@@ -32,6 +32,11 @@ juce_add_plugin(NAM_Rig
 target_sources(NAM_Rig PRIVATE
     src/PluginProcessor.cpp
     src/PluginEditor.cpp
+    src/PluginEditor.h
+    src/ui/RigLookAndFeel.h
+    src/ui/Meter.h
+    src/ui/BlockStrip.h
+    src/ui/Panels.h
 )
 
 target_include_directories(NAM_Rig PRIVATE src)

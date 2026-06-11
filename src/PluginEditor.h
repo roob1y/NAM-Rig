@@ -2,37 +2,55 @@
 #include "PluginProcessor.h"
 #include <juce_audio_utils/juce_audio_utils.h>
 
-// Minimal v1 editor: load model / load IR, chain status line, amp AA combo,
-// in/out gains. Real block UI (slots, per-block panels) comes once the chain
-// has more than the amp + cab doing work.
+#include "ui/RigLookAndFeel.h"
+#include "ui/Meter.h"
+#include "ui/BlockStrip.h"
+#include "ui/Panels.h"
+
+// Block-strip editor: global header (I/O gains + meters + status), the chain
+// as a row of tiles with bypass LEDs, and one block's full panel below.
+// Logical size is fixed (920x540); the window is resizable and the whole UI
+// scales uniformly via an AffineTransform on the content component.
 class NamRigEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
 public:
+    static constexpr int kBaseW = 920, kBaseH = 540;
+
     explicit NamRigEditor(NamRigProcessor &);
-    ~NamRigEditor() override = default;
+    ~NamRigEditor() override;
 
     void paint(juce::Graphics &) override;
     void resized() override;
 
 private:
     void timerCallback() override;
+    void showPanel(int selectableIndex);
 
     NamRigProcessor &mProc;
+    nam_rig::ui::RigLookAndFeel mLnf;
 
-    juce::TextButton mLoadModelBtn{"Load NAM model..."};
-    juce::TextButton mLoadIrBtn{"Load cab IR..."};
-    juce::Label mModelLabel, mIrLabel, mStatusLabel;
+    // Everything lives on mContent (fixed kBaseW x kBaseH, scaled to fit).
+    juce::Component mContent;
 
-    juce::ComboBox mOversampleBox;
-    juce::Label mOversampleLabel{{}, "Amp AA"};
-    juce::Slider mInGain{juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight};
-    juce::Slider mOutGain{juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight};
-    juce::Label mInLabel{{}, "Input"}, mOutLabel{{}, "Output"};
-
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mOversampleAtt;
+    // --- Header ---
+    juce::Label mTitle{{}, "NAM RIG"};
+    juce::Label mStatus;
+    juce::Label mInLabel{{}, "IN"}, mOutLabel{{}, "OUT"};
+    juce::Slider mInGain{juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox};
+    juce::Slider mOutGain{juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox};
+    nam_rig::ui::PeakMeter mInMeter, mOutMeter;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mInAtt, mOutAtt;
 
-    std::unique_ptr<juce::FileChooser> mChooser;
+    // --- Chain strip + per-block panels (selectable: 0 gate, 1 comp, 2 amp, 3 eq, 4 cab) ---
+    nam_rig::ui::BlockStrip mStrip;
+    nam_rig::ui::GatePanel mGatePanel;
+    nam_rig::ui::CompPanel mCompPanel;
+    nam_rig::ui::AmpPanel mAmpPanel;
+    nam_rig::ui::EqPanel mEqPanel;
+    nam_rig::ui::CabPanel mCabPanel;
+    std::array<juce::Component *, 5> mPanels;
+
+    double mLastTimerMs = 0.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(NamRigEditor)
 };

@@ -1,119 +1,156 @@
 #include "PluginEditor.h"
 
+using namespace nam_rig::ui;
+
 NamRigEditor::NamRigEditor(NamRigProcessor &p)
-    : juce::AudioProcessorEditor(&p), mProc(p)
+    : juce::AudioProcessorEditor(&p), mProc(p),
+      mStrip(p.apvts),
+      mGatePanel(p.apvts),
+      mCompPanel(p.apvts),
+      mAmpPanel(p),
+      mEqPanel(p.apvts),
+      mCabPanel(p),
+      mPanels{&mGatePanel, &mCompPanel, &mAmpPanel, &mEqPanel, &mCabPanel}
 {
-    addAndMakeVisible(mLoadModelBtn);
-    addAndMakeVisible(mLoadIrBtn);
-    addAndMakeVisible(mModelLabel);
-    addAndMakeVisible(mIrLabel);
-    addAndMakeVisible(mStatusLabel);
-    addAndMakeVisible(mOversampleBox);
-    addAndMakeVisible(mOversampleLabel);
-    addAndMakeVisible(mInGain);
-    addAndMakeVisible(mOutGain);
-    addAndMakeVisible(mInLabel);
-    addAndMakeVisible(mOutLabel);
+    setLookAndFeel(&mLnf);
+    addAndMakeVisible(mContent);
+    mContent.setSize(kBaseW, kBaseH);
 
-    mLoadModelBtn.onClick = [this]
+    // --- Header ---
+    mTitle.setFont(RigLookAndFeel::withHeight(22.0f).boldened());
+    mTitle.setColour(juce::Label::textColourId, colors::text);
+    mContent.addAndMakeVisible(mTitle);
+
+    mStatus.setJustificationType(juce::Justification::centredRight);
+    mStatus.setColour(juce::Label::textColourId, colors::textDim);
+    mContent.addAndMakeVisible(mStatus);
+
+    for (auto *l : {&mInLabel, &mOutLabel})
     {
-        mChooser = std::make_unique<juce::FileChooser>(
-            "Select a NAM model", juce::File{}, "*.nam");
-        mChooser->launchAsync(juce::FileBrowserComponent::openMode |
-                                  juce::FileBrowserComponent::canSelectFiles,
-                              [this](const juce::FileChooser &fc)
-                              {
-                                  if (fc.getResult().existsAsFile())
-                                      mProc.loadModel(fc.getResult());
-                              });
-    };
-
-    mLoadIrBtn.onClick = [this]
+        l->setJustificationType(juce::Justification::centred);
+        l->setColour(juce::Label::textColourId, colors::textDim);
+        mContent.addAndMakeVisible(*l);
+    }
+    for (auto *s : {&mInGain, &mOutGain})
     {
-        mChooser = std::make_unique<juce::FileChooser>(
-            "Select a cab IR", juce::File{}, "*.wav;*.aif;*.aiff");
-        mChooser->launchAsync(juce::FileBrowserComponent::openMode |
-                                  juce::FileBrowserComponent::canSelectFiles,
-                              [this](const juce::FileChooser &fc)
-                              {
-                                  if (fc.getResult().existsAsFile())
-                                      mProc.loadIr(fc.getResult());
-                              });
-    };
-
-    // Combo items must match the parameter's StringArray order, IDs are 1-based.
-    mOversampleBox.addItemList({"Off", "2x", "4x", "8x", "16x", "32x"}, 1);
-    mOversampleAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-        mProc.apvts, "oversample", mOversampleBox);
+        s->setPopupDisplayEnabled(true, true, this);
+        mContent.addAndMakeVisible(*s);
+    }
     mInAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         mProc.apvts, "inputGain", mInGain);
     mOutAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         mProc.apvts, "outputGain", mOutGain);
+    mContent.addAndMakeVisible(mInMeter);
+    mContent.addAndMakeVisible(mOutMeter);
 
-    startTimerHz(4);
-    setSize(520, 260);
+    // --- Strip + panels ---
+    mContent.addAndMakeVisible(mStrip);
+    for (auto *panel : mPanels)
+        mContent.addChildComponent(*panel); // visibility driven by selection
+
+    mStrip.onSelectionChanged = [this](int i) { showPanel(i); };
+    mStrip.select(juce::jlimit(0, (int)mPanels.size() - 1, mProc.uiSelectedBlock));
+
+    mAmpPanel.refresh();
+    mCabPanel.refresh();
+
+    mLastTimerMs = juce::Time::getMillisecondCounterHiRes();
+    startTimerHz(15);
+
+    // Uniform scaling: fixed aspect, remember the last size for this instance.
+    setResizable(true, true);
+    getConstrainer()->setFixedAspectRatio((double)kBaseW / kBaseH);
+    setResizeLimits(kBaseW * 7 / 10, kBaseH * 7 / 10, kBaseW * 2, kBaseH * 2);
+    const int w = mProc.uiWidth > 0 ? mProc.uiWidth : kBaseW;
+    setSize(w, w * kBaseH / kBaseW);
+}
+
+NamRigEditor::~NamRigEditor()
+{
+    setLookAndFeel(nullptr);
+}
+
+void NamRigEditor::showPanel(int selectableIndex)
+{
+    for (int i = 0; i < (int)mPanels.size(); ++i)
+        mPanels[(size_t)i]->setVisible(i == selectableIndex);
+    mProc.uiSelectedBlock = selectableIndex;
 }
 
 void NamRigEditor::timerCallback()
 {
-    mModelLabel.setText("Amp: " + mProc.getModelName(), juce::dontSendNotification);
-    mIrLabel.setText("Cab: " + (mProc.isIrLoaded() ? mProc.getIrName() : juce::String("No IR loaded")),
-                     juce::dontSendNotification);
+    const double now = juce::Time::getMillisecondCounterHiRes();
+    const float dt = (float)juce::jlimit(0.0, 0.5, (now - mLastTimerMs) * 0.001);
+    mLastTimerMs = now;
+
+    mInMeter.push(mProc.mInputPeakDb.load(), dt);
+    mOutMeter.push(mProc.mOutputPeakDb.load(), dt);
+
+    mAmpPanel.refresh();
+    mCabPanel.refresh();
 
     juce::String status;
-    const int engaged = mProc.engagedFactor();
     if (!mProc.isModelLoaded())
-        status = "Chain: gate > comp > AMP > eq > cab > mod > delay > reverb";
-    else if (engaged > 0)
-        status = "Amp engaged at " + juce::String(engaged) + "x | PDC "
-                 + juce::String(mProc.getLatencySamples()) + " smp";
+        status = "No model";
     else
-        status = "Amp passthrough";
-    mStatusLabel.setText(status, juce::dontSendNotification);
+    {
+        status = mProc.getModelName();
+        const int engaged = mProc.engagedFactor();
+        if (engaged > 1)
+            status << "  |  " << engaged << "x";
+        status << "  |  PDC " << mProc.getLatencySamples() << " smp";
+    }
+    if (mProc.isIrLoaded())
+        status << "  |  IR: " << mProc.getIrName();
+    if (status != mStatus.getText())
+        mStatus.setText(status, juce::dontSendNotification);
 }
 
 void NamRigEditor::paint(juce::Graphics &g)
 {
-    g.fillAll(getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId));
+    g.fillAll(colors::bg);
 }
 
 void NamRigEditor::resized()
 {
-    auto area = getLocalBounds().reduced(12);
-    auto row = [&](int h) { return area.removeFromTop(h); };
+    // Scale the fixed-size content to the window; layout itself never reflows.
+    const float scale = (float)getWidth() / (float)kBaseW;
+    mContent.setTransform(juce::AffineTransform::scale(scale));
+    mContent.setTopLeftPosition(0, 0);
+    mProc.uiWidth = getWidth();
 
+    auto area = juce::Rectangle<int>(0, 0, kBaseW, kBaseH).reduced(12);
+
+    // --- Header (64 px): title | status | IN knob+meter | OUT knob+meter ---
+    auto header = area.removeFromTop(64);
+    mTitle.setBounds(header.removeFromLeft(150));
+
+    auto ioCluster = header.removeFromRight(220);
+    auto laidOut = [&](juce::Label &label, juce::Slider &knob, PeakMeter &meter,
+                       juce::Rectangle<int> r)
     {
-        auto r = row(32);
-        mLoadModelBtn.setBounds(r.removeFromLeft(160));
-        r.removeFromLeft(8);
-        mModelLabel.setBounds(r);
-    }
-    area.removeFromTop(6);
-    {
-        auto r = row(32);
-        mLoadIrBtn.setBounds(r.removeFromLeft(160));
-        r.removeFromLeft(8);
-        mIrLabel.setBounds(r);
-    }
-    area.removeFromTop(6);
-    {
-        auto r = row(28);
-        mOversampleLabel.setBounds(r.removeFromLeft(70));
-        mOversampleBox.setBounds(r.removeFromLeft(120));
-    }
-    area.removeFromTop(6);
-    {
-        auto r = row(28);
-        mInLabel.setBounds(r.removeFromLeft(70));
-        mInGain.setBounds(r);
-    }
-    {
-        auto r = row(28);
-        mOutLabel.setBounds(r.removeFromLeft(70));
-        mOutGain.setBounds(r);
-    }
+        meter.setBounds(r.removeFromRight(8).reduced(0, 6));
+        r.removeFromRight(4);
+        label.setBounds(r.removeFromTop(14));
+        knob.setBounds(r.withSizeKeepingCentre(juce::jmin(r.getWidth(), r.getHeight()),
+                                               juce::jmin(r.getWidth(), r.getHeight())));
+    };
+    auto inArea = ioCluster.removeFromLeft(ioCluster.getWidth() / 2);
+    laidOut(mInLabel, mInGain, mInMeter, inArea.reduced(10, 0));
+    laidOut(mOutLabel, mOutGain, mOutMeter, ioCluster.reduced(10, 0));
+
+    header.removeFromRight(12);
+    mStatus.setBounds(header);
+
     area.removeFromTop(8);
-    mStatusLabel.setBounds(row(24));
+
+    // --- Chain strip ---
+    mStrip.setBounds(area.removeFromTop(76));
+    area.removeFromTop(12);
+
+    // --- Block panel ---
+    for (auto *panel : mPanels)
+        panel->setBounds(area);
 }
 
 juce::AudioProcessorEditor *NamRigProcessor::createEditor()

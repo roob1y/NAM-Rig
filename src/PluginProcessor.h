@@ -56,6 +56,10 @@ public:
     std::atomic<float> mInputPeakDb{-100.0f};
     std::atomic<float> mOutputPeakDb{-100.0f};
 
+    // --- Editor session state (not persisted; survives editor close/reopen) ---
+    int uiSelectedBlock = 2; // strip selection, default AMP
+    int uiWidth = 0;         // last editor width, 0 = use default
+
 private:
     void updateLatency();
     int requestedFactorNow() const; // oversample param + offline bump (NAM-AA logic)
