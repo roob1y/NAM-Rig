@@ -9,6 +9,7 @@
 
 #include "Blocks.h"
 #include "GateBlock.h"
+#include "CompBlock.h"
 #include "AmpBlock.h"
 #include "CabBlock.h"
 

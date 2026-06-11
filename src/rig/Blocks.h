@@ -68,13 +68,7 @@ private:
 
 // GateBlock lives in GateBlock.h (real DSP, verified by tests/gate_test.cpp).
 
-class CompBlock : public MonoBlock
-{
-public:
-    const char *name() const override { return "Comp/Drive"; }
-    void prepare(const BlockContext &) override {}
-    void process(float *, int) override {} // TODO: compressor/drive @ DAW rate
-};
+// CompBlock lives in CompBlock.h (real DSP, verified by tests/comp_test.cpp).
 
 class EqBlock : public MonoBlock
 {

@@ -18,9 +18,9 @@ using nam_rig::BlockContext;
 
 static int gFails = 0;
 #define CHECK(cond, ...) do { \
-    const bool ok = (cond); \
-    std::printf("%s: ", ok ? "PASS" : "FAIL"); std::printf(__VA_ARGS__); std::printf("\n"); \
-    if (!ok) ++gFails; } while (0)
+    const bool chkOk_ = (cond); /* unique name: must not shadow caller's vars */ \
+    std::printf("%s: ", chkOk_ ? "PASS" : "FAIL"); std::printf(__VA_ARGS__); std::printf("\n"); \
+    if (!chkOk_) ++gFails; } while (0)
 
 static constexpr double SR = 48000.0;
 static constexpr int BLK = 512;

@@ -60,6 +60,23 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::NormalisableRange<float>(0.0f, nam_rig::GateBlock::kMaxLookaheadMs, 0.1f), 0.0f,
         juce::AudioParameterFloatAttributes().withLabel("ms")));
 
+    // --- Comp/Boost (see rig/CompBlock.h; verified by tests/comp_test.cpp) ---
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("compSustain", 1), "Comp Sustain",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("compAttack", 1), "Comp Attack",
+        juce::NormalisableRange<float>(1.0f, 50.0f, 0.5f, 0.5f), 15.0f,
+        juce::AudioParameterFloatAttributes().withLabel("ms")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("compLevel", 1), "Comp Level",
+        juce::NormalisableRange<float>(-12.0f, 12.0f, 0.1f), 0.0f,
+        juce::AudioParameterFloatAttributes().withLabel("dB")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("compBoost", 1), "Boost",
+        juce::NormalisableRange<float>(0.0f, 20.0f, 0.1f), 0.0f,
+        juce::AudioParameterFloatAttributes().withLabel("dB")));
+
     return {params.begin(), params.end()};
 }
 
@@ -145,6 +162,11 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     // gateOn does NOT chain-bypass: the lookahead delay must keep running or
     // PDC breaks. Disabled gate = forced open (passthrough + constant delay).
     mChain.gate.setEnabled(apvts.getRawParameterValue("gateOn")->load() >= 0.5f);
+    // Comp/Boost parameters (zero latency, so plain chain bypass is safe).
+    mChain.comp.setSustain(apvts.getRawParameterValue("compSustain")->load());
+    mChain.comp.setAttackMs(apvts.getRawParameterValue("compAttack")->load());
+    mChain.comp.setLevelDb(apvts.getRawParameterValue("compLevel")->load());
+    mChain.comp.setBoostDb(apvts.getRawParameterValue("compBoost")->load());
     mChain.comp.setBypassed(apvts.getRawParameterValue("compOn")->load() < 0.5f);
     mChain.eq.setBypassed(apvts.getRawParameterValue("eqOn")->load() < 0.5f);
     mChain.cab.setBypassed(apvts.getRawParameterValue("cabOn")->load() < 0.5f);
