@@ -8,6 +8,7 @@
 // NAM-AA its verified-chain guarantee via AaEngine/SrcLayer.
 
 #include "Blocks.h"
+#include "GateBlock.h"
 #include "AmpBlock.h"
 #include "CabBlock.h"
 

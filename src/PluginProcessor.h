@@ -68,6 +68,9 @@ private:
     // Paths persisted in plugin state and restored on load.
     juce::String mModelPath, mIrPath;
 
+    // Last gate lookahead pushed to the chain (PDC re-report on change).
+    float mLastGateLookMs = -1.0f;
+
     double mSampleRate = 48000.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(NamRigProcessor)

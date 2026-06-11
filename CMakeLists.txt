@@ -84,4 +84,21 @@ if(BUILD_RIG_HARNESS)
     if(MSVC)
         target_compile_options(rig_chain_process PRIVATE /arch:AVX2 /fp:fast)
     endif()
+
+    # GateBlock measurement suite (PASS/FAIL, exits nonzero on failure)
+    juce_add_console_app(gate_test PRODUCT_NAME "gate_test")
+    target_sources(gate_test PRIVATE tests/gate_test.cpp)
+    target_include_directories(gate_test PRIVATE src)
+    target_compile_definitions(gate_test PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        _USE_MATH_DEFINES   # M_PI on MSVC
+    )
+    target_link_libraries(gate_test PRIVATE
+        juce::juce_audio_basics
+        juce::juce_recommended_config_flags
+    )
+    if(MSVC)
+        target_compile_options(gate_test PRIVATE /arch:AVX2 /fp:fast)
+    endif()
 endif()

@@ -33,6 +33,33 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         params.push_back(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID(id, 1), juce::String(id).dropLastCharacters(2) + " Enable", true));
 
+    // --- Gate (see rig/GateBlock.h; verified by tests/gate_test.cpp) ---
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("gateThresh", 1), "Gate Threshold",
+        juce::NormalisableRange<float>(-90.0f, -20.0f, 0.5f), -50.0f,
+        juce::AudioParameterFloatAttributes().withLabel("dB")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("gateRange", 1), "Gate Range",
+        juce::NormalisableRange<float>(20.0f, 100.0f, 1.0f), 80.0f,
+        juce::AudioParameterFloatAttributes().withLabel("dB")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("gateAttack", 1), "Gate Attack",
+        juce::NormalisableRange<float>(0.05f, 5.0f, 0.01f, 0.4f), 0.1f,
+        juce::AudioParameterFloatAttributes().withLabel("ms")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("gateHold", 1), "Gate Hold",
+        juce::NormalisableRange<float>(5.0f, 500.0f, 1.0f, 0.4f), 50.0f,
+        juce::AudioParameterFloatAttributes().withLabel("ms")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("gateRelease", 1), "Gate Release",
+        juce::NormalisableRange<float>(10.0f, 1000.0f, 1.0f, 0.4f), 100.0f,
+        juce::AudioParameterFloatAttributes().withLabel("ms")));
+    // Lookahead preserves pick attacks but adds PDC — keep 0 for live monitoring.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("gateLook", 1), "Gate Lookahead",
+        juce::NormalisableRange<float>(0.0f, nam_rig::GateBlock::kMaxLookaheadMs, 0.1f), 0.0f,
+        juce::AudioParameterFloatAttributes().withLabel("ms")));
+
     return {params.begin(), params.end()};
 }
 
@@ -65,6 +92,7 @@ void NamRigProcessor::updateLatency()
     if (!mChain.isPrepared())
         return;
     mChain.amp.setRequestedFactor(requestedFactorNow());
+    mChain.gate.setLookaheadMs(apvts.getRawParameterValue("gateLook")->load());
     setLatencySamples((int)std::round(mChain.latencySamples()));
 }
 
@@ -99,7 +127,24 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
 
     // Bypass flags + amp AA factor from parameters.
     mChain.amp.setRequestedFactor(requestedFactorNow());
-    mChain.gate.setBypassed(apvts.getRawParameterValue("gateOn")->load() < 0.5f);
+
+    // Gate parameters (atomics; cheap to push every block). Lookahead changes
+    // PDC, so re-report latency when it moves.
+    mChain.gate.setThresholdDb(apvts.getRawParameterValue("gateThresh")->load());
+    mChain.gate.setRangeDb(apvts.getRawParameterValue("gateRange")->load());
+    mChain.gate.setAttackMs(apvts.getRawParameterValue("gateAttack")->load());
+    mChain.gate.setHoldMs(apvts.getRawParameterValue("gateHold")->load());
+    mChain.gate.setReleaseMs(apvts.getRawParameterValue("gateRelease")->load());
+    const float gateLookMs = apvts.getRawParameterValue("gateLook")->load();
+    if (gateLookMs != mLastGateLookMs)
+    {
+        mLastGateLookMs = gateLookMs;
+        updateLatency(); // sets the block's lookahead + re-reports PDC
+    }
+
+    // gateOn does NOT chain-bypass: the lookahead delay must keep running or
+    // PDC breaks. Disabled gate = forced open (passthrough + constant delay).
+    mChain.gate.setEnabled(apvts.getRawParameterValue("gateOn")->load() >= 0.5f);
     mChain.comp.setBypassed(apvts.getRawParameterValue("compOn")->load() < 0.5f);
     mChain.eq.setBypassed(apvts.getRawParameterValue("eqOn")->load() < 0.5f);
     mChain.cab.setBypassed(apvts.getRawParameterValue("cabOn")->load() < 0.5f);

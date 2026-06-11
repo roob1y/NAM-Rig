@@ -66,13 +66,7 @@ private:
 
 // ---- v1 stubs (passthrough; implemented incrementally, harness-first) ----
 
-class GateBlock : public MonoBlock
-{
-public:
-    const char *name() const override { return "Gate"; }
-    void prepare(const BlockContext &) override {}
-    void process(float *, int) override {} // TODO: envelope gate @ DAW rate
-};
+// GateBlock lives in GateBlock.h (real DSP, verified by tests/gate_test.cpp).
 
 class CompBlock : public MonoBlock
 {
