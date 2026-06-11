@@ -5,13 +5,14 @@
 //
 // With only amp + cab active and no IR, output must be bit-identical to
 // NAM-AA's chain_process for the same model/rate/factor — that's the chain
-// host's first verification gate.
+// host's first verification gate (passed 2026-06-11, + DC blocker).
 //
 // Usage: rig_chain_process <model.nam|-> <ir.wav|-> <dawRate> <requestedFactor> <in.f32> <out.f32> [block]
 //        ("-" skips loading that stage)
 
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -57,6 +58,31 @@ int main(int argc, char **argv)
             {
                 std::fprintf(stderr, "IR load failed: %s\n", irPath.c_str());
                 return 1;
+            }
+
+            // juce::dsp::Convolution loads asynchronously on a background
+            // thread AND crossfades from the previous engine over the first
+            // few processed blocks (verified empirically: ~5 blocks of ramp,
+            // then exact). Offline we must run past both: wait for the load,
+            // then probe with unit impulses until two consecutive responses
+            // are bit-identical (fade complete), then reset the chain state.
+            {
+                juce::Thread::sleep(400); // let the background load land
+                juce::AudioBuffer<float> prev(1, block), probe(1, block);
+                bool stable = false;
+                for (int tries = 0; tries < 200 && !stable; ++tries)
+                {
+                    probe.clear();
+                    probe.setSample(0, 0, 1.0f);
+                    chain.cab.process(probe.getWritePointer(0), block);
+                    if (tries > 0 && std::memcmp(prev.getReadPointer(0), probe.getReadPointer(0),
+                                                 (size_t)block * sizeof(float)) == 0)
+                        stable = true;
+                    prev.makeCopyOf(probe);
+                }
+                std::fprintf(stderr, "[rig] IR %s\n",
+                             stable ? "engaged (response stable)" : "load wait timed out");
+                chain.reset(); // clear probe energy from the convolver
             }
         }
 

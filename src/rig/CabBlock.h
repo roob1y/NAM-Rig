@@ -1,14 +1,17 @@
 #pragma once
 // CabBlock — mono cabinet IR loader/convolver (priority #2 after the amp).
 // Uniform-partitioned juce::dsp::Convolution with zero added latency, so PDC
-// is unaffected; trims/normalises on load. Stereo fan-out happens AFTER this
-// block (scoping decision: mono through cab; dual-IR stereo is a later option).
+// is unaffected; normalised to unity energy on load. Stereo fan-out happens
+// AFTER this block (scoping decision: mono through cab; dual-IR stereo is a
+// later option).
 //
 // loadImpulseResponse is internally async + lock-free swapped by JUCE, so it's
 // safe to call from the message thread while audio runs.
 
 #include "Blocks.h"
+#include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_dsp/juce_dsp.h>
+#include <cmath>
 
 namespace nam_rig
 {
@@ -29,17 +32,37 @@ public:
 
     void reset() override { mConv.reset(); }
 
-    // Load a cab IR (wav/aiff). Trimmed and normalised; resampled to the
-    // current rate by JUCE. Returns false if the file doesn't exist.
+    // Load a cab IR (wav/aiff), resampled to the current rate by JUCE.
+    // Normalised to UNITY ENERGY (1/sqrt(sum(ir^2))) — a unit impulse stays a
+    // unit impulse and overall loudness is consistent across IRs. (JUCE's
+    // Normalise::yes scales everything to 0.125 ≈ -18 dB instead — verified
+    // empirically — so we normalise ourselves and pass Normalise::no.)
+    // Returns false if the file doesn't exist or can't be read.
     bool loadIr(const juce::File &irFile)
     {
         if (!irFile.existsAsFile())
             return false;
-        mConv.loadImpulseResponse(irFile,
+
+        juce::AudioFormatManager fm;
+        fm.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> reader(fm.createReaderFor(irFile));
+        if (!reader || reader->lengthInSamples <= 0)
+            return false;
+
+        juce::AudioBuffer<float> ir(1, (int)reader->lengthInSamples);
+        reader->read(&ir, 0, (int)reader->lengthInSamples, 0, true, false);
+
+        double energy = 0.0;
+        const float *d = ir.getReadPointer(0);
+        for (int i = 0; i < ir.getNumSamples(); ++i)
+            energy += (double)d[i] * d[i];
+        if (energy > 0.0)
+            ir.applyGain((float)(1.0 / std::sqrt(energy)));
+
+        mConv.loadImpulseResponse(std::move(ir), reader->sampleRate,
                                   juce::dsp::Convolution::Stereo::no,
                                   juce::dsp::Convolution::Trim::yes,
-                                  0, // full length
-                                  juce::dsp::Convolution::Normalise::yes);
+                                  juce::dsp::Convolution::Normalise::no);
         mIrName = irFile.getFileNameWithoutExtension();
         mIrLoaded.store(true);
         return true;
