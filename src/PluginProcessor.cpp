@@ -77,6 +77,30 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::NormalisableRange<float>(0.0f, 20.0f, 0.1f), 0.0f,
         juce::AudioParameterFloatAttributes().withLabel("dB")));
 
+    // --- Graphic EQ, pre-cab (see rig/EqBlock.h; verified by tests/eq_test.cpp) ---
+    {
+        static const char *ids[] = {"eq62", "eq125", "eq250", "eq500",
+                                    "eq1k", "eq2k", "eq4k", "eq8k"};
+        static const char *names[] = {"EQ 62.5 Hz", "EQ 125 Hz", "EQ 250 Hz", "EQ 500 Hz",
+                                      "EQ 1 kHz", "EQ 2 kHz", "EQ 4 kHz", "EQ 8 kHz"};
+        for (int b = 0; b < nam_rig::EqBlock::kNumBands; ++b)
+            params.push_back(std::make_unique<juce::AudioParameterFloat>(
+                juce::ParameterID(ids[b], 1), names[b],
+                juce::NormalisableRange<float>(-nam_rig::EqBlock::kMaxGainDb,
+                                               nam_rig::EqBlock::kMaxGainDb, 0.1f),
+                0.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    }
+
+    // --- Post-cab cuts (in CabBlock; knob extremes = off/bit-exact) ---
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("cabHpf", 1), "Cab Low Cut",
+        juce::NormalisableRange<float>(20.0f, 300.0f, 1.0f, 0.5f), 20.0f,
+        juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("cabLpf", 1), "Cab High Cut",
+        juce::NormalisableRange<float>(2000.0f, 20000.0f, 10.0f, 0.5f), 20000.0f,
+        juce::AudioParameterFloatAttributes().withLabel("Hz")));
+
     return {params.begin(), params.end()};
 }
 
@@ -168,7 +192,18 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.comp.setLevelDb(apvts.getRawParameterValue("compLevel")->load());
     mChain.comp.setBoostDb(apvts.getRawParameterValue("compBoost")->load());
     mChain.comp.setBypassed(apvts.getRawParameterValue("compOn")->load() < 0.5f);
+    // Graphic EQ band gains (zero latency; chain bypass via eqOn is safe).
+    {
+        static const char *ids[] = {"eq62", "eq125", "eq250", "eq500",
+                                    "eq1k", "eq2k", "eq4k", "eq8k"};
+        for (int b = 0; b < nam_rig::EqBlock::kNumBands; ++b)
+            mChain.eq.setBandGainDb(b, apvts.getRawParameterValue(ids[b])->load());
+    }
     mChain.eq.setBypassed(apvts.getRawParameterValue("eqOn")->load() < 0.5f);
+
+    // Post-cab cuts ride with the cab block.
+    mChain.cab.setHpfHz(apvts.getRawParameterValue("cabHpf")->load());
+    mChain.cab.setLpfHz(apvts.getRawParameterValue("cabLpf")->load());
     mChain.cab.setBypassed(apvts.getRawParameterValue("cabOn")->load() < 0.5f);
     mChain.mod.setBypassed(apvts.getRawParameterValue("modOn")->load() < 0.5f);
     mChain.delay.setBypassed(apvts.getRawParameterValue("delayOn")->load() < 0.5f);

@@ -11,6 +11,7 @@
 #include "GateBlock.h"
 #include "CompBlock.h"
 #include "AmpBlock.h"
+#include "EqBlock.h"
 #include "CabBlock.h"
 
 namespace nam_rig

@@ -9,8 +9,10 @@
 // safe to call from the message thread while audio runs.
 
 #include "Blocks.h"
+#include "Biquad.h"
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_dsp/juce_dsp.h>
+#include <atomic>
 #include <cmath>
 
 namespace nam_rig
@@ -27,10 +29,21 @@ public:
         mSpec.maximumBlockSize = (juce::uint32)ctx.maxBlockSize;
         mSpec.numChannels = 1;
         mConv.prepare(mSpec);
+        mCuts.prepare(ctx.sampleRate);
         mPrepared = true;
     }
 
-    void reset() override { mConv.reset(); }
+    void reset() override
+    {
+        mConv.reset();
+        mCuts.reset();
+    }
+
+    // Post-cab corrective cuts (Butterworth 12 dB/oct). Convention: HPF <= 20 Hz
+    // is OFF, LPF >= 20 kHz is OFF (knob extremes = out of the path, bit-exact).
+    void setHpfHz(float hz) { mHpfHz.store(hz); }
+    void setLpfHz(float hz) { mLpfHz.store(hz); }
+    const CutFilters &cuts() const { return mCuts; } // verification access
 
     // Load a cab IR (wav/aiff), resampled to the current rate by JUCE.
     // Normalised to UNITY ENERGY (1/sqrt(sum(ir^2))) — a unit impulse stays a
@@ -73,12 +86,21 @@ public:
 
     void process(float *mono, int numSamples) override
     {
-        if (!mIrLoaded.load() || !mPrepared)
-            return; // passthrough until an IR is loaded
+        if (!mPrepared)
+            return;
 
-        juce::dsp::AudioBlock<float> block(&mono, 1, (size_t)numSamples);
-        juce::dsp::ProcessContextReplacing<float> ctx(block);
-        mConv.process(ctx);
+        if (mIrLoaded.load()) // convolve only once an IR is loaded
+        {
+            juce::dsp::AudioBlock<float> block(&mono, 1, (size_t)numSamples);
+            juce::dsp::ProcessContextReplacing<float> ctx(block);
+            mConv.process(ctx);
+        }
+
+        // Post-cab cuts apply regardless of IR (they're the block's output
+        // filters; with both at their extremes this is a no-op, bit-exact).
+        mCuts.update((double)mHpfHz.load(), (double)mLpfHz.load());
+        if (mCuts.engaged())
+            mCuts.process(mono, numSamples);
     }
 
     double latencySamples() const override
@@ -90,6 +112,9 @@ public:
 private:
     juce::dsp::Convolution mConv; // default: uniform-partitioned, zero latency
     juce::dsp::ProcessSpec mSpec{48000.0, 512, 1};
+    CutFilters mCuts;
+    std::atomic<float> mHpfHz{20.0f};    // <= 20 = off
+    std::atomic<float> mLpfHz{20000.0f}; // >= 20k = off
     juce::String mIrName;
     std::atomic<bool> mIrLoaded{false};
     bool mPrepared = false;

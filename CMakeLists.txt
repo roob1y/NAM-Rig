@@ -118,4 +118,21 @@ if(BUILD_RIG_HARNESS)
     if(MSVC)
         target_compile_options(comp_test PRIVATE /arch:AVX2 /fp:fast)
     endif()
+
+    # EqBlock + CutFilters measurement suite (PASS/FAIL, exits nonzero on failure)
+    juce_add_console_app(eq_test PRODUCT_NAME "eq_test")
+    target_sources(eq_test PRIVATE tests/eq_test.cpp)
+    target_include_directories(eq_test PRIVATE src)
+    target_compile_definitions(eq_test PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        _USE_MATH_DEFINES   # M_PI on MSVC
+    )
+    target_link_libraries(eq_test PRIVATE
+        juce::juce_audio_basics
+        juce::juce_recommended_config_flags
+    )
+    if(MSVC)
+        target_compile_options(eq_test PRIVATE /arch:AVX2 /fp:fast)
+    endif()
 endif()

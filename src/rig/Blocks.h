@@ -70,13 +70,7 @@ private:
 
 // CompBlock lives in CompBlock.h (real DSP, verified by tests/comp_test.cpp).
 
-class EqBlock : public MonoBlock
-{
-public:
-    const char *name() const override { return "EQ"; }
-    void prepare(const BlockContext &) override {}
-    void process(float *, int) override {} // TODO: post-amp tone stack / parametric
-};
+// EqBlock lives in EqBlock.h (8-band graphic, verified by tests/eq_test.cpp).
 
 class ModBlock : public StereoBlock
 {
