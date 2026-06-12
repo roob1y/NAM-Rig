@@ -25,6 +25,7 @@
 
 #include "Blocks.h"
 #include <atomic>
+#include <atomic>
 #include <cmath>
 
 namespace nam_rig
@@ -117,9 +118,15 @@ public:
         }
 
         mGrDb = (gr < 1.0e-7f) ? 0.0f : gr; // flush
+        mGrDbPub.store(mGrDb); // published for the editor's GR meter
     }
 
+    // Last block's gain reduction in dB (>= 0). UI thread.
+    float grDb() const { return mGrDbPub.load(); }
+
 private:
+    std::atomic<float> mGrDbPub{0.0f};
+
     static float coefForMs(float ms, double sr)
     {
         return 1.0f - (float)std::exp(-1.0 / (std::max(0.01f, ms) * 0.001 * sr));

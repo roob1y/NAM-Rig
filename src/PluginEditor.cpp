@@ -96,6 +96,8 @@ void NamRigEditor::timerCallback()
     mCabPanel.refresh();
     mModPanel.refresh();
     mDelayPanel.refresh();
+    mGatePanel.grMeter().push(-mProc.gateGainDb(), dt);
+    mCompPanel.grMeter().push(mProc.compGrDb(), dt);
     if (++mPresetRefreshTick >= 30) // rescan the preset folder ~every 2 s
     {
         mPresetRefreshTick = 0;

@@ -1,6 +1,7 @@
 #pragma once
 #include "PluginProcessor.h"
 #include "ui/RigLookAndFeel.h"
+#include "ui/GrMeter.h"
 
 namespace nam_rig::ui
 {
@@ -88,12 +89,23 @@ public:
                       juce::dontSendNotification);
         mHint.setColour(juce::Label::textColourId, colors::textDim);
         addAndMakeVisible(mHint);
+
+        mGrLabel.setText("GR", juce::dontSendNotification);
+        mGrLabel.setJustificationType(juce::Justification::centred);
+        mGrLabel.setColour(juce::Label::textColourId, colors::textDim);
+        addAndMakeVisible(mGrLabel);
+        addAndMakeVisible(mGrMeter);
     }
+
+    GrMeter &grMeter() { return mGrMeter; }
 
     void resized() override
     {
         auto area = contentArea();
         mHint.setBounds(area.removeFromBottom(20));
+        auto meterCol = area.removeFromRight(46);
+        mGrLabel.setBounds(meterCol.removeFromTop(16));
+        mGrMeter.setBounds(meterCol.reduced(16, 4));
         area = area.withSizeKeepingCentre(area.getWidth(),
                                           juce::jmin(area.getHeight(), 170));
         const int w = area.getWidth() / (int)mKnobs.size();
@@ -103,7 +115,8 @@ public:
 
 private:
     std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
-    juce::Label mHint;
+    juce::Label mHint, mGrLabel;
+    GrMeter mGrMeter;
 };
 
 //==============================================================================
@@ -125,12 +138,23 @@ public:
                       juce::dontSendNotification);
         mHint.setColour(juce::Label::textColourId, colors::textDim);
         addAndMakeVisible(mHint);
+
+        mGrLabel.setText("GR", juce::dontSendNotification);
+        mGrLabel.setJustificationType(juce::Justification::centred);
+        mGrLabel.setColour(juce::Label::textColourId, colors::textDim);
+        addAndMakeVisible(mGrLabel);
+        addAndMakeVisible(mGrMeter);
     }
+
+    GrMeter &grMeter() { return mGrMeter; }
 
     void resized() override
     {
         auto area = contentArea();
         mHint.setBounds(area.removeFromBottom(20));
+        auto meterCol = area.removeFromRight(46);
+        mGrLabel.setBounds(meterCol.removeFromTop(16));
+        mGrMeter.setBounds(meterCol.reduced(16, 4));
         const int w = juce::jmin(130, area.getWidth() / (int)mKnobs.size());
         auto row = area.withSizeKeepingCentre(w * (int)mKnobs.size(),
                                               juce::jmin(area.getHeight(), 170));
@@ -140,7 +164,8 @@ public:
 
 private:
     std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
-    juce::Label mHint;
+    juce::Label mHint, mGrLabel;
+    GrMeter mGrMeter;
 };
 
 //==============================================================================
@@ -267,6 +292,7 @@ public:
             auto slider = std::make_unique<juce::Slider>(juce::Slider::LinearVertical,
                                                          juce::Slider::NoTextBox);
             slider->setPopupDisplayEnabled(true, true, this);
+            slider->onValueChange = [this] { repaint(); }; // redraw response curve
             addAndMakeVisible(*slider);
             mAtts.push_back(std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
                 apvts, ids[b], *slider));
@@ -297,6 +323,7 @@ public:
     void resized() override
     {
         auto area = contentArea();
+        mCurveArea = area.removeFromTop(54).reduced(0, 2);
         mFlatBtn.setBounds(area.removeFromRight(64).withSizeKeepingCentre(56, 26));
         area.removeFromRight(8);
         const int w = area.getWidth() / (int)mSliders.size();
@@ -311,6 +338,46 @@ public:
     void paint(juce::Graphics &g) override
     {
         BlockPanel::paint(g);
+
+        // Combined response from the SAME RBJ designs the DSP runs (drawn at
+        // nominal 48 kHz; the actual rate only shifts the extreme HF end).
+        if (!mCurveArea.isEmpty())
+        {
+            const double fs = 48000.0;
+            std::array<Biquad, EqBlock::kNumBands> filters;
+            for (int b = 0; b < EqBlock::kNumBands; ++b)
+                filters[(size_t)b] = Biquad::peaking(fs, EqBlock::kBandHz[(size_t)b],
+                                                     EqBlock::kQ,
+                                                     mSliders[(size_t)b]->getValue());
+
+            g.setColour(colors::outline);
+            g.drawHorizontalLine(mCurveArea.getCentreY(), (float)mCurveArea.getX(),
+                                 (float)mCurveArea.getRight());
+
+            juce::Path curve;
+            const double fLo = 30.0, fHi = 16000.0;
+            const int n = mCurveArea.getWidth();
+            for (int x = 0; x < n; ++x)
+            {
+                const double f = fLo * std::pow(fHi / fLo, (double)x / (double)(n - 1));
+                double db = 0.0;
+                for (auto &bi : filters)
+                    if (!bi.isIdentity())
+                        db += 20.0 * std::log10(std::max(bi.magnitudeAt(fs, f), 1.0e-6));
+                const float y = juce::jlimit(
+                    (float)mCurveArea.getY(), (float)mCurveArea.getBottom(),
+                    (float)mCurveArea.getCentreY()
+                        - (float)(db / (double)EqBlock::kMaxGainDb)
+                              * ((float)mCurveArea.getHeight() * 0.5f - 2.0f));
+                if (x == 0)
+                    curve.startNewSubPath((float)mCurveArea.getX(), y);
+                else
+                    curve.lineTo((float)(mCurveArea.getX() + x), y);
+            }
+            g.setColour(colors::accent);
+            g.strokePath(curve, juce::PathStrokeType(1.8f, juce::PathStrokeType::curved));
+        }
+
         // 0 dB line across the slider field
         if (!mSliders.empty())
         {
@@ -328,6 +395,7 @@ private:
     std::vector<std::unique_ptr<juce::Label>> mLabels;
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> mAtts;
     juce::TextButton mFlatBtn{"Flat"};
+    juce::Rectangle<int> mCurveArea;
 };
 
 //==============================================================================

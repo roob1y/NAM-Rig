@@ -60,6 +60,10 @@ public:
     // Engaged amp factor on the last block (0 = passthrough). Editor status.
     int engagedFactor() const { return mChain.amp.engagedFactor(); }
 
+    // Live gain-reduction telemetry for the editor meters.
+    float gateGainDb() const { return mChain.gate.currentGainDb(); }
+    float compGrDb() const { return mChain.comp.grDb(); }
+
     // --- Parameters ---
     juce::AudioProcessorValueTreeState apvts;
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();

@@ -177,7 +177,14 @@ public:
         mGain = gain;
         mOpen = open;
         mHoldCount = hold;
+
+        // Published once per block for the editor's GR meter.
+        mGainDbPub.store((gain >= 1.0f) ? 0.0f
+                                        : 20.0f * std::log10(std::max(gain, 1.0e-5f)));
     }
+
+    // Last block's gate gain in dB (0 = open, negative = attenuating). UI thread.
+    float currentGainDb() const { return mGainDbPub.load(); }
 
 private:
     int lookaheadSamples() const
@@ -211,6 +218,7 @@ private:
     std::vector<float> mDelay;
     int mDelayCap = 0, mWrite = 0;
     float mHpState = 0.0f, mPeakEnv = 0.0f, mRms2 = 0.0f, mGain = 0.0f;
+    std::atomic<float> mGainDbPub{0.0f};
     bool mOpen = false;
     int mHoldCount = 0;
     double mSampleRate = 48000.0;
