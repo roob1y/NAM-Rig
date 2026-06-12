@@ -37,6 +37,25 @@ public:
     const juce::String &currentName() const { return mCurrentName; }
     const juce::File &currentFile() const { return mCurrentFile; }
 
+    // True when any parameter differs from the loaded/saved preset snapshot.
+    bool isModified() const
+    {
+        auto *obj = mLoadedParams.getDynamicObject();
+        if (mCurrentName.isEmpty() || obj == nullptr)
+            return false;
+        for (auto *p : mProc.getParameters())
+            if (auto *rp = dynamic_cast<juce::RangedAudioParameter *>(p))
+            {
+                const double now = (double)rp->convertFrom0to1(rp->getValue());
+                const double ref = obj->hasProperty(rp->paramID)
+                                       ? (double)obj->getProperty(rp->paramID)
+                                       : (double)rp->convertFrom0to1(rp->getDefaultValue());
+                if (std::abs(now - ref) > 1.0e-4)
+                    return true;
+            }
+        return false;
+    }
+
     bool saveToFile(const juce::File &f)
     {
         PresetFile preset;
@@ -65,6 +84,7 @@ public:
             return false;
         mCurrentFile = f;
         mCurrentName = preset.name;
+        mLoadedParams = preset.params; // snapshot for the modified indicator
         return true;
     }
 
@@ -108,6 +128,7 @@ public:
 
         mCurrentFile = f;
         mCurrentName = preset.name;
+        mLoadedParams = preset.params; // snapshot for the modified indicator
         return true;
     }
 
@@ -121,6 +142,7 @@ private:
     NamRigProcessor &mProc;
     juce::File mCurrentFile;
     juce::String mCurrentName;
+    juce::var mLoadedParams;
 };
 
 } // namespace nam_rig

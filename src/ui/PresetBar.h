@@ -56,6 +56,19 @@ public:
             mCombo.setSelectedId(0, juce::dontSendNotification);
     }
 
+    // Called every editor tick (no folder scan): " *" suffix while the rig
+    // differs from the loaded preset.
+    void updateDirty()
+    {
+        const int current = mFiles.indexOf(mManager.currentFile());
+        if (current < 0)
+            return;
+        const auto base = mFiles[current].getFileNameWithoutExtension();
+        const auto want = mManager.isModified() ? base + " *" : base;
+        if (mCombo.getText() != want)
+            mCombo.setText(want, juce::dontSendNotification);
+    }
+
     void resized() override
     {
         auto r = getLocalBounds();

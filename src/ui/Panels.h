@@ -23,6 +23,9 @@ public:
         addAndMakeVisible(mSlider);
         mAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
             apvts, paramId, mSlider);
+        if (auto *param = apvts.getParameter(paramId)) // double-click = default
+            mSlider.setDoubleClickReturnValue(
+                true, param->convertFrom0to1(param->getDefaultValue()));
     }
 
     void resized() override
@@ -293,6 +296,7 @@ public:
                                                          juce::Slider::NoTextBox);
             slider->setPopupDisplayEnabled(true, true, this);
             slider->onValueChange = [this] { repaint(); }; // redraw response curve
+            slider->setDoubleClickReturnValue(true, 0.0); // double-click = flat
             addAndMakeVisible(*slider);
             mAtts.push_back(std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
                 apvts, ids[b], *slider));

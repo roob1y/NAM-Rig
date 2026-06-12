@@ -40,6 +40,7 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
     for (auto *s : {&mInGain, &mOutGain})
     {
         s->setPopupDisplayEnabled(true, true, this);
+        s->setDoubleClickReturnValue(true, 0.0); // double-click = 0 dB
         mContent.addAndMakeVisible(*s);
     }
     mInAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
@@ -98,6 +99,7 @@ void NamRigEditor::timerCallback()
     mDelayPanel.refresh();
     mGatePanel.grMeter().push(-mProc.gateGainDb(), dt);
     mCompPanel.grMeter().push(mProc.compGrDb(), dt);
+    mPresetBar.updateDirty(); // modified-asterisk on the preset name
     if (++mPresetRefreshTick >= 30) // rescan the preset folder ~every 2 s
     {
         mPresetRefreshTick = 0;
