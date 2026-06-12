@@ -33,10 +33,13 @@ target_sources(NAM_Rig PRIVATE
     src/PluginProcessor.cpp
     src/PluginEditor.cpp
     src/PluginEditor.h
+    src/PresetFile.h
+    src/PresetManager.h
     src/ui/RigLookAndFeel.h
     src/ui/Meter.h
     src/ui/BlockStrip.h
     src/ui/Panels.h
+    src/ui/PresetBar.h
 )
 
 target_include_directories(NAM_Rig PRIVATE src)
@@ -141,8 +144,8 @@ if(BUILD_RIG_HARNESS)
         target_compile_options(eq_test PRIVATE /arch:AVX2 /fp:fast)
     endif()
 
-    # Stereo-section measurement suites (PASS/FAIL, exit nonzero on failure)
-    foreach(t IN ITEMS mod_test delay_test reverb_test)
+    # Stereo-section + preset suites (PASS/FAIL, exit nonzero on failure)
+    foreach(t IN ITEMS mod_test delay_test reverb_test preset_test)
         juce_add_console_app(${t} PRODUCT_NAME "${t}")
         target_sources(${t} PRIVATE tests/${t}.cpp)
         target_include_directories(${t} PRIVATE src)

@@ -6,11 +6,13 @@
 
 #include "rig/RigChain.h"
 
+namespace nam_rig { class PresetManager; }
+
 class NamRigProcessor : public juce::AudioProcessor
 {
 public:
     NamRigProcessor();
-    ~NamRigProcessor() override = default;
+    ~NamRigProcessor() override; // defined in .cpp (unique_ptr to fwd-decl type)
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
@@ -39,6 +41,16 @@ public:
     // --- model / IR loading (message thread) ---
     void loadModel(const juce::File &namFile);
     void loadIr(const juce::File &irFile);
+
+    // Source content cached at load time (embedded into .namrig presets).
+    const juce::String &modelText() const { return mModelText; }
+    const juce::String &modelBaseName() const { return mModelBaseName; }
+    const juce::MemoryBlock &irBytes() const { return mIrBytes; }
+    const juce::String &irBaseName() const { return mIrBaseName; }
+
+    // Preset manager lives on the processor so the current preset name
+    // survives editor close/reopen (message thread only).
+    nam_rig::PresetManager &presets() { return *mPresets; }
     juce::String getModelName() const { return mModelName; }
     juce::String getIrName() const { return mChain.cab.irName(); }
     bool isModelLoaded() const { return mModelLoaded.load(); }
@@ -71,6 +83,13 @@ private:
 
     // Paths persisted in plugin state and restored on load.
     juce::String mModelPath, mIrPath;
+
+    // Embedding caches (message thread only; written by loadModel/loadIr).
+    juce::String mModelText, mModelBaseName;
+    juce::MemoryBlock mIrBytes;
+    juce::String mIrBaseName;
+
+    std::unique_ptr<nam_rig::PresetManager> mPresets;
 
     // Last gate lookahead pushed to the chain (PDC re-report on change).
     float mLastGateLookMs = -1.0f;

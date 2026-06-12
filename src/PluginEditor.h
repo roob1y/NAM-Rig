@@ -6,11 +6,12 @@
 #include "ui/Meter.h"
 #include "ui/BlockStrip.h"
 #include "ui/Panels.h"
+#include "ui/PresetBar.h"
 
-// Block-strip editor: global header (I/O gains + meters + status), the chain
-// as a row of tiles with bypass LEDs, and one block's full panel below.
-// Logical size is fixed (920x540); the window is resizable and the whole UI
-// scales uniformly via an AffineTransform on the content component.
+// Block-strip editor: global header (presets + I/O gains + meters + status),
+// the chain as a row of tiles with bypass LEDs, and one block's full panel
+// below. Logical size is fixed (920x540); the window is resizable and the
+// whole UI scales uniformly via an AffineTransform on the content component.
 class NamRigEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
 public:
@@ -34,6 +35,7 @@ private:
 
     // --- Header ---
     juce::Label mTitle{{}, "NAM RIG"};
+    nam_rig::ui::PresetBar mPresetBar;
     juce::Label mStatus;
     juce::Label mInLabel{{}, "IN"}, mOutLabel{{}, "OUT"};
     juce::Slider mInGain{juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox};
@@ -55,6 +57,7 @@ private:
     std::array<juce::Component *, 8> mPanels;
 
     double mLastTimerMs = 0.0;
+    int mPresetRefreshTick = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(NamRigEditor)
 };

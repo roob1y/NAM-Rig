@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "PresetManager.h"
 #include <cmath>
 
 juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParameterLayout()
@@ -182,7 +183,10 @@ NamRigProcessor::NamRigProcessor()
                          .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
       apvts(*this, nullptr, "Parameters", createParameterLayout())
 {
+    mPresets = std::make_unique<nam_rig::PresetManager>(*this);
 }
+
+NamRigProcessor::~NamRigProcessor() = default;
 
 int NamRigProcessor::requestedFactorNow() const
 {
@@ -348,6 +352,9 @@ void NamRigProcessor::loadModel(const juce::File &namFile)
         suffix += " [warn: native " + juce::String(info.expectedSampleRate, 0) + "Hz; AA assumes 48k]";
 
     mModelName = namFile.getFileNameWithoutExtension() + suffix;
+    // Cache the source text so presets can embed the model (single-file rigs).
+    mModelText = namFile.loadFileAsString();
+    mModelBaseName = namFile.getFileNameWithoutExtension();
     mModelPath = namFile.getFullPathName();
     mModelLoaded.store(true);
 
@@ -359,6 +366,9 @@ void NamRigProcessor::loadIr(const juce::File &irFile)
     if (mChain.cab.loadIr(irFile))
     {
         mIrPath = irFile.getFullPathName();
+        // Cache the source bytes so presets can embed the IR (single-file rigs).
+        irFile.loadFileAsData(mIrBytes);
+        mIrBaseName = irFile.getFileNameWithoutExtension();
         updateLatency();
     }
 }

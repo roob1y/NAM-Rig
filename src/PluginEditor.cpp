@@ -4,6 +4,7 @@ using namespace nam_rig::ui;
 
 NamRigEditor::NamRigEditor(NamRigProcessor &p)
     : juce::AudioProcessorEditor(&p), mProc(p),
+      mPresetBar(p.presets()),
       mStrip(p.apvts),
       mGatePanel(p.apvts),
       mCompPanel(p.apvts),
@@ -24,6 +25,7 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
     mTitle.setFont(RigLookAndFeel::withHeight(22.0f).boldened());
     mTitle.setColour(juce::Label::textColourId, colors::text);
     mContent.addAndMakeVisible(mTitle);
+    mContent.addAndMakeVisible(mPresetBar);
 
     mStatus.setJustificationType(juce::Justification::centredRight);
     mStatus.setColour(juce::Label::textColourId, colors::textDim);
@@ -94,6 +96,11 @@ void NamRigEditor::timerCallback()
     mCabPanel.refresh();
     mModPanel.refresh();
     mDelayPanel.refresh();
+    if (++mPresetRefreshTick >= 30) // rescan the preset folder ~every 2 s
+    {
+        mPresetRefreshTick = 0;
+        mPresetBar.refresh();
+    }
 
     juce::String status;
     if (!mProc.isModelLoaded())
@@ -127,9 +134,11 @@ void NamRigEditor::resized()
 
     auto area = juce::Rectangle<int>(0, 0, kBaseW, kBaseH).reduced(12);
 
-    // --- Header (64 px): title | status | IN knob+meter | OUT knob+meter ---
+    // --- Header (64 px): title | presets | status | IN + OUT knob/meter ---
     auto header = area.removeFromTop(64);
-    mTitle.setBounds(header.removeFromLeft(150));
+    mTitle.setBounds(header.removeFromLeft(130));
+    mPresetBar.setBounds(header.removeFromLeft(300).withSizeKeepingCentre(300, 26));
+    header.removeFromLeft(12);
 
     auto ioCluster = header.removeFromRight(220);
     auto laidOut = [&](juce::Label &label, juce::Slider &knob, PeakMeter &meter,
