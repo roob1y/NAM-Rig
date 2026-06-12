@@ -13,6 +13,9 @@
 #include "AmpBlock.h"
 #include "EqBlock.h"
 #include "CabBlock.h"
+#include "ModBlock.h"
+#include "DelayBlock.h"
+#include "ReverbBlock.h"
 
 namespace nam_rig
 {

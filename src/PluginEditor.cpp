@@ -10,7 +10,11 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
       mAmpPanel(p),
       mEqPanel(p.apvts),
       mCabPanel(p),
-      mPanels{&mGatePanel, &mCompPanel, &mAmpPanel, &mEqPanel, &mCabPanel}
+      mModPanel(p.apvts),
+      mDelayPanel(p.apvts),
+      mReverbPanel(p.apvts),
+      mPanels{&mGatePanel, &mCompPanel, &mAmpPanel, &mEqPanel, &mCabPanel,
+              &mModPanel, &mDelayPanel, &mReverbPanel}
 {
     setLookAndFeel(&mLnf);
     addAndMakeVisible(mContent);
@@ -88,6 +92,8 @@ void NamRigEditor::timerCallback()
 
     mAmpPanel.refresh();
     mCabPanel.refresh();
+    mModPanel.refresh();
+    mDelayPanel.refresh();
 
     juce::String status;
     if (!mProc.isModelLoaded())

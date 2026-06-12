@@ -64,36 +64,10 @@ private:
     bool mBypassed = false;
 };
 
-// ---- v1 stubs (passthrough; implemented incrementally, harness-first) ----
-
-// GateBlock lives in GateBlock.h (real DSP, verified by tests/gate_test.cpp).
-
-// CompBlock lives in CompBlock.h (real DSP, verified by tests/comp_test.cpp).
-
-// EqBlock lives in EqBlock.h (8-band graphic, verified by tests/eq_test.cpp).
-
-class ModBlock : public StereoBlock
-{
-public:
-    const char *name() const override { return "Modulation"; }
-    void prepare(const BlockContext &) override {}
-    void process(float *, float *, int) override {} // TODO: chorus/flanger/phaser
-};
-
-class DelayBlock : public StereoBlock
-{
-public:
-    const char *name() const override { return "Delay"; }
-    void prepare(const BlockContext &) override {}
-    void process(float *, float *, int) override {} // TODO: stereo delay
-};
-
-class ReverbBlock : public StereoBlock
-{
-public:
-    const char *name() const override { return "Reverb"; }
-    void prepare(const BlockContext &) override {}
-    void process(float *, float *, int) override {} // TODO: reverb
-};
+// ---- block homes (each verified by its own measurement suite) ----
+// GateBlock.h   (tests/gate_test.cpp)     CompBlock.h (tests/comp_test.cpp)
+// EqBlock.h     (tests/eq_test.cpp)       CabBlock.h  (rig_chain_process)
+// ModBlock.h    (tests/mod_test.cpp)      DelayBlock.h (tests/delay_test.cpp)
+// ReverbBlock.h (tests/reverb_test.cpp)
 
 } // namespace nam_rig

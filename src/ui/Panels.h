@@ -399,4 +399,155 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(CabPanel)
 };
 
+//==============================================================================
+class ModPanel : public BlockPanel
+{
+public:
+    explicit ModPanel(juce::AudioProcessorValueTreeState &apvts)
+        : BlockPanel("MODULATION"), mApvts(apvts)
+    {
+        mTypeLabel.setText("Type", juce::dontSendNotification);
+        mTypeLabel.setColour(juce::Label::textColourId, colors::textDim);
+        addAndMakeVisible(mTypeLabel);
+        mType.addItemList({"Chorus", "Flanger", "Phaser", "Tremolo"}, 1);
+        addAndMakeVisible(mType);
+        mTypeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, "modType", mType);
+
+        const std::pair<const char *, const char *> defs[] = {
+            {"modRate", "Rate"}, {"modDepth", "Depth"},
+            {"modFeedback", "Feedback"}, {"modMix", "Mix"}};
+        for (const auto &[id, caption] : defs)
+        {
+            mKnobs.push_back(std::make_unique<LabeledKnob>(apvts, id, caption));
+            addAndMakeVisible(*mKnobs.back());
+        }
+    }
+
+    void refresh() // feedback only does something for flanger / phaser
+    {
+        const int type = (int)mApvts.getRawParameterValue("modType")->load();
+        mKnobs[2]->setEnabled(type == 1 || type == 2);
+    }
+
+    void resized() override
+    {
+        auto area = contentArea();
+        auto typeRow = area.removeFromTop(30);
+        mTypeLabel.setBounds(typeRow.removeFromLeft(50));
+        mType.setBounds(typeRow.removeFromLeft(150));
+        area.removeFromTop(4);
+        area = area.withSizeKeepingCentre(area.getWidth(),
+                                          juce::jmin(area.getHeight(), 150));
+        const int w = juce::jmin(130, area.getWidth() / (int)mKnobs.size());
+        auto row = area.withSizeKeepingCentre(w * (int)mKnobs.size(), area.getHeight());
+        for (auto &k : mKnobs)
+            k->setBounds(row.removeFromLeft(w).reduced(6, 0));
+    }
+
+private:
+    juce::AudioProcessorValueTreeState &mApvts;
+    juce::ComboBox mType;
+    juce::Label mTypeLabel;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt;
+    std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
+};
+
+//==============================================================================
+class DelayPanel : public BlockPanel
+{
+public:
+    explicit DelayPanel(juce::AudioProcessorValueTreeState &apvts)
+        : BlockPanel("DELAY"), mApvts(apvts)
+    {
+        mSyncLabel.setText("Sync", juce::dontSendNotification);
+        mSyncLabel.setColour(juce::Label::textColourId, colors::textDim);
+        addAndMakeVisible(mSyncLabel);
+        mSync.addItemList({"Free", "1/1", "1/2.", "1/2", "1/2T", "1/4.", "1/4",
+                           "1/4T", "1/8.", "1/8", "1/8T", "1/16.", "1/16", "1/16T"},
+                          1);
+        addAndMakeVisible(mSync);
+        mSyncAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, "delaySync", mSync);
+
+        mPingPong.setButtonText("Ping-pong");
+        addAndMakeVisible(mPingPong);
+        mPpAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            apvts, "delayPingPong", mPingPong);
+
+        const std::pair<const char *, const char *> defs[] = {
+            {"delayTime", "Time"},        {"delayFeedback", "Feedback"},
+            {"delayTone", "Tone"},        {"delayMod", "Wow/Flutter"},
+            {"delayWidth", "Width"},      {"delayMix", "Mix"}};
+        for (const auto &[id, caption] : defs)
+        {
+            mKnobs.push_back(std::make_unique<LabeledKnob>(apvts, id, caption));
+            addAndMakeVisible(*mKnobs.back());
+        }
+    }
+
+    void refresh() // time knob is owned by the sync division when sync != Free
+    {
+        const int sync = (int)mApvts.getRawParameterValue("delaySync")->load();
+        mKnobs[0]->setEnabled(sync == 0);
+    }
+
+    void resized() override
+    {
+        auto area = contentArea();
+        auto topRow = area.removeFromTop(30);
+        mSyncLabel.setBounds(topRow.removeFromLeft(50));
+        mSync.setBounds(topRow.removeFromLeft(110));
+        topRow.removeFromLeft(20);
+        mPingPong.setBounds(topRow.removeFromLeft(110));
+        area.removeFromTop(4);
+        area = area.withSizeKeepingCentre(area.getWidth(),
+                                          juce::jmin(area.getHeight(), 150));
+        const int w = area.getWidth() / (int)mKnobs.size();
+        for (auto &k : mKnobs)
+            k->setBounds(area.removeFromLeft(w).reduced(6, 0));
+    }
+
+private:
+    juce::AudioProcessorValueTreeState &mApvts;
+    juce::ComboBox mSync;
+    juce::Label mSyncLabel;
+    juce::ToggleButton mPingPong;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mSyncAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mPpAtt;
+    std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
+};
+
+//==============================================================================
+class ReverbPanel : public BlockPanel
+{
+public:
+    explicit ReverbPanel(juce::AudioProcessorValueTreeState &apvts) : BlockPanel("REVERB")
+    {
+        const std::pair<const char *, const char *> defs[] = {
+            {"revSize", "Size"},         {"revDecay", "Decay"},
+            {"revDamp", "Damping"},      {"revPredelay", "Pre-Delay"},
+            {"revMix", "Mix"}};
+        for (const auto &[id, caption] : defs)
+        {
+            mKnobs.push_back(std::make_unique<LabeledKnob>(apvts, id, caption));
+            addAndMakeVisible(*mKnobs.back());
+        }
+    }
+
+    void resized() override
+    {
+        auto area = contentArea();
+        area = area.withSizeKeepingCentre(area.getWidth(),
+                                          juce::jmin(area.getHeight(), 170));
+        const int w = juce::jmin(140, area.getWidth() / (int)mKnobs.size());
+        auto row = area.withSizeKeepingCentre(w * (int)mKnobs.size(), area.getHeight());
+        for (auto &k : mKnobs)
+            k->setBounds(row.removeFromLeft(w).reduced(6, 0));
+    }
+
+private:
+    std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
+};
+
 } // namespace nam_rig::ui

@@ -140,4 +140,23 @@ if(BUILD_RIG_HARNESS)
     if(MSVC)
         target_compile_options(eq_test PRIVATE /arch:AVX2 /fp:fast)
     endif()
+
+    # Stereo-section measurement suites (PASS/FAIL, exit nonzero on failure)
+    foreach(t IN ITEMS mod_test delay_test reverb_test)
+        juce_add_console_app(${t} PRODUCT_NAME "${t}")
+        target_sources(${t} PRIVATE tests/${t}.cpp)
+        target_include_directories(${t} PRIVATE src)
+        target_compile_definitions(${t} PRIVATE
+            JUCE_WEB_BROWSER=0
+            JUCE_USE_CURL=0
+            _USE_MATH_DEFINES   # M_PI on MSVC
+        )
+        target_link_libraries(${t} PRIVATE
+            juce::juce_audio_basics
+            juce::juce_recommended_config_flags
+        )
+        if(MSVC)
+            target_compile_options(${t} PRIVATE /arch:AVX2 /fp:fast)
+        endif()
+    endforeach()
 endif()

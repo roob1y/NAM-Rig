@@ -127,9 +127,9 @@ public:
             {"AMP",   "",         false},
             {"EQ",    "eqOn",     false},
             {"CAB",   "cabOn",    false},
-            {"MOD",   "modOn",    true},
-            {"DELAY", "delayOn",  true},
-            {"VERB",  "reverbOn", true},
+            {"MOD",   "modOn",    false},
+            {"DELAY", "delayOn",  false},
+            {"VERB",  "reverbOn", false},
         };
         int selectable = 0;
         for (const auto &s : slots)

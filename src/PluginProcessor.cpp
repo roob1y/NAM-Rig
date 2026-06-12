@@ -101,6 +101,78 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::NormalisableRange<float>(2000.0f, 20000.0f, 10.0f, 0.5f), 20000.0f,
         juce::AudioParameterFloatAttributes().withLabel("Hz")));
 
+    // --- Modulation (rig/ModBlock.h; verified by tests/mod_test.cpp) ---
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("modType", 1), "Mod Type",
+        juce::StringArray{"Chorus", "Flanger", "Phaser", "Tremolo"}, 0));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("modRate", 1), "Mod Rate",
+        juce::NormalisableRange<float>(0.05f, 10.0f, 0.01f, 0.4f), 0.8f,
+        juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("modDepth", 1), "Mod Depth",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("modFeedback", 1), "Mod Feedback",
+        juce::NormalisableRange<float>(0.0f, 0.9f, 0.01f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("modMix", 1), "Mod Mix",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+
+    // --- Delay (rig/DelayBlock.h; verified by tests/delay_test.cpp) ---
+    // Order must match DelayBlock::kSyncBeats — append only.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("delaySync", 1), "Delay Sync",
+        juce::StringArray{"Free", "1/1", "1/2.", "1/2", "1/2T", "1/4.", "1/4",
+                          "1/4T", "1/8.", "1/8", "1/8T", "1/16.", "1/16", "1/16T"},
+        0));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("delayTime", 1), "Delay Time",
+        juce::NormalisableRange<float>(nam_rig::DelayBlock::kMinTimeMs,
+                                       nam_rig::DelayBlock::kMaxTimeMs, 1.0f, 0.4f),
+        350.0f, juce::AudioParameterFloatAttributes().withLabel("ms")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("delayFeedback", 1), "Delay Feedback",
+        juce::NormalisableRange<float>(0.0f, nam_rig::DelayBlock::kMaxFeedback, 0.01f),
+        0.35f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("delayTone", 1), "Delay Tone",
+        juce::NormalisableRange<float>(1000.0f, 20000.0f, 10.0f, 0.5f), 8000.0f,
+        juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("delayPingPong", 1), "Delay Ping-Pong", false));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("delayWidth", 1), "Delay Width",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("delayMod", 1), "Delay Wow/Flutter",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.15f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("delayMix", 1), "Delay Mix",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.25f));
+
+    // --- Reverb (rig/ReverbBlock.h; verified by tests/reverb_test.cpp) ---
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("revSize", 1), "Reverb Size",
+        juce::NormalisableRange<float>(nam_rig::ReverbBlock::kMinSize,
+                                       nam_rig::ReverbBlock::kMaxSize, 0.01f),
+        1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("revDecay", 1), "Reverb Decay",
+        juce::NormalisableRange<float>(0.2f, 10.0f, 0.05f, 0.5f), 2.0f,
+        juce::AudioParameterFloatAttributes().withLabel("s")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("revDamp", 1), "Reverb Damping",
+        juce::NormalisableRange<float>(1000.0f, 16000.0f, 10.0f, 0.5f), 6000.0f,
+        juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("revPredelay", 1), "Reverb Pre-Delay",
+        juce::NormalisableRange<float>(0.0f, 200.0f, 1.0f, 0.5f), 20.0f,
+        juce::AudioParameterFloatAttributes().withLabel("ms")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("revMix", 1), "Reverb Mix",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.25f));
+
     return {params.begin(), params.end()};
 }
 
@@ -205,8 +277,33 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.cab.setHpfHz(apvts.getRawParameterValue("cabHpf")->load());
     mChain.cab.setLpfHz(apvts.getRawParameterValue("cabLpf")->load());
     mChain.cab.setBypassed(apvts.getRawParameterValue("cabOn")->load() < 0.5f);
+    // Stereo section (all zero-latency; plain chain bypass is safe).
+    mChain.mod.setType((int)apvts.getRawParameterValue("modType")->load());
+    mChain.mod.setRateHz(apvts.getRawParameterValue("modRate")->load());
+    mChain.mod.setDepth(apvts.getRawParameterValue("modDepth")->load());
+    mChain.mod.setFeedback(apvts.getRawParameterValue("modFeedback")->load());
+    mChain.mod.setMix(apvts.getRawParameterValue("modMix")->load());
     mChain.mod.setBypassed(apvts.getRawParameterValue("modOn")->load() < 0.5f);
+
+    if (auto *ph = getPlayHead())
+        if (auto pos = ph->getPosition())
+            if (auto bpm = pos->getBpm())
+                mChain.delay.setBpm(*bpm);
+    mChain.delay.setSyncIndex((int)apvts.getRawParameterValue("delaySync")->load());
+    mChain.delay.setTimeMs(apvts.getRawParameterValue("delayTime")->load());
+    mChain.delay.setFeedback(apvts.getRawParameterValue("delayFeedback")->load());
+    mChain.delay.setToneHz(apvts.getRawParameterValue("delayTone")->load());
+    mChain.delay.setPingPong(apvts.getRawParameterValue("delayPingPong")->load() >= 0.5f);
+    mChain.delay.setWidth(apvts.getRawParameterValue("delayWidth")->load());
+    mChain.delay.setModAmount(apvts.getRawParameterValue("delayMod")->load());
+    mChain.delay.setMix(apvts.getRawParameterValue("delayMix")->load());
     mChain.delay.setBypassed(apvts.getRawParameterValue("delayOn")->load() < 0.5f);
+
+    mChain.reverb.setSize(apvts.getRawParameterValue("revSize")->load());
+    mChain.reverb.setDecaySeconds(apvts.getRawParameterValue("revDecay")->load());
+    mChain.reverb.setDampHz(apvts.getRawParameterValue("revDamp")->load());
+    mChain.reverb.setPredelayMs(apvts.getRawParameterValue("revPredelay")->load());
+    mChain.reverb.setMix(apvts.getRawParameterValue("revMix")->load());
     mChain.reverb.setBypassed(apvts.getRawParameterValue("reverbOn")->load() < 0.5f);
 
     mChain.process(buffer);
