@@ -1,17 +1,19 @@
 #pragma once
-// PresetFile — the .namrig single-file rig preset format. JSON envelope:
+// PresetFile — the .namrig single-file rig preset format. JSON envelope (v2):
 //
-//   { "format": "nam-rig-preset", "version": 1, "name": "...",
+//   { "format": "nam-rig-preset", "version": 2, "name": "...",
 //     "params": { "<paramID>": <real-world value>, ... },
-//     "model":  { "name": "...", "nam": "<raw .nam file text>" } | absent,
-//     "ir":     { "name": "...", "wav64": "<base64 of original wav>" } | absent }
+//     "model":  { "name": "...", "nam": "<raw .nam text>" } | absent,   // Rig A
+//     "ir":     { "name": "...", "wav64": "<base64 wav>" } | absent,     // Rig A
+//     "modelB": { ... } | absent,                                        // Rig B
+//     "irB":    { ... } | absent }                                       // Rig B
 //
-// The model is embedded as the ORIGINAL FILE TEXT (a .nam is itself JSON);
-// the IR as the original wav bytes, base64. Loading writes the bytes back to
-// temp files and goes through the exact same loadModel/loadIr paths the file
-// pickers use — no second parser to drift. Format round-trip is verified
-// byte-exact by tests/preset_test.cpp (juce_core only — this header must not
-// depend on any audio module).
+// v1 files (single rig, no modelB/irB) still load -> their model/ir go to Rig A.
+// Rig A keeps the original "model"/"ir" keys so the v1 round-trip test is
+// unaffected. The model is embedded as the ORIGINAL .nam text, the IR as the
+// original wav bytes (base64); loading writes temp files and replays them
+// through the same loadModel/loadIr paths the pickers use — no second parser.
+// Verified byte-exact by tests/preset_test.cpp (juce_core only — no audio dep).
 
 #include <juce_core/juce_core.h>
 
@@ -20,20 +22,44 @@ namespace nam_rig
 
 struct PresetFile
 {
-    static constexpr int kVersion = 1;
+    static constexpr int kVersion = 2; // v2 adds Rig B (modelB/irB); reads v1
     static constexpr const char *kFormatTag = "nam-rig-preset";
     static constexpr const char *kExtension = ".namrig";
 
     juce::String name;
     juce::var params; // DynamicObject: paramID -> double (real-world value)
+
+    // Rig A (the v1 "model"/"ir" slot).
     juce::String modelName, modelText; // empty = no model embedded
     juce::String irName;
     juce::MemoryBlock irBytes;         // empty = no IR embedded
 
+    // Rig B (v2 only).
+    juce::String modelNameB, modelTextB;
+    juce::String irNameB;
+    juce::MemoryBlock irBytesB;
+
     bool hasModel() const { return modelText.isNotEmpty(); }
     bool hasIr() const { return irBytes.getSize() > 0; }
+    bool hasModelB() const { return modelTextB.isNotEmpty(); }
+    bool hasIrB() const { return irBytesB.getSize() > 0; }
 
     // ---- serialize ----
+    static juce::var modelVar(const juce::String &nm, const juce::String &nam)
+    {
+        auto *m = new juce::DynamicObject();
+        m->setProperty("name", nm);
+        m->setProperty("nam", nam);
+        return juce::var(m);
+    }
+    static juce::var irVar(const juce::String &nm, const juce::MemoryBlock &bytes)
+    {
+        auto *ir = new juce::DynamicObject();
+        ir->setProperty("name", nm);
+        ir->setProperty("wav64", juce::Base64::toBase64(bytes.getData(), bytes.getSize()));
+        return juce::var(ir);
+    }
+
     juce::String toJson() const
     {
         auto *root = new juce::DynamicObject();
@@ -42,20 +68,13 @@ struct PresetFile
         root->setProperty("name", name);
         root->setProperty("params", params);
         if (hasModel())
-        {
-            auto *m = new juce::DynamicObject();
-            m->setProperty("name", modelName);
-            m->setProperty("nam", modelText);
-            root->setProperty("model", juce::var(m));
-        }
+            root->setProperty("model", modelVar(modelName, modelText));
         if (hasIr())
-        {
-            auto *ir = new juce::DynamicObject();
-            ir->setProperty("name", irName);
-            ir->setProperty("wav64",
-                            juce::Base64::toBase64(irBytes.getData(), irBytes.getSize()));
-            root->setProperty("ir", juce::var(ir));
-        }
+            root->setProperty("ir", irVar(irName, irBytes));
+        if (hasModelB())
+            root->setProperty("modelB", modelVar(modelNameB, modelTextB));
+        if (hasIrB())
+            root->setProperty("irB", irVar(irNameB, irBytesB));
         return juce::JSON::toString(juce::var(root));
     }
 
@@ -65,6 +84,33 @@ struct PresetFile
     }
 
     // ---- parse (returns false on anything malformed) ----
+    // model object -> (name,text); returns false if present but payload empty.
+    static bool readModel(const juce::var &v, juce::String &nm, juce::String &text)
+    {
+        if (auto *m = v.getDynamicObject())
+        {
+            nm = m->getProperty("name").toString();
+            text = m->getProperty("nam").toString();
+            if (text.isEmpty())
+                return false;
+        }
+        return true;
+    }
+    static bool readIr(const juce::var &v, juce::String &nm, juce::MemoryBlock &bytes)
+    {
+        if (auto *ir = v.getDynamicObject())
+        {
+            nm = ir->getProperty("name").toString();
+            juce::MemoryOutputStream decoded;
+            if (!juce::Base64::convertFromBase64(decoded, ir->getProperty("wav64").toString()))
+                return false;
+            bytes = decoded.getMemoryBlock();
+            if (bytes.getSize() == 0)
+                return false;
+        }
+        return true;
+    }
+
     static bool parse(const juce::String &json, PresetFile &out)
     {
         const juce::var v = juce::JSON::parse(json);
@@ -82,24 +128,15 @@ struct PresetFile
         if (out.params.getDynamicObject() == nullptr)
             return false;
 
-        if (auto *m = root->getProperty("model").getDynamicObject())
-        {
-            out.modelName = m->getProperty("name").toString();
-            out.modelText = m->getProperty("nam").toString();
-            if (out.modelText.isEmpty())
-                return false; // model object present but no payload
-        }
-        if (auto *ir = root->getProperty("ir").getDynamicObject())
-        {
-            out.irName = ir->getProperty("name").toString();
-            juce::MemoryOutputStream decoded;
-            if (!juce::Base64::convertFromBase64(decoded,
-                                                 ir->getProperty("wav64").toString()))
-                return false;
-            out.irBytes = decoded.getMemoryBlock();
-            if (out.irBytes.getSize() == 0)
-                return false;
-        }
+        // Rig A (v1 keys). Rig B (v2 keys, absent in v1 files).
+        if (!readModel(root->getProperty("model"), out.modelName, out.modelText))
+            return false;
+        if (!readIr(root->getProperty("ir"), out.irName, out.irBytes))
+            return false;
+        if (!readModel(root->getProperty("modelB"), out.modelNameB, out.modelTextB))
+            return false;
+        if (!readIr(root->getProperty("irB"), out.irNameB, out.irBytesB))
+            return false;
         return true;
     }
 

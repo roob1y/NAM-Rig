@@ -80,6 +80,16 @@ public:
             preset.irName = mProc.irBaseName();
             preset.irBytes = mProc.irBytes();
         }
+        if (mProc.isModelLoaded(1) && mProc.modelText(1).isNotEmpty())
+        {
+            preset.modelNameB = mProc.modelBaseName(1);
+            preset.modelTextB = mProc.modelText(1);
+        }
+        if (mProc.isIrLoaded(1) && mProc.irBytes(1).getSize() > 0)
+        {
+            preset.irNameB = mProc.irBaseName(1);
+            preset.irBytesB = mProc.irBytes(1);
+        }
         return preset;
     }
 
@@ -124,6 +134,24 @@ public:
                 const auto tmp = tmpDir.getChildFile(sanitize(preset.irName) + ".wav");
                 if (tmp.replaceWithData(preset.irBytes.getData(), preset.irBytes.getSize()))
                     mProc.loadIr(tmp);
+            }
+        }
+        if (preset.hasModelB())
+        {
+            if (!mProc.isModelLoaded(1) || preset.modelTextB != mProc.modelText(1))
+            {
+                const auto tmp = tmpDir.getChildFile(sanitize(preset.modelNameB) + "_B.nam");
+                if (tmp.replaceWithText(preset.modelTextB))
+                    mProc.loadModel(tmp, 1);
+            }
+        }
+        if (preset.hasIrB())
+        {
+            if (!mProc.isIrLoaded(1) || preset.irBytesB != mProc.irBytes(1))
+            {
+                const auto tmp = tmpDir.getChildFile(sanitize(preset.irNameB) + "_B.wav");
+                if (tmp.replaceWithData(preset.irBytesB.getData(), preset.irBytesB.getSize()))
+                    mProc.loadIr(tmp, 1);
             }
         }
     }
