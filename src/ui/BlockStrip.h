@@ -127,6 +127,7 @@ public:
             {"AMP",   "",         false},
             {"EQ",    "eqOn",     false},
             {"CAB",   "cabOn",    false},
+            {"MIX",   "",         false},
             {"MOD",   "modOn",    false},
             {"DELAY", "delayOn",  false},
             {"VERB",  "reverbOn", false},

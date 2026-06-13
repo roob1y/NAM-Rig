@@ -44,17 +44,18 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mInAtt, mOutAtt;
 
     // --- Chain strip + per-block panels ---
-    // selectable: 0 gate, 1 comp, 2 amp, 3 eq, 4 cab, 5 mod, 6 delay, 7 reverb
+    // selectable: 0 gate, 1 comp, 2 amp, 3 eq, 4 cab, 5 mix, 6 mod, 7 delay, 8 reverb
     nam_rig::ui::BlockStrip mStrip;
     nam_rig::ui::GatePanel mGatePanel;
     nam_rig::ui::CompPanel mCompPanel;
     nam_rig::ui::AmpPanel mAmpPanel;
     nam_rig::ui::EqPanel mEqPanel;
     nam_rig::ui::CabPanel mCabPanel;
+    nam_rig::ui::MixPanel mMixPanel;
     nam_rig::ui::ModPanel mModPanel;
     nam_rig::ui::DelayPanel mDelayPanel;
     nam_rig::ui::ReverbPanel mReverbPanel;
-    std::array<juce::Component *, 8> mPanels;
+    std::array<juce::Component *, 9> mPanels;
 
     double mLastTimerMs = 0.0;
     int mPresetRefreshTick = 0;

@@ -667,4 +667,112 @@ private:
     std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
 };
 
+//==============================================================================
+// MIX — dual-rig routing: mode (Solo A / Solo B / Dual), per-rig level + pan +
+// polarity, the phase-align nudge, and the Auto-align button (probes both
+// voices). The two rigs merge here into the shared stereo section.
+class MixPanel : public BlockPanel
+{
+public:
+    explicit MixPanel(NamRigProcessor &proc) : BlockPanel("MIX - DUAL RIG"), mProc(proc)
+    {
+        mModeLabel.setText("Mode", juce::dontSendNotification);
+        mModeLabel.setColour(juce::Label::textColourId, colors::textDim);
+        addAndMakeVisible(mModeLabel);
+        mMode.addItemList({"Solo A", "Solo B", "Dual"}, 1); // matches rigMode order
+        addAndMakeVisible(mMode);
+        mModeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            mProc.apvts, "rigMode", mMode);
+
+        auto rigTag = [this](juce::Label &l, const char *txt)
+        {
+            l.setText(txt, juce::dontSendNotification);
+            l.setJustificationType(juce::Justification::centred);
+            l.setColour(juce::Label::textColourId, colors::accent);
+            addAndMakeVisible(l);
+        };
+        rigTag(mALabel, "RIG A");
+        rigTag(mBLabel, "RIG B");
+
+        mLevelA = std::make_unique<LabeledKnob>(mProc.apvts, "rigLevelA", "Level");
+        mPanA = std::make_unique<LabeledKnob>(mProc.apvts, "rigPanA", "Pan");
+        mLevelB = std::make_unique<LabeledKnob>(mProc.apvts, "rigLevelB", "Level");
+        mPanB = std::make_unique<LabeledKnob>(mProc.apvts, "rigPanB", "Pan");
+        mAlign = std::make_unique<LabeledKnob>(mProc.apvts, "rigAlign", "Align");
+        for (auto *k : {mLevelA.get(), mPanA.get(), mLevelB.get(), mPanB.get(), mAlign.get()})
+            addAndMakeVisible(*k);
+
+        mPolA.setButtonText("Invert");
+        mPolB.setButtonText("Invert");
+        addAndMakeVisible(mPolA);
+        addAndMakeVisible(mPolB);
+        mPolAAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            mProc.apvts, "rigPolA", mPolA);
+        mPolBAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            mProc.apvts, "rigPolB", mPolB);
+
+        mAutoBtn.onClick = [this] { mProc.autoAlign(); };
+        addAndMakeVisible(mAutoBtn);
+        mHint.setColour(juce::Label::textColourId, colors::textDim);
+        mHint.setText("Auto-align probes both voices and sets the nudge + Rig B polarity.",
+                      juce::dontSendNotification);
+        addAndMakeVisible(mHint);
+    }
+
+    // Called from the editor timer.
+    void refresh()
+    {
+        const int mode = (int)mProc.apvts.getRawParameterValue("rigMode")->load();
+        const bool dual = (mode == 2);
+        // Pan / polarity only matter in Dual (Solo plays centered); grey otherwise.
+        mPanA->setEnabled(dual);
+        mPanB->setEnabled(dual);
+        mPolA.setEnabled(dual);
+        mPolB.setEnabled(dual);
+        // Auto-align needs a model in BOTH rigs.
+        mAutoBtn.setEnabled(mProc.isModelLoaded(0) && mProc.isModelLoaded(1));
+    }
+
+    void resized() override
+    {
+        auto area = contentArea();
+
+        auto modeRow = area.removeFromTop(30);
+        mModeLabel.setBounds(modeRow.removeFromLeft(50));
+        mMode.setBounds(modeRow.removeFromLeft(150));
+        area.removeFromTop(8);
+
+        auto rigRow = [&](juce::Label &tag, LabeledKnob &lvl, LabeledKnob &pan,
+                          juce::ToggleButton &pol)
+        {
+            auto r = area.removeFromTop(96);
+            tag.setBounds(r.removeFromLeft(64).withSizeKeepingCentre(64, 20));
+            lvl.setBounds(r.removeFromLeft(96).reduced(6, 0));
+            pan.setBounds(r.removeFromLeft(96).reduced(6, 0));
+            pol.setBounds(r.removeFromLeft(90).withSizeKeepingCentre(90, 24));
+            area.removeFromTop(4);
+        };
+        rigRow(mALabel, *mLevelA, *mPanA, mPolA);
+        rigRow(mBLabel, *mLevelB, *mPanB, mPolB);
+
+        auto alignRow = area.removeFromTop(96);
+        mAlign->setBounds(alignRow.removeFromLeft(96).reduced(6, 0));
+        mAutoBtn.setBounds(alignRow.removeFromLeft(120).withSizeKeepingCentre(120, 28));
+        alignRow.removeFromLeft(10);
+        mHint.setBounds(alignRow.withSizeKeepingCentre(alignRow.getWidth(), 40));
+    }
+
+private:
+    NamRigProcessor &mProc;
+    juce::ComboBox mMode;
+    juce::Label mModeLabel, mALabel, mBLabel, mHint;
+    std::unique_ptr<LabeledKnob> mLevelA, mPanA, mLevelB, mPanB, mAlign;
+    juce::ToggleButton mPolA, mPolB;
+    juce::TextButton mAutoBtn{"Auto-align"};
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mModeAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mPolAAtt, mPolBAtt;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MixPanel)
+};
+
 } // namespace nam_rig::ui

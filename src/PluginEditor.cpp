@@ -11,11 +11,12 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
       mAmpPanel(p),
       mEqPanel(p.apvts),
       mCabPanel(p),
+      mMixPanel(p),
       mModPanel(p.apvts),
       mDelayPanel(p.apvts),
       mReverbPanel(p.apvts),
       mPanels{&mGatePanel, &mCompPanel, &mAmpPanel, &mEqPanel, &mCabPanel,
-              &mModPanel, &mDelayPanel, &mReverbPanel}
+              &mMixPanel, &mModPanel, &mDelayPanel, &mReverbPanel}
 {
     setLookAndFeel(&mLnf);
     addAndMakeVisible(mContent);
@@ -95,6 +96,7 @@ void NamRigEditor::timerCallback()
 
     mAmpPanel.refresh();
     mCabPanel.refresh();
+    mMixPanel.refresh();
     mModPanel.refresh();
     mDelayPanel.refresh();
     mGatePanel.grMeter().push(-mProc.gateGainDb(), dt);
