@@ -271,6 +271,28 @@ float NamRigProcessor::normalizationGainDb() const
         eng.loudnessDb());
 }
 
+void NamRigProcessor::autoAlign()
+{
+    if (!isModelLoaded(0) || !isModelLoaded(1))
+        return;
+    suspendProcessing(true);
+    const auto r = mChain.measureAlignment();
+    suspendProcessing(false);
+    if (auto *p = apvts.getParameter("rigAlign"))
+    {
+        p->beginChangeGesture();
+        p->setValueNotifyingHost(
+            p->convertTo0to1((float)juce::jlimit(-256.0, 256.0, r.lagSamples)));
+        p->endChangeGesture();
+    }
+    if (auto *p = apvts.getParameter("rigPolB"))
+    {
+        p->beginChangeGesture();
+        p->setValueNotifyingHost(r.invert ? 1.0f : 0.0f);
+        p->endChangeGesture();
+    }
+}
+
 int NamRigProcessor::requestedFactorNow() const
 {
     const int choice = static_cast<int>(apvts.getRawParameterValue("oversample")->load());

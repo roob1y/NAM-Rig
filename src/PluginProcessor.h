@@ -60,6 +60,11 @@ public:
     // Engaged amp factor on the last block (0 = passthrough). Editor status.
     int engagedFactor(int rig = 0) const { return ampFor(rig).engagedFactor(); }
 
+    // Auto phase-align: probe both voices, cross-correlate, write the measured
+    // lag (rigAlign) + polarity (rigPolB) to params. Suspends processing around
+    // the offline render. Message thread; wired to the load/Align UI in 2d.
+    void autoAlign();
+
     // --- Input calibration / output normalization (NAM-AA parity; CalNorm.h) ---
     // Driven by Rig A's model metadata (calibration is pre-split, normalization
     // post-mix); folded into the in/out gains in processBlock.

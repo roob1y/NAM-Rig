@@ -307,6 +307,25 @@ int main(int argc, char **argv)
         CHECK(std::fabs((pdc10 - pdc0) - 10.0) < 1e-9, "T6 align delay folds into PDC (+10)");
     }
 
+    // ===================== T7: auto-align probe recovers a cab offset =========
+    // Same model in both rigs; Rig A cab passthrough, Rig B cab = an IR whose
+    // body is delayed ~11 samples. measureAlignment() should report B later ~11.
+    {
+        const char *irPath = argc > 2 ? argv[2] : "delay11.wav";
+        RigChain chain;
+        chain.amp.engine().loadModel(model);
+        chain.ampB.engine().loadModel(model);
+        chain.prepare(48000.0, 256);
+        chain.amp.setRequestedFactor(1);
+        chain.ampB.setRequestedFactor(1);
+        const bool irOk = chain.cabB.loadIr(juce::File(juce::String(irPath)));
+        CHECK(irOk, "T7 Rig B delay IR loads (%s)", irPath);
+        const auto r = chain.measureAlignment();
+        CHECK(std::fabs(r.lagSamples - 11.0) < 1.5 && !r.invert,
+              "T7 auto-align recovers cab offset ~11 (got %.2f, inv=%d)",
+              r.lagSamples, (int)r.invert);
+    }
+
     std::printf("\n%s (%d failure%s)\n", gFails == 0 ? "ALL PASS" : "FAILURES",
                 gFails, gFails == 1 ? "" : "s");
     return gFails == 0 ? 0 : 1;

@@ -21,6 +21,7 @@
 // driven from PhaseAlign::measure() on the two rendered voice outputs (see
 // PhaseAlign.h) so it works whether the cab is an IR or baked into the .nam.
 // Defaults (delay 0, polarity +1) skip both paths, keeping SoloA bit-exact.
+// measureAlignment() renders an internal probe through both voices to drive it.
 //
 // Shared (no copy drift) between PluginProcessor::processBlock and the offline
 // harnesses (tests/rig_chain_process.cpp, tests/dualrig_test.cpp).
@@ -62,6 +63,7 @@ public:
         mVoiceB.assign((size_t)juce::jmax(1, maxBlockSize), 0.0f);
         mFdlA.prepare(kMaxAlignSamples);
         mFdlB.prepare(kMaxAlignSamples);
+        mMaxBlock = juce::jmax(1, maxBlockSize);
         mPrepared = true;
     }
 
@@ -105,6 +107,41 @@ public:
     {
         setAlignmentLag(r.lagSamples);
         setPolarityB(r.invert);
+    }
+
+    // Measure the broadband time/polarity offset between the two voices by
+    // rendering an internal probe through each full voice (amp->eq->cab) and
+    // cross-correlating the OUTPUTS — cab-agnostic (works for IR or in-model
+    // cabs). Settles the cab convolvers (async load + crossfade) first, then
+    // clears all state afterwards so live audio resumes clean.
+    //
+    // NOT realtime-safe: it renders offline and sleeps while the convolver
+    // settles. The CALLER must guarantee the audio thread is not processing
+    // (NamRigProcessor::autoAlign suspends processing around it).
+    AlignResult measureAlignment()
+    {
+        const int n = 4096;
+        settleCab(cab);
+        settleCab(cabB);
+        reset();
+
+        // Deterministic broadband probe (white-ish noise -> sharp xcorr peak).
+        std::vector<float> a((size_t)n), b((size_t)n);
+        std::uint32_t s = 0x9e3779b9u;
+        for (int i = 0; i < n; ++i)
+        {
+            s = s * 1103515245u + 12345u;
+            const float v = 0.25f * (float)((int)((s >> 16) & 0x7fff) - 16384) / 16384.0f;
+            a[(size_t)i] = v;
+            b[(size_t)i] = v;
+        }
+
+        renderVoice(0, a.data(), n);
+        reset();
+        renderVoice(1, b.data(), n);
+        reset();
+
+        return PhaseAlign::measure(a.data(), b.data(), n, kMaxAlignSamples);
     }
 
     // Full chain on a DAW-rate buffer (1 = mono fold, 2 = stereo).
@@ -268,6 +305,51 @@ private:
         }
     }
 
+    // Offline-render one voice (amp->eq->cab) in place, chunked by the prepared
+    // block size so the convolver never sees an oversized block. Bypass flags
+    // are ignored: alignment is about the full voice's acoustic timing.
+    void renderVoice(int rig, float *buf, int n)
+    {
+        AmpBlock &a = rig ? ampB : amp;
+        EqBlock &e = rig ? eqB : eq;
+        CabBlock &c = rig ? cabB : cab;
+        const int chunk = juce::jmax(1, juce::jmin(mMaxBlock, n));
+        for (int pos = 0; pos < n; pos += chunk)
+        {
+            const int m = juce::jmin(chunk, n - pos);
+            a.process(buf + pos, m);
+            e.process(buf + pos, m);
+            c.process(buf + pos, m);
+        }
+    }
+
+    // Wait out juce::dsp::Convolution's async IR load + crossfade by probing
+    // with unit impulses until two consecutive responses are bit-identical
+    // (same approach as tests/rig_chain_process.cpp). No-op without an IR.
+    void settleCab(CabBlock &c)
+    {
+        if (!c.isIrLoaded())
+            return;
+        // JUCE swaps the IR in on a background thread, so the first probes would
+        // otherwise read identical PRE-load responses and exit early. Let the
+        // load land first (mirrors tests/rig_chain_process.cpp), then probe out
+        // the crossfade until two consecutive responses match.
+        juce::Thread::sleep(300);
+        const int n = juce::jmax(1, juce::jmin(mMaxBlock, 256));
+        std::vector<float> prev((size_t)n, 0.0f), probe((size_t)n, 0.0f);
+        for (int tries = 0; tries < 200; ++tries)
+        {
+            std::fill(probe.begin(), probe.end(), 0.0f);
+            probe[0] = 1.0f;
+            c.process(probe.data(), n);
+            if (tries > 0 &&
+                std::memcmp(prev.data(), probe.data(), (size_t)n * sizeof(float)) == 0)
+                return;
+            prev = probe;
+            juce::Thread::sleep(5);
+        }
+    }
+
     std::array<MonoBlock *, 8> allMonoBlocks()
     {
         return {&gate, &comp, &amp, &eq, &cab, &ampB, &eqB, &cabB};
@@ -283,6 +365,7 @@ private:
     double mAlignA = 0.0, mAlignB = 0.0; // fractional align delay (samples)
     FracDelayLine mFdlA, mFdlB;
     std::vector<float> mVoiceA, mVoiceB;
+    int mMaxBlock = 512; // prepared block size (probe render chunk size)
     bool mPrepared = false;
 };
 
