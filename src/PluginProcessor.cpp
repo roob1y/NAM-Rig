@@ -245,6 +245,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::ParameterID("offlineAAB", 1), "Rig B Offline AA",
         juce::StringArray{"Same as live", "8x", "16x", "32x"}, 1));
 
+    // Comp voicing (see rig/CompBlock.h). Appended last for automation
+    // stability; default Clean reproduces the original comp behaviour.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("compMode", 1), "Comp Mode",
+        juce::StringArray{"Clean", "OTA", "Opto", "FET"}, 0));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("compCharacter", 1), "Comp Character",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.35f));
+
     return {params.begin(), params.end()};
 }
 
@@ -421,6 +430,8 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.comp.setAttackMs(apvts.getRawParameterValue("compAttack")->load());
     mChain.comp.setLevelDb(apvts.getRawParameterValue("compLevel")->load());
     mChain.comp.setBoostDb(apvts.getRawParameterValue("compBoost")->load());
+    mChain.comp.setMode((int)apvts.getRawParameterValue("compMode")->load());
+    mChain.comp.setCharacter(apvts.getRawParameterValue("compCharacter")->load());
     mChain.comp.setBypassed(apvts.getRawParameterValue("compOn")->load() < 0.5f);
     // Graphic EQ band gains (Rig A; zero latency; chain bypass via eqOn is safe).
     {

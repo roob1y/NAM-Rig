@@ -133,7 +133,8 @@ public:
     {
         const std::pair<const char *, const char *> defs[] = {
             {"compSustain", "Sustain"}, {"compAttack", "Attack"},
-            {"compLevel", "Level"},     {"compBoost", "Boost"}};
+            {"compLevel", "Level"},     {"compBoost", "Boost"},
+            {"compCharacter", "Character"}};
         for (const auto &[id, caption] : defs)
         {
             mKnobs.push_back(std::make_unique<LabeledKnob>(apvts, id, caption));
@@ -161,6 +162,15 @@ public:
         };
         mCurve.setSustain((float)mKnobs[0]->slider().getValue());
 
+        // Voicing selector (Clean / OTA / Opto / FET) -> compMode param.
+        mModeBox.addItemList(juce::StringArray{"Clean", "OTA", "Opto", "FET"}, 1);
+        mModeBox.setJustificationType(juce::Justification::centred);
+        mModeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, "compMode", mModeBox);
+        mModeBox.onChange = [this] { updateCurveShape(); };
+        addAndMakeVisible(mModeBox);
+        updateCurveShape();
+
         setAdvanced(false);
     }
 
@@ -174,6 +184,8 @@ public:
         auto bottom = area.removeFromBottom(22);
         mAdvBtn.setBounds(bottom.removeFromRight(88).reduced(0, 2));
         bottom.removeFromRight(8);
+        mModeBox.setBounds(bottom.removeFromLeft(96).reduced(0, 1));
+        bottom.removeFromLeft(8);
         mHint.setBounds(bottom);
 
         auto meterCol = area.removeFromRight(96); // GR + IN + OUT columns
@@ -203,11 +215,20 @@ private:
         resized();
     }
 
+    void updateCurveShape()
+    {
+        const int idx = juce::jmax(0, mModeBox.getSelectedItemIndex());
+        const auto v = nam_rig::CompBlock::voicingFor((nam_rig::CompBlock::Mode)idx);
+        mCurve.setShape(v.ratio, v.kneeDb);
+    }
+
     std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
     juce::Label mHint;
     CompMeter mMeter;
     CompCurve mCurve;
     juce::TextButton mAdvBtn;
+    juce::ComboBox mModeBox;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mModeAtt;
     bool mAdvanced = false;
 };
 

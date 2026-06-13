@@ -45,6 +45,17 @@ public:
         }
     }
 
+    // Voicing shape (from CompBlock::voicingFor) so the curve matches the mode.
+    void setShape(float ratio, float kneeDb)
+    {
+        if (std::abs(ratio - mRatio) > 1.0e-3f || std::abs(kneeDb - mKnee) > 1.0e-3f)
+        {
+            mRatio = ratio;
+            mKnee = kneeDb;
+            repaint();
+        }
+    }
+
     void paint(juce::Graphics &g) override
     {
         auto outer = getLocalBounds().toFloat().reduced(1.0f);
@@ -91,7 +102,7 @@ public:
         bool started = false;
         for (float inDb = kMinDb; inDb <= 0.001f; inDb += 1.0f)
         {
-            const float outDb = inDb + nam_rig::CompBlock::computeGainDb(inDb, thr);
+            const float outDb = inDb + nam_rig::CompBlock::computeGainDb(inDb, thr, mRatio, mKnee);
             const float px = xOf(inDb), py = yOf(juce::jmax(outDb, kMinDb));
             if (!started)
             {
@@ -109,7 +120,7 @@ public:
         if (mInputDb > kMinDb + 1.0f)
         {
             const float inDb = juce::jlimit(kMinDb, 0.0f, mInputDb);
-            const float outDb = inDb + nam_rig::CompBlock::computeGainDb(inDb, thr);
+            const float outDb = inDb + nam_rig::CompBlock::computeGainDb(inDb, thr, mRatio, mKnee);
             const float dx = xOf(inDb), dy = yOf(juce::jmax(outDb, kMinDb));
             g.setColour(colors::text);
             g.fillEllipse(dx - 3.5f, dy - 3.5f, 7.0f, 7.0f);
@@ -129,6 +140,8 @@ public:
 private:
     float mSustain = 0.5f;
     float mInputDb = kMinDb; // idle (dot hidden) until fed
+    float mRatio = nam_rig::CompBlock::kRatio;
+    float mKnee = nam_rig::CompBlock::kKneeDb;
 };
 
 } // namespace nam_rig::ui

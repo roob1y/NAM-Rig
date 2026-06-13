@@ -42,6 +42,46 @@ static double tailDb(const std::vector<float> &x)
     return 10.0 * std::log10(e / (double)n) + 3.0103; // RMS->peak of sine
 }
 
+// run a buffer through a chosen voicing
+static std::vector<float> runMode(int mode, float sustain, float attackMs,
+                                  float character, const std::vector<float> &in)
+{
+    CompBlock c;
+    c.setSustain(sustain);
+    c.setAttackMs(attackMs);
+    c.setMode(mode);
+    c.setCharacter(character);
+    c.prepare({SR, BLK});
+    auto x = in;
+    run(c, x);
+    return x;
+}
+
+// |X(freq)| over n samples from start (Goertzel)
+static double goertzel(const std::vector<float> &x, size_t start, size_t n, double freq)
+{
+    const double w = 2.0 * M_PI * freq / SR;
+    const double cw = std::cos(w), sw = std::sin(w), coeff = 2.0 * cw;
+    double s1 = 0, s2 = 0;
+    for (size_t i = 0; i < n; ++i)
+    {
+        const double s0 = (double)x[start + i] + coeff * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    const double re = s1 - s2 * cw, im = s2 * sw;
+    return std::sqrt(re * re + im * im) / (double)(n / 2);
+}
+
+// windowed RMS in dB, +/- half samples around centre
+static double envWin(const std::vector<float> &y, size_t c, size_t half)
+{
+    double e = 0;
+    for (size_t i = c - half; i < c + half; ++i)
+        e += (double)y[i] * y[i];
+    return 10.0 * std::log10(e / (double)(2 * half));
+}
+
 int main()
 {
     const float sustain = 0.5f;
@@ -174,6 +214,115 @@ int main()
             peak = std::max(peak, (double)std::abs(x[i]));
         }
         CHECK(maxStep < 0.27 * peak, "T6 max per-sample step %.3f of peak (want < 0.27)", maxStep / peak);
+    }
+
+    // ======================= VOICINGS (compMode) =======================
+    // Bounds below are first-run estimates (sandbox down when written); tune
+    // on the clang-cl run if a margin is too tight, like the earlier suites.
+
+    // ---- T7: per-mode transfer slope == 1/ratio; ratios FET > Clean > Opto ----
+    {
+        bool ok = true;
+        double worst = 0;
+        for (int m : {1, 2, 3}) // OTA, Opto, FET
+        {
+            const auto v = CompBlock::voicingFor((CompBlock::Mode)m);
+            const float Tt = -20.0f;
+            const double o1 = -1.0 + CompBlock::computeGainDb(-1.0f, Tt, v.ratio, v.kneeDb);
+            const double o2 = -9.0 + CompBlock::computeGainDb(-9.0f, Tt, v.ratio, v.kneeDb);
+            const double slope = (o1 - o2) / 8.0;
+            worst = std::max(worst, std::abs(slope - 1.0 / v.ratio));
+            if (std::abs(slope - 1.0 / v.ratio) > 0.03)
+                ok = false;
+        }
+        ok = ok && CompBlock::voicingFor(CompBlock::Mode::FET).ratio > CompBlock::kRatio &&
+             CompBlock::voicingFor(CompBlock::Mode::Opto).ratio < CompBlock::kRatio;
+        CHECK(ok, "T7 per-mode slope==1/ratio (worst %.3f), ratios FET>Clean>Opto", worst);
+    }
+
+    // ---- T8: FET's fast attack clamps the pick transient harder than Clean ----
+    {
+        std::vector<float> x(96000);
+        for (size_t i = 0; i < x.size(); ++i)
+        {
+            const double amp = (i < 24000) ? 0.01 : 0.5623; // -40 -> -5 dB step
+            x[i] = (float)(amp * std::sin(2.0 * M_PI * 1000.0 * (double)i / SR));
+        }
+        auto clean = runMode(0, 0.5f, 10.0f, 0.0f, x);
+        auto fet = runMode(3, 0.5f, 10.0f, 0.0f, x);
+        // bloom = early overshoot (~6 ms in) minus settled (200 ms in)
+        const double cleanBloom = envWin(clean, 24000 + 300, 120) - envWin(clean, 24000 + 9600, 480);
+        const double fetBloom = envWin(fet, 24000 + 300, 120) - envWin(fet, 24000 + 9600, 480);
+        CHECK(fetBloom < cleanBloom - 0.5,
+              "T8 FET clamps transient faster (bloom FET %.1f < Clean %.1f dB)", fetBloom, cleanBloom);
+    }
+
+    // ---- T9: Opto's program-dependent release recovers slower than Clean ----
+    {
+        std::vector<float> x(144000);
+        for (size_t i = 0; i < x.size(); ++i)
+        {
+            const double amp = (i < 48000) ? 0.5623 : 0.01; // -5 dB for 1 s, then -40 dB
+            x[i] = (float)(amp * std::sin(2.0 * M_PI * 1000.0 * (double)i / SR));
+        }
+        auto clean = runMode(0, 0.5f, 10.0f, 0.0f, x);
+        auto opto = runMode(2, 0.5f, 10.0f, 0.0f, x);
+        auto recoveredBy150 = [&](const std::vector<float> &y) {
+            const double atDrop = envWin(y, 48000 + 480, 240); // ~10 ms after drop
+            const double at150 = envWin(y, 48000 + 7200, 480); // 150 ms after drop
+            const double finalL = envWin(y, 138000, 2400);     // recovered
+            return (at150 - atDrop) / (finalL - atDrop + 1.0e-9);
+        };
+        const double cleanR = recoveredBy150(clean), optoR = recoveredBy150(opto);
+        CHECK(optoR < cleanR - 0.15,
+              "T9 Opto releases slower: recovered-by-150ms Opto %.2f < Clean %.2f", optoR, cleanR);
+    }
+
+    // ---- T10: FET adds harmonic grit a clean VCA does not ----
+    {
+        auto x = tone(-5.0, 48000); // above threshold -> compressing + driven
+        auto clean = runMode(0, 0.7f, 5.0f, 0.8f, x);
+        auto fet = runMode(3, 0.7f, 5.0f, 0.8f, x);
+        auto thd = [&](const std::vector<float> &y) {
+            const double f1 = goertzel(y, 24000, 24000, 1000.0);
+            const double h2 = goertzel(y, 24000, 24000, 2000.0);
+            const double h3 = goertzel(y, 24000, 24000, 3000.0);
+            return (h2 + h3) / (f1 + 1.0e-12);
+        };
+        const double cThd = thd(clean), fThd = thd(fet);
+        CHECK(fThd > cThd * 2.0 && fThd > 0.01,
+              "T10 FET adds harmonics: THD FET %.4f vs Clean %.4f", fThd, cThd);
+    }
+
+    // ---- T11: Character knob scales the analog colour (0 = clean) ----
+    {
+        auto x = tone(-5.0, 48000);
+        auto fet0 = runMode(3, 0.7f, 5.0f, 0.0f, x); // colour off
+        auto fet1 = runMode(3, 0.7f, 5.0f, 0.8f, x); // colour up
+        auto thd = [&](const std::vector<float> &y) {
+            const double f1 = goertzel(y, 24000, 24000, 1000.0);
+            const double h2 = goertzel(y, 24000, 24000, 2000.0);
+            const double h3 = goertzel(y, 24000, 24000, 3000.0);
+            return (h2 + h3) / (f1 + 1.0e-12);
+        };
+        const double t0 = thd(fet0), t1 = thd(fet1);
+        CHECK(t0 < 0.01 && t1 > t0 * 3.0,
+              "T11 Character scales colour: THD char0 %.4f -> char0.8 %.4f", t0, t1);
+    }
+
+    // ---- T12: voicing harmonic signature (Opto even-forward vs OTA odd-forward) ----
+    {
+        auto x = tone(-8.0, 48000);
+        auto ota = runMode(1, 0.7f, 8.0f, 0.9f, x);
+        auto opto = runMode(2, 0.7f, 8.0f, 0.9f, x);
+        auto h2over3 = [&](const std::vector<float> &y) {
+            const double h2 = goertzel(y, 24000, 24000, 2000.0);
+            const double h3 = goertzel(y, 24000, 24000, 3000.0);
+            return h2 / (h3 + 1.0e-9);
+        };
+        const double rOpto = h2over3(opto), rOta = h2over3(ota);
+        CHECK(rOpto > rOta,
+              "T12 Opto more 2nd-harmonic (even) than OTA: h2/h3 Opto %.2f > OTA %.2f", rOpto, rOta);
     }
 
     std::printf("\n%s (%d failure%s)\n", gFails ? "RESULT: FAIL" : "RESULT: ALL PASS", gFails, gFails == 1 ? "" : "s");
