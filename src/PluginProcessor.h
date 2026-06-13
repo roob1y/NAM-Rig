@@ -66,8 +66,9 @@ public:
     void autoAlign();
 
     // --- Input calibration / output normalization (NAM-AA parity; CalNorm.h) ---
-    // Driven by Rig A's model metadata (calibration is pre-split, normalization
-    // post-mix); folded into the in/out gains in processBlock.
+    // Per-rig: each rig is calibrated/normalized from its OWN model metadata,
+    // applied as that rig's voice in/out trims. The enable toggles are global;
+    // has*() is true if EITHER rig carries the metadata.
     bool hasInputCalibration() const
     {
         return mChain.amp.engine().hasInputLevelDbu() || mChain.ampB.engine().hasInputLevelDbu();
