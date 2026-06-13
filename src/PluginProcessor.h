@@ -6,7 +6,10 @@
 
 #include "rig/RigChain.h"
 
-namespace nam_rig { class PresetManager; }
+namespace nam_rig
+{
+    class PresetManager;
+}
 
 class NamRigProcessor : public juce::AudioProcessor
 {
@@ -88,6 +91,8 @@ public:
     // Live gain-reduction telemetry for the editor meters.
     float gateGainDb() const { return mChain.gate.currentGainDb(); }
     float compGrDb() const { return mChain.comp.grDb(); }
+    float compInDb() const { return mChain.comp.inPeakDb(); }
+    float compOutDb() const { return mChain.comp.outPeakDb(); }
 
     // --- Parameters ---
     juce::AudioProcessorValueTreeState apvts;

@@ -98,11 +98,15 @@ public:
         const float relCoef = coefForMs(kReleaseMs, sr);
 
         float gr = mGrDb;
+        float inPk = 0.0f, outPk = 0.0f; // block peaks for the IN/OUT meter modes
 
         for (int i = 0; i < numSamples; ++i)
         {
             const float x = mono[i];
-            const float aDb = 20.0f * std::log10(std::max(std::abs(x), 1.0e-9f));
+            const float ax = std::abs(x);
+            if (ax > inPk)
+                inPk = ax;
+            const float aDb = 20.0f * std::log10(std::max(ax, 1.0e-9f));
 
             const float grTarget = -computeGainDb(aDb, t); // >= 0
             // branching smoother: attack when GR rises, release when it falls
@@ -114,18 +118,30 @@ public:
             // total gain; GR == 0 path keeps the multiply exact w.r.t. outLin
             const float g = (gr < 1.0e-4f) ? outLin
                                            : outLin * std::pow(10.0f, -gr * 0.05f);
-            mono[i] = x * g;
+            const float y = x * g;
+            mono[i] = y;
+            const float ay = std::abs(y);
+            if (ay > outPk)
+                outPk = ay;
         }
 
         mGrDb = (gr < 1.0e-7f) ? 0.0f : gr; // flush
         mGrDbPub.store(mGrDb); // published for the editor's GR meter
+        // Block peaks in dBFS for the IN/OUT meter modes (UI thread reads these).
+        mInPeakDbPub.store(inPk > 1.0e-9f ? 20.0f * std::log10(inPk) : -120.0f);
+        mOutPeakDbPub.store(outPk > 1.0e-9f ? 20.0f * std::log10(outPk) : -120.0f);
     }
 
     // Last block's gain reduction in dB (>= 0). UI thread.
     float grDb() const { return mGrDbPub.load(); }
+    // Last block's input / output peak in dBFS (-120 = silence). UI thread.
+    float inPeakDb() const { return mInPeakDbPub.load(); }
+    float outPeakDb() const { return mOutPeakDbPub.load(); }
 
 private:
     std::atomic<float> mGrDbPub{0.0f};
+    std::atomic<float> mInPeakDbPub{-120.0f};
+    std::atomic<float> mOutPeakDbPub{-120.0f};
 
     static float coefForMs(float ms, double sr)
     {

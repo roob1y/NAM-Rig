@@ -2,6 +2,8 @@
 #include "PluginProcessor.h"
 #include "ui/RigLookAndFeel.h"
 #include "ui/GrMeter.h"
+#include "ui/CompMeter.h"
+#include "ui/CompCurve.h"
 
 namespace nam_rig::ui
 {
@@ -137,38 +139,76 @@ public:
             mKnobs.push_back(std::make_unique<LabeledKnob>(apvts, id, caption));
             addAndMakeVisible(*mKnobs.back());
         }
-        mHint.setText("Pedal-style: Sustain sets squash (auto makeup), Boost is a clean post-gain into the amp.",
+
+        mHint.setText("GR shows squash + history trail; IN/OUT track gain staging. Advanced adds the transfer curve.",
                       juce::dontSendNotification);
         mHint.setColour(juce::Label::textColourId, colors::textDim);
         addAndMakeVisible(mHint);
 
-        mGrLabel.setText("GR", juce::dontSendNotification);
-        mGrLabel.setJustificationType(juce::Justification::centred);
-        mGrLabel.setColour(juce::Label::textColourId, colors::textDim);
-        addAndMakeVisible(mGrLabel);
-        addAndMakeVisible(mGrMeter);
+        addAndMakeVisible(mMeter);
+        addChildComponent(mCurve); // Advanced view only
+
+        // Live input level drives the transfer-curve operating dot.
+        mMeter.onInput = [this](float inDb) { mCurve.setInputDb(inDb); };
+
+        mAdvBtn.setClickingTogglesState(true);
+        mAdvBtn.onClick = [this] { setAdvanced(mAdvBtn.getToggleState()); };
+        addAndMakeVisible(mAdvBtn);
+
+        // Sustain knob drives the curve's threshold marker.
+        mKnobs[0]->slider().onValueChange = [this] {
+            mCurve.setSustain((float)mKnobs[0]->slider().getValue());
+        };
+        mCurve.setSustain((float)mKnobs[0]->slider().getValue());
+
+        setAdvanced(false);
     }
 
-    GrMeter &grMeter() { return mGrMeter; }
+    // Drop-in for the editor's existing comp line (CompMeter::push(grDb, dt)).
+    CompMeter &grMeter() { return mMeter; }
 
     void resized() override
     {
         auto area = contentArea();
-        mHint.setBounds(area.removeFromBottom(20));
-        auto meterCol = area.removeFromRight(46);
-        mGrLabel.setBounds(meterCol.removeFromTop(16));
-        mGrMeter.setBounds(meterCol.reduced(16, 4));
-        const int w = juce::jmin(130, area.getWidth() / (int)mKnobs.size());
-        auto row = area.withSizeKeepingCentre(w * (int)mKnobs.size(),
-                                              juce::jmin(area.getHeight(), 170));
+
+        auto bottom = area.removeFromBottom(22);
+        mAdvBtn.setBounds(bottom.removeFromRight(88).reduced(0, 2));
+        bottom.removeFromRight(8);
+        mHint.setBounds(bottom);
+
+        auto meterCol = area.removeFromRight(96); // GR + IN + OUT columns
+        mMeter.setBounds(meterCol.reduced(4, 2));
+
+        if (mAdvanced)
+        {
+            const int curveW = juce::jlimit(120, 210, area.getWidth() / 2);
+            mCurve.setBounds(area.removeFromLeft(curveW).reduced(2));
+        }
+
+        auto row = area.withSizeKeepingCentre(
+            juce::jmin(area.getWidth(), 120 * (int)mKnobs.size()),
+            juce::jmin(area.getHeight(), 170));
+        const int w = row.getWidth() / (int)mKnobs.size();
         for (auto &k : mKnobs)
             k->setBounds(row.removeFromLeft(w).reduced(6, 0));
     }
 
 private:
+    void setAdvanced(bool adv)
+    {
+        mAdvanced = adv;
+        mCurve.setVisible(adv);
+        mAdvBtn.setButtonText(adv ? "Advanced" : "Simple");
+        mAdvBtn.setToggleState(adv, juce::dontSendNotification);
+        resized();
+    }
+
     std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
-    juce::Label mHint, mGrLabel;
-    GrMeter mGrMeter;
+    juce::Label mHint;
+    CompMeter mMeter;
+    CompCurve mCurve;
+    juce::TextButton mAdvBtn;
+    bool mAdvanced = false;
 };
 
 //==============================================================================

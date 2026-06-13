@@ -60,7 +60,8 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
     for (auto *panel : mPanels)
         mContent.addChildComponent(*panel); // visibility driven by selection
 
-    mStrip.onSelectionChanged = [this](int i) { showPanel(i); };
+    mStrip.onSelectionChanged = [this](int i)
+    { showPanel(i); };
     mStrip.select(juce::jlimit(0, (int)mPanels.size() - 1, mProc.uiSelectedBlock));
 
     mAmpPanelA.refresh();
@@ -109,7 +110,9 @@ void NamRigEditor::timerCallback()
     mDelayPanel.refresh();
     mGatePanel.grMeter().push(-mProc.gateGainDb(), dt);
     mCompPanel.grMeter().push(mProc.compGrDb(), dt);
-    mPresetBar.updateDirty(); // modified-asterisk on the preset name
+    mCompPanel.grMeter().pushIn(mProc.compInDb(), dt);
+    mCompPanel.grMeter().pushOut(mProc.compOutDb(), dt);
+    mPresetBar.updateDirty();       // modified-asterisk on the preset name
     if (++mPresetRefreshTick >= 30) // rescan the preset folder ~every 2 s
     {
         mPresetRefreshTick = 0;
