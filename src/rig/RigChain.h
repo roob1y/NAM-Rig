@@ -174,6 +174,15 @@ public:
         if (runB)
             std::memcpy(vB, ch0, (size_t)numSamples * sizeof(float));
 
+        double compA = 0.0, compB = 0.0;
+        if (mMode == Dual)
+        {
+            const double LA = amp.latencySamples() + eq.latencySamples() + cab.latencySamples();
+            const double LB = ampB.latencySamples() + eqB.latencySamples() + cabB.latencySamples();
+            compA = std::max(0.0, LB - LA);
+            compB = std::max(0.0, LA - LB);
+        }
+
         // ---- per-rig voices (in-trim -> amp -> eq -> cab -> out-trim), mono ----
         if (runA)
         {
@@ -182,7 +191,7 @@ public:
             if (!eq.isBypassed()) eq.process(vA, numSamples);
             if (!cab.isBypassed()) cab.process(vA, numSamples);
             if (mOutTrimA != 1.0f) scale(vA, numSamples, mOutTrimA);
-            alignVoice(mFdlA, vA, numSamples, mAlignA, mPolA);
+            alignVoice(mFdlA, vA, numSamples, compA + mAlignA, mPolA);
         }
         if (runB)
         {
@@ -191,7 +200,7 @@ public:
             if (!eqB.isBypassed()) eqB.process(vB, numSamples);
             if (!cabB.isBypassed()) cabB.process(vB, numSamples);
             if (mOutTrimB != 1.0f) scale(vB, numSamples, mOutTrimB);
-            alignVoice(mFdlB, vB, numSamples, mAlignB, mPolB);
+            alignVoice(mFdlB, vB, numSamples, compB + mAlignB, mPolB);
         }
 
         // ---- mix to the output bus ----
@@ -210,15 +219,13 @@ public:
     double latencySamples() const
     {
         const double pre = gate.latencySamples() + comp.latencySamples();
-        const double voiceA = amp.latencySamples() + eq.latencySamples()
-                              + cab.latencySamples() + mAlignA;
-        const double voiceB = ampB.latencySamples() + eqB.latencySamples()
-                              + cabB.latencySamples() + mAlignB;
-        double voice = voiceA;
+        const double LA = amp.latencySamples() + eq.latencySamples() + cab.latencySamples();
+        const double LB = ampB.latencySamples() + eqB.latencySamples() + cabB.latencySamples();
+        double voice = LA + mAlignA;
         if (mMode == SoloB)
-            voice = voiceB;
+            voice = LB + mAlignB;
         else if (mMode == Dual)
-            voice = std::max(voiceA, voiceB);
+            voice = std::max(LA, LB) + std::max(mAlignA, mAlignB);
         double post = 0.0;
         for (auto *b : stereoBlocks())
             post += b->latencySamples();

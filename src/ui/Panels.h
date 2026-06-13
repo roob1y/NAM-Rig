@@ -210,9 +210,9 @@ public:
                 mProc.apvts, paramId, box);
         };
         initCombo(mLiveAa, mLiveAaLabel, {"Off", "2x", "4x", "8x", "16x", "32x"},
-                  "oversample", "Live AA", mLiveAtt);
+                  rig == 0 ? "oversample" : "oversampleB", "Live AA", mLiveAtt);
         initCombo(mOfflineAa, mOfflineAaLabel, {"Same as live", "8x", "16x", "32x"},
-                  "offlineAA", "Offline AA", mOfflineAtt);
+                  rig == 0 ? "offlineAA" : "offlineAAB", "Offline AA", mOfflineAtt);
 
         mInfo.setColour(juce::Label::textColourId, colors::textDim);
         addAndMakeVisible(mInfo);

@@ -98,7 +98,7 @@ public:
 
 private:
     void updateLatency();
-    int requestedFactorNow() const; // oversample param + offline bump (NAM-AA logic)
+    int requestedFactorNow(int rig) const; // per-rig oversample param + offline bump
 
     // Per-rig block access (rig 0 = A, 1 = B).
     nam_rig::AmpBlock &ampFor(int rig) { return rig ? mChain.ampB : mChain.amp; }
@@ -126,6 +126,7 @@ private:
     float mLastGateLookMs = -1.0f;
     float mLastRigAlign = -1.0e9f;
     int mLastRigMode = -1;
+    int mLastFactorA = -1, mLastFactorB = -1;
 
     double mSampleRate = 48000.0;
 

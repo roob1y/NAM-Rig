@@ -238,6 +238,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::NormalisableRange<float>(2000.0f, 20000.0f, 10.0f, 0.5f), 20000.0f,
         juce::AudioParameterFloatAttributes().withLabel("Hz")));
 
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("oversampleB", 1), "Rig B Oversampling",
+        juce::StringArray{"Off", "2x", "4x", "8x", "16x", "32x"}, 0));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("offlineAAB", 1), "Rig B Offline AA",
+        juce::StringArray{"Same as live", "8x", "16x", "32x"}, 1));
+
     return {params.begin(), params.end()};
 }
 
@@ -293,12 +300,14 @@ void NamRigProcessor::autoAlign()
     }
 }
 
-int NamRigProcessor::requestedFactorNow() const
+int NamRigProcessor::requestedFactorNow(int rig) const
 {
-    const int choice = static_cast<int>(apvts.getRawParameterValue("oversample")->load());
+    const char *osId = rig == 0 ? "oversample" : "oversampleB";
+    const char *offId = rig == 0 ? "offlineAA" : "offlineAAB";
+    const int choice = static_cast<int>(apvts.getRawParameterValue(osId)->load());
     int requested = 1 << juce::jlimit(0, 5, choice); // Off..32x -> 1..32
-    const int offline = static_cast<int>(apvts.getRawParameterValue("offlineAA")->load());
-    if (isNonRealtime() && offline > 0 && mChain.amp.engine().isA2())
+    const int offline = static_cast<int>(apvts.getRawParameterValue(offId)->load());
+    if (isNonRealtime() && offline > 0 && ampFor(rig).engine().isA2())
         requested = juce::jmax(requested, 8 << (offline - 1)); // 8x / 16x / 32x
     return requested;
 }
@@ -313,9 +322,8 @@ void NamRigProcessor::updateLatency()
 {
     if (!mChain.isPrepared())
         return;
-    const int f = requestedFactorNow();
-    mChain.amp.setRequestedFactor(f);
-    mChain.ampB.setRequestedFactor(f); // v1: Rig B shares Rig A's AA factor
+    mChain.amp.setRequestedFactor(requestedFactorNow(0));
+    mChain.ampB.setRequestedFactor(requestedFactorNow(1));
     mChain.gate.setLookaheadMs(apvts.getRawParameterValue("gateLook")->load());
     setLatencySamples((int)std::round(mChain.latencySamples()));
 }
@@ -350,10 +358,16 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         inPeak = juce::jmax(inPeak, buffer.getMagnitude(ch, 0, numSamples));
     mInputPeakDb.store(juce::Decibels::gainToDecibels(inPeak, -100.0f));
 
-    // Bypass flags + amp AA factor from parameters (shared across both rigs).
-    const int factor = requestedFactorNow();
-    mChain.amp.setRequestedFactor(factor);
-    mChain.ampB.setRequestedFactor(factor);
+    const int fA = requestedFactorNow(0);
+    const int fB = requestedFactorNow(1);
+    mChain.amp.setRequestedFactor(fA);
+    mChain.ampB.setRequestedFactor(fB);
+    if (fA != mLastFactorA || fB != mLastFactorB)
+    {
+        mLastFactorA = fA;
+        mLastFactorB = fB;
+        updateLatency();
+    }
 
     // Gate parameters (atomics; cheap to push every block). Lookahead changes
     // PDC, so re-report latency when it moves.
