@@ -8,15 +8,19 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
       mStrip(p.apvts),
       mGatePanel(p.apvts),
       mCompPanel(p.apvts),
-      mAmpPanel(p),
-      mEqPanel(p.apvts),
-      mCabPanel(p),
+      mAmpPanelA(p, 0),
+      mAmpPanelB(p, 1),
+      mEqPanelA(p.apvts, 0),
+      mEqPanelB(p.apvts, 1),
+      mCabPanelA(p, 0),
+      mCabPanelB(p, 1),
       mMixPanel(p),
       mModPanel(p.apvts),
       mDelayPanel(p.apvts),
       mReverbPanel(p.apvts),
-      mPanels{&mGatePanel, &mCompPanel, &mAmpPanel, &mEqPanel, &mCabPanel,
-              &mMixPanel, &mModPanel, &mDelayPanel, &mReverbPanel}
+      mPanels{&mGatePanel, &mCompPanel, &mAmpPanelA, &mEqPanelA, &mCabPanelA,
+              &mAmpPanelB, &mEqPanelB, &mCabPanelB, &mMixPanel,
+              &mModPanel, &mDelayPanel, &mReverbPanel}
 {
     setLookAndFeel(&mLnf);
     addAndMakeVisible(mContent);
@@ -59,8 +63,10 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
     mStrip.onSelectionChanged = [this](int i) { showPanel(i); };
     mStrip.select(juce::jlimit(0, (int)mPanels.size() - 1, mProc.uiSelectedBlock));
 
-    mAmpPanel.refresh();
-    mCabPanel.refresh();
+    mAmpPanelA.refresh();
+    mAmpPanelB.refresh();
+    mCabPanelA.refresh();
+    mCabPanelB.refresh();
 
     mLastTimerMs = juce::Time::getMillisecondCounterHiRes();
     startTimerHz(15);
@@ -94,8 +100,10 @@ void NamRigEditor::timerCallback()
     mInMeter.push(mProc.mInputPeakDb.load(), dt);
     mOutMeter.push(mProc.mOutputPeakDb.load(), dt);
 
-    mAmpPanel.refresh();
-    mCabPanel.refresh();
+    mAmpPanelA.refresh();
+    mAmpPanelB.refresh();
+    mCabPanelA.refresh();
+    mCabPanelB.refresh();
     mMixPanel.refresh();
     mModPanel.refresh();
     mDelayPanel.refresh();

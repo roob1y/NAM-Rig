@@ -37,10 +37,7 @@ public:
         mPrev.setButtonText("<");
         mNext.setButtonText(">");
         mSave.setButtonText("Save");
-        mA.setButtonText("A");
-        mB.setButtonText("B");
-        mCopy.setButtonText("A>B");
-        for (auto *b : {&mPrev, &mNext, &mSave, &mA, &mB, &mCopy})
+        for (auto *b : {&mPrev, &mNext, &mSave})
             addAndMakeVisible(*b);
 
         mCombo.setTextWhenNothingSelected("Presets...");
@@ -57,14 +54,8 @@ public:
         mPrev.onClick = [this] { step(-1); };
         mNext.onClick = [this] { step(+1); };
         mSave.onClick = [this] { saveDialog(); };
-        // Switching recalls the slot's preset identity too, so refresh the combo
-        // to show that slot's name / asterisk.
-        mA.onClick = [this] { mManager.abSwitch(0); updateAbButtons(); refresh(); };
-        mB.onClick = [this] { mManager.abSwitch(1); updateAbButtons(); refresh(); };
-        mCopy.onClick = [this] { mManager.abCopyToOther(); };
 
         refresh();
-        updateAbButtons();
     }
 
     // Called from the editor timer (cheap if the folder hasn't changed).
@@ -106,13 +97,7 @@ public:
         r.removeFromLeft(2);
         mNext.setBounds(r.removeFromLeft(22));
         r.removeFromLeft(4);
-        // Right cluster: Save | A/B compare.
         mSave.setBounds(r.removeFromRight(46));
-        r.removeFromRight(4);
-        mCopy.setBounds(r.removeFromRight(34));
-        r.removeFromRight(2);
-        mB.setBounds(r.removeFromRight(24));
-        mA.setBounds(r.removeFromRight(24));
         r.removeFromRight(4);
         mCombo.setBounds(r);
     }
@@ -134,17 +119,6 @@ private:
         const int next = current < 0 ? (delta > 0 ? 0 : n - 1)
                                      : (current + delta + n) % n;
         load(mFiles[next]);
-    }
-
-    // Highlight the active A/B slot and point the copy arrow at the other.
-    void updateAbButtons()
-    {
-        const int active = mManager.abActive();
-        mA.setColour(juce::TextButton::buttonColourId,
-                     active == 0 ? colors::accent : colors::panel);
-        mB.setColour(juce::TextButton::buttonColourId,
-                     active == 1 ? colors::accent : colors::panel);
-        mCopy.setButtonText(active == 0 ? "A>B" : "B>A");
     }
 
     void showContextMenu()
@@ -235,7 +209,7 @@ private:
 
     PresetManager &mManager;
     PresetCombo mCombo;
-    juce::TextButton mPrev, mNext, mSave, mA, mB, mCopy;
+    juce::TextButton mPrev, mNext, mSave;
     juce::Array<juce::File> mFiles;
     std::unique_ptr<juce::FileChooser> mChooser;
     std::unique_ptr<juce::AlertWindow> mAlert;

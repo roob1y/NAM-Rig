@@ -175,7 +175,9 @@ private:
 class AmpPanel : public BlockPanel
 {
 public:
-    explicit AmpPanel(NamRigProcessor &proc) : BlockPanel("AMP - NEURAL MODEL"), mProc(proc)
+    AmpPanel(NamRigProcessor &proc, int rig)
+        : BlockPanel(rig == 0 ? "AMP A - NEURAL MODEL" : "AMP B - NEURAL MODEL"),
+          mProc(proc), mRig(rig)
     {
         addAndMakeVisible(mLoadBtn);
         mLoadBtn.onClick = [this]
@@ -187,7 +189,7 @@ public:
                                   [this](const juce::FileChooser &fc)
                                   {
                                       if (fc.getResult().existsAsFile())
-                                          mProc.loadModel(fc.getResult());
+                                          mProc.loadModel(fc.getResult(), mRig);
                                   });
         };
 
@@ -239,9 +241,9 @@ public:
     // Called from the editor timer.
     void refresh()
     {
-        const bool loaded = mProc.isModelLoaded();
-        const bool a2 = loaded && mProc.isA2Model();
-        mModelName.setText(loaded ? mProc.getModelName() : "No model loaded",
+        const bool loaded = mProc.isModelLoaded(mRig);
+        const bool a2 = loaded && mProc.isA2Model(mRig);
+        mModelName.setText(loaded ? mProc.getModelName(mRig) : "No model loaded",
                            juce::dontSendNotification);
 
         // AA only exists for A2 models (dilation-scaled copies); grey it out otherwise.
@@ -263,7 +265,7 @@ public:
             info = "Standard model - anti-aliasing controls need an A2 model.";
         else
         {
-            const int engaged = mProc.engagedFactor();
+            const int engaged = mProc.engagedFactor(mRig);
             info = engaged > 0 ? "Engaged at " + juce::String(engaged) + "x"
                                : "Passthrough";
             info << "  |  PDC " << mProc.getLatencySamples() << " smp";
@@ -310,6 +312,7 @@ public:
 
 private:
     NamRigProcessor &mProc;
+    int mRig = 0;
     juce::TextButton mLoadBtn{"Load NAM model..."};
     juce::Label mModelName, mInfo;
     juce::ComboBox mLiveAa, mOfflineAa;
@@ -328,11 +331,17 @@ private:
 class EqPanel : public BlockPanel
 {
 public:
-    explicit EqPanel(juce::AudioProcessorValueTreeState &apvts)
-        : BlockPanel("GRAPHIC EQ - PRE-CAB"), mApvts(apvts)
+    EqPanel(juce::AudioProcessorValueTreeState &apvts, int rig)
+        : BlockPanel(rig == 0 ? "GRAPHIC EQ A - PRE-CAB" : "GRAPHIC EQ B - PRE-CAB"),
+          mApvts(apvts)
     {
-        static const char *ids[] = {"eq62", "eq125", "eq250", "eq500",
-                                    "eq1k", "eq2k", "eq4k", "eq8k"};
+        static const char *idsA[] = {"eq62", "eq125", "eq250", "eq500",
+                                     "eq1k", "eq2k", "eq4k", "eq8k"};
+        static const char *idsB[] = {"rigBeq62", "rigBeq125", "rigBeq250", "rigBeq500",
+                                     "rigBeq1k", "rigBeq2k", "rigBeq4k", "rigBeq8k"};
+        const char *const *ids = (rig == 0) ? idsA : idsB;
+        for (int b = 0; b < 8; ++b)
+            mBandIds[b] = ids[b]; // remembered for the Flat button
         static const char *captions[] = {"62.5", "125", "250", "500",
                                          "1k", "2k", "4k", "8k"};
         for (int b = 0; b < 8; ++b)
@@ -357,9 +366,7 @@ public:
         addAndMakeVisible(mFlatBtn);
         mFlatBtn.onClick = [this]
         {
-            static const char *bandIds[] = {"eq62", "eq125", "eq250", "eq500",
-                                            "eq1k", "eq2k", "eq4k", "eq8k"};
-            for (const char *id : bandIds)
+            for (const char *id : mBandIds)
                 if (auto *p = mApvts.getParameter(id))
                 {
                     p->beginChangeGesture();
@@ -440,6 +447,7 @@ public:
 
 private:
     juce::AudioProcessorValueTreeState &mApvts;
+    const char *mBandIds[8]{};
     std::vector<std::unique_ptr<juce::Slider>> mSliders;
     std::vector<std::unique_ptr<juce::Label>> mLabels;
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> mAtts;
@@ -451,7 +459,8 @@ private:
 class CabPanel : public BlockPanel
 {
 public:
-    explicit CabPanel(NamRigProcessor &proc) : BlockPanel("CABINET - IR"), mProc(proc)
+    CabPanel(NamRigProcessor &proc, int rig)
+        : BlockPanel(rig == 0 ? "CABINET A - IR" : "CABINET B - IR"), mProc(proc), mRig(rig)
     {
         addAndMakeVisible(mLoadBtn);
         mLoadBtn.onClick = [this]
@@ -463,15 +472,15 @@ public:
                                   [this](const juce::FileChooser &fc)
                                   {
                                       if (fc.getResult().existsAsFile())
-                                          mProc.loadIr(fc.getResult());
+                                          mProc.loadIr(fc.getResult(), mRig);
                                   });
         };
 
         mIrName.setColour(juce::Label::textColourId, colors::text);
         addAndMakeVisible(mIrName);
 
-        mHpf = std::make_unique<LabeledKnob>(mProc.apvts, "cabHpf", "Low Cut");
-        mLpf = std::make_unique<LabeledKnob>(mProc.apvts, "cabLpf", "High Cut");
+        mHpf = std::make_unique<LabeledKnob>(mProc.apvts, rig == 0 ? "cabHpf" : "rigBcabHpf", "Low Cut");
+        mLpf = std::make_unique<LabeledKnob>(mProc.apvts, rig == 0 ? "cabLpf" : "rigBcabLpf", "High Cut");
         addAndMakeVisible(*mHpf);
         addAndMakeVisible(*mLpf);
 
@@ -483,8 +492,8 @@ public:
 
     void refresh()
     {
-        mIrName.setText(mProc.isIrLoaded() ? mProc.getIrName()
-                                           : juce::String("No IR loaded - amp runs direct"),
+        mIrName.setText(mProc.isIrLoaded(mRig) ? mProc.getIrName(mRig)
+                                               : juce::String("No IR loaded - amp runs direct"),
                         juce::dontSendNotification);
     }
 
@@ -508,6 +517,7 @@ public:
 
 private:
     NamRigProcessor &mProc;
+    int mRig = 0;
     juce::TextButton mLoadBtn{"Load cab IR..."};
     juce::Label mIrName, mHint;
     std::unique_ptr<LabeledKnob> mHpf, mLpf;
