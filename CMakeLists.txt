@@ -33,6 +33,7 @@ target_sources(NAM_Rig PRIVATE
     src/PluginProcessor.cpp
     src/PluginEditor.cpp
     src/PluginEditor.h
+    src/CalNorm.h
     src/PresetFile.h
     src/PresetManager.h
     src/ui/RigLookAndFeel.h
@@ -91,6 +92,46 @@ if(BUILD_RIG_HARNESS)
     )
     if(MSVC)
         target_compile_options(rig_chain_process PRIVATE /arch:AVX2 /fp:fast)
+    endif()
+
+    # cal_test — input calibration + output normalization (CalNorm.h + AaEngine
+    # metadata path). Links the engine to load metadata-bearing .nam models.
+    juce_add_console_app(cal_test PRODUCT_NAME "cal_test")
+    target_sources(cal_test PRIVATE tests/cal_test.cpp)
+    target_include_directories(cal_test PRIVATE src "${NAM_AA_CORE_DIR}/include/nam_aa")
+    target_compile_definitions(cal_test PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+    )
+    target_link_libraries(cal_test PRIVATE
+        nam_aa_core
+        juce::juce_audio_basics
+        juce::juce_audio_formats
+        juce::juce_dsp
+        juce::juce_recommended_config_flags
+    )
+    if(MSVC)
+        target_compile_options(cal_test PRIVATE /arch:AVX2 /fp:fast)
+    endif()
+
+    # dualrig_test — dual-voice RigChain core (SoloA bit-exact regression, mixer/
+    # mode/pan, latency invariant). Links the engine (loads a model for T1).
+    juce_add_console_app(dualrig_test PRODUCT_NAME "dualrig_test")
+    target_sources(dualrig_test PRIVATE tests/dualrig_test.cpp)
+    target_include_directories(dualrig_test PRIVATE src "${NAM_AA_CORE_DIR}/include/nam_aa")
+    target_compile_definitions(dualrig_test PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+    )
+    target_link_libraries(dualrig_test PRIVATE
+        nam_aa_core
+        juce::juce_audio_basics
+        juce::juce_audio_formats
+        juce::juce_dsp
+        juce::juce_recommended_config_flags
+    )
+    if(MSVC)
+        target_compile_options(dualrig_test PRIVATE /arch:AVX2 /fp:fast)
     endif()
 
     # GateBlock measurement suite (PASS/FAIL, exits nonzero on failure)

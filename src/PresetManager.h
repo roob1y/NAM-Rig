@@ -56,10 +56,12 @@ public:
         return false;
     }
 
-    bool saveToFile(const juce::File &f)
+    // Snapshot the live rig into an in-memory PresetFile (params + embedded
+    // model text + IR bytes). Shared by saveToFile and the A/B slots.
+    PresetFile captureState() const
     {
         PresetFile preset;
-        preset.name = f.getFileNameWithoutExtension();
+        preset.name = mCurrentName;
 
         auto *params = new juce::DynamicObject();
         for (auto *p : mProc.getParameters())
@@ -78,6 +80,58 @@ public:
             preset.irName = mProc.irBaseName();
             preset.irBytes = mProc.irBytes();
         }
+        return preset;
+    }
+
+    // Apply an in-memory state to the live rig: defaults first (so params added
+    // after the snapshot keep their defaults), then the snapshot's values, then
+    // its embedded model/IR through the SAME loadModel/loadIr paths the file
+    // pickers use (temp files keep the original base names for the UI).
+    void applyState(const PresetFile &preset)
+    {
+        auto *obj = preset.params.getDynamicObject();
+        for (auto *p : mProc.getParameters())
+            if (auto *rp = dynamic_cast<juce::RangedAudioParameter *>(p))
+            {
+                float norm = rp->getDefaultValue();
+                if (obj != nullptr && obj->hasProperty(rp->paramID))
+                    norm = rp->convertTo0to1((float)(double)obj->getProperty(rp->paramID));
+                rp->beginChangeGesture();
+                rp->setValueNotifyingHost(juce::jlimit(0.0f, 1.0f, norm));
+                rp->endChangeGesture();
+            }
+
+        const auto tmpDir = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                .getChildFile("NAMRigPreset");
+        tmpDir.createDirectory();
+        // Only reload the model/IR when it actually differs from what's live.
+        // A model reload rebuilds every 1x..32x dilation copy (~0.3 s / 17 MB at
+        // 32x), so same-amp A/B must stay instant — compare the embedded payload
+        // to the cached source and skip the round-trip when unchanged.
+        if (preset.hasModel())
+        {
+            if (!mProc.isModelLoaded() || preset.modelText != mProc.modelText())
+            {
+                const auto tmp = tmpDir.getChildFile(sanitize(preset.modelName) + ".nam");
+                if (tmp.replaceWithText(preset.modelText))
+                    mProc.loadModel(tmp);
+            }
+        }
+        if (preset.hasIr())
+        {
+            if (!mProc.isIrLoaded() || preset.irBytes != mProc.irBytes())
+            {
+                const auto tmp = tmpDir.getChildFile(sanitize(preset.irName) + ".wav");
+                if (tmp.replaceWithData(preset.irBytes.getData(), preset.irBytes.getSize()))
+                    mProc.loadIr(tmp);
+            }
+        }
+    }
+
+    bool saveToFile(const juce::File &f)
+    {
+        PresetFile preset = captureState();
+        preset.name = f.getFileNameWithoutExtension();
 
         presetsDir().createDirectory();
         if (!preset.writeToFile(f))
@@ -94,41 +148,75 @@ public:
         if (!PresetFile::readFromFile(f, preset))
             return false;
 
-        // Defaults first, then the file's values: params added after the
-        // preset was saved keep their defaults instead of stale state.
-        auto *obj = preset.params.getDynamicObject();
-        for (auto *p : mProc.getParameters())
-            if (auto *rp = dynamic_cast<juce::RangedAudioParameter *>(p))
-            {
-                float norm = rp->getDefaultValue();
-                if (obj->hasProperty(rp->paramID))
-                    norm = rp->convertTo0to1((float)(double)obj->getProperty(rp->paramID));
-                rp->beginChangeGesture();
-                rp->setValueNotifyingHost(juce::jlimit(0.0f, 1.0f, norm));
-                rp->endChangeGesture();
-            }
-
-        // Embedded payloads -> temp files -> the verified load paths. Temp
-        // files keep the original base names so the UI shows the right names.
-        const auto tmpDir = juce::File::getSpecialLocation(juce::File::tempDirectory)
-                                .getChildFile("NAMRigPreset");
-        tmpDir.createDirectory();
-        if (preset.hasModel())
-        {
-            const auto tmp = tmpDir.getChildFile(sanitize(preset.modelName) + ".nam");
-            if (tmp.replaceWithText(preset.modelText))
-                mProc.loadModel(tmp);
-        }
-        if (preset.hasIr())
-        {
-            const auto tmp = tmpDir.getChildFile(sanitize(preset.irName) + ".wav");
-            if (tmp.replaceWithData(preset.irBytes.getData(), preset.irBytes.getSize()))
-                mProc.loadIr(tmp);
-        }
+        applyState(preset);
 
         mCurrentFile = f;
         mCurrentName = preset.name;
         mLoadedParams = preset.params; // snapshot for the modified indicator
+        return true;
+    }
+
+    // ---- A/B compare: two in-memory full-state slots (params + model + IR) ----
+    // The active slot is the live rig; switching captures the live state into
+    // the slot being left so per-slot edits survive, and recalls the target.
+    int abActive() const { return mAbActive; }
+
+    void abSwitch(int slot)
+    {
+        slot = juce::jlimit(0, 1, slot);
+        if (slot == mAbActive)
+            return;
+        captureLiveInto(mAb[mAbActive]); // preserve edits + identity we leave
+        if (mAb[slot].valid)
+            restoreFrom(mAb[slot]);
+        else
+            mAb[slot] = mAb[mAbActive]; // first visit: clone so A and B match
+        mAbActive = slot;
+    }
+
+    // Copy the active (live) state onto the other slot, so both start equal.
+    void abCopyToOther()
+    {
+        captureLiveInto(mAb[mAbActive]);
+        mAb[1 - mAbActive] = mAb[mAbActive];
+    }
+
+    // ---- Rename / delete the current preset file (message thread) ----
+    // Rename keeps the preset selected; returns false on no current file, an
+    // illegal name, or a name collision with another preset.
+    bool renameCurrent(const juce::String &newName)
+    {
+        if (!mCurrentFile.existsAsFile())
+            return false;
+        const auto clean = sanitize(newName);
+        const auto target = presetsDir().getChildFile(clean + PresetFile::kExtension);
+        if (target == mCurrentFile)
+            return true; // no-op
+        if (target.existsAsFile())
+            return false; // would clobber another preset
+        if (!mCurrentFile.moveFileTo(target))
+            return false;
+        // Keep the embedded "name" field in sync with the file name.
+        PresetFile pf;
+        if (PresetFile::readFromFile(target, pf))
+        {
+            pf.name = clean;
+            pf.writeToFile(target);
+        }
+        mCurrentFile = target;
+        mCurrentName = clean;
+        return true;
+    }
+
+    bool deleteCurrent()
+    {
+        if (!mCurrentFile.existsAsFile())
+            return false;
+        if (!mCurrentFile.deleteFile())
+            return false;
+        mCurrentFile = juce::File{};
+        mCurrentName = {};
+        mLoadedParams = juce::var{};
         return true;
     }
 
@@ -139,10 +227,42 @@ private:
         return cleaned.isEmpty() ? juce::String("preset") : cleaned;
     }
 
+    // A/B slot: full rig state PLUS the preset identity, so the bar's name and
+    // modified-asterisk follow the active slot.
+    struct AbSlot
+    {
+        PresetFile state;
+        juce::File presetFile;
+        juce::String presetName;
+        juce::var loadedParams;
+        bool valid = false;
+    };
+
+    void captureLiveInto(AbSlot &s) const
+    {
+        s.state = captureState();
+        s.presetFile = mCurrentFile;
+        s.presetName = mCurrentName;
+        s.loadedParams = mLoadedParams;
+        s.valid = true;
+    }
+
+    void restoreFrom(const AbSlot &s)
+    {
+        applyState(s.state); // skips model/IR reload when unchanged (fast)
+        mCurrentFile = s.presetFile;
+        mCurrentName = s.presetName;
+        mLoadedParams = s.loadedParams;
+    }
+
     NamRigProcessor &mProc;
     juce::File mCurrentFile;
     juce::String mCurrentName;
     juce::var mLoadedParams;
+
+    // A/B compare slots. Both start invalid; the preset bar seeds them.
+    AbSlot mAb[2];
+    int mAbActive = 0;
 };
 
 } // namespace nam_rig

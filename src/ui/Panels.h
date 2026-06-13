@@ -214,6 +214,26 @@ public:
 
         mInfo.setColour(juce::Label::textColourId, colors::textDim);
         addAndMakeVisible(mInfo);
+
+        // --- Input calibration + output normalization (NAM-AA parity) ---
+        // Both are gated on the model carrying the matching .nam metadata; the
+        // controls grey out otherwise (see refresh()).
+        mCalToggle.setButtonText("Calibrate input (interface clip dBu)");
+        addAndMakeVisible(mCalToggle);
+        mCalToggleAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            mProc.apvts, "calEnable", mCalToggle);
+
+        mCalSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+        mCalSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 22);
+        mCalSlider.setTextValueSuffix(" dBu");
+        addAndMakeVisible(mCalSlider);
+        mCalSliderAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+            mProc.apvts, "calDbu", mCalSlider);
+
+        mNormToggle.setButtonText("Normalize output (-18 dB)");
+        addAndMakeVisible(mNormToggle);
+        mNormToggleAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            mProc.apvts, "normalize", mNormToggle);
     }
 
     // Called from the editor timer.
@@ -229,6 +249,13 @@ public:
         mLiveAa.setEnabled(aaAvailable);
         mOfflineAa.setEnabled(aaAvailable);
 
+        // Calibration needs input_level_dbu; normalization needs loudness. The
+        // slider is live only when calibration is both available and enabled.
+        const bool hasCal = mProc.hasInputCalibration();
+        mCalToggle.setEnabled(hasCal);
+        mCalSlider.setEnabled(hasCal && mCalToggle.getToggleState());
+        mNormToggle.setEnabled(mProc.hasLoudness());
+
         juce::String info;
         if (!loaded)
             info = "Load a .nam model to bring the amp online.";
@@ -241,6 +268,13 @@ public:
                                : "Passthrough";
             info << "  |  PDC " << mProc.getLatencySamples() << " smp";
         }
+        // Surface the live cal/norm corrections (only when non-zero).
+        const float calDb = mProc.calibrationGainDb();
+        if (calDb != 0.0f)
+            info << "  |  cal " << (calDb > 0 ? "+" : "") << juce::String(calDb, 1) << " dB";
+        const float normDb = mProc.normalizationGainDb();
+        if (normDb != 0.0f)
+            info << "  |  norm " << (normDb > 0 ? "+" : "") << juce::String(normDb, 1) << " dB";
         if (info != mInfo.getText())
             mInfo.setText(info, juce::dontSendNotification);
     }
@@ -265,6 +299,13 @@ public:
         };
         comboRow(mLiveAaLabel, mLiveAa);
         comboRow(mOfflineAaLabel, mOfflineAa);
+
+        // Calibration + normalization sit below the AA combos in the right column.
+        area.removeFromTop(6);
+        mCalToggle.setBounds(area.removeFromTop(24));
+        mCalSlider.setBounds(area.removeFromTop(26).removeFromLeft(240));
+        area.removeFromTop(8);
+        mNormToggle.setBounds(area.removeFromTop(24));
     }
 
 private:
@@ -274,6 +315,10 @@ private:
     juce::ComboBox mLiveAa, mOfflineAa;
     juce::Label mLiveAaLabel, mOfflineAaLabel;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mLiveAtt, mOfflineAtt;
+    juce::ToggleButton mCalToggle, mNormToggle;
+    juce::Slider mCalSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mCalToggleAtt, mNormToggleAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mCalSliderAtt;
     std::unique_ptr<juce::FileChooser> mChooser;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AmpPanel)

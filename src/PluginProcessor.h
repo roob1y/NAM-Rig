@@ -60,6 +60,15 @@ public:
     // Engaged amp factor on the last block (0 = passthrough). Editor status.
     int engagedFactor() const { return mChain.amp.engagedFactor(); }
 
+    // --- Input calibration / output normalization (NAM-AA parity; CalNorm.h) ---
+    // Metadata availability gates the editor controls; the *GainDb() helpers
+    // return the live correction (0 dB when disabled/absent) for status display
+    // and are also folded into the in/out gains in processBlock.
+    bool hasInputCalibration() const { return mChain.amp.engine().hasInputLevelDbu(); }
+    bool hasLoudness() const { return mChain.amp.engine().hasLoudness(); }
+    float calibrationGainDb() const;
+    float normalizationGainDb() const;
+
     // Live gain-reduction telemetry for the editor meters.
     float gateGainDb() const { return mChain.gate.currentGainDb(); }
     float compGrDb() const { return mChain.comp.grDb(); }

@@ -1,13 +1,33 @@
 #pragma once
-// PresetBar — header strip: [<] [preset combo] [>] [Save]. Scans the
-// presets folder (Documents/NAM Rig/Presets), loads on selection, cycles
-// with prev/next, saves via dialog defaulting into the folder.
+// PresetBar — header strip: [<][>] [preset combo] [A][B][>] [Save]. Scans the
+// presets folder (Documents/NAM Rig/Presets), loads on selection, cycles with
+// prev/next, saves via dialog. Right-click the combo for Rename.../Delete.
+// A/B swap two in-memory full-state snapshots (params + model + IR) for quick
+// tone comparison; the arrow button copies the active slot onto the other.
 
 #include "PresetManager.h"
 #include "ui/RigLookAndFeel.h"
 
 namespace nam_rig::ui
 {
+
+// ComboBox that forwards right-clicks to a callback instead of opening its list,
+// so the bar can show a Rename/Delete context menu on the preset name.
+class PresetCombo : public juce::ComboBox
+{
+public:
+    std::function<void()> onRightClick;
+    void mouseDown(const juce::MouseEvent &e) override
+    {
+        if (e.mods.isPopupMenu())
+        {
+            if (onRightClick)
+                onRightClick();
+            return;
+        }
+        juce::ComboBox::mouseDown(e);
+    }
+};
 
 class PresetBar : public juce::Component
 {
@@ -17,7 +37,10 @@ public:
         mPrev.setButtonText("<");
         mNext.setButtonText(">");
         mSave.setButtonText("Save");
-        for (auto *b : {&mPrev, &mNext, &mSave})
+        mA.setButtonText("A");
+        mB.setButtonText("B");
+        mCopy.setButtonText("A>B");
+        for (auto *b : {&mPrev, &mNext, &mSave, &mA, &mB, &mCopy})
             addAndMakeVisible(*b);
 
         mCombo.setTextWhenNothingSelected("Presets...");
@@ -30,11 +53,18 @@ public:
             if (idx >= 0 && idx < mFiles.size())
                 load(mFiles[idx]);
         };
+        mCombo.onRightClick = [this] { showContextMenu(); };
         mPrev.onClick = [this] { step(-1); };
         mNext.onClick = [this] { step(+1); };
         mSave.onClick = [this] { saveDialog(); };
+        // Switching recalls the slot's preset identity too, so refresh the combo
+        // to show that slot's name / asterisk.
+        mA.onClick = [this] { mManager.abSwitch(0); updateAbButtons(); refresh(); };
+        mB.onClick = [this] { mManager.abSwitch(1); updateAbButtons(); refresh(); };
+        mCopy.onClick = [this] { mManager.abCopyToOther(); };
 
         refresh();
+        updateAbButtons();
     }
 
     // Called from the editor timer (cheap if the folder hasn't changed).
@@ -72,11 +102,17 @@ public:
     void resized() override
     {
         auto r = getLocalBounds();
-        mPrev.setBounds(r.removeFromLeft(24));
+        mPrev.setBounds(r.removeFromLeft(22));
+        r.removeFromLeft(2);
+        mNext.setBounds(r.removeFromLeft(22));
         r.removeFromLeft(4);
-        mSave.setBounds(r.removeFromRight(52));
+        // Right cluster: Save | A/B compare.
+        mSave.setBounds(r.removeFromRight(46));
         r.removeFromRight(4);
-        mNext.setBounds(r.removeFromRight(24));
+        mCopy.setBounds(r.removeFromRight(34));
+        r.removeFromRight(2);
+        mB.setBounds(r.removeFromRight(24));
+        mA.setBounds(r.removeFromRight(24));
         r.removeFromRight(4);
         mCombo.setBounds(r);
     }
@@ -98,6 +134,77 @@ private:
         const int next = current < 0 ? (delta > 0 ? 0 : n - 1)
                                      : (current + delta + n) % n;
         load(mFiles[next]);
+    }
+
+    // Highlight the active A/B slot and point the copy arrow at the other.
+    void updateAbButtons()
+    {
+        const int active = mManager.abActive();
+        mA.setColour(juce::TextButton::buttonColourId,
+                     active == 0 ? colors::accent : colors::panel);
+        mB.setColour(juce::TextButton::buttonColourId,
+                     active == 1 ? colors::accent : colors::panel);
+        mCopy.setButtonText(active == 0 ? "A>B" : "B>A");
+    }
+
+    void showContextMenu()
+    {
+        const bool haveCurrent = mManager.currentFile().existsAsFile();
+        juce::PopupMenu m;
+        m.addItem(1, "Rename...", haveCurrent);
+        m.addItem(2, "Delete", haveCurrent);
+        m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&mCombo),
+                        [this](int choice)
+                        {
+                            if (choice == 1)
+                                renameDialog();
+                            else if (choice == 2)
+                                deleteDialog();
+                        });
+    }
+
+    void renameDialog()
+    {
+        if (!mManager.currentFile().existsAsFile())
+            return;
+        mAlert = std::make_unique<juce::AlertWindow>(
+            "Rename preset", "New name:", juce::MessageBoxIconType::NoIcon);
+        mAlert->addTextEditor("name", mManager.currentName());
+        mAlert->addButton("Rename", 1, juce::KeyPress(juce::KeyPress::returnKey));
+        mAlert->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+        mAlert->enterModalState(
+            true,
+            juce::ModalCallbackFunction::create([this](int result)
+                                                {
+                                                    if (result == 1)
+                                                    {
+                                                        const auto newName =
+                                                            mAlert->getTextEditorContents("name").trim();
+                                                        if (newName.isNotEmpty())
+                                                            mManager.renameCurrent(newName);
+                                                    }
+                                                    mAlert.reset();
+                                                    refresh();
+                                                }),
+            false);
+    }
+
+    void deleteDialog()
+    {
+        if (!mManager.currentFile().existsAsFile())
+            return;
+        juce::AlertWindow::showOkCancelBox(
+            juce::MessageBoxIconType::WarningIcon, "Delete preset",
+            "Delete \"" + mManager.currentName() + "\"? This cannot be undone.",
+            "Delete", "Cancel", this,
+            juce::ModalCallbackFunction::create([this](int result)
+                                                {
+                                                    if (result == 1)
+                                                    {
+                                                        mManager.deleteCurrent();
+                                                        refresh();
+                                                    }
+                                                }));
     }
 
     void saveDialog()
@@ -127,10 +234,11 @@ private:
     }
 
     PresetManager &mManager;
-    juce::ComboBox mCombo;
-    juce::TextButton mPrev, mNext, mSave;
+    PresetCombo mCombo;
+    juce::TextButton mPrev, mNext, mSave, mA, mB, mCopy;
     juce::Array<juce::File> mFiles;
     std::unique_ptr<juce::FileChooser> mChooser;
+    std::unique_ptr<juce::AlertWindow> mAlert;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PresetBar)
 };

@@ -1,6 +1,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "PresetManager.h"
+#include "CalNorm.h"
 #include <cmath>
 
 juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParameterLayout()
@@ -174,6 +175,18 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::ParameterID("revMix", 1), "Reverb Mix",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.25f));
 
+    // --- Input calibration + output normalization (NAM-AA parity; see CalNorm.h).
+    // Both are metadata-driven and unity when disabled / metadata absent.
+    // Appended last so existing sessions keep their automation indices.
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("calEnable", 1), "Calibrate Input", false));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("calDbu", 1), "Input Calibration",
+        juce::NormalisableRange<float>(0.0f, 30.0f, 0.1f), 12.0f,
+        juce::AudioParameterFloatAttributes().withLabel("dBu")));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("normalize", 1), "Normalize Output", false));
+
     return {params.begin(), params.end()};
 }
 
@@ -187,6 +200,25 @@ NamRigProcessor::NamRigProcessor()
 }
 
 NamRigProcessor::~NamRigProcessor() = default;
+
+float NamRigProcessor::calibrationGainDb() const
+{
+    const auto &eng = mChain.amp.engine();
+    return nam_rig::CalNorm::calibrationGainDb(
+        apvts.getRawParameterValue("calEnable")->load() >= 0.5f,
+        eng.hasInputLevelDbu(),
+        apvts.getRawParameterValue("calDbu")->load(),
+        eng.inputLevelDbu());
+}
+
+float NamRigProcessor::normalizationGainDb() const
+{
+    const auto &eng = mChain.amp.engine();
+    return nam_rig::CalNorm::normalizationGainDb(
+        apvts.getRawParameterValue("normalize")->load() >= 0.5f,
+        eng.hasLoudness(),
+        eng.loudnessDb());
+}
 
 int NamRigProcessor::requestedFactorNow() const
 {
@@ -230,10 +262,12 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     if (numSamples == 0)
         return;
 
+    // User input gain plus dBu calibration correction (0 dB when disabled/absent).
     const float inGain = juce::Decibels::decibelsToGain(
-        apvts.getRawParameterValue("inputGain")->load());
+        apvts.getRawParameterValue("inputGain")->load() + calibrationGainDb());
+    // User output gain plus loudness normalization (0 dB when disabled/absent).
     const float outGain = juce::Decibels::decibelsToGain(
-        apvts.getRawParameterValue("outputGain")->load());
+        apvts.getRawParameterValue("outputGain")->load() + normalizationGainDb());
 
     buffer.applyGain(inGain);
 

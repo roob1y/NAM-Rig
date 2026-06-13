@@ -141,7 +141,7 @@ void NamRigEditor::resized()
     // --- Header (64 px): title | presets | status | IN + OUT knob/meter ---
     auto header = area.removeFromTop(64);
     mTitle.setBounds(header.removeFromLeft(130));
-    mPresetBar.setBounds(header.removeFromLeft(300).withSizeKeepingCentre(300, 26));
+    mPresetBar.setBounds(header.removeFromLeft(380).withSizeKeepingCentre(380, 26));
     header.removeFromLeft(12);
 
     auto ioCluster = header.removeFromRight(220);
