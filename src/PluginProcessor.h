@@ -38,32 +38,31 @@ public:
     const juce::String getProgramName(int) override { return {}; }
     void changeProgramName(int, const juce::String &) override {}
 
-    // --- model / IR loading (message thread) ---
-    void loadModel(const juce::File &namFile);
-    void loadIr(const juce::File &irFile);
+    // --- model / IR loading (message thread). rig 0 = Rig A, 1 = Rig B. ---
+    void loadModel(const juce::File &namFile, int rig = 0);
+    void loadIr(const juce::File &irFile, int rig = 0);
 
     // Source content cached at load time (embedded into .namrig presets).
-    const juce::String &modelText() const { return mModelText; }
-    const juce::String &modelBaseName() const { return mModelBaseName; }
-    const juce::MemoryBlock &irBytes() const { return mIrBytes; }
-    const juce::String &irBaseName() const { return mIrBaseName; }
+    const juce::String &modelText(int rig = 0) const { return mModelText[rig]; }
+    const juce::String &modelBaseName(int rig = 0) const { return mModelBaseName[rig]; }
+    const juce::MemoryBlock &irBytes(int rig = 0) const { return mIrBytes[rig]; }
+    const juce::String &irBaseName(int rig = 0) const { return mIrBaseName[rig]; }
 
     // Preset manager lives on the processor so the current preset name
     // survives editor close/reopen (message thread only).
     nam_rig::PresetManager &presets() { return *mPresets; }
-    juce::String getModelName() const { return mModelName; }
-    juce::String getIrName() const { return mChain.cab.irName(); }
-    bool isModelLoaded() const { return mModelLoaded.load(); }
-    bool isIrLoaded() const { return mChain.cab.isIrLoaded(); }
-    bool isA2Model() const { return mChain.amp.engine().isA2(); }
+    juce::String getModelName(int rig = 0) const { return mModelName[rig]; }
+    juce::String getIrName(int rig = 0) const { return cabFor(rig).irName(); }
+    bool isModelLoaded(int rig = 0) const { return mModelLoaded[rig].load(); }
+    bool isIrLoaded(int rig = 0) const { return cabFor(rig).isIrLoaded(); }
+    bool isA2Model(int rig = 0) const { return ampFor(rig).engine().isA2(); }
 
     // Engaged amp factor on the last block (0 = passthrough). Editor status.
-    int engagedFactor() const { return mChain.amp.engagedFactor(); }
+    int engagedFactor(int rig = 0) const { return ampFor(rig).engagedFactor(); }
 
     // --- Input calibration / output normalization (NAM-AA parity; CalNorm.h) ---
-    // Metadata availability gates the editor controls; the *GainDb() helpers
-    // return the live correction (0 dB when disabled/absent) for status display
-    // and are also folded into the in/out gains in processBlock.
+    // Driven by Rig A's model metadata (calibration is pre-split, normalization
+    // post-mix); folded into the in/out gains in processBlock.
     bool hasInputCalibration() const { return mChain.amp.engine().hasInputLevelDbu(); }
     bool hasLoudness() const { return mChain.amp.engine().hasLoudness(); }
     float calibrationGainDb() const;
@@ -89,23 +88,32 @@ private:
     void updateLatency();
     int requestedFactorNow() const; // oversample param + offline bump (NAM-AA logic)
 
+    // Per-rig block access (rig 0 = A, 1 = B).
+    nam_rig::AmpBlock &ampFor(int rig) { return rig ? mChain.ampB : mChain.amp; }
+    const nam_rig::AmpBlock &ampFor(int rig) const { return rig ? mChain.ampB : mChain.amp; }
+    nam_rig::CabBlock &cabFor(int rig) { return rig ? mChain.cabB : mChain.cab; }
+    const nam_rig::CabBlock &cabFor(int rig) const { return rig ? mChain.cabB : mChain.cab; }
+
     nam_rig::RigChain mChain;
 
-    juce::String mModelName{"No model loaded"};
-    std::atomic<bool> mModelLoaded{false};
+    // Per-rig model/IR state (index 0 = Rig A, 1 = Rig B).
+    juce::String mModelName[2]{"No model loaded", "No model loaded"};
+    std::atomic<bool> mModelLoaded[2]{};
 
     // Paths persisted in plugin state and restored on load.
-    juce::String mModelPath, mIrPath;
+    juce::String mModelPath[2], mIrPath[2];
 
     // Embedding caches (message thread only; written by loadModel/loadIr).
-    juce::String mModelText, mModelBaseName;
-    juce::MemoryBlock mIrBytes;
-    juce::String mIrBaseName;
+    juce::String mModelText[2], mModelBaseName[2];
+    juce::MemoryBlock mIrBytes[2];
+    juce::String mIrBaseName[2];
 
     std::unique_ptr<nam_rig::PresetManager> mPresets;
 
-    // Last gate lookahead pushed to the chain (PDC re-report on change).
+    // Re-report PDC when these change (lookahead / align / mode shift latency).
     float mLastGateLookMs = -1.0f;
+    float mLastRigAlign = -1.0e9f;
+    int mLastRigMode = -1;
 
     double mSampleRate = 48000.0;
 

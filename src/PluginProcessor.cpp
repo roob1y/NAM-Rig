@@ -18,7 +18,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::NormalisableRange<float>(-24.0f, 24.0f, 0.1f), 0.0f,
         juce::AudioParameterFloatAttributes().withLabel("dB")));
 
-    // Amp AA oversampling — identical semantics to NAM-AA's parameter.
+    // Amp AA oversampling — identical semantics to NAM-AA's parameter. v1 dual
+    // rig SHARES this setting across both amps (equal voice latency).
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("oversample", 1), "Amp Oversampling",
         juce::StringArray{"Off", "2x", "4x", "8x", "16x", "32x"}, 0)); // default Off
@@ -187,6 +188,56 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID("normalize", 1), "Normalize Output", false));
 
+    // --- Dual-rig mixer + Rig B voice (RigChain dual core; see rig/RigChain.h).
+    // Appended last so existing sessions keep their automation indices. Rig B
+    // shares the amp AA setting with Rig A (v1) -> no separate oversample param.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("rigMode", 1), "Rig Mode",
+        juce::StringArray{"Solo A", "Solo B", "Dual"}, 0)); // default Solo A
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("rigLevelA", 1), "Rig A Level",
+        juce::NormalisableRange<float>(-24.0f, 12.0f, 0.1f), 0.0f,
+        juce::AudioParameterFloatAttributes().withLabel("dB")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("rigLevelB", 1), "Rig B Level",
+        juce::NormalisableRange<float>(-24.0f, 12.0f, 0.1f), 0.0f,
+        juce::AudioParameterFloatAttributes().withLabel("dB")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("rigPanA", 1), "Rig A Pan",
+        juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), -1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("rigPanB", 1), "Rig B Pan",
+        juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("rigPolA", 1), "Rig A Polarity", false));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("rigPolB", 1), "Rig B Polarity", false));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("rigAlign", 1), "Rig Align",
+        juce::NormalisableRange<float>(-256.0f, 256.0f, 0.1f), 0.0f,
+        juce::AudioParameterFloatAttributes().withLabel("smp")));
+    {
+        static const char *idsB[] = {"rigBeq62", "rigBeq125", "rigBeq250", "rigBeq500",
+                                     "rigBeq1k", "rigBeq2k", "rigBeq4k", "rigBeq8k"};
+        static const char *namesB[] = {"Rig B EQ 62.5 Hz", "Rig B EQ 125 Hz",
+                                       "Rig B EQ 250 Hz", "Rig B EQ 500 Hz", "Rig B EQ 1 kHz",
+                                       "Rig B EQ 2 kHz", "Rig B EQ 4 kHz", "Rig B EQ 8 kHz"};
+        for (int b = 0; b < nam_rig::EqBlock::kNumBands; ++b)
+            params.push_back(std::make_unique<juce::AudioParameterFloat>(
+                juce::ParameterID(idsB[b], 1), namesB[b],
+                juce::NormalisableRange<float>(-nam_rig::EqBlock::kMaxGainDb,
+                                               nam_rig::EqBlock::kMaxGainDb, 0.1f),
+                0.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    }
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("rigBcabHpf", 1), "Rig B Cab Low Cut",
+        juce::NormalisableRange<float>(20.0f, 300.0f, 1.0f, 0.5f), 20.0f,
+        juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("rigBcabLpf", 1), "Rig B Cab High Cut",
+        juce::NormalisableRange<float>(2000.0f, 20000.0f, 10.0f, 0.5f), 20000.0f,
+        juce::AudioParameterFloatAttributes().withLabel("Hz")));
+
     return {params.begin(), params.end()};
 }
 
@@ -240,7 +291,9 @@ void NamRigProcessor::updateLatency()
 {
     if (!mChain.isPrepared())
         return;
-    mChain.amp.setRequestedFactor(requestedFactorNow());
+    const int f = requestedFactorNow();
+    mChain.amp.setRequestedFactor(f);
+    mChain.ampB.setRequestedFactor(f); // v1: Rig B shares Rig A's AA factor
     mChain.gate.setLookaheadMs(apvts.getRawParameterValue("gateLook")->load());
     setLatencySamples((int)std::round(mChain.latencySamples()));
 }
@@ -276,8 +329,10 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         inPeak = juce::jmax(inPeak, buffer.getMagnitude(ch, 0, numSamples));
     mInputPeakDb.store(juce::Decibels::gainToDecibels(inPeak, -100.0f));
 
-    // Bypass flags + amp AA factor from parameters.
-    mChain.amp.setRequestedFactor(requestedFactorNow());
+    // Bypass flags + amp AA factor from parameters (shared across both rigs).
+    const int factor = requestedFactorNow();
+    mChain.amp.setRequestedFactor(factor);
+    mChain.ampB.setRequestedFactor(factor);
 
     // Gate parameters (atomics; cheap to push every block). Lookahead changes
     // PDC, so re-report latency when it moves.
@@ -302,7 +357,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.comp.setLevelDb(apvts.getRawParameterValue("compLevel")->load());
     mChain.comp.setBoostDb(apvts.getRawParameterValue("compBoost")->load());
     mChain.comp.setBypassed(apvts.getRawParameterValue("compOn")->load() < 0.5f);
-    // Graphic EQ band gains (zero latency; chain bypass via eqOn is safe).
+    // Graphic EQ band gains (Rig A; zero latency; chain bypass via eqOn is safe).
     {
         static const char *ids[] = {"eq62", "eq125", "eq250", "eq500",
                                     "eq1k", "eq2k", "eq4k", "eq8k"};
@@ -311,10 +366,40 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     }
     mChain.eq.setBypassed(apvts.getRawParameterValue("eqOn")->load() < 0.5f);
 
-    // Post-cab cuts ride with the cab block.
+    // Post-cab cuts ride with the cab block (Rig A).
     mChain.cab.setHpfHz(apvts.getRawParameterValue("cabHpf")->load());
     mChain.cab.setLpfHz(apvts.getRawParameterValue("cabLpf")->load());
     mChain.cab.setBypassed(apvts.getRawParameterValue("cabOn")->load() < 0.5f);
+
+    // ---- Rig B voice (amp shares AA with Rig A; EQ + cab cuts independent) ----
+    {
+        static const char *idsB[] = {"rigBeq62", "rigBeq125", "rigBeq250", "rigBeq500",
+                                     "rigBeq1k", "rigBeq2k", "rigBeq4k", "rigBeq8k"};
+        for (int b = 0; b < nam_rig::EqBlock::kNumBands; ++b)
+            mChain.eqB.setBandGainDb(b, apvts.getRawParameterValue(idsB[b])->load());
+    }
+    mChain.cabB.setHpfHz(apvts.getRawParameterValue("rigBcabHpf")->load());
+    mChain.cabB.setLpfHz(apvts.getRawParameterValue("rigBcabLpf")->load());
+
+    // ---- Dual-rig mixer (mode / per-rig level + pan + polarity + align) ----
+    mChain.setLevelA(juce::Decibels::decibelsToGain(apvts.getRawParameterValue("rigLevelA")->load()));
+    mChain.setLevelB(juce::Decibels::decibelsToGain(apvts.getRawParameterValue("rigLevelB")->load()));
+    mChain.setPanA(apvts.getRawParameterValue("rigPanA")->load());
+    mChain.setPanB(apvts.getRawParameterValue("rigPanB")->load());
+    mChain.setPolarityA(apvts.getRawParameterValue("rigPolA")->load() >= 0.5f);
+    mChain.setPolarityB(apvts.getRawParameterValue("rigPolB")->load() >= 0.5f);
+    const int rigMode = (int)apvts.getRawParameterValue("rigMode")->load();
+    const float rigAlign = apvts.getRawParameterValue("rigAlign")->load();
+    mChain.setMode(rigMode);
+    mChain.setAlignmentLag(rigAlign);
+    // Mode (Solo<->Dual) and align both shift the reported PDC.
+    if (rigMode != mLastRigMode || rigAlign != mLastRigAlign)
+    {
+        mLastRigMode = rigMode;
+        mLastRigAlign = rigAlign;
+        updateLatency();
+    }
+
     // Stereo section (all zero-latency; plain chain bypass is safe).
     mChain.mod.setType((int)apvts.getRawParameterValue("modType")->load());
     mChain.mod.setRateHz(apvts.getRawParameterValue("modRate")->load());
@@ -363,21 +448,22 @@ bool NamRigProcessor::isBusesLayoutSupported(const BusesLayout &layouts) const
     return mainOut == juce::AudioChannelSet::mono() || mainOut == juce::AudioChannelSet::stereo();
 }
 
-void NamRigProcessor::loadModel(const juce::File &namFile)
+void NamRigProcessor::loadModel(const juce::File &namFile, int rig)
 {
+    rig = juce::jlimit(0, 1, rig);
     if (!namFile.existsAsFile())
     {
-        mModelName = "File not found";
+        mModelName[rig] = "File not found";
         return;
     }
 
-    const auto info = mChain.amp.engine().loadModel(
+    const auto info = ampFor(rig).engine().loadModel(
         std::filesystem::path(namFile.getFullPathName().toStdString()));
 
     if (!info.ok)
     {
-        mModelName = juce::String("Error: ") + info.error;
-        mModelLoaded.store(false);
+        mModelName[rig] = juce::String("Error: ") + info.error;
+        mModelLoaded[rig].store(false);
         return;
     }
 
@@ -385,24 +471,25 @@ void NamRigProcessor::loadModel(const juce::File &namFile)
     if (info.expectedSampleRate > 0.0 && std::abs(info.expectedSampleRate - 48000.0) > 1.0)
         suffix += " [warn: native " + juce::String(info.expectedSampleRate, 0) + "Hz; AA assumes 48k]";
 
-    mModelName = namFile.getFileNameWithoutExtension() + suffix;
+    mModelName[rig] = namFile.getFileNameWithoutExtension() + suffix;
     // Cache the source text so presets can embed the model (single-file rigs).
-    mModelText = namFile.loadFileAsString();
-    mModelBaseName = namFile.getFileNameWithoutExtension();
-    mModelPath = namFile.getFullPathName();
-    mModelLoaded.store(true);
+    mModelText[rig] = namFile.loadFileAsString();
+    mModelBaseName[rig] = namFile.getFileNameWithoutExtension();
+    mModelPath[rig] = namFile.getFullPathName();
+    mModelLoaded[rig].store(true);
 
     updateLatency(); // available factors may have changed
 }
 
-void NamRigProcessor::loadIr(const juce::File &irFile)
+void NamRigProcessor::loadIr(const juce::File &irFile, int rig)
 {
-    if (mChain.cab.loadIr(irFile))
+    rig = juce::jlimit(0, 1, rig);
+    if (cabFor(rig).loadIr(irFile))
     {
-        mIrPath = irFile.getFullPathName();
+        mIrPath[rig] = irFile.getFullPathName();
         // Cache the source bytes so presets can embed the IR (single-file rigs).
-        irFile.loadFileAsData(mIrBytes);
-        mIrBaseName = irFile.getFileNameWithoutExtension();
+        irFile.loadFileAsData(mIrBytes[rig]);
+        mIrBaseName[rig] = irFile.getFileNameWithoutExtension();
         updateLatency();
     }
 }
@@ -410,8 +497,10 @@ void NamRigProcessor::loadIr(const juce::File &irFile)
 void NamRigProcessor::getStateInformation(juce::MemoryBlock &destData)
 {
     auto state = apvts.copyState();
-    state.setProperty("modelPath", mModelPath, nullptr);
-    state.setProperty("irPath", mIrPath, nullptr);
+    state.setProperty("modelPath", mModelPath[0], nullptr);
+    state.setProperty("irPath", mIrPath[0], nullptr);
+    state.setProperty("modelPathB", mModelPath[1], nullptr);
+    state.setProperty("irPathB", mIrPath[1], nullptr);
     std::unique_ptr<juce::XmlElement> xml(state.createXml());
     copyXmlToBinary(*xml, destData);
 }
@@ -427,10 +516,16 @@ void NamRigProcessor::setStateInformation(const void *data, int sizeInBytes)
 
     const juce::String modelPath = state.getProperty("modelPath", "");
     if (modelPath.isNotEmpty())
-        loadModel(juce::File(modelPath));
+        loadModel(juce::File(modelPath), 0);
     const juce::String irPath = state.getProperty("irPath", "");
     if (irPath.isNotEmpty())
-        loadIr(juce::File(irPath));
+        loadIr(juce::File(irPath), 0);
+    const juce::String modelPathB = state.getProperty("modelPathB", "");
+    if (modelPathB.isNotEmpty())
+        loadModel(juce::File(modelPathB), 1);
+    const juce::String irPathB = state.getProperty("irPathB", "");
+    if (irPathB.isNotEmpty())
+        loadIr(juce::File(irPathB), 1);
 }
 
 juce::AudioProcessor *JUCE_CALLTYPE createPluginFilter()
