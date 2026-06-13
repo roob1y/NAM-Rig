@@ -14,8 +14,8 @@
 // Mode: SoloA / SoloB / Dual. Solo plays one rig centered at unity (pan
 // bypassed) so SoloA is BIT-EXACT to the old single chain (the regression
 // gate); Dual places both rigs with an equal-power pan law and per-rig level.
-// v1 shares ONE AA/oversampling setting across both amps, so the two voices
-// have equal latency and need no inter-voice alignment delay.
+// Each rig has its OWN AA/oversampling factor; when they differ, Dual delay-
+// compensates the faster voice so both stay sample-aligned at the mix.
 //
 // Phase alignment: each rig has a fractional align delay + a polarity flip,
 // driven from PhaseAlign::measure() on the two rendered voice outputs (see

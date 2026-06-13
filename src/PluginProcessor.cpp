@@ -18,8 +18,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::NormalisableRange<float>(-24.0f, 24.0f, 0.1f), 0.0f,
         juce::AudioParameterFloatAttributes().withLabel("dB")));
 
-    // Amp AA oversampling — identical semantics to NAM-AA's parameter. v1 dual
-    // rig SHARES this setting across both amps (equal voice latency).
+    // Rig A amp AA oversampling (NAM-AA semantics). Rig B has its own
+    // oversampleB / offlineAAB; the chain delay-compensates differing factors.
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("oversample", 1), "Amp Oversampling",
         juce::StringArray{"Off", "2x", "4x", "8x", "16x", "32x"}, 0)); // default Off
