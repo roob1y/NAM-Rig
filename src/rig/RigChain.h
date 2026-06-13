@@ -95,6 +95,11 @@ public:
     double alignA() const { return mAlignA; }
     double alignB() const { return mAlignB; }
 
+    void setInTrimA(float g) { mInTrimA = g; }
+    void setInTrimB(float g) { mInTrimB = g; }
+    void setOutTrimA(float g) { mOutTrimA = g; }
+    void setOutTrimB(float g) { mOutTrimB = g; }
+
     // Apply a measured A/B lag (samples; >0 => B later than A, so delay A):
     // delays the earlier voice so the two line up. Manual nudge uses setAlignA/B.
     void setAlignmentLag(double lagSamples)
@@ -169,19 +174,23 @@ public:
         if (runB)
             std::memcpy(vB, ch0, (size_t)numSamples * sizeof(float));
 
-        // ---- per-rig voices (amp -> eq -> cab), mono ----
+        // ---- per-rig voices (in-trim -> amp -> eq -> cab -> out-trim), mono ----
         if (runA)
         {
+            if (mInTrimA != 1.0f) scale(vA, numSamples, mInTrimA);
             if (!amp.isBypassed()) amp.process(vA, numSamples);
             if (!eq.isBypassed()) eq.process(vA, numSamples);
             if (!cab.isBypassed()) cab.process(vA, numSamples);
+            if (mOutTrimA != 1.0f) scale(vA, numSamples, mOutTrimA);
             alignVoice(mFdlA, vA, numSamples, mAlignA, mPolA);
         }
         if (runB)
         {
+            if (mInTrimB != 1.0f) scale(vB, numSamples, mInTrimB);
             if (!ampB.isBypassed()) ampB.process(vB, numSamples);
             if (!eqB.isBypassed()) eqB.process(vB, numSamples);
             if (!cabB.isBypassed()) cabB.process(vB, numSamples);
+            if (mOutTrimB != 1.0f) scale(vB, numSamples, mOutTrimB);
             alignVoice(mFdlB, vB, numSamples, mAlignB, mPolB);
         }
 
@@ -242,6 +251,12 @@ private:
     // Fractional align delay + polarity on one voice. delay 0 & polarity +1 ->
     // untouched (keeps SoloA bit-exact). Integer delays are exact (Hermite at
     // t=0 returns the tap), fractional ones interpolate.
+    static void scale(float *v, int n, float g)
+    {
+        for (int i = 0; i < n; ++i)
+            v[i] *= g;
+    }
+
     void alignVoice(FracDelayLine &fdl, float *v, int n, double delay, float pol)
     {
         if (delay > 0.0)
@@ -362,6 +377,8 @@ private:
     float mLevelA = 1.0f, mLevelB = 1.0f;
     float mPanA = -1.0f, mPanB = 1.0f; // default hard L / hard R for Dual
     float mPolA = 1.0f, mPolB = 1.0f;  // polarity (+1 / -1)
+    float mInTrimA = 1.0f, mInTrimB = 1.0f;
+    float mOutTrimA = 1.0f, mOutTrimB = 1.0f;
     double mAlignA = 0.0, mAlignB = 0.0; // fractional align delay (samples)
     FracDelayLine mFdlA, mFdlB;
     std::vector<float> mVoiceA, mVoiceB;

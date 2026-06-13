@@ -252,9 +252,9 @@ NamRigProcessor::NamRigProcessor()
 
 NamRigProcessor::~NamRigProcessor() = default;
 
-float NamRigProcessor::calibrationGainDb() const
+float NamRigProcessor::calibrationGainDb(int rig) const
 {
-    const auto &eng = mChain.amp.engine();
+    const auto &eng = ampFor(rig).engine();
     return nam_rig::CalNorm::calibrationGainDb(
         apvts.getRawParameterValue("calEnable")->load() >= 0.5f,
         eng.hasInputLevelDbu(),
@@ -262,9 +262,9 @@ float NamRigProcessor::calibrationGainDb() const
         eng.inputLevelDbu());
 }
 
-float NamRigProcessor::normalizationGainDb() const
+float NamRigProcessor::normalizationGainDb(int rig) const
 {
-    const auto &eng = mChain.amp.engine();
+    const auto &eng = ampFor(rig).engine();
     return nam_rig::CalNorm::normalizationGainDb(
         apvts.getRawParameterValue("normalize")->load() >= 0.5f,
         eng.hasLoudness(),
@@ -339,10 +339,9 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
 
     // User input gain plus dBu calibration correction (0 dB when disabled/absent).
     const float inGain = juce::Decibels::decibelsToGain(
-        apvts.getRawParameterValue("inputGain")->load() + calibrationGainDb());
-    // User output gain plus loudness normalization (0 dB when disabled/absent).
+        apvts.getRawParameterValue("inputGain")->load());
     const float outGain = juce::Decibels::decibelsToGain(
-        apvts.getRawParameterValue("outputGain")->load() + normalizationGainDb());
+        apvts.getRawParameterValue("outputGain")->load());
 
     buffer.applyGain(inGain);
 
@@ -410,6 +409,10 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.setPanB(apvts.getRawParameterValue("rigPanB")->load());
     mChain.setPolarityA(apvts.getRawParameterValue("rigPolA")->load() >= 0.5f);
     mChain.setPolarityB(apvts.getRawParameterValue("rigPolB")->load() >= 0.5f);
+    mChain.setInTrimA(juce::Decibels::decibelsToGain(calibrationGainDb(0)));
+    mChain.setInTrimB(juce::Decibels::decibelsToGain(calibrationGainDb(1)));
+    mChain.setOutTrimA(juce::Decibels::decibelsToGain(normalizationGainDb(0)));
+    mChain.setOutTrimB(juce::Decibels::decibelsToGain(normalizationGainDb(1)));
     const int rigMode = (int)apvts.getRawParameterValue("rigMode")->load();
     const float rigAlign = apvts.getRawParameterValue("rigAlign")->load();
     mChain.setMode(rigMode);

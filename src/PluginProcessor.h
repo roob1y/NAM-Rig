@@ -68,10 +68,16 @@ public:
     // --- Input calibration / output normalization (NAM-AA parity; CalNorm.h) ---
     // Driven by Rig A's model metadata (calibration is pre-split, normalization
     // post-mix); folded into the in/out gains in processBlock.
-    bool hasInputCalibration() const { return mChain.amp.engine().hasInputLevelDbu(); }
-    bool hasLoudness() const { return mChain.amp.engine().hasLoudness(); }
-    float calibrationGainDb() const;
-    float normalizationGainDb() const;
+    bool hasInputCalibration() const
+    {
+        return mChain.amp.engine().hasInputLevelDbu() || mChain.ampB.engine().hasInputLevelDbu();
+    }
+    bool hasLoudness() const
+    {
+        return mChain.amp.engine().hasLoudness() || mChain.ampB.engine().hasLoudness();
+    }
+    float calibrationGainDb(int rig = 0) const;
+    float normalizationGainDb(int rig = 0) const;
 
     // Live gain-reduction telemetry for the editor meters.
     float gateGainDb() const { return mChain.gate.currentGainDb(); }

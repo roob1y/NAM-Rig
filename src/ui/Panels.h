@@ -271,10 +271,10 @@ public:
             info << "  |  PDC " << mProc.getLatencySamples() << " smp";
         }
         // Surface the live cal/norm corrections (only when non-zero).
-        const float calDb = mProc.calibrationGainDb();
+        const float calDb = mProc.calibrationGainDb(mRig);
         if (calDb != 0.0f)
             info << "  |  cal " << (calDb > 0 ? "+" : "") << juce::String(calDb, 1) << " dB";
-        const float normDb = mProc.normalizationGainDb();
+        const float normDb = mProc.normalizationGainDb(mRig);
         if (normDb != 0.0f)
             info << "  |  norm " << (normDb > 0 ? "+" : "") << juce::String(normDb, 1) << " dB";
         if (info != mInfo.getText())
