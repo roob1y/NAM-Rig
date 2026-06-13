@@ -184,31 +184,6 @@ public:
         return true;
     }
 
-    // ---- A/B compare: two in-memory full-state slots (params + model + IR) ----
-    // The active slot is the live rig; switching captures the live state into
-    // the slot being left so per-slot edits survive, and recalls the target.
-    int abActive() const { return mAbActive; }
-
-    void abSwitch(int slot)
-    {
-        slot = juce::jlimit(0, 1, slot);
-        if (slot == mAbActive)
-            return;
-        captureLiveInto(mAb[mAbActive]); // preserve edits + identity we leave
-        if (mAb[slot].valid)
-            restoreFrom(mAb[slot]);
-        else
-            mAb[slot] = mAb[mAbActive]; // first visit: clone so A and B match
-        mAbActive = slot;
-    }
-
-    // Copy the active (live) state onto the other slot, so both start equal.
-    void abCopyToOther()
-    {
-        captureLiveInto(mAb[mAbActive]);
-        mAb[1 - mAbActive] = mAb[mAbActive];
-    }
-
     // ---- Rename / delete the current preset file (message thread) ----
     // Rename keeps the preset selected; returns false on no current file, an
     // illegal name, or a name collision with another preset.
@@ -255,42 +230,10 @@ private:
         return cleaned.isEmpty() ? juce::String("preset") : cleaned;
     }
 
-    // A/B slot: full rig state PLUS the preset identity, so the bar's name and
-    // modified-asterisk follow the active slot.
-    struct AbSlot
-    {
-        PresetFile state;
-        juce::File presetFile;
-        juce::String presetName;
-        juce::var loadedParams;
-        bool valid = false;
-    };
-
-    void captureLiveInto(AbSlot &s) const
-    {
-        s.state = captureState();
-        s.presetFile = mCurrentFile;
-        s.presetName = mCurrentName;
-        s.loadedParams = mLoadedParams;
-        s.valid = true;
-    }
-
-    void restoreFrom(const AbSlot &s)
-    {
-        applyState(s.state); // skips model/IR reload when unchanged (fast)
-        mCurrentFile = s.presetFile;
-        mCurrentName = s.presetName;
-        mLoadedParams = s.loadedParams;
-    }
-
     NamRigProcessor &mProc;
     juce::File mCurrentFile;
     juce::String mCurrentName;
     juce::var mLoadedParams;
-
-    // A/B compare slots. Both start invalid; the preset bar seeds them.
-    AbSlot mAb[2];
-    int mAbActive = 0;
 };
 
 } // namespace nam_rig
