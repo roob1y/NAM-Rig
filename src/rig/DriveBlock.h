@@ -126,7 +126,7 @@ public:
             const float preGain = v.gMin * std::pow(v.gMax / v.gMin, s.drive.load()); // log
             const float hpCoef = (v.lowCutHz > 0.0f) ? coefForHz(v.lowCutHz, sr) : 0.0f;
             const bool useMid = (v.midDb != 0.0f);
-            const float dcSub = clipF(v.clip, v.bias);
+            const double dcSub = clipF(v.clip, (double)v.bias);
             const float levelLin = std::pow(10.0f, s.levelDb.load() * 0.05f) * v.outTrim;
 
             // tone tilt: tone 0..1 -> tilt -1..+1 -> +/- maxTiltDb about pivot.
@@ -135,7 +135,8 @@ public:
             const float bassG   = std::pow(10.0f, (-tilt * kMaxTiltDb) * 0.05f);
             const float toneCoef = coefForHz(v.pivotHz, sr);
 
-            float hp = s.hp, x0 = s.x0, low = s.toneLp;
+            float hp = s.hp, low = s.toneLp;
+            double x0 = s.x0; // ADAA history in double (avoids float cancellation)
 
             for (int i = 0; i < numSamples; ++i)
             {
@@ -150,15 +151,19 @@ public:
                     u = s.mid.processSample(u);
 
                 // waveshaper with 1st-order ADAA; asymmetry via the input bias.
-                const float xb = u + v.bias;
-                const float d = xb - x0;
-                float y;
-                if (std::abs(d) > 1.0e-6f)
+                // The divided difference is evaluated in DOUBLE: in float the
+                // antiderivative subtraction loses catastrophic precision at small
+                // signal levels and injects high-frequency crackle (worst at low
+                // drive / between notes). Double has the headroom to stay clean.
+                const double xb = (double)u + (double)v.bias;
+                const double d = xb - x0;
+                double y;
+                if (std::abs(d) > 1.0e-6)
                     y = (clipAD(v.clip, xb) - clipAD(v.clip, x0)) / d;
                 else
-                    y = clipF(v.clip, 0.5f * (xb + x0));
+                    y = clipF(v.clip, 0.5 * (xb + x0));
                 x0 = xb;
-                const float c = y - dcSub;     // remove the DC the bias introduces
+                const float c = (float)(y - dcSub); // remove the DC the bias introduces
 
                 // tone tilt (post-shaper): at tone=0.5 low+high == c (transparent).
                 low += toneCoef * (c - low);
@@ -183,12 +188,13 @@ private:
         std::atomic<float> drive{0.5f};
         std::atomic<float> tone{0.5f};
         std::atomic<float> levelDb{0.0f};
-        float hp = 0.0f, x0 = 0.0f, toneLp = 0.0f;
+        float hp = 0.0f, toneLp = 0.0f;
+        double x0 = 0.0;
         int lastKind = -1;
         Biquad mid; // pre-shaper peak (state preserved across blocks)
         void resetState()
         {
-            hp = 0.0f; x0 = 0.0f; toneLp = 0.0f;
+            hp = 0.0f; toneLp = 0.0f; x0 = 0.0;
             lastKind = -1;
             mid.reset();
         }
@@ -199,23 +205,23 @@ private:
     // ---- base shapers: f and its antiderivative F (for ADAA) ----
     // clip 0 = soft (tanh):    f = tanh(x),  F = log(cosh(x))
     // clip 1 = hard clip +/-1: f = clamp,    F = piecewise quadratic/linear
-    static float clipF(int type, float x)
+    static double clipF(int type, double x)
     {
         if (type == 0)
             return std::tanh(x);
-        return x > 1.0f ? 1.0f : (x < -1.0f ? -1.0f : x);
+        return x > 1.0 ? 1.0 : (x < -1.0 ? -1.0 : x);
     }
-    static float clipAD(int type, float x)
+    static double clipAD(int type, double x)
     {
         if (type == 0)
             return logCosh(x);
-        const float a = std::abs(x);
-        return a <= 1.0f ? 0.5f * x * x : (a - 0.5f);
+        const double a = std::abs(x);
+        return a <= 1.0 ? 0.5 * x * x : (a - 0.5);
     }
-    static float logCosh(float x)
+    static double logCosh(double x)
     {
-        const float a = std::abs(x);
-        return a + std::log1p(std::exp(-2.0f * a)) - 0.69314718056f; // log(cosh x)
+        const double a = std::abs(x);
+        return a + std::log1p(std::exp(-2.0 * a)) - 0.6931471805599453; // log(cosh x)
     }
 
     static float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
