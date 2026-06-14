@@ -701,57 +701,183 @@ private:
 };
 
 //==============================================================================
-class ModPanel : public BlockPanel
+// One slot's controls. Shows only the controls the selected effect actually
+// has: universal Rate/Sync/Mix/Width/On always; Depth (all but Phaser);
+// Feedback (Flanger/Phaser); Shape waveform (Tremolo). Everything else is
+// hardwired in ModVoice, so there are no bad-sound knobs.
+class ModSlotControls : public juce::Component
 {
 public:
-    explicit ModPanel(juce::AudioProcessorValueTreeState &apvts)
-        : BlockPanel("MODULATION"), mApvts(apvts)
+    ModSlotControls(juce::AudioProcessorValueTreeState &apvts, int slot)
+        : mApvts(apvts), mSlot(slot)
     {
-        mTypeLabel.setText("Type", juce::dontSendNotification);
-        mTypeLabel.setColour(juce::Label::textColourId, colors::textDim);
-        addAndMakeVisible(mTypeLabel);
-        mType.addItemList({"Chorus", "Flanger", "Phaser", "Tremolo"}, 1);
+        const juce::String p = "mod" + juce::String(slot + 1);
+
+        mTypeL.setText("Type", juce::dontSendNotification);
+        mTypeL.setColour(juce::Label::textColourId, colors::textDim);
+        addAndMakeVisible(mTypeL);
+        mType.addItemList({"Chorus", "Flanger", "Phaser", "Tremolo",
+                           "Vibrato", "Rotary", "Uni-Vibe", "Harm Trem"}, 1);
         addAndMakeVisible(mType);
         mTypeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-            apvts, "modType", mType);
+            apvts, p + "Type", mType);
+        mType.onChange = [this] { refresh(); };
 
-        const std::pair<const char *, const char *> defs[] = {
-            {"modRate", "Rate"}, {"modDepth", "Depth"},
-            {"modFeedback", "Feedback"}, {"modMix", "Mix"}};
-        for (const auto &[id, caption] : defs)
+        mSyncL.setText("Sync", juce::dontSendNotification);
+        mSyncL.setColour(juce::Label::textColourId, colors::textDim);
+        addAndMakeVisible(mSyncL);
+        mSync.addItemList({"Off", "1/1", "1/2", "1/4", "1/4.", "1/4T",
+                           "1/8", "1/8.", "1/8T", "1/16"}, 1);
+        addAndMakeVisible(mSync);
+        mSyncAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, p + "Sync", mSync);
+        mSync.onChange = [this] { refresh(); };
+
+        mWaveL.setText("Shape", juce::dontSendNotification);
+        mWaveL.setColour(juce::Label::textColourId, colors::textDim);
+        addChildComponent(mWaveL);
+        mWave.addItemList({"Sine", "Triangle", "Square", "S&H"}, 1);
+        addChildComponent(mWave); // Tremolo only
+        mWaveAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, p + "Wave", mWave);
+
+        mOn.setButtonText("On");
+        addAndMakeVisible(mOn);
+        mOnAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            apvts, p + "On", mOn);
+
+        mRate = std::make_unique<LabeledKnob>(apvts, p + "Rate", "Rate");
+        mDepth = std::make_unique<LabeledKnob>(apvts, p + "Depth", "Depth");
+        mFeedback = std::make_unique<LabeledKnob>(apvts, p + "Feedback", "Feedback");
+        mMix = std::make_unique<LabeledKnob>(apvts, p + "Mix", "Mix");
+        mWidth = std::make_unique<LabeledKnob>(apvts, p + "Width", "Width");
+        addAndMakeVisible(*mRate);
+        addChildComponent(*mDepth);
+        addChildComponent(*mFeedback);
+        addAndMakeVisible(*mMix);
+        addAndMakeVisible(*mWidth);
+
+        refresh();
+    }
+
+    void refresh()
+    {
+        const juce::String p = "mod" + juce::String(mSlot + 1);
+        const int type = (int)mApvts.getRawParameterValue(p + "Type")->load();
+        const int sync = (int)mApvts.getRawParameterValue(p + "Sync")->load();
+        if (type == mLastType && sync == mLastSync)
+            return;
+        mLastType = type;
+        mLastSync = sync;
+        mDepth->setVisible(type != 2);                 // phaser: no depth
+        mFeedback->setVisible(type == 1 || type == 2); // flanger/phaser
+        mWave.setVisible(type == 3);                   // tremolo shape
+        mWaveL.setVisible(type == 3);
+        mRate->setEnabled(sync == 0);                  // rate greyed when synced
+        resized();
+    }
+
+    void resized() override
+    {
+        auto area = getLocalBounds();
+        auto top = area.removeFromTop(28);
+        mTypeL.setBounds(top.removeFromLeft(34));
+        mType.setBounds(top.removeFromLeft(104));
+        top.removeFromLeft(8);
+        mSyncL.setBounds(top.removeFromLeft(34));
+        mSync.setBounds(top.removeFromLeft(74));
+        top.removeFromLeft(8);
+        if (mWave.isVisible())
         {
-            mKnobs.push_back(std::make_unique<LabeledKnob>(apvts, id, caption));
-            addAndMakeVisible(*mKnobs.back());
+            mWaveL.setBounds(top.removeFromLeft(40));
+            mWave.setBounds(top.removeFromLeft(86));
+            top.removeFromLeft(8);
+        }
+        mOn.setBounds(top.removeFromLeft(46));
+
+        area.removeFromTop(6);
+        std::vector<juce::Component *> vis;
+        for (juce::Component *k : {(juce::Component *)mRate.get(), (juce::Component *)mDepth.get(),
+                                   (juce::Component *)mFeedback.get(), (juce::Component *)mMix.get(),
+                                   (juce::Component *)mWidth.get()})
+            if (k->isVisible())
+                vis.push_back(k);
+        const int nk = (int)vis.size();
+        if (nk > 0)
+        {
+            auto row = area.withSizeKeepingCentre(juce::jmin(area.getWidth(), nk * 118),
+                                                  juce::jmin(area.getHeight(), 150));
+            const int w = row.getWidth() / nk;
+            for (auto *k : vis)
+                k->setBounds(row.removeFromLeft(w).reduced(6, 0));
         }
     }
 
-    void refresh() // feedback only does something for flanger / phaser
+private:
+    juce::AudioProcessorValueTreeState &mApvts;
+    int mSlot;
+    int mLastType = -1, mLastSync = -1;
+    juce::ComboBox mType, mWave, mSync;
+    juce::Label mTypeL, mWaveL, mSyncL;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt, mWaveAtt, mSyncAtt;
+    juce::ToggleButton mOn;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mOnAtt;
+    std::unique_ptr<LabeledKnob> mRate, mDepth, mFeedback, mMix, mWidth;
+};
+
+class ModPanel : public BlockPanel
+{
+public:
+    explicit ModPanel(juce::AudioProcessorValueTreeState &apvts) : BlockPanel("MODULATION")
     {
-        const int type = (int)mApvts.getRawParameterValue("modType")->load();
-        mKnobs[2]->setEnabled(type == 1 || type == 2);
+        for (int s = 0; s < nam_rig::ModBlock::kSlots; ++s)
+        {
+            mTab[(size_t)s].setButtonText("Slot " + juce::String(s + 1));
+            mTab[(size_t)s].setClickingTogglesState(true);
+            mTab[(size_t)s].setRadioGroupId(4731);
+            mTab[(size_t)s].onClick = [this, s] { selectSlot(s); };
+            addAndMakeVisible(mTab[(size_t)s]);
+            mSlots[(size_t)s] = std::make_unique<ModSlotControls>(apvts, s);
+            addChildComponent(*mSlots[(size_t)s]);
+        }
+        mHint.setText("3 slots in series - stack effects for quirky sounds. Each effect shows only its real controls.",
+                      juce::dontSendNotification);
+        mHint.setColour(juce::Label::textColourId, colors::textDim);
+        addAndMakeVisible(mHint);
+        selectSlot(0);
+    }
+
+    void refresh()
+    {
+        for (auto &sc : mSlots)
+            if (sc) sc->refresh();
     }
 
     void resized() override
     {
         auto area = contentArea();
-        auto typeRow = area.removeFromTop(30);
-        mTypeLabel.setBounds(typeRow.removeFromLeft(50));
-        mType.setBounds(typeRow.removeFromLeft(150));
-        area.removeFromTop(4);
-        area = area.withSizeKeepingCentre(area.getWidth(),
-                                          juce::jmin(area.getHeight(), 150));
-        const int w = juce::jmin(130, area.getWidth() / (int)mKnobs.size());
-        auto row = area.withSizeKeepingCentre(w * (int)mKnobs.size(), area.getHeight());
-        for (auto &k : mKnobs)
-            k->setBounds(row.removeFromLeft(w).reduced(6, 0));
+        mHint.setBounds(area.removeFromBottom(20));
+        auto tabs = area.removeFromTop(26);
+        for (int s = 0; s < nam_rig::ModBlock::kSlots; ++s)
+            mTab[(size_t)s].setBounds(tabs.removeFromLeft(90).reduced(2, 0));
+        area.removeFromTop(8);
+        for (auto &sc : mSlots)
+            if (sc) sc->setBounds(area);
     }
 
 private:
-    juce::AudioProcessorValueTreeState &mApvts;
-    juce::ComboBox mType;
-    juce::Label mTypeLabel;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt;
-    std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
+    void selectSlot(int s)
+    {
+        for (int i = 0; i < nam_rig::ModBlock::kSlots; ++i)
+        {
+            mSlots[(size_t)i]->setVisible(i == s);
+            mTab[(size_t)i].setToggleState(i == s, juce::dontSendNotification);
+        }
+    }
+
+    std::array<juce::TextButton, (size_t)nam_rig::ModBlock::kSlots> mTab;
+    std::array<std::unique_ptr<ModSlotControls>, (size_t)nam_rig::ModBlock::kSlots> mSlots;
+    juce::Label mHint;
 };
 
 //==============================================================================
