@@ -238,6 +238,28 @@ private:
 // DrivePanel — the 3-slot series drive rack (shared, feeds both rigs). Each row
 // is one pedal: Type selector (Off/Boost/Overdrive/Distortion/Fuzz) + Drive /
 // Tone / Level. Type=Off bypasses that slot; an all-Off rack is bit-exact.
+// A round metal footswitch (toggles the pedal On/Off; ring lights amber on).
+class Footswitch : public juce::Button
+{
+public:
+    Footswitch() : juce::Button({}) { setClickingTogglesState(true); }
+    void paintButton(juce::Graphics &g, bool, bool down) override
+    {
+        auto bb = getLocalBounds().toFloat();
+        const float dd = juce::jmin(bb.getWidth(), bb.getHeight());
+        auto c = juce::Rectangle<float>(dd, dd).withCentre(bb.getCentre()).reduced(2.0f);
+        g.setColour(getToggleState() ? colors::accent : colors::ledOff); // ring
+        g.fillEllipse(c);
+        auto cap = c.reduced(3.0f);
+        juce::ColourGradient grad(colors::text.withAlpha(0.80f), cap.getX(), cap.getY(),
+                                  colors::outline, cap.getX(), cap.getBottom(), false);
+        g.setGradientFill(grad);
+        g.fillEllipse(cap);
+        g.setColour(colors::bg.withAlpha(down ? 0.30f : 0.14f)); // dimple
+        g.fillEllipse(cap.reduced(cap.getWidth() * 0.30f));
+    }
+};
+
 // One drive "stomp" - a vertical pedal in the pedalboard. Shows only the
 // controls the chosen pedal's hardware had: name + subtitle, the type/On
 // footswitch, the right knobs (treble boost adds its 3-way range switch).
@@ -272,7 +294,6 @@ public:
             apvts, p + "Range", mRange);
         addChildComponent(mRange);
 
-        mOn.setButtonText("On");
         mOnAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             apvts, p + "On", mOn);
         mOn.onClick = [this] { refresh(); };
@@ -303,13 +324,24 @@ public:
 
     void paint(juce::Graphics &g) override
     {
-        auto b = getLocalBounds().toFloat().reduced(0.5f);
-        g.setColour(colors::tile);
-        g.fillRoundedRectangle(b, 9.0f);
+        auto b = getLocalBounds().toFloat().reduced(1.0f);
+        juce::ColourGradient eg(colors::tile.brighter(0.05f), 0.0f, b.getY(),
+                                colors::tile.darker(0.18f), 0.0f, b.getBottom(), false);
+        g.setGradientFill(eg);
+        g.fillRoundedRectangle(b, 10.0f);
         g.setColour(mActive ? colors::accent : colors::outline);
-        g.drawRoundedRectangle(b, 9.0f, mActive ? 1.5f : 1.0f);
+        g.drawRoundedRectangle(b, 10.0f, mActive ? 1.6f : 1.1f);
+        // corner screws (enclosure)
+        auto screw = [&](float x, float y) {
+            g.setColour(colors::outline.brighter(0.35f));
+            g.fillEllipse(x - 3.0f, y - 3.0f, 6.0f, 6.0f);
+            g.setColour(colors::bg);
+            g.drawLine(x - 2.0f, y - 1.5f, x + 2.0f, y + 1.5f, 1.0f);
+        };
+        screw(12.0f, 12.0f); screw((float)getWidth() - 12.0f, 12.0f);
+        screw(12.0f, (float)getHeight() - 12.0f); screw((float)getWidth() - 12.0f, (float)getHeight() - 12.0f);
         g.setColour(mActive ? colors::accent : colors::ledOff);
-        g.fillEllipse((float)getWidth() - 17.0f, 11.0f, 7.0f, 7.0f); // status LED
+        g.fillEllipse((float)getWidth() - 19.0f, 12.0f, 7.0f, 7.0f); // status LED
     }
 
     void resized() override
@@ -326,9 +358,9 @@ public:
         }
         if (mOn.isVisible())
         {
-            auto bot = area.removeFromBottom(26);
-            mOn.setBounds(bot.withSizeKeepingCentre(64, 24));
-            area.removeFromBottom(4);
+            auto bot = area.removeFromBottom(46);
+            mOn.setBounds(bot.withSizeKeepingCentre(42, 42));
+            area.removeFromBottom(2);
         }
         area.removeFromTop(6);
         LabeledKnob *ks[3] = {mDrive.get(), mTone.get(), mLevel.get()};
@@ -369,7 +401,7 @@ private:
     int mSlot;
     juce::Label mName, mSub;
     juce::ComboBox mType, mRange;
-    juce::ToggleButton mOn;
+    Footswitch mOn;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt, mRangeAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mOnAtt;
     std::unique_ptr<LabeledKnob> mDrive, mTone, mLevel;
@@ -407,10 +439,10 @@ public:
     void paint(juce::Graphics &g) override
     {
         BlockPanel::paint(g);
-        g.setColour(colors::textDim);
-        g.setFont(RigLookAndFeel::withHeight(9.5f));
-        g.drawText("IN", (int)mInX - 24, (int)mFlowY - 6, 20, 12, juce::Justification::centredRight);
-        g.drawText("OUT", (int)mOutX + 4, (int)mFlowY - 6, 26, 12, juce::Justification::centredLeft);
+        g.setColour(colors::text);
+        g.setFont(RigLookAndFeel::withHeight(11.0f).boldened());
+        g.drawText("IN", (int)mInX - 30, (int)mFlowY - 8, 26, 16, juce::Justification::centredRight);
+        g.drawText("OUT", (int)mOutX + 6, (int)mFlowY - 8, 30, 16, juce::Justification::centredLeft);
         g.setColour(colors::accentDim);
         for (auto &c : mCables)
             g.drawLine(c.getStartX(), c.getStartY(), c.getEndX(), c.getEndY(), 2.0f);
@@ -422,7 +454,7 @@ public:
         auto bottom = area.removeFromBottom(22);
         mAutoGain.setBounds(bottom.removeFromRight(110));
 
-        const int inM = 28, outM = 32, cable = 22;
+        const int inM = 40, outM = 46, cable = 22;
         area.removeFromLeft(inM);
         area.removeFromRight(outM);
         const int n = nam_rig::DriveBlock::kSlots;
