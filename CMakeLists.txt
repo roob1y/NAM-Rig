@@ -35,6 +35,7 @@ target_sources(NAM_Rig PRIVATE
     src/PluginEditor.h
     src/CalNorm.h
     src/PresetFile.h
+    src/FactoryPresets.h
     src/PresetManager.h
     src/ui/RigLookAndFeel.h
     src/ui/Meter.h

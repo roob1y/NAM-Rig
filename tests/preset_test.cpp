@@ -9,8 +9,10 @@
 // T5 file write/read round-trip
 // T6 params-only preset: hasModel/hasIr false, still valid
 #include "PresetFile.h"
+#include "FactoryPresets.h"
 #include <cstdio>
 #include <random>
+#include <set>
 
 using nam_rig::PresetFile;
 
@@ -189,6 +191,26 @@ int main()
         CHECK(!q.hasModelB() && !q.hasIrB(), "T8 v1 has no Rig B");
         CHECK((double)q.params.getDynamicObject()->getProperty("outputGain") == 1.5,
               "T8 v1 params intact");
+    }
+
+    // ---- T9: factory preset bank is well-formed (params-only, unique) ----
+    {
+        auto facs = nam_rig::FactoryPresets::all();
+        CHECK(facs.size() >= 3, "T9 factory bank has presets (%d)", (int)facs.size());
+        bool ok = true;
+        std::set<juce::String> names;
+        for (auto &f : facs)
+        {
+            PresetFile q;
+            const bool parses = PresetFile::parse(f.toJson(), q);
+            auto *po = f.params.getDynamicObject();
+            if (!parses || po == nullptr || po->getProperties().size() == 0 ||
+                f.hasModel() || f.hasIr())
+                ok = false;
+            names.insert(f.name);
+        }
+        CHECK(ok, "T9 every factory preset round-trips and is params-only");
+        CHECK((int)names.size() == (int)facs.size(), "T9 factory names are unique");
     }
 
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);

@@ -10,6 +10,7 @@
 
 #include "PluginProcessor.h"
 #include "PresetFile.h"
+#include "FactoryPresets.h"
 
 namespace nam_rig
 {
@@ -17,7 +18,7 @@ namespace nam_rig
 class PresetManager
 {
 public:
-    explicit PresetManager(NamRigProcessor &p) : mProc(p) {}
+    explicit PresetManager(NamRigProcessor &p) : mProc(p) { installFactory(); }
 
     static juce::File presetsDir()
     {
@@ -228,6 +229,24 @@ private:
     {
         const auto cleaned = juce::File::createLegalFileName(s);
         return cleaned.isEmpty() ? juce::String("preset") : cleaned;
+    }
+
+    // Write the built-in factory presets to the presets folder once (guarded by
+    // a marker so a user can delete one without it coming back). Params-only:
+    // they apply over whatever amps are loaded.
+    void installFactory()
+    {
+        const auto marker = presetsDir().getChildFile(".factory_v1");
+        if (marker.existsAsFile())
+            return;
+        presetsDir().createDirectory();
+        for (const auto &f : FactoryPresets::all())
+        {
+            const auto file = presetsDir().getChildFile(sanitize(f.name) + PresetFile::kExtension);
+            if (!file.existsAsFile())
+                f.writeToFile(file);
+        }
+        marker.replaceWithText("nam-rig factory v1");
     }
 
     NamRigProcessor &mProc;
