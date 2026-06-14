@@ -97,7 +97,7 @@ public:
     {                       // clip  gMin    gMax  lowCut   midHz  midDb midQ   lpHz   bias   pivot   outTrim shp post
         static const Model boost[] = {
             {"Range '65", "germanium treble boost",
-             { 0, 1.0f, 10.0f, 120.0f, 3500.0f, 8.0f, 0.5f,    0.0f, 0.20f, 2500.0f, 0.85f, 0.0f, 0.0f}, true},
+             { 0, 1.0f, 20.0f, 2600.0f,   0.0f, 0.0f, 0.7f,    0.0f, 0.20f, 2500.0f, 0.95f, 0.0f, 0.0f}, true},
             {"EP Boost", "FET clean boost",
              { 0, 1.0f,  6.0f,  40.0f, 5000.0f, 3.0f, 0.6f,    0.0f, 0.05f, 1000.0f, 0.95f, 0.0f, 1.0f}, false},
         };
@@ -143,11 +143,13 @@ public:
     // through and shifts the emphasis down (Treble = bright, Full = fat).
     static void applyRange(Voicing &v, int rng)
     {
+        // Input-cap mod: a single one-pole high-pass whose corner moves with the
+        // cap. Stock 5nF -> 2.6 kHz; 10nF -> 1.3 kHz; 47nF -> 0.3 kHz. No peak.
         switch (rng)
         {
-        case 1: v.lowCutHz = 300.0f; v.midHz = 1500.0f; v.midDb = 6.0f; break; // Mid
-        case 2: v.lowCutHz = 130.0f; v.midHz = 2500.0f; v.midDb = 5.0f; break; // Full
-        default: v.lowCutHz = 600.0f; v.midHz = 3500.0f; v.midDb = 8.0f; break; // Treble
+        case 1: v.lowCutHz = 1300.0f; break; // Mid  (10nF, fuller)
+        case 2: v.lowCutHz =  300.0f; break; // Full (47nF, near full-range)
+        default: v.lowCutHz = 2600.0f; break; // Treble (5nF stock)
         }
     }
 
