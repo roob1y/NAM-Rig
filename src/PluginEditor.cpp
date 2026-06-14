@@ -8,6 +8,7 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
       mStrip(p.apvts),
       mGatePanel(p.apvts),
       mCompPanel(p.apvts),
+      mDrivePanel(p.apvts),
       mAmpPanelA(p, 0),
       mAmpPanelB(p, 1),
       mEqPanelA(p.apvts, 0),
@@ -18,7 +19,7 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
       mModPanel(p.apvts),
       mDelayPanel(p.apvts),
       mReverbPanel(p.apvts),
-      mPanels{&mGatePanel, &mCompPanel, &mAmpPanelA, &mEqPanelA, &mCabPanelA,
+      mPanels{&mGatePanel, &mCompPanel, &mDrivePanel, &mAmpPanelA, &mEqPanelA, &mCabPanelA,
               &mAmpPanelB, &mEqPanelB, &mCabPanelB, &mMixPanel,
               &mModPanel, &mDelayPanel, &mReverbPanel}
 {

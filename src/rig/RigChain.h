@@ -1,7 +1,7 @@
 #pragma once
 // RigChain — the fixed serial chain host, now with a DUAL-RIG core.
 //
-//   [mono shared pre]  gate -> comp/drive
+//   [mono shared pre]  gate -> comp -> drive (3-slot rack)
 //                          |
 //          split ----------+----------
 //          |                          |
@@ -29,6 +29,7 @@
 #include "Blocks.h"
 #include "GateBlock.h"
 #include "CompBlock.h"
+#include "DriveBlock.h"
 #include "AmpBlock.h"
 #include "EqBlock.h"
 #include "CabBlock.h"
@@ -209,6 +210,8 @@ public:
             gate.process(ch0, numSamples);
         if (!comp.isBypassed())
             comp.process(ch0, numSamples);
+        if (!drive.isBypassed())
+            drive.process(ch0, numSamples);
 
         // ---- split into the two voice buffers ----
         float *vA = mVoiceA.data();
@@ -263,7 +266,7 @@ public:
     // (max of the two voices, INCLUDING their align delays) + shared post.
     double latencySamples() const
     {
-        const double pre = gate.latencySamples() + comp.latencySamples();
+        const double pre = gate.latencySamples() + comp.latencySamples() + drive.latencySamples();
         const double LA = amp.latencySamples() + eq.latencySamples() + cab.latencySamples();
         const double LB = ampB.latencySamples() + eqB.latencySamples() + cabB.latencySamples();
         double voice = LA + mAlignA;
@@ -289,6 +292,7 @@ public:
     // ---- the blocks ----
     GateBlock gate; // shared pre
     CompBlock comp;
+    DriveBlock drive; // 3-slot drive rack (shared, before split)
     AmpBlock amp;   // Rig A
     EqBlock eq;
     CabBlock cab;
@@ -450,9 +454,9 @@ private:
         }
     }
 
-    std::array<MonoBlock *, 8> allMonoBlocks()
+    std::array<MonoBlock *, 9> allMonoBlocks()
     {
-        return {&gate, &comp, &amp, &eq, &cab, &ampB, &eqB, &cabB};
+        return {&gate, &comp, &drive, &amp, &eq, &cab, &ampB, &eqB, &cabB};
     }
 
     std::array<StereoBlock *, 3> stereoBlocks() { return {&mod, &delay, &reverb}; }

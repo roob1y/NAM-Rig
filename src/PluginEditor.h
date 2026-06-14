@@ -49,6 +49,7 @@ private:
     nam_rig::ui::BlockStrip mStrip;
     nam_rig::ui::GatePanel mGatePanel;
     nam_rig::ui::CompPanel mCompPanel;
+    nam_rig::ui::DrivePanel mDrivePanel;
     nam_rig::ui::AmpPanel mAmpPanelA, mAmpPanelB;
     nam_rig::ui::EqPanel mEqPanelA, mEqPanelB;
     nam_rig::ui::CabPanel mCabPanelA, mCabPanelB;
@@ -56,7 +57,7 @@ private:
     nam_rig::ui::ModPanel mModPanel;
     nam_rig::ui::DelayPanel mDelayPanel;
     nam_rig::ui::ReverbPanel mReverbPanel;
-    std::array<juce::Component *, 12> mPanels;
+    std::array<juce::Component *, 13> mPanels;
 
     double mLastTimerMs = 0.0;
     int mPresetRefreshTick = 0;

@@ -130,16 +130,17 @@ public:
         static const Slot slots[] = {
             {"GATE",  "gateOn",   0, Full},
             {"COMP",  "compOn",   1, Full},
-            {"AMP A", "",         2, Top},
-            {"EQ A",  "eqOn",     3, Top},
-            {"CAB A", "cabOn",    4, Top},
-            {"AMP B", "",         2, Bot},
-            {"EQ B",  "",         3, Bot},
-            {"CAB B", "",         4, Bot},
-            {"MIX",   "",         5, Full},
-            {"MOD",   "modOn",    6, Full},
-            {"DELAY", "delayOn",  7, Full},
-            {"VERB",  "reverbOn", 8, Full},
+            {"DRIVE", "",         2, Full},
+            {"AMP A", "",         3, Top},
+            {"EQ A",  "eqOn",     4, Top},
+            {"CAB A", "cabOn",    5, Top},
+            {"AMP B", "",         3, Bot},
+            {"EQ B",  "",         4, Bot},
+            {"CAB B", "",         5, Bot},
+            {"MIX",   "",         6, Full},
+            {"MOD",   "modOn",    7, Full},
+            {"DELAY", "delayOn",  8, Full},
+            {"VERB",  "reverbOn", 9, Full},
         };
         for (const auto &s : slots)
         {
@@ -185,24 +186,25 @@ public:
         const float yC = (float)getHeight() * 0.5f;
         auto cy = [](BlockTile &t) { return (float)t.getBounds().getCentreY(); };
 
-        // Split: comp -> AMP A (top) and AMP B (bottom).
-        const float splitX = ((float)mTiles[1]->getRight() + (float)mTiles[2]->getX()) * 0.5f;
-        branch(g, (float)mTiles[1]->getRight(), yC, splitX, cy(*mTiles[2]),
-               (float)mTiles[2]->getX(), cy(*mTiles[5]), (float)mTiles[5]->getX());
+        // Split: DRIVE -> AMP A (top) and AMP B (bottom).
+        const float splitX = ((float)mTiles[2]->getRight() + (float)mTiles[3]->getX()) * 0.5f;
+        branch(g, (float)mTiles[2]->getRight(), yC, splitX, cy(*mTiles[3]),
+               (float)mTiles[3]->getX(), cy(*mTiles[6]), (float)mTiles[6]->getX());
         // Merge: CAB A / CAB B -> MIX.
-        const float mergeX = ((float)mTiles[4]->getRight() + (float)mTiles[8]->getX()) * 0.5f;
-        branch(g, (float)mTiles[8]->getX(), yC, mergeX, cy(*mTiles[2]),
-               (float)mTiles[4]->getRight(), cy(*mTiles[5]), (float)mTiles[4]->getRight());
+        const float mergeX = ((float)mTiles[5]->getRight() + (float)mTiles[9]->getX()) * 0.5f;
+        branch(g, (float)mTiles[9]->getX(), yC, mergeX, cy(*mTiles[3]),
+               (float)mTiles[5]->getRight(), cy(*mTiles[6]), (float)mTiles[5]->getRight());
 
         // Flow chevrons between adjacent same-lane tiles.
-        chevron(g, *mTiles[2], *mTiles[3]);
-        chevron(g, *mTiles[3], *mTiles[4]);
-        chevron(g, *mTiles[5], *mTiles[6]);
-        chevron(g, *mTiles[6], *mTiles[7]);
-        chevron(g, *mTiles[0], *mTiles[1]);
-        chevron(g, *mTiles[8], *mTiles[9]);
-        chevron(g, *mTiles[9], *mTiles[10]);
-        chevron(g, *mTiles[10], *mTiles[11]);
+        chevron(g, *mTiles[0], *mTiles[1]);   // GATE -> COMP
+        chevron(g, *mTiles[1], *mTiles[2]);   // COMP -> DRIVE
+        chevron(g, *mTiles[3], *mTiles[4]);   // AMP A -> EQ A
+        chevron(g, *mTiles[4], *mTiles[5]);   // EQ A -> CAB A
+        chevron(g, *mTiles[6], *mTiles[7]);   // AMP B -> EQ B
+        chevron(g, *mTiles[7], *mTiles[8]);   // EQ B -> CAB B
+        chevron(g, *mTiles[9], *mTiles[10]);  // MIX -> MOD
+        chevron(g, *mTiles[10], *mTiles[11]); // MOD -> DELAY
+        chevron(g, *mTiles[11], *mTiles[12]); // DELAY -> VERB
     }
 
 private:
@@ -233,7 +235,7 @@ private:
         g.strokePath(p, juce::PathStrokeType(1.5f));
     }
 
-    static constexpr int kCols = 9;
+    static constexpr int kCols = 10;
     std::vector<std::unique_ptr<BlockTile>> mTiles;
     std::vector<std::pair<int, int>> mLayout; // (col, lane) per tile
     int mSelected = -1;

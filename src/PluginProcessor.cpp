@@ -80,6 +80,28 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::NormalisableRange<float>(0.0f, 20.0f, 0.1f), 0.0f,
         juce::AudioParameterFloatAttributes().withLabel("dB")));
 
+    // --- Drive rack: 3 series slots, shared/pre-split (rig/DriveBlock.h;
+    //     verified by tests/drive_test.cpp). Type "Off" leaves a slot out of
+    //     the path; an all-Off rack is bypassed (bit-exact). ---
+    for (int s = 1; s <= nam_rig::DriveBlock::kSlots; ++s)
+    {
+        const juce::String pid = "drv" + juce::String(s);
+        const juce::String lbl = "Drive " + juce::String(s) + " ";
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID(pid + "Type", 1), lbl + "Type",
+            juce::StringArray{"Off", "Boost", "Overdrive", "Distortion", "Fuzz"}, 0));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(pid + "Drive", 1), lbl + "Drive",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(pid + "Tone", 1), lbl + "Tone",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(pid + "Level", 1), lbl + "Level",
+            juce::NormalisableRange<float>(-12.0f, 12.0f, 0.1f), 0.0f,
+            juce::AudioParameterFloatAttributes().withLabel("dB")));
+    }
+
     // --- Graphic EQ, pre-cab (see rig/EqBlock.h; verified by tests/eq_test.cpp) ---
     {
         static const char *ids[] = {"eq62", "eq125", "eq250", "eq500",
@@ -433,6 +455,18 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.comp.setMode((int)apvts.getRawParameterValue("compMode")->load());
     mChain.comp.setCharacter(apvts.getRawParameterValue("compCharacter")->load());
     mChain.comp.setBypassed(apvts.getRawParameterValue("compOn")->load() < 0.5f);
+
+    // Drive rack (shared, before the split). Block is bypassed -> skipped
+    // entirely when every slot is Off, keeping the no-drive path bit-exact.
+    for (int s = 0; s < nam_rig::DriveBlock::kSlots; ++s)
+    {
+        const juce::String pid = "drv" + juce::String(s + 1);
+        mChain.drive.setKind(s, (int)apvts.getRawParameterValue(pid + "Type")->load());
+        mChain.drive.setDrive(s, apvts.getRawParameterValue(pid + "Drive")->load());
+        mChain.drive.setTone(s, apvts.getRawParameterValue(pid + "Tone")->load());
+        mChain.drive.setLevelDb(s, apvts.getRawParameterValue(pid + "Level")->load());
+    }
+    mChain.drive.setBypassed(!mChain.drive.anyActive());
     // Graphic EQ band gains (Rig A; zero latency; chain bypass via eqOn is safe).
     {
         static const char *ids[] = {"eq62", "eq125", "eq250", "eq500",

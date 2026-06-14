@@ -233,6 +233,78 @@ private:
 };
 
 //==============================================================================
+// DrivePanel — the 3-slot series drive rack (shared, feeds both rigs). Each row
+// is one pedal: Type selector (Off/Boost/Overdrive/Distortion/Fuzz) + Drive /
+// Tone / Level. Type=Off bypasses that slot; an all-Off rack is bit-exact.
+class DrivePanel : public BlockPanel
+{
+public:
+    explicit DrivePanel(juce::AudioProcessorValueTreeState &apvts)
+        : BlockPanel("DRIVE RACK")
+    {
+        for (int sIdx = 0; sIdx < nam_rig::DriveBlock::kSlots; ++sIdx)
+        {
+            Row &row = mRows[sIdx];
+            const juce::String pid = "drv" + juce::String(sIdx + 1);
+
+            row.label.setText("PEDAL " + juce::String(sIdx + 1), juce::dontSendNotification);
+            row.label.setJustificationType(juce::Justification::centredLeft);
+            row.label.setColour(juce::Label::textColourId, colors::textDim);
+            addAndMakeVisible(row.label);
+
+            row.type.addItemList(
+                juce::StringArray{"Off", "Boost", "Overdrive", "Distortion", "Fuzz"}, 1);
+            row.type.setJustificationType(juce::Justification::centred);
+            row.typeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+                apvts, pid + "Type", row.type);
+            addAndMakeVisible(row.type);
+
+            row.drive = std::make_unique<LabeledKnob>(apvts, pid + "Drive", "Drive");
+            row.tone  = std::make_unique<LabeledKnob>(apvts, pid + "Tone", "Tone");
+            row.level = std::make_unique<LabeledKnob>(apvts, pid + "Level", "Level");
+            addAndMakeVisible(*row.drive);
+            addAndMakeVisible(*row.tone);
+            addAndMakeVisible(*row.level);
+        }
+
+        mHint.setText("Three pedals in series feeding both rigs. Stack a boost into an "
+                      "overdrive, or set Type to Off to skip a slot.",
+                      juce::dontSendNotification);
+        mHint.setColour(juce::Label::textColourId, colors::textDim);
+        addAndMakeVisible(mHint);
+    }
+
+    void resized() override
+    {
+        auto area = contentArea();
+        mHint.setBounds(area.removeFromBottom(20));
+        const int rowH = area.getHeight() / nam_rig::DriveBlock::kSlots;
+        for (int sIdx = 0; sIdx < nam_rig::DriveBlock::kSlots; ++sIdx)
+        {
+            auto r = area.removeFromTop(rowH).reduced(0, 4);
+            auto left = r.removeFromLeft(116);
+            mRows[sIdx].label.setBounds(left.removeFromTop(18));
+            mRows[sIdx].type.setBounds(left.removeFromTop(26).reduced(0, 2));
+            const int w = juce::jmax(1, r.getWidth() / 3);
+            mRows[sIdx].drive->setBounds(r.removeFromLeft(w).reduced(6, 0));
+            mRows[sIdx].tone->setBounds(r.removeFromLeft(w).reduced(6, 0));
+            mRows[sIdx].level->setBounds(r.removeFromLeft(w).reduced(6, 0));
+        }
+    }
+
+private:
+    struct Row
+    {
+        juce::Label label;
+        juce::ComboBox type;
+        std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> typeAtt;
+        std::unique_ptr<LabeledKnob> drive, tone, level;
+    };
+    Row mRows[nam_rig::DriveBlock::kSlots];
+    juce::Label mHint;
+};
+
+//==============================================================================
 class AmpPanel : public BlockPanel
 {
 public:
