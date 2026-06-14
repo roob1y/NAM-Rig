@@ -409,13 +409,16 @@ private:
         return cnt > 0 ? std::sqrt(sum / (double)cnt) : 0.0;
     }
 
-    // Bracket the guitar-loudness band (~80 Hz .. 5 kHz) before the RMS so
-    // subsonics and distortion fizz don't skew the level measure. Uses the same
-    // verified RBJ Biquads the EQ/cab run.
+    // Bracket the guitar-loudness band (~80 Hz .. 3 kHz) before the RMS so
+    // subsonics and distortion fizz don't skew the level measure. The LPF is
+    // deliberately well below any standard loudness curve: distortion fizz lives
+    // ~4-10 kHz and we don't hear it as proportionally loud, so cutting it hard
+    // keeps a crunchy amp from being over-counted (and matched too quiet). Uses
+    // the same verified RBJ Biquads the EQ/cab run.
     void bandLimit(float *x, int n) const
     {
         Biquad hp = Biquad::highpass(mSampleRate, 80.0);
-        Biquad lp = Biquad::lowpass(mSampleRate, 5000.0);
+        Biquad lp = Biquad::lowpass(mSampleRate, 3000.0);
         hp.process(x, n);
         lp.process(x, n);
     }
