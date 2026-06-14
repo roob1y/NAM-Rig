@@ -62,6 +62,7 @@ static std::vector<float> naiveSlot(Kind k, float drive, const std::vector<float
     const double asym = (v.clip == 2) ? (double)v.bias : 0.0;
     const double inBias = (v.clip == 2) ? 0.0 : (double)v.bias;
     const float shapeAmt = 1.0f - v.shapeTrack * (1.0f - drive);
+    const bool midPost = (v.midPost > 0.5f);
     auto clipF = [&](double x) -> double {
         if (v.clip == 0) return std::tanh(x);
         if (v.clip == 1) return x > 1.0 ? 1.0 : (x < -1.0 ? -1.0 : x);
@@ -74,8 +75,9 @@ static std::vector<float> naiveSlot(Kind k, float drive, const std::vector<float
     {
         float u = in[i] * preGain;
         if (hpCoef > 0.0f) { hp += hpCoef * (u - hp); float hipassed = u - hp; u += shapeAmt * (hipassed - u); }
-        if (useMid) { float m = mid.processSample(u); u += shapeAmt * (m - u); }
+        if (useMid && !midPost) { float m = mid.processSample(u); u += shapeAmt * (m - u); }
         float c = (float)clipF((double)u + inBias);
+        if (useMid && midPost) { float m = mid.processSample(c); c += shapeAmt * (m - c); }
         if (useLp) { lpz += lpCoef * (c - lpz); c += shapeAmt * (lpz - c); }
         float dcOut = c - dcx + kDcR * dcy; dcx = c; dcy = dcOut; c = dcOut;
         y[i] = c * v.outTrim; // tone flat, level 0 dB

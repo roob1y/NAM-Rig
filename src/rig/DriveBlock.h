@@ -79,18 +79,21 @@ public:
         float shapeTrack;  // 0 = pre-shaper EQ always on; 1 = EQ (low-cut + mid)
                            //     scales with the Drive knob (the TS hump blooms
                            //     with gain instead of being a fixed band-pass)
+        float midPost;     // 0 = mid peak PRE-clip (treble booster input cap);
+                           //     1 = POST-clip (TS/RAT tone stack -> peak freq is
+                           //     level-stable instead of dragged down by clipping)
     };
 
     static Voicing voicingFor(Kind k)
     {
         switch (k)
         {                       // clip  gMin    gMax  lowCut   midHz  midDb midQ   lpHz   bias   pivot   outTrim
-        case Kind::Boost:      return { 0, 1.0f,  10.0f, 120.0f, 3500.0f, 8.0f, 0.5f,    0.0f, 0.20f, 2500.0f, 0.85f, 0.0f};
-        case Kind::Overdrive:  return { 0, 1.5f,  30.0f, 560.0f,  720.0f, 6.0f, 0.7f, 1300.0f, 0.05f,  720.0f, 1.10f, 1.0f};
-        case Kind::Distortion: return { 1, 2.0f, 130.0f,  50.0f, 1000.0f, 3.0f, 0.6f, 5000.0f, 0.00f, 1500.0f, 0.42f, 0.0f};
-        case Kind::Fuzz:       return { 2, 6.0f, 300.0f,  70.0f,    0.0f, 0.0f, 0.7f,    0.0f, 0.45f,  700.0f, 0.45f, 0.0f};
+        case Kind::Boost:      return { 0, 1.0f,  10.0f, 120.0f, 3500.0f, 8.0f, 0.5f,    0.0f, 0.20f, 2500.0f, 0.85f, 0.0f, 0.0f};
+        case Kind::Overdrive:  return { 0, 1.5f,  30.0f, 560.0f,  780.0f, 6.0f, 0.7f, 1300.0f, 0.05f,  720.0f, 1.10f, 1.0f, 1.0f};
+        case Kind::Distortion: return { 1, 2.0f, 130.0f,  50.0f, 1000.0f, 3.0f, 0.6f, 5000.0f, 0.00f, 1500.0f, 0.42f, 0.0f, 1.0f};
+        case Kind::Fuzz:       return { 2, 6.0f, 300.0f,  70.0f,    0.0f, 0.0f, 0.7f,    0.0f, 0.45f,  700.0f, 0.45f, 0.0f, 0.0f};
         case Kind::Off:
-        default:               return { 0, 1.0f,   1.0f,   0.0f,    0.0f, 0.0f, 0.7f,    0.0f, 0.00f,  700.0f, 1.00f, 0.0f};
+        default:               return { 0, 1.0f,   1.0f,   0.0f,    0.0f, 0.0f, 0.7f,    0.0f, 0.00f,  700.0f, 1.00f, 0.0f, 0.0f};
         }
     }
 
@@ -135,10 +138,12 @@ public:
             const float hpCoef = (v.lowCutHz > 0.0f) ? coefForHz(v.lowCutHz, sr) : 0.0f;
             const float lpCoef = (v.lpHz > 0.0f) ? coefForHz(v.lpHz, sr) : 0.0f;
             const bool useMid = (v.midDb != 0.0f);
+            const bool midPost = (v.midPost > 0.5f);
             const bool useLp = (v.lpHz > 0.0f);
             const double asym = (v.clip == 2) ? (double)v.bias : 0.0;     // type-2 rail
             const double inBias = (v.clip == 2) ? 0.0 : (double)v.bias;   // type 0/1 input bias
-            const float levelLin = std::pow(10.0f, s.levelDb.load() * 0.05f) * v.outTrim;
+            const float levelLin = std::pow(10.0f, s.levelDb.load() * 0.05f) * v.outTrim
+                                  * driveMakeup(k, s.drive.load()) * toneMakeup(k, s.tone.load());
 
             const float tilt = (s.tone.load() - 0.5f) * 2.0f;
             const float trebleG = std::pow(10.0f, (tilt * kMaxTiltDb) * 0.05f);
@@ -154,7 +159,7 @@ public:
                 float u = mono[i] * preGain;
 
                 if (hpCoef > 0.0f) { hp += hpCoef * (u - hp); const float hipassed = u - hp; u += shapeAmt * (hipassed - u); } // pre low-cut (drive-scaled)
-                if (useMid) { const float m = s.mid.processSample(u); u += shapeAmt * (m - u); }                                // mid / treble peak (drive-scaled)
+                if (useMid && !midPost) { const float m = s.mid.processSample(u); u += shapeAmt * (m - u); } // pre-clip peak (treble booster)
 
                 // waveshaper, 1st-order ADAA in DOUBLE (avoids float cancellation crackle)
                 const double xb = (double)u + inBias;
@@ -167,6 +172,7 @@ public:
                 x0 = xb;
                 float c = (float)y;
 
+                if (useMid && midPost) { const float m = s.mid.processSample(c); c += shapeAmt * (m - c); } // post-clip peak (TS/RAT tone stack; level-stable)
                 if (useLp) { lpz += lpCoef * (c - lpz); c += shapeAmt * (lpz - c); } // post low-pass (drive-scaled)
 
                 // DC blocker (one-pole HPF ~4 Hz): removes the offset asymmetric
@@ -233,6 +239,38 @@ private:
     {
         const double a = std::abs(x);
         return a + std::log1p(std::exp(-2.0 * a)) - 0.6931471805599453; // log(cosh x)
+    }
+
+    // ---- auto-gain: keep output level ~constant as Drive / Tone move ----
+    // Per-voicing makeup measured against a guitar-like reference, normalised so
+    // the knob centres (drive 0.5, tone 0.5) = unity (default sound unchanged).
+    // Drive table is 6 points (0..1), Tone table 5 points (0..1).
+    static float lerpTbl(const float *t, int n, float x)
+    {
+        const float pos = clamp01(x) * (float)(n - 1);
+        int i = (int)pos;
+        if (i >= n - 1) return t[n - 1];
+        return t[i] + (pos - (float)i) * (t[i + 1] - t[i]);
+    }
+    static float driveMakeup(Kind k, float drive)
+    {
+        static const float B[6] = {2.259f, 1.547f, 1.129f, 0.899f, 0.773f, 0.705f};
+        static const float O[6] = {2.297f, 1.524f, 1.112f, 0.909f, 0.807f, 0.738f};
+        static const float D[6] = {2.270f, 1.262f, 1.029f, 0.973f, 0.961f, 0.956f};
+        static const float F[6] = {1.266f, 1.078f, 1.013f, 0.991f, 0.985f, 0.985f};
+        const float *t = (k == Kind::Boost) ? B : (k == Kind::Overdrive) ? O
+                       : (k == Kind::Distortion) ? D : F;
+        return lerpTbl(t, 6, drive);
+    }
+    static float toneMakeup(Kind k, float tone)
+    {
+        static const float B[5] = {0.473f, 0.751f, 1.000f, 0.892f, 0.595f};
+        static const float O[5] = {0.554f, 0.857f, 1.000f, 0.756f, 0.473f};
+        static const float D[5] = {0.451f, 0.728f, 1.000f, 0.914f, 0.607f};
+        static const float F[5] = {0.643f, 0.953f, 1.000f, 0.708f, 0.436f};
+        const float *t = (k == Kind::Boost) ? B : (k == Kind::Overdrive) ? O
+                       : (k == Kind::Distortion) ? D : F;
+        return lerpTbl(t, 5, tone);
     }
 
     static float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
