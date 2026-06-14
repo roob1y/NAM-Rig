@@ -38,6 +38,7 @@ public:
     }
 
     juce::Slider &slider() { return mSlider; }
+    void setCaption(const juce::String &c) { mLabel.setText(c, juce::dontSendNotification); }
 
 private:
     juce::Label mLabel;
@@ -257,6 +258,7 @@ public:
             row.type.setJustificationType(juce::Justification::centred);
             row.typeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
                 apvts, pid + "Type", row.type);
+            row.type.onChange = [this] { refresh(); };
             addAndMakeVisible(row.type);
 
             row.drive = std::make_unique<LabeledKnob>(apvts, pid + "Drive", "Drive");
@@ -265,10 +267,11 @@ public:
             addAndMakeVisible(*row.drive);
             addAndMakeVisible(*row.tone);
             addAndMakeVisible(*row.level);
+            configureRow(sIdx);
         }
 
-        mHint.setText("Three pedals in series feeding both rigs. Stack a boost into an "
-                      "overdrive, or set Type to Off to skip a slot.",
+        mHint.setText("Three pedals in series feeding both rigs. Each pedal shows the "
+                      "controls its original hardware had.",
                       juce::dontSendNotification);
         mHint.setColour(juce::Label::textColourId, colors::textDim);
         addAndMakeVisible(mHint);
@@ -277,6 +280,19 @@ public:
         addAndMakeVisible(mAutoGain);
         mAutoGainAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             apvts, "driveAutoGain", mAutoGain);
+    }
+
+    void refresh() // editor timer: follow preset loads / type changes
+    {
+        bool changed = false;
+        for (int s = 0; s < nam_rig::DriveBlock::kSlots; ++s)
+            if (mRows[s].type.getSelectedItemIndex() != mRows[s].lastType)
+            {
+                configureRow(s);
+                changed = true;
+            }
+        if (changed)
+            resized();
     }
 
     void resized() override
@@ -293,20 +309,44 @@ public:
             auto left = r.removeFromLeft(116);
             mRows[sIdx].label.setBounds(left.removeFromTop(18));
             mRows[sIdx].type.setBounds(left.removeFromTop(26).reduced(0, 2));
-            const int w = juce::jmax(1, r.getWidth() / 3);
-            mRows[sIdx].drive->setBounds(r.removeFromLeft(w).reduced(6, 0));
-            mRows[sIdx].tone->setBounds(r.removeFromLeft(w).reduced(6, 0));
-            mRows[sIdx].level->setBounds(r.removeFromLeft(w).reduced(6, 0));
+            LabeledKnob *ks[3] = {mRows[sIdx].drive.get(), mRows[sIdx].tone.get(), mRows[sIdx].level.get()};
+            int nVis = 0;
+            for (auto *k : ks) if (k->isVisible()) ++nVis;
+            const int kw = juce::jmin(120, juce::jmax(1, r.getWidth() / 3));
+            auto grp = r.withSizeKeepingCentre(juce::jmax(kw, kw * nVis), r.getHeight());
+            for (auto *k : ks)
+                if (k->isVisible())
+                    k->setBounds(grp.removeFromLeft(kw).reduced(6, 0));
         }
     }
 
 private:
+    void configureRow(int slot)
+    {
+        Row &row = mRows[slot];
+        const int k = row.type.getSelectedItemIndex(); // 0 Off,1 Treble,2 OD,3 Dist,4 Fuzz
+        row.lastType = k;
+        const char *d = "", *t = "", *l = "";
+        switch (k)
+        {
+        case 1: d = "Boost"; break;                                   // Rangemaster: one knob
+        case 2: d = "Drive";      t = "Tone";   l = "Level";  break;  // Tube Screamer
+        case 3: d = "Distortion"; t = "Filter"; l = "Volume"; break;  // RAT
+        case 4: d = "Fuzz";                     l = "Volume"; break;  // Fuzz Face (no tone)
+        default: break;                                               // Off: no knobs
+        }
+        row.drive->setCaption(d); row.drive->setVisible(*d != '\0');
+        row.tone->setCaption(t);  row.tone->setVisible(*t != '\0');
+        row.level->setCaption(l); row.level->setVisible(*l != '\0');
+    }
+
     struct Row
     {
         juce::Label label;
         juce::ComboBox type;
         std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> typeAtt;
         std::unique_ptr<LabeledKnob> drive, tone, level;
+        int lastType = -1;
     };
     Row mRows[nam_rig::DriveBlock::kSlots];
     juce::Label mHint;
