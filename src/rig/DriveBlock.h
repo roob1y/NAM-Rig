@@ -57,6 +57,7 @@ public:
     void setTone(int slot, float v)    { at(slot).tone.store(clamp01(v)); }
     void setLevelDb(int slot, float v) { at(slot).levelDb.store(v); }
     void setAutoGain(bool on) { mAutoGain.store(on); } // level-compensate Drive/Tone (default off)
+    void setRange(int slot, int r) { at(slot).range.store(r); } // treble-boost cap switch: 0 Treble/1 Mid/2 Full
 
     bool anyActive() const
     {
@@ -98,6 +99,18 @@ public:
         }
     }
 
+    // Treble-boost input-cap switch: larger cap (Mid/Full) lets more low-end
+    // through and shifts the emphasis down (Treble = bright, Full = fat).
+    static void applyRange(Voicing &v, int rng)
+    {
+        switch (rng)
+        {
+        case 1: v.lowCutHz = 300.0f; v.midHz = 1500.0f; v.midDb = 6.0f; break; // Mid
+        case 2: v.lowCutHz = 130.0f; v.midHz = 2500.0f; v.midDb = 5.0f; break; // Full
+        default: v.lowCutHz = 600.0f; v.midHz = 3500.0f; v.midDb = 8.0f; break; // Treble
+        }
+    }
+
     void prepare(const BlockContext &ctx) override
     {
         mSampleRate = ctx.sampleRate;
@@ -123,11 +136,15 @@ public:
             const Kind k = (Kind)s.kind.load();
             if (k == Kind::Off)
                 continue;
-            const Voicing v = voicingFor(k);
+            Voicing v = voicingFor(k);
+            const int rng = (k == Kind::Boost) ? s.range.load() : 0;
+            if (k == Kind::Boost)
+                applyRange(v, rng);
 
-            if ((int)k != s.lastKind) // reconfigure the peak only on a voicing change
+            const int cfg = (int)k * 8 + rng; // reconfigure the peak on voicing OR range change
+            if (cfg != s.lastKind)
             {
-                s.lastKind = (int)k;
+                s.lastKind = cfg;
                 s.mid = (v.midDb != 0.0f) ? Biquad::peaking(sr, v.midHz, v.midQ, v.midDb)
                                           : Biquad::identity();
             }
@@ -203,6 +220,7 @@ private:
         std::atomic<float> drive{0.5f};
         std::atomic<float> tone{0.5f};
         std::atomic<float> levelDb{0.0f};
+        std::atomic<int> range{0};
         float hp = 0.0f, lp = 0.0f, toneLp = 0.0f, dcX1 = 0.0f, dcY1 = 0.0f;
         double x0 = 0.0; // ADAA history in double
         int lastKind = -1;

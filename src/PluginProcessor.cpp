@@ -100,6 +100,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
             juce::ParameterID(pid + "Level", 1), lbl + "Level",
             juce::NormalisableRange<float>(-12.0f, 12.0f, 0.1f), 0.0f,
             juce::AudioParameterFloatAttributes().withLabel("dB")));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID(pid + "Range", 1), lbl + "Range",
+            juce::StringArray{"Treble", "Mid", "Full"}, 0)); // treble-boost cap switch
     }
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID("driveAutoGain", 1), "Drive Auto Gain", false));
@@ -467,6 +470,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         mChain.drive.setDrive(s, apvts.getRawParameterValue(pid + "Drive")->load());
         mChain.drive.setTone(s, apvts.getRawParameterValue(pid + "Tone")->load());
         mChain.drive.setLevelDb(s, apvts.getRawParameterValue(pid + "Level")->load());
+        mChain.drive.setRange(s, (int)apvts.getRawParameterValue(pid + "Range")->load());
     }
     mChain.drive.setAutoGain(apvts.getRawParameterValue("driveAutoGain")->load() >= 0.5f);
     mChain.drive.setBypassed(!mChain.drive.anyActive());

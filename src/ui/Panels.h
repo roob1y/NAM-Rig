@@ -248,10 +248,15 @@ public:
             Row &row = mRows[sIdx];
             const juce::String pid = "drv" + juce::String(sIdx + 1);
 
-            row.label.setText("PEDAL " + juce::String(sIdx + 1), juce::dontSendNotification);
             row.label.setJustificationType(juce::Justification::centredLeft);
-            row.label.setColour(juce::Label::textColourId, colors::textDim);
+            row.label.setColour(juce::Label::textColourId, colors::accent);
+            row.label.setFont(RigLookAndFeel::withHeight(13.0f).boldened());
             addAndMakeVisible(row.label);
+
+            row.subtitle.setJustificationType(juce::Justification::centredLeft);
+            row.subtitle.setColour(juce::Label::textColourId, colors::textDim);
+            row.subtitle.setFont(RigLookAndFeel::withHeight(10.5f));
+            addAndMakeVisible(row.subtitle);
 
             row.type.addItemList(
                 juce::StringArray{"Off", "Treble Boost", "Overdrive", "Distortion", "Fuzz"}, 1);
@@ -260,6 +265,12 @@ public:
                 apvts, pid + "Type", row.type);
             row.type.onChange = [this] { refresh(); };
             addAndMakeVisible(row.type);
+
+            row.range.addItemList(juce::StringArray{"Treble", "Mid", "Full"}, 1);
+            row.range.setJustificationType(juce::Justification::centred);
+            row.rangeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+                apvts, pid + "Range", row.range);
+            addChildComponent(row.range); // shown only for the treble boost
 
             row.drive = std::make_unique<LabeledKnob>(apvts, pid + "Drive", "Drive");
             row.tone  = std::make_unique<LabeledKnob>(apvts, pid + "Tone", "Tone");
@@ -306,9 +317,16 @@ public:
         for (int sIdx = 0; sIdx < nam_rig::DriveBlock::kSlots; ++sIdx)
         {
             auto r = area.removeFromTop(rowH).reduced(0, 4);
-            auto left = r.removeFromLeft(116);
-            mRows[sIdx].label.setBounds(left.removeFromTop(18));
-            mRows[sIdx].type.setBounds(left.removeFromTop(26).reduced(0, 2));
+            auto left = r.removeFromLeft(132);
+            mRows[sIdx].label.setBounds(left.removeFromTop(16));
+            mRows[sIdx].type.setBounds(left.removeFromTop(24).reduced(0, 1));
+            mRows[sIdx].subtitle.setBounds(left.removeFromTop(14));
+            r.removeFromLeft(8);
+            if (mRows[sIdx].range.isVisible())
+            {
+                auto rr = r.removeFromRight(92);
+                mRows[sIdx].range.setBounds(rr.withSizeKeepingCentre(84, 26));
+            }
             LabeledKnob *ks[3] = {mRows[sIdx].drive.get(), mRows[sIdx].tone.get(), mRows[sIdx].level.get()};
             int nVis = 0;
             for (auto *k : ks) if (k->isVisible()) ++nVis;
@@ -327,24 +345,28 @@ private:
         const int k = row.type.getSelectedItemIndex(); // 0 Off,1 Treble,2 OD,3 Dist,4 Fuzz
         row.lastType = k;
         const char *d = "", *t = "", *l = "";
+        juce::String name, sub;
         switch (k)
         {
-        case 1: d = "Boost"; break;                                   // germanium treble booster: one knob
-        case 2: d = "Drive";      t = "Tone";   l = "Level";  break;  // mid-hump overdrive
-        case 3: d = "Distortion"; t = "Filter"; l = "Volume"; break;  // hard-clip distortion
-        case 4: d = "Fuzz";                     l = "Volume"; break;  // vintage fuzz (no tone)
-        default: break;                                               // Off: no knobs
+        case 1: d = "Boost"; name = "Range '65"; sub = "germanium treble boost"; break;
+        case 2: d = "Drive";      t = "Tone";   l = "Level";  name = "Overdrive";  sub = "mid-hump overdrive";  break;
+        case 3: d = "Distortion"; t = "Filter"; l = "Volume"; name = "Distortion"; sub = "hard-clip distortion"; break;
+        case 4: d = "Fuzz";                     l = "Volume"; name = "Fuzz";       sub = "germanium fuzz";       break;
+        default: name = "Pedal " + juce::String(slot + 1); sub = "(empty)"; break; // Off
         }
+        row.label.setText(name, juce::dontSendNotification);
+        row.subtitle.setText(sub, juce::dontSendNotification);
         row.drive->setCaption(d); row.drive->setVisible(*d != '\0');
         row.tone->setCaption(t);  row.tone->setVisible(*t != '\0');
         row.level->setCaption(l); row.level->setVisible(*l != '\0');
+        row.range.setVisible(k == 1); // 3-way cap switch only on the treble boost
     }
 
     struct Row
     {
-        juce::Label label;
-        juce::ComboBox type;
-        std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> typeAtt;
+        juce::Label label, subtitle;
+        juce::ComboBox type, range;
+        std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> typeAtt, rangeAtt;
         std::unique_ptr<LabeledKnob> drive, tone, level;
         int lastType = -1;
     };
