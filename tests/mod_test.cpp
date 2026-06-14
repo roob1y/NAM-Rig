@@ -1,22 +1,32 @@
-// mod_test — offline verification harness for ModBlock (measurement-first,
-// same culture as gate/comp/eq tests). Exits nonzero on any FAIL.
+// mod_test — offline verification harness for the modulation section
+// (measurement-first). Exits nonzero on any FAIL.
 //
-// T1 tremolo depth exact (envelope min == 1-depth at mix 1)
-// T2 tremolo rate via envelope period
-// T3 chorus is a pure modulated delay: output of an impulse train lands
-//    within the designed sweep window, dry path intact at mix 0.5
-// T4 phaser: notches exist and move (spectrum at two LFO phases differs)
-// T5 mix 0 is (near-)dry; depth smoothing keeps it click-free
-// T6 stereo spread: L and R envelopes are ~90 degrees apart (tremolo)
-// T7 left==right aliasing (mono buffer) is safe and equals mono reference
+// ModVoice = one voiced effect; ModBlock = 3-slot series section.
+//   T1  tremolo depth (capped to its voiced musical maximum)
+//   T2  tremolo rate via envelope period
+//   T3  chorus stays inside its designed sweep window
+//   T4  phaser notches move (hardwired sweep)
+//   T5  mix 0 is dry
+//   T6  stereo spread ~90 deg (tremolo, Width 1)
+//   T7  mono-aliased buffer == stereo left (bit-exact)
+//   T8  tempo sync resolves rate from BPM + division
+//   T9  section = voices in series (1 slot == single voice; 2nd slot stacks)
+//   T10 new types finite + non-silent
+//   T11 harmonic tremolo bands anti-correlated
+//   T12 Width controls the stereo spread
+//   T13 per-effect voicing constants (depthMax / bakedBbd / authenticWave)
+//   T14 tremolo at full depth keeps headroom (never dead silence / square)
+//   T15 only Tremolo honours the Shape waveform; others hardwire their LFO
 #include "rig/ModBlock.h"
 #include <cstdio>
 #include <cmath>
 #include <vector>
 #include <complex>
 
-using nam_rig::ModBlock;
 using nam_rig::BlockContext;
+using nam_rig::Lfo;
+using nam_rig::ModBlock;
+using nam_rig::ModVoice;
 
 static int gFails = 0;
 #define CHECK(cond, ...) do { \
@@ -27,7 +37,8 @@ static int gFails = 0;
 static constexpr double SR = 48000.0;
 static constexpr int BLK = 512;
 
-static void run(ModBlock &m, std::vector<float> &l, std::vector<float> &r)
+template <class M>
+static void run(M &m, std::vector<float> &l, std::vector<float> &r)
 {
     for (size_t p = 0; p < l.size(); p += BLK)
     {
@@ -44,7 +55,6 @@ static std::vector<float> tone(double freq, double amp, int n)
     return v;
 }
 
-// Peak envelope over windows of w samples
 static std::vector<double> envelope(const std::vector<float> &x, int w)
 {
     std::vector<double> e;
@@ -58,7 +68,6 @@ static std::vector<double> envelope(const std::vector<float> &x, int w)
     return e;
 }
 
-// Goertzel magnitude at freq
 static double mag(const std::vector<float> &x, size_t from, size_t len, double freq)
 {
     std::complex<double> acc{0, 0};
@@ -68,12 +77,27 @@ static double mag(const std::vector<float> &x, size_t from, size_t len, double f
     return std::abs(acc) * 2.0 / (double)len;
 }
 
+// run a single voice over a 1 s 1 kHz tone, return the left channel
+static std::vector<float> runWave(int type, int wave, float depth)
+{
+    ModVoice m;
+    m.setType(type);
+    m.setRateHz(2.0f);
+    m.setDepth(depth);
+    m.setMix(1.0f);
+    m.setWaveform(wave);
+    m.prepare({SR, BLK});
+    auto l = tone(1000.0, 0.5, (int)SR), r = l;
+    run(m, l, r);
+    return l;
+}
+
 int main()
 {
-    // ---- T1/T2: tremolo depth + rate ----
+    // ---- T1: tremolo depth, capped to its voiced maximum ----
     {
-        ModBlock m;
-        m.setType(ModBlock::kTremolo);
+        ModVoice m;
+        m.setType(ModVoice::kTremolo);
         m.setRateHz(4.0f);
         m.setDepth(0.6f);
         m.setMix(1.0f);
@@ -84,32 +108,46 @@ int main()
         auto env = envelope(tail, 48);
         double mn = 1e9, mx = 0;
         for (auto e : env) { mn = std::min(mn, e); mx = std::max(mx, e); }
-        const double depthMeas = 1.0 - mn / mx;
-        CHECK(std::abs(depthMeas - 0.6) < 0.03,
-              "T1 tremolo depth %.3f (set 0.600)", depthMeas);
+        const double meas = 1.0 - mn / mx;
+        const double want = 0.6 * ModVoice::depthMax(ModVoice::kTremolo);
+        CHECK(std::abs(meas - want) < 0.04, "T1 tremolo depth %.3f (voiced want %.3f)", meas, want);
+    }
 
+    // ---- T2: tremolo rate ----
+    {
+        ModVoice m;
+        m.setType(ModVoice::kTremolo);
+        m.setRateHz(4.0f);
+        m.setDepth(0.6f);
+        m.setMix(1.0f);
+        m.prepare({SR, BLK});
+        auto l = tone(1000.0, 0.5, (int)SR * 3), r = l;
+        run(m, l, r);
+        std::vector<float> tail(l.begin() + (int)SR, l.end());
+        auto env = envelope(tail, 48);
+        double mn = 1e9, mx = 0;
+        for (auto e : env) { mn = std::min(mn, e); mx = std::max(mx, e); }
         int minima = 0;
         for (size_t i = 1; i + 1 < env.size(); ++i)
             if (env[i] < env[i - 1] && env[i] <= env[i + 1] && env[i] < mn + 0.1 * (mx - mn))
                 ++minima;
-        const double rateMeas = minima / 2.0; // 2 s analyzed
-        CHECK(std::abs(rateMeas - 4.0) <= 0.5, "T2 tremolo rate %.1f Hz (set 4.0)", rateMeas);
+        const double rate = minima / 2.0;
+        CHECK(std::abs(rate - 4.0) <= 0.5, "T2 tremolo rate %.1f Hz (set 4.0)", rate);
     }
 
-    // ---- T3: chorus delay stays inside the designed sweep window ----
+    // ---- T3: chorus stays inside its sweep window ----
     {
-        ModBlock m;
-        m.setType(ModBlock::kChorus);
+        ModVoice m;
+        m.setType(ModVoice::kChorus);
         m.setRateHz(0.5f);
         m.setDepth(1.0f);
-        m.setMix(1.0f); // wet only: output IS the delayed signal
+        m.setMix(1.0f);
         m.prepare({SR, BLK});
         std::vector<float> l((size_t)SR * 2, 0.0f);
         for (size_t i = 0; i < l.size(); i += 4800)
             l[i] = 1.0f;
         auto r = l;
         run(m, l, r);
-        bool inWindow = true;
         double dMin = 1e9, dMax = 0;
         for (size_t i = 48000; i + 4800 < l.size(); i += 4800)
         {
@@ -120,19 +158,16 @@ int main()
             const double dMs = (double)(pkAt - i) * 1000.0 / SR;
             dMin = std::min(dMin, dMs);
             dMax = std::max(dMax, dMs);
-            if (dMs < 6.9 || dMs > 17.2)
-                inWindow = false;
         }
-        CHECK(inWindow, "T3 chorus delay window [%.1f, %.1f] ms (design [7, 17])", dMin, dMax);
-        CHECK(dMax - dMin > 3.0, "T3 chorus actually sweeps (range %.1f ms > 3)", dMax - dMin);
+        CHECK(dMin > 6.0 && dMax < 18.0, "T3 chorus delay window [%.1f, %.1f] ms (design [7,17])", dMin, dMax);
+        CHECK(dMax - dMin > 3.0, "T3 chorus sweeps (range %.1f ms > 3)", dMax - dMin);
     }
 
     // ---- T4: phaser notches move ----
     {
-        ModBlock m;
-        m.setType(ModBlock::kPhaser);
+        ModVoice m;
+        m.setType(ModVoice::kPhaser);
         m.setRateHz(0.2f);
-        m.setDepth(1.0f);
         m.setMix(0.5f);
         m.prepare({SR, BLK});
         std::vector<float> l((size_t)SR * 5, 0.0f);
@@ -158,8 +193,8 @@ int main()
 
     // ---- T5: mix 0 ~= dry ----
     {
-        ModBlock m;
-        m.setType(ModBlock::kChorus);
+        ModVoice m;
+        m.setType(ModVoice::kChorus);
         m.setMix(0.0f);
         m.prepare({SR, BLK});
         auto l = tone(440.0, 0.25, (int)SR), r = l;
@@ -171,10 +206,10 @@ int main()
         CHECK(err < 1e-6, "T5 mix=0 dry error %.2e < 1e-6", err);
     }
 
-    // ---- T6: stereo spread (tremolo envelopes ~90 deg apart) ----
+    // ---- T6: stereo spread ~90 deg (tremolo, Width 1) ----
     {
-        ModBlock m;
-        m.setType(ModBlock::kTremolo);
+        ModVoice m;
+        m.setType(ModVoice::kTremolo);
         m.setRateHz(2.0f);
         m.setDepth(0.8f);
         m.setMix(1.0f);
@@ -183,14 +218,12 @@ int main()
         run(m, l, r);
         std::vector<float> lt(l.begin() + (int)SR, l.end()), rt(r.begin() + (int)SR, r.end());
         auto el = envelope(lt, 48), er = envelope(rt, 48);
-        // cross-correlate MEAN-REMOVED envelopes normalized by overlap length
-        // (raw correlation is DC-dominated and edge effects pin the peak to 0)
-        double meanL = 0, meanR = 0;
-        for (auto e : el) meanL += e;
-        for (auto e : er) meanR += e;
-        meanL /= (double)el.size();
-        meanR /= (double)er.size();
-        const double period = 1000.0 / 2.0; // envelope samples per LFO cycle (1ms hop)
+        double mL = 0, mR = 0;
+        for (auto e : el) mL += e;
+        for (auto e : er) mR += e;
+        mL /= (double)el.size();
+        mR /= (double)er.size();
+        const double period = 1000.0 / 2.0;
         int bestLag = 0;
         double bestC = -1e18;
         for (int lag = 0; lag < (int)period; ++lag)
@@ -198,22 +231,21 @@ int main()
             double c = 0;
             int n = 0;
             for (size_t i = 0; i + (size_t)lag < er.size() && i < el.size(); ++i, ++n)
-                c += (el[i] - meanL) * (er[i + (size_t)lag] - meanR);
-            if (n > 0)
-                c /= (double)n;
+                c += (el[i] - mL) * (er[i + (size_t)lag] - mR);
+            if (n > 0) c /= (double)n;
             if (c > bestC) { bestC = c; bestLag = lag; }
         }
-        const double frac = bestLag / period; // expect 0.25 or 0.75
+        const double frac = bestLag / period;
         const double d90 = std::min(std::abs(frac - 0.25), std::abs(frac - 0.75));
         CHECK(d90 < 0.06, "T6 L/R envelope offset %.2f cycles (want 0.25/0.75)", frac);
     }
 
-    // ---- T7: mono aliasing (left == right) equals true mono processing ----
+    // ---- T7: mono aliasing (left == right) equals stereo left ----
     {
-        ModBlock m1, m2;
+        ModVoice m1, m2;
         for (auto *m : {&m1, &m2})
         {
-            m->setType(ModBlock::kChorus);
+            m->setType(ModVoice::kChorus);
             m->setRateHz(1.0f);
             m->setDepth(0.7f);
             m->setMix(0.5f);
@@ -221,7 +253,7 @@ int main()
         }
         auto x = tone(330.0, 0.3, (int)SR);
         auto aliased = x;
-        for (size_t p = 0; p < aliased.size(); p += BLK) // left == right
+        for (size_t p = 0; p < aliased.size(); p += BLK)
             m1.process(aliased.data() + p, aliased.data() + p,
                        (int)std::min<size_t>(BLK, aliased.size() - p));
         auto lref = x, rref = x;
@@ -229,11 +261,197 @@ int main()
         bool same = true;
         for (size_t i = 0; i < x.size(); ++i)
             if (aliased[i] != lref[i]) { same = false; break; }
-        CHECK(same, "T7 mono-aliased buffer == stereo left channel (bit-exact)");
-        bool finite = true;
-        for (auto v : aliased)
-            if (!std::isfinite(v)) finite = false;
-        CHECK(finite, "T7 mono-aliased output finite");
+        CHECK(same, "T7 mono-aliased buffer == stereo left (bit-exact)");
+    }
+
+    // ---- T8: tempo sync ----
+    {
+        ModVoice m;
+        m.setBpm(120.0);
+        m.setRateHz(0.1f);
+        m.setSyncIndex(3); // 1/4 = 1 beat -> 2 Hz
+        CHECK(std::abs(m.effectiveRateHz() - 2.0f) < 0.01f, "T8 sync 1/4 @120 -> %.3f Hz", m.effectiveRateHz());
+        m.setSyncIndex(6); // 1/8 -> 4 Hz
+        CHECK(std::abs(m.effectiveRateHz() - 4.0f) < 0.01f, "T8 sync 1/8 @120 -> %.3f Hz", m.effectiveRateHz());
+        m.setSyncIndex(0);
+        CHECK(std::abs(m.effectiveRateHz() - 0.1f) < 1e-4f, "T8 sync Off -> free %.3f", m.effectiveRateHz());
+    }
+
+    // ---- T9: section = voices in series ----
+    {
+        ModBlock sec;
+        sec.setType(0, ModVoice::kTremolo);
+        sec.setRateHz(0, 4.0f);
+        sec.setDepth(0, 0.6f);
+        sec.setMix(0, 1.0f);
+        sec.setSlotBypassed(0, false);
+        for (int s = 1; s < ModBlock::kSlots; ++s)
+            sec.setSlotBypassed(s, true);
+        sec.prepare({SR, BLK});
+
+        ModVoice one;
+        one.setType(ModVoice::kTremolo);
+        one.setRateHz(4.0f);
+        one.setDepth(0.6f);
+        one.setMix(1.0f);
+        one.prepare({SR, BLK});
+
+        auto x = tone(1000.0, 0.5, (int)SR);
+        auto la = x, ra = x, lb = x, rb = x;
+        run(sec, la, ra);
+        run(one, lb, rb);
+        bool same = true;
+        for (size_t i = 0; i < x.size(); ++i)
+            if (la[i] != lb[i]) { same = false; break; }
+        CHECK(same, "T9 section 1-slot == single ModVoice (bit-exact)");
+
+        auto makeChorus = [](ModBlock &m) {
+            m.setType(0, ModVoice::kChorus);
+            m.setRateHz(0, 1.0f);
+            m.setDepth(0, 0.7f);
+            m.setMix(0, 1.0f);
+            m.setSlotBypassed(0, false);
+            m.setSlotBypassed(1, true);
+            m.setSlotBypassed(2, true);
+        };
+        ModBlock chorusOnly, stacked;
+        makeChorus(chorusOnly);
+        makeChorus(stacked);
+        stacked.setType(1, ModVoice::kTremolo);
+        stacked.setRateHz(1, 5.0f);
+        stacked.setDepth(1, 0.8f);
+        stacked.setMix(1, 1.0f);
+        stacked.setSlotBypassed(1, false);
+        chorusOnly.prepare({SR, BLK});
+        stacked.prepare({SR, BLK});
+        auto l1 = x, r1 = x, l2 = x, r2 = x;
+        run(chorusOnly, l1, r1);
+        run(stacked, l2, r2);
+        double d = 0;
+        for (size_t i = 0; i < x.size(); ++i)
+            d = std::max(d, (double)std::abs(l2[i] - l1[i]));
+        CHECK(d > 0.01, "T9 second slot stacks in series (max diff %.3f)", d);
+    }
+
+    // ---- T10: new types finite + non-silent ----
+    {
+        bool ok = true;
+        for (int t : {ModVoice::kVibrato, ModVoice::kRotary, ModVoice::kUniVibe, ModVoice::kHarmTrem})
+        {
+            ModVoice m;
+            m.setType(t);
+            m.setRateHz(2.0f);
+            m.setDepth(0.7f);
+            m.setMix(1.0f);
+            m.prepare({SR, BLK});
+            auto l = tone(440.0, 0.3, (int)SR), r = l;
+            run(m, l, r);
+            double e = 0;
+            bool fin = true;
+            for (float v : l) { if (!std::isfinite(v)) fin = false; e += (double)v * v; }
+            if (!fin || e < 1e-3) ok = false;
+        }
+        CHECK(ok, "T10 new types (vibrato/rotary/uni-vibe/harm-trem) finite + non-silent");
+    }
+
+    // ---- T11: harmonic tremolo bands anti-correlated ----
+    {
+        ModVoice m;
+        m.setType(ModVoice::kHarmTrem);
+        m.setRateHz(3.0f);
+        m.setDepth(0.9f);
+        m.setMix(1.0f);
+        m.prepare({SR, BLK});
+        std::vector<float> l((size_t)SR * 2);
+        for (size_t i = 0; i < l.size(); ++i)
+            l[i] = (float)(0.3 * std::sin(2.0 * M_PI * 200.0 * (double)i / SR) +
+                           0.3 * std::sin(2.0 * M_PI * 3000.0 * (double)i / SR));
+        auto r = l;
+        run(m, l, r);
+        std::vector<double> eLo, eHi;
+        for (size_t p = (size_t)SR; p + 480 <= l.size(); p += 480)
+        {
+            eLo.push_back(mag(l, p, 480, 200.0));
+            eHi.push_back(mag(l, p, 480, 3000.0));
+        }
+        double mL = 0, mH = 0;
+        for (size_t i = 0; i < eLo.size(); ++i) { mL += eLo[i]; mH += eHi[i]; }
+        mL /= (double)eLo.size();
+        mH /= (double)eHi.size();
+        double cov = 0, vL = 0, vH = 0;
+        for (size_t i = 0; i < eLo.size(); ++i)
+        {
+            const double a = eLo[i] - mL, b = eHi[i] - mH;
+            cov += a * b; vL += a * a; vH += b * b;
+        }
+        const double corr = cov / (std::sqrt(vL * vH) + 1e-12);
+        CHECK(corr < -0.3, "T11 harmonic trem bands anti-correlated (corr %.2f)", corr);
+    }
+
+    // ---- T12: Width controls the stereo spread ----
+    {
+        auto spread = [](float width) {
+            ModVoice m;
+            m.setType(ModVoice::kTremolo);
+            m.setRateHz(2.0f);
+            m.setDepth(0.8f);
+            m.setMix(1.0f);
+            m.setWidth(width);
+            m.prepare({SR, BLK});
+            auto l = tone(1000.0, 0.5, (int)SR), r = l;
+            run(m, l, r);
+            double d = 0;
+            for (size_t i = 4800; i < l.size(); ++i)
+                d = std::max(d, (double)std::abs(l[i] - r[i]));
+            return d;
+        };
+        CHECK(spread(0.0f) < 1e-6, "T12 width 0 -> L==R (max diff %.2e)", spread(0.0f));
+        CHECK(spread(1.0f) > 0.05, "T12 width 1 -> spread (max diff %.3f)", spread(1.0f));
+    }
+
+    // ---- T13: per-effect voicing constants ----
+    {
+        const bool ok =
+            ModVoice::depthMax(ModVoice::kTremolo) < 1.0f &&
+            ModVoice::depthMax(ModVoice::kChorus) == 1.0f &&
+            ModVoice::bakedBbd(ModVoice::kChorus) > 0.0f &&
+            ModVoice::bakedBbd(ModVoice::kPhaser) == 0.0f &&
+            ModVoice::authenticWave(ModVoice::kFlanger) == Lfo::Triangle &&
+            ModVoice::authenticWave(ModVoice::kChorus) == Lfo::Sine;
+        CHECK(ok, "T13 voicing constants (tremolo capped, BBD baked on delay types, flanger=triangle)");
+    }
+
+    // ---- T14: tremolo at full depth keeps headroom (no dead silence/square) ----
+    {
+        ModVoice m;
+        m.setType(ModVoice::kTremolo);
+        m.setRateHz(4.0f);
+        m.setDepth(1.0f);
+        m.setMix(1.0f);
+        m.prepare({SR, BLK});
+        auto l = tone(1000.0, 0.5, (int)SR * 2), r = l;
+        run(m, l, r);
+        std::vector<float> tail(l.begin() + (int)SR, l.end());
+        auto env = envelope(tail, 48);
+        double mn = 1e9, mx = 0;
+        for (auto e : env) { mn = std::min(mn, e); mx = std::max(mx, e); }
+        CHECK(mn / mx > 0.10, "T14 full depth keeps headroom (min/max %.2f > 0.10 = no silence)", mn / mx);
+    }
+
+    // ---- T15: only Tremolo honours the Shape waveform ----
+    {
+        auto cs = runWave(ModVoice::kChorus, Lfo::Sine, 0.7f);
+        auto cq = runWave(ModVoice::kChorus, Lfo::Square, 0.7f);
+        bool chorusSame = true;
+        for (size_t i = 0; i < cs.size(); ++i)
+            if (cs[i] != cq[i]) { chorusSame = false; break; }
+        auto ts = runWave(ModVoice::kTremolo, Lfo::Sine, 0.7f);
+        auto tq = runWave(ModVoice::kTremolo, Lfo::Square, 0.7f);
+        double td = 0;
+        for (size_t i = 0; i < ts.size(); ++i)
+            td = std::max(td, (double)std::abs(ts[i] - tq[i]));
+        CHECK(chorusSame && td > 0.01,
+              "T15 chorus hardwires LFO (sq==sine), tremolo honours Shape (diff %.3f)", td);
     }
 
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);

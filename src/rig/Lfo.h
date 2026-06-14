@@ -10,37 +10,64 @@
 namespace nam_rig
 {
 
-// Sine LFO with a phase accumulator in [0,1). Stereo offsets are read with
-// value(offset01) so L/R stay phase-locked to one accumulator.
+// LFO with a phase accumulator in [0,1). Stereo offsets are read with
+// value(offset01) so L/R stay phase-locked to one accumulator. Waveform
+// defaults to Sine; DelayBlock never changes it, so its behaviour is byte
+// identical to the original sine-only LFO.
 class Lfo
 {
 public:
+    enum Wave { Sine = 0, Triangle, Square, SampleHold };
+
     void prepare(double fs) { mFs = fs; mPhase = 0.0; setRateHz(mRateHz); }
-    void reset() { mPhase = 0.0; }
+    void reset()
+    {
+        mPhase = 0.0;
+        mHeld = 0.0f;
+        mRng = 0x2545F491u;
+    }
 
     void setRateHz(float hz)
     {
         mRateHz = hz;
         mInc = (double)hz / mFs;
     }
+    void setWaveform(int w) { mWave = (Wave)w; }
 
-    // -1..1 sine at (phase + offset01 cycles). Does not advance.
+    // -1..1 at (phase + offset01 cycles). Does not advance.
     float value(double offset01 = 0.0) const
     {
-        return (float)std::sin(2.0 * kPi * (mPhase + offset01));
+        if (mWave == Sine) // exact original path (DelayBlock relies on this)
+            return (float)std::sin(2.0 * kPi * (mPhase + offset01));
+        if (mWave == SampleHold)
+            return mHeld; // stepped: stereo offset is moot
+        double p = mPhase + offset01;
+        p -= std::floor(p); // wrap to [0,1)
+        if (mWave == Triangle)
+            return (float)(1.0 - 4.0 * std::abs(p - 0.5)); // p0:-1 p.5:+1
+        return p < 0.5 ? 1.0f : -1.0f;                     // Square
     }
 
     void advance()
     {
         mPhase += mInc;
         if (mPhase >= 1.0)
+        {
             mPhase -= 1.0;
+            // refresh the sample-and-hold value once per cycle (LCG; only used
+            // by the SampleHold waveform, harmless otherwise).
+            mRng = mRng * 1664525u + 1013904223u;
+            mHeld = (float)((double)(mRng >> 8) / (double)(1u << 24)) * 2.0f - 1.0f;
+        }
     }
 
 private:
     static constexpr double kPi = 3.14159265358979323846;
     double mFs = 48000.0, mPhase = 0.0, mInc = 0.0;
     float mRateHz = 1.0f;
+    Wave mWave = Sine;
+    float mHeld = 0.0f;
+    uint32_t mRng = 0x2545F491u;
 };
 
 // Fractional delay line, 4-point Hermite interpolation. Power-of-two ring.

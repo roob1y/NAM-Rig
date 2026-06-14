@@ -131,23 +131,45 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::NormalisableRange<float>(2000.0f, 20000.0f, 10.0f, 0.5f), 20000.0f,
         juce::AudioParameterFloatAttributes().withLabel("Hz")));
 
-    // --- Modulation (rig/ModBlock.h; verified by tests/mod_test.cpp) ---
-    params.push_back(std::make_unique<juce::AudioParameterChoice>(
-        juce::ParameterID("modType", 1), "Mod Type",
-        juce::StringArray{"Chorus", "Flanger", "Phaser", "Tremolo"}, 0));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("modRate", 1), "Mod Rate",
-        juce::NormalisableRange<float>(0.05f, 10.0f, 0.01f, 0.4f), 0.8f,
-        juce::AudioParameterFloatAttributes().withLabel("Hz")));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("modDepth", 1), "Mod Depth",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("modFeedback", 1), "Mod Feedback",
-        juce::NormalisableRange<float>(0.0f, 0.9f, 0.01f), 0.0f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("modMix", 1), "Mod Mix",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+    // --- Modulation: 3-slot series section (rig/ModBlock.h; mod_test.cpp).
+    // Per-slot bank (superset; the panel shows only each effect's real
+    // controls). Slot 1 on by default = the old single-chorus default.
+    for (int s = 1; s <= nam_rig::ModBlock::kSlots; ++s)
+    {
+        const juce::String p = "mod" + juce::String(s);
+        const juce::String n = "Mod " + juce::String(s) + " ";
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID(p + "Type", 1), n + "Type",
+            juce::StringArray{"Chorus", "Flanger", "Phaser", "Tremolo",
+                              "Vibrato", "Rotary", "Uni-Vibe", "Harm Trem"},
+            0));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID(p + "Wave", 1), n + "Waveform",
+            juce::StringArray{"Sine", "Triangle", "Square", "S&H"}, 0));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID(p + "Sync", 1), n + "Sync",
+            juce::StringArray{"Off", "1/1", "1/2", "1/4", "1/4.", "1/4T",
+                              "1/8", "1/8.", "1/8T", "1/16"},
+            0));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(p + "Rate", 1), n + "Rate",
+            juce::NormalisableRange<float>(0.05f, 10.0f, 0.01f, 0.4f), 0.8f,
+            juce::AudioParameterFloatAttributes().withLabel("Hz")));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(p + "Depth", 1), n + "Depth",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(p + "Feedback", 1), n + "Feedback",
+            juce::NormalisableRange<float>(0.0f, 0.9f, 0.01f), 0.0f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(p + "Mix", 1), n + "Mix",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(p + "Width", 1), n + "Width",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID(p + "On", 1), n + "Enable", s == 1));
+    }
 
     // --- Delay (rig/DelayBlock.h; verified by tests/delay_test.cpp) ---
     // Order must match DelayBlock::kSyncBeats — append only.
@@ -530,17 +552,32 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     }
 
     // Stereo section (all zero-latency; plain chain bypass is safe).
-    mChain.mod.setType((int)apvts.getRawParameterValue("modType")->load());
-    mChain.mod.setRateHz(apvts.getRawParameterValue("modRate")->load());
-    mChain.mod.setDepth(apvts.getRawParameterValue("modDepth")->load());
-    mChain.mod.setFeedback(apvts.getRawParameterValue("modFeedback")->load());
-    mChain.mod.setMix(apvts.getRawParameterValue("modMix")->load());
+    // 3-slot mod section (ids prebuilt = no per-block string alloc; cf. EQ bands)
+    static const char *const modIds[3][9] = {
+        {"mod1Type", "mod1Wave", "mod1Sync", "mod1Rate", "mod1Depth", "mod1Feedback", "mod1Mix", "mod1Width", "mod1On"},
+        {"mod2Type", "mod2Wave", "mod2Sync", "mod2Rate", "mod2Depth", "mod2Feedback", "mod2Mix", "mod2Width", "mod2On"},
+        {"mod3Type", "mod3Wave", "mod3Sync", "mod3Rate", "mod3Depth", "mod3Feedback", "mod3Mix", "mod3Width", "mod3On"}};
+    for (int s = 0; s < nam_rig::ModBlock::kSlots; ++s)
+    {
+        mChain.mod.setType(s, (int)apvts.getRawParameterValue(modIds[s][0])->load());
+        mChain.mod.setWaveform(s, (int)apvts.getRawParameterValue(modIds[s][1])->load());
+        mChain.mod.setSyncIndex(s, (int)apvts.getRawParameterValue(modIds[s][2])->load());
+        mChain.mod.setRateHz(s, apvts.getRawParameterValue(modIds[s][3])->load());
+        mChain.mod.setDepth(s, apvts.getRawParameterValue(modIds[s][4])->load());
+        mChain.mod.setFeedback(s, apvts.getRawParameterValue(modIds[s][5])->load());
+        mChain.mod.setMix(s, apvts.getRawParameterValue(modIds[s][6])->load());
+        mChain.mod.setWidth(s, apvts.getRawParameterValue(modIds[s][7])->load());
+        mChain.mod.setSlotBypassed(s, apvts.getRawParameterValue(modIds[s][8])->load() < 0.5f);
+    }
     mChain.mod.setBypassed(apvts.getRawParameterValue("modOn")->load() < 0.5f);
 
     if (auto *ph = getPlayHead())
         if (auto pos = ph->getPosition())
             if (auto bpm = pos->getBpm())
+            {
                 mChain.delay.setBpm(*bpm);
+                mChain.mod.setBpm(*bpm);
+            }
     mChain.delay.setSyncIndex((int)apvts.getRawParameterValue("delaySync")->load());
     mChain.delay.setTimeMs(apvts.getRawParameterValue("delayTime")->load());
     mChain.delay.setFeedback(apvts.getRawParameterValue("delayFeedback")->load());
