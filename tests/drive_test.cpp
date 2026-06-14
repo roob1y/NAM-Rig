@@ -76,7 +76,7 @@ static std::vector<float> naiveSlot(Kind k, float drive, const std::vector<float
         if (hpCoef > 0.0f) { hp += hpCoef * (u - hp); float hipassed = u - hp; u += shapeAmt * (hipassed - u); }
         if (useMid) { float m = mid.processSample(u); u += shapeAmt * (m - u); }
         float c = (float)clipF((double)u + inBias);
-        if (useLp) { lpz += lpCoef * (c - lpz); c = lpz; }
+        if (useLp) { lpz += lpCoef * (c - lpz); c += shapeAmt * (lpz - c); }
         float dcOut = c - dcx + kDcR * dcy; dcx = c; dcy = dcOut; c = dcOut;
         y[i] = c * v.outTrim; // tone flat, level 0 dB
     }
@@ -174,15 +174,15 @@ int main()
               "T6 Fuzz asymmetric (soft/hard) vs symmetric Dist (h2/h1 %.3f vs %.3f)", h2overH1(fz), h2overH1(ds));
     }
 
-    // ---- T7: tone tilt up = brighter (odd 7th harmonic above the OD pivot) ----
+    // ---- T7: tone tilt up = brighter (small-signal, above the pivot) ----
     {
-        auto in = sine(220.0, 0.1f, 16000);
+        auto in = sine(2000.0, 0.01f, 16384);
         auto hi = in, lo = in;
         DriveBlock a, b;
-        a.setKind(0, (int)Kind::Overdrive); a.setDrive(0, 0.7f); a.setTone(0, 0.9f); a.prepare({SR, BLK}); run(a, hi);
-        b.setKind(0, (int)Kind::Overdrive); b.setDrive(0, 0.7f); b.setTone(0, 0.1f); b.prepare({SR, BLK}); run(b, lo);
-        const double hiT = goertzel(hi, 1540.0), loT = goertzel(lo, 1540.0);
-        CHECK(hiT > loT * 1.5, "T7 tone up = brighter (HF %.2e > %.2e)", hiT, loT);
+        a.setKind(0, (int)Kind::Overdrive); a.setDrive(0, 0.5f); a.setTone(0, 0.9f); a.prepare({SR, BLK}); run(a, hi);
+        b.setKind(0, (int)Kind::Overdrive); b.setDrive(0, 0.5f); b.setTone(0, 0.1f); b.prepare({SR, BLK}); run(b, lo);
+        const double hiT = goertzel(hi, 2000.0), loT = goertzel(lo, 2000.0);
+        CHECK(hiT > loT * 1.5, "T7 tone up = brighter at 2kHz (%.2e > %.2e)", hiT, loT);
     }
 
     // ---- T8: Overdrive at DRIVE 0 stays full-range (no band-pass scoop) ----

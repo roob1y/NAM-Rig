@@ -86,7 +86,7 @@ public:
         switch (k)
         {                       // clip  gMin    gMax  lowCut   midHz  midDb midQ   lpHz   bias   pivot   outTrim
         case Kind::Boost:      return { 0, 1.0f,  10.0f, 120.0f, 3500.0f, 8.0f, 0.5f,    0.0f, 0.20f, 2500.0f, 0.85f, 0.0f};
-        case Kind::Overdrive:  return { 0, 1.5f,  30.0f, 160.0f,  720.0f, 6.0f, 0.8f, 5000.0f, 0.05f,  720.0f, 0.70f, 1.0f};
+        case Kind::Overdrive:  return { 0, 1.5f,  30.0f, 560.0f,  720.0f, 6.0f, 0.7f, 1300.0f, 0.05f,  720.0f, 1.10f, 1.0f};
         case Kind::Distortion: return { 1, 2.0f, 130.0f,  50.0f, 1000.0f, 3.0f, 0.6f, 5000.0f, 0.00f, 1500.0f, 0.42f, 0.0f};
         case Kind::Fuzz:       return { 2, 6.0f, 300.0f,  70.0f,    0.0f, 0.0f, 0.7f,    0.0f, 0.45f,  700.0f, 0.45f, 0.0f};
         case Kind::Off:
@@ -167,7 +167,7 @@ public:
                 x0 = xb;
                 float c = (float)y;
 
-                if (useLp) { lpz += lpCoef * (c - lpz); c = lpz; }   // post low-pass (top roll-off)
+                if (useLp) { lpz += lpCoef * (c - lpz); c += shapeAmt * (lpz - c); } // post low-pass (drive-scaled)
 
                 // DC blocker (one-pole HPF ~4 Hz): removes the offset asymmetric
                 // clipping introduces, so no static bias subtraction is needed.
