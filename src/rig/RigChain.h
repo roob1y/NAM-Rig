@@ -183,8 +183,8 @@ public:
         // Perceptual band-limit before RMS. Distortion dumps energy into fizzy
         // HF harmonics we don't hear as proportionally loud, so plain (or worse,
         // K-weighted) RMS over-counts a crunchy amp and the match leaves it too
-        // quiet. Bracketing the guitar-loudness band (~80 Hz .. 5 kHz) tracks
-        // perceived loudness much better.
+        // quiet. Bracketing the guitar-loudness band (see bandLimit, ~80 Hz ..
+        // 2.5 kHz) tracks perceived loudness much better.
         bandLimit(a.data(), n);
         bandLimit(b.data(), n);
 
