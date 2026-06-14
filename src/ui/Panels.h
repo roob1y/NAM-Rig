@@ -4,6 +4,7 @@
 #include "ui/GrMeter.h"
 #include "ui/CompMeter.h"
 #include "ui/CompCurve.h"
+#include "ui/ModFxIcon.h"
 
 namespace nam_rig::ui
 {
@@ -705,17 +706,23 @@ private:
 // has: universal Rate/Sync/Mix/Width/On always; Depth (all but Phaser);
 // Feedback (Flanger/Phaser); Shape waveform (Tremolo). Everything else is
 // hardwired in ModVoice, so there are no bad-sound knobs.
-class ModSlotControls : public juce::Component
+// One slot as a horizontal lane: number+LED, animated effect icon, Type/Sync,
+// only the effect's real knobs, Shape (tremolo), and an On toggle. All three
+// lanes are shown at once (no tabs) so the whole section reads at a glance.
+class ModSlotLane : public juce::Component
 {
 public:
-    ModSlotControls(juce::AudioProcessorValueTreeState &apvts, int slot)
+    ModSlotLane(juce::AudioProcessorValueTreeState &apvts, int slot)
         : mApvts(apvts), mSlot(slot)
     {
         const juce::String p = "mod" + juce::String(slot + 1);
 
-        mTypeL.setText("Type", juce::dontSendNotification);
-        mTypeL.setColour(juce::Label::textColourId, colors::textDim);
-        addAndMakeVisible(mTypeL);
+        mNum.setText(juce::String(slot + 1), juce::dontSendNotification);
+        mNum.setJustificationType(juce::Justification::centred);
+        mNum.setColour(juce::Label::textColourId, colors::textDim);
+        addAndMakeVisible(mNum);
+        addAndMakeVisible(mIcon);
+
         mType.addItemList({"Chorus", "Flanger", "Phaser", "Tremolo",
                            "Vibrato", "Rotary", "Uni-Vibe", "Harm Trem"}, 1);
         addAndMakeVisible(mType);
@@ -723,9 +730,6 @@ public:
             apvts, p + "Type", mType);
         mType.onChange = [this] { refresh(); };
 
-        mSyncL.setText("Sync", juce::dontSendNotification);
-        mSyncL.setColour(juce::Label::textColourId, colors::textDim);
-        addAndMakeVisible(mSyncL);
         mSync.addItemList({"Off", "1/1", "1/2", "1/4", "1/4.", "1/4T",
                            "1/8", "1/8.", "1/8T", "1/16"}, 1);
         addAndMakeVisible(mSync);
@@ -733,9 +737,6 @@ public:
             apvts, p + "Sync", mSync);
         mSync.onChange = [this] { refresh(); };
 
-        mWaveL.setText("Shape", juce::dontSendNotification);
-        mWaveL.setColour(juce::Label::textColourId, colors::textDim);
-        addChildComponent(mWaveL);
         mWave.addItemList({"Sine", "Triangle", "Square", "S&H"}, 1);
         addChildComponent(mWave); // Tremolo only
         mWaveAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
@@ -745,6 +746,7 @@ public:
         addAndMakeVisible(mOn);
         mOnAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             apvts, p + "On", mOn);
+        mOn.onClick = [this] { refresh(); };
 
         mRate = std::make_unique<LabeledKnob>(apvts, p + "Rate", "Rate");
         mDepth = std::make_unique<LabeledKnob>(apvts, p + "Depth", "Depth");
@@ -765,37 +767,61 @@ public:
         const juce::String p = "mod" + juce::String(mSlot + 1);
         const int type = (int)mApvts.getRawParameterValue(p + "Type")->load();
         const int sync = (int)mApvts.getRawParameterValue(p + "Sync")->load();
-        if (type == mLastType && sync == mLastSync)
+        const bool on = mApvts.getRawParameterValue(p + "On")->load() >= 0.5f;
+        mIcon.setType(type);
+        mIcon.setActive(on);
+        if (type == mLastType && sync == mLastSync && on == mLastOn)
             return;
         mLastType = type;
         mLastSync = sync;
-        mDepth->setVisible(type != 2);                 // phaser: no depth
+        mLastOn = on;
+        mDepth->setVisible(type != 2);                 // phaser: no depth knob
         mFeedback->setVisible(type == 1 || type == 2); // flanger/phaser
         mWave.setVisible(type == 3);                   // tremolo shape
-        mWaveL.setVisible(type == 3);
         mRate->setEnabled(sync == 0);                  // rate greyed when synced
+        repaint();                                     // LED
         resized();
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        auto b = getLocalBounds().toFloat().reduced(0.5f);
+        g.setColour(colors::panel);
+        g.fillRoundedRectangle(b, 8.0f);
+        g.setColour(colors::outline);
+        g.drawRoundedRectangle(b, 8.0f, 1.0f);
+        g.setColour(mLastOn ? colors::accent : colors::ledOff);
+        g.fillEllipse(mLedX - 3.5f, mLedY - 3.5f, 7.0f, 7.0f);
     }
 
     void resized() override
     {
-        auto area = getLocalBounds();
-        auto top = area.removeFromTop(28);
-        mTypeL.setBounds(top.removeFromLeft(34));
-        mType.setBounds(top.removeFromLeft(104));
-        top.removeFromLeft(8);
-        mSyncL.setBounds(top.removeFromLeft(34));
-        mSync.setBounds(top.removeFromLeft(74));
-        top.removeFromLeft(8);
+        auto area = getLocalBounds().reduced(9, 7);
+        auto numCol = area.removeFromLeft(16);
+        mNum.setBounds(numCol.removeFromTop(numCol.getHeight() / 2));
+        mLedX = (float)numCol.getCentreX();
+        mLedY = (float)numCol.getCentreY();
+        area.removeFromLeft(6);
+
+        auto iconCol = area.removeFromLeft(62);
+        mIcon.setBounds(iconCol.withSizeKeepingCentre(62, juce::jmin(iconCol.getHeight(), 46)));
+        area.removeFromLeft(10);
+
+        auto meta = area.removeFromLeft(112).withSizeKeepingCentre(112, juce::jmin(area.getHeight(), 50));
+        mType.setBounds(meta.removeFromTop(24));
+        meta.removeFromTop(4);
+        mSync.setBounds(meta.removeFromTop(22).removeFromLeft(88));
+        area.removeFromLeft(10);
+
+        auto onCol = area.removeFromRight(44);
+        mOn.setBounds(onCol.withSizeKeepingCentre(44, 22));
+        area.removeFromRight(8);
         if (mWave.isVisible())
         {
-            mWaveL.setBounds(top.removeFromLeft(40));
-            mWave.setBounds(top.removeFromLeft(86));
-            top.removeFromLeft(8);
+            mWave.setBounds(area.removeFromRight(84).withSizeKeepingCentre(84, 24));
+            area.removeFromRight(8);
         }
-        mOn.setBounds(top.removeFromLeft(46));
 
-        area.removeFromTop(6);
         std::vector<juce::Component *> vis;
         for (juce::Component *k : {(juce::Component *)mRate.get(), (juce::Component *)mDepth.get(),
                                    (juce::Component *)mFeedback.get(), (juce::Component *)mMix.get(),
@@ -805,11 +831,10 @@ public:
         const int nk = (int)vis.size();
         if (nk > 0)
         {
-            auto row = area.withSizeKeepingCentre(juce::jmin(area.getWidth(), nk * 118),
-                                                  juce::jmin(area.getHeight(), 150));
-            const int w = row.getWidth() / nk;
+            const int w = juce::jmin(62, area.getWidth() / nk);
+            auto row = area.withSizeKeepingCentre(w * nk, juce::jmin(area.getHeight(), 62));
             for (auto *k : vis)
-                k->setBounds(row.removeFromLeft(w).reduced(6, 0));
+                k->setBounds(row.removeFromLeft(w).reduced(4, 0));
         }
     }
 
@@ -817,8 +842,11 @@ private:
     juce::AudioProcessorValueTreeState &mApvts;
     int mSlot;
     int mLastType = -1, mLastSync = -1;
+    bool mLastOn = true;
+    float mLedX = 0.0f, mLedY = 0.0f;
+    juce::Label mNum;
+    ModFxIcon mIcon;
     juce::ComboBox mType, mWave, mSync;
-    juce::Label mTypeL, mWaveL, mSyncL;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt, mWaveAtt, mSyncAtt;
     juce::ToggleButton mOn;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mOnAtt;
@@ -832,52 +860,62 @@ public:
     {
         for (int s = 0; s < nam_rig::ModBlock::kSlots; ++s)
         {
-            mTab[(size_t)s].setButtonText("Slot " + juce::String(s + 1));
-            mTab[(size_t)s].setClickingTogglesState(true);
-            mTab[(size_t)s].setRadioGroupId(4731);
-            mTab[(size_t)s].onClick = [this, s] { selectSlot(s); };
-            addAndMakeVisible(mTab[(size_t)s]);
-            mSlots[(size_t)s] = std::make_unique<ModSlotControls>(apvts, s);
-            addChildComponent(*mSlots[(size_t)s]);
+            mLanes[(size_t)s] = std::make_unique<ModSlotLane>(apvts, s);
+            addAndMakeVisible(*mLanes[(size_t)s]);
         }
-        mHint.setText("3 slots in series - stack effects for quirky sounds. Each effect shows only its real controls.",
-                      juce::dontSendNotification);
-        mHint.setColour(juce::Label::textColourId, colors::textDim);
-        addAndMakeVisible(mHint);
-        selectSlot(0);
     }
 
     void refresh()
     {
-        for (auto &sc : mSlots)
-            if (sc) sc->refresh();
+        for (auto &l : mLanes)
+            if (l) l->refresh();
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        BlockPanel::paint(g); // panel body + "MODULATION" title
+        if (mSpine.getHeight() <= 0)
+            return;
+        const float x = (float)mSpine.getCentreX();
+        g.setColour(colors::outline);
+        g.drawLine(x, (float)mSpine.getY(), x, (float)mSpine.getBottom(), 1.5f);
+        g.setColour(colors::accentDim);
+        for (float fy : mArrowYs)
+        {
+            juce::Path tri;
+            tri.addTriangle(x - 3.0f, fy - 2.0f, x + 3.0f, fy - 2.0f, x, fy + 3.0f);
+            g.fillPath(tri);
+        }
+        g.setColour(colors::textDim);
+        g.setFont(RigLookAndFeel::withHeight(9.0f));
+        g.drawText("IN", mSpine.getX() - 3, mSpine.getY() - 13, 26, 11, juce::Justification::centred);
+        g.drawText("OUT", mSpine.getX() - 3, mSpine.getBottom() + 3, 26, 11, juce::Justification::centred);
     }
 
     void resized() override
     {
         auto area = contentArea();
-        mHint.setBounds(area.removeFromBottom(20));
-        auto tabs = area.removeFromTop(26);
-        for (int s = 0; s < nam_rig::ModBlock::kSlots; ++s)
-            mTab[(size_t)s].setBounds(tabs.removeFromLeft(90).reduced(2, 0));
-        area.removeFromTop(8);
-        for (auto &sc : mSlots)
-            if (sc) sc->setBounds(area);
-    }
-
-private:
-    void selectSlot(int s)
-    {
-        for (int i = 0; i < nam_rig::ModBlock::kSlots; ++i)
+        auto spine = area.removeFromLeft(20);
+        area.removeFromLeft(4);
+        const int n = nam_rig::ModBlock::kSlots, gap = 8;
+        const int laneH = (area.getHeight() - gap * (n - 1)) / n;
+        mArrowYs.clear();
+        mSpine = spine.withTrimmedTop(14).withTrimmedBottom(16);
+        for (int s = 0; s < n; ++s)
         {
-            mSlots[(size_t)i]->setVisible(i == s);
-            mTab[(size_t)i].setToggleState(i == s, juce::dontSendNotification);
+            auto lane = area.removeFromTop(laneH);
+            mLanes[(size_t)s]->setBounds(lane);
+            if (s < n - 1)
+            {
+                mArrowYs.push_back((float)area.removeFromTop(gap).getCentreY());
+            }
         }
     }
 
-    std::array<juce::TextButton, (size_t)nam_rig::ModBlock::kSlots> mTab;
-    std::array<std::unique_ptr<ModSlotControls>, (size_t)nam_rig::ModBlock::kSlots> mSlots;
-    juce::Label mHint;
+private:
+    std::array<std::unique_ptr<ModSlotLane>, (size_t)nam_rig::ModBlock::kSlots> mLanes;
+    juce::Rectangle<int> mSpine;
+    std::vector<float> mArrowYs;
 };
 
 //==============================================================================
