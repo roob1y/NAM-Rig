@@ -61,6 +61,7 @@ static std::vector<float> naiveSlot(Kind k, float drive, const std::vector<float
     Biquad mid = useMid ? Biquad::peaking(SR, v.midHz, v.midQ, v.midDb) : Biquad::identity();
     const double asym = (v.clip == 2) ? (double)v.bias : 0.0;
     const double inBias = (v.clip == 2) ? 0.0 : (double)v.bias;
+    const float shapeAmt = 1.0f - v.shapeTrack * (1.0f - drive);
     auto clipF = [&](double x) -> double {
         if (v.clip == 0) return std::tanh(x);
         if (v.clip == 1) return x > 1.0 ? 1.0 : (x < -1.0 ? -1.0 : x);
@@ -72,8 +73,8 @@ static std::vector<float> naiveSlot(Kind k, float drive, const std::vector<float
     for (size_t i = 0; i < in.size(); ++i)
     {
         float u = in[i] * preGain;
-        if (hpCoef > 0.0f) { hp += hpCoef * (u - hp); u -= hp; }
-        if (useMid) u = mid.processSample(u);
+        if (hpCoef > 0.0f) { hp += hpCoef * (u - hp); float hipassed = u - hp; u += shapeAmt * (hipassed - u); }
+        if (useMid) { float m = mid.processSample(u); u += shapeAmt * (m - u); }
         float c = (float)clipF((double)u + inBias);
         if (useLp) { lpz += lpCoef * (c - lpz); c = lpz; }
         float dcOut = c - dcx + kDcR * dcy; dcx = c; dcy = dcOut; c = dcOut;
@@ -88,6 +89,18 @@ static std::vector<float> realSlot(Kind k, float drive, const std::vector<float>
     d.setKind(0, (int)k); d.setDrive(0, drive); d.setTone(0, 0.5f); d.setLevelDb(0, 0.0f);
     d.prepare({SR, BLK});
     auto x = in; run(d, x); return x;
+}
+
+
+// Small-signal magnitude at one freq relative to a reference freq (dB), at a
+// given Drive — reveals the EQ shape (low amplitude keeps the shaper ~linear).
+static double respDb(Kind k, float drive, double f, double refF)
+{
+    auto inF = sine(f, 0.01f, 16384), inR = sine(refF, 0.01f, 16384);
+    auto yF = realSlot(k, drive, inF), yR = realSlot(k, drive, inR);
+    const double gF = goertzel(yF, f) / goertzel(inF, f);
+    const double gR = goertzel(yR, refF) / goertzel(inR, refF);
+    return 20.0 * std::log10(gF / gR);
 }
 
 int main()
@@ -170,6 +183,22 @@ int main()
         b.setKind(0, (int)Kind::Overdrive); b.setDrive(0, 0.7f); b.setTone(0, 0.1f); b.prepare({SR, BLK}); run(b, lo);
         const double hiT = goertzel(hi, 1540.0), loT = goertzel(lo, 1540.0);
         CHECK(hiT > loT * 1.5, "T7 tone up = brighter (HF %.2e > %.2e)", hiT, loT);
+    }
+
+    // ---- T8: Overdrive at DRIVE 0 stays full-range (no band-pass scoop) ----
+    {
+        const double lo = respDb(Kind::Overdrive, 0.0f, 100.0, 700.0);   // 100 Hz vs 700 Hz
+        const double hi = respDb(Kind::Overdrive, 0.0f, 3000.0, 700.0);  // 3 kHz vs 700 Hz
+        CHECK(lo > -3.0 && hi > -4.0,
+              "T8 OD@drive0 full-range: 100Hz %.1f dB, 3k %.1f dB (vs 700Hz)", lo, hi);
+    }
+
+    // ---- T9: Overdrive at DRIVE 1 blooms the 720 Hz mid-hump ----
+    {
+        const double vsLow = respDb(Kind::Overdrive, 1.0f, 700.0, 100.0);  // 700 vs 100
+        const double vsHigh = respDb(Kind::Overdrive, 1.0f, 700.0, 3000.0); // 700 vs 3k
+        CHECK(vsLow > 3.0 && vsHigh > 3.0,
+              "T9 OD@drive1 mid-hump: 700Hz +%.1f vs 100Hz, +%.1f vs 3k", vsLow, vsHigh);
     }
 
     std::printf("\n%s (%d failure%s)\n", gFails ? "RESULT: FAIL" : "RESULT: ALL PASS", gFails, gFails == 1 ? "" : "s");

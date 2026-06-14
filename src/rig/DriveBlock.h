@@ -76,18 +76,21 @@ public:
         float bias;        // type 0/1: input bias; type 2: negative-rail = -(1-bias)
         float pivotHz;     // tone tilt pivot
         float outTrim;     // voicing output compensation
+        float shapeTrack;  // 0 = pre-shaper EQ always on; 1 = EQ (low-cut + mid)
+                           //     scales with the Drive knob (the TS hump blooms
+                           //     with gain instead of being a fixed band-pass)
     };
 
     static Voicing voicingFor(Kind k)
     {
         switch (k)
         {                       // clip  gMin    gMax  lowCut   midHz  midDb midQ   lpHz   bias   pivot   outTrim
-        case Kind::Boost:      return { 0, 1.0f,  10.0f, 120.0f, 3500.0f, 8.0f, 0.5f,    0.0f, 0.20f, 2500.0f, 0.85f};
-        case Kind::Overdrive:  return { 0, 1.5f,  30.0f, 160.0f,  720.0f, 6.0f, 0.8f, 5000.0f, 0.05f,  720.0f, 0.70f};
-        case Kind::Distortion: return { 1, 2.0f, 130.0f,  50.0f, 1000.0f, 3.0f, 0.6f, 5000.0f, 0.00f, 1500.0f, 0.42f};
-        case Kind::Fuzz:       return { 2, 6.0f, 300.0f,  70.0f,    0.0f, 0.0f, 0.7f,    0.0f, 0.45f,  700.0f, 0.45f};
+        case Kind::Boost:      return { 0, 1.0f,  10.0f, 120.0f, 3500.0f, 8.0f, 0.5f,    0.0f, 0.20f, 2500.0f, 0.85f, 0.0f};
+        case Kind::Overdrive:  return { 0, 1.5f,  30.0f, 160.0f,  720.0f, 6.0f, 0.8f, 5000.0f, 0.05f,  720.0f, 0.70f, 1.0f};
+        case Kind::Distortion: return { 1, 2.0f, 130.0f,  50.0f, 1000.0f, 3.0f, 0.6f, 5000.0f, 0.00f, 1500.0f, 0.42f, 0.0f};
+        case Kind::Fuzz:       return { 2, 6.0f, 300.0f,  70.0f,    0.0f, 0.0f, 0.7f,    0.0f, 0.45f,  700.0f, 0.45f, 0.0f};
         case Kind::Off:
-        default:               return { 0, 1.0f,   1.0f,   0.0f,    0.0f, 0.0f, 0.7f,    0.0f, 0.00f,  700.0f, 1.00f};
+        default:               return { 0, 1.0f,   1.0f,   0.0f,    0.0f, 0.0f, 0.7f,    0.0f, 0.00f,  700.0f, 1.00f, 0.0f};
         }
     }
 
@@ -126,6 +129,9 @@ public:
             }
 
             const float preGain = v.gMin * std::pow(v.gMax / v.gMin, s.drive.load()); // log
+            // How much of the pre-shaper EQ is engaged: static voicings use the
+            // full EQ; for the TS the hump + bass-tighten scale with Drive.
+            const float shapeAmt = 1.0f - v.shapeTrack * (1.0f - s.drive.load());
             const float hpCoef = (v.lowCutHz > 0.0f) ? coefForHz(v.lowCutHz, sr) : 0.0f;
             const float lpCoef = (v.lpHz > 0.0f) ? coefForHz(v.lpHz, sr) : 0.0f;
             const bool useMid = (v.midDb != 0.0f);
@@ -147,8 +153,8 @@ public:
             {
                 float u = mono[i] * preGain;
 
-                if (hpCoef > 0.0f) { hp += hpCoef * (u - hp); u = u - hp; } // pre low-cut
-                if (useMid) u = s.mid.processSample(u);                     // mid / treble peak
+                if (hpCoef > 0.0f) { hp += hpCoef * (u - hp); const float hipassed = u - hp; u += shapeAmt * (hipassed - u); } // pre low-cut (drive-scaled)
+                if (useMid) { const float m = s.mid.processSample(u); u += shapeAmt * (m - u); }                                // mid / treble peak (drive-scaled)
 
                 // waveshaper, 1st-order ADAA in DOUBLE (avoids float cancellation crackle)
                 const double xb = (double)u + inBias;
