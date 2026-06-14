@@ -101,6 +101,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
             juce::NormalisableRange<float>(-12.0f, 12.0f, 0.1f), 0.0f,
             juce::AudioParameterFloatAttributes().withLabel("dB")));
     }
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("driveAutoGain", 1), "Drive Auto Gain", false));
 
     // --- Graphic EQ, pre-cab (see rig/EqBlock.h; verified by tests/eq_test.cpp) ---
     {
@@ -466,6 +468,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         mChain.drive.setTone(s, apvts.getRawParameterValue(pid + "Tone")->load());
         mChain.drive.setLevelDb(s, apvts.getRawParameterValue(pid + "Level")->load());
     }
+    mChain.drive.setAutoGain(apvts.getRawParameterValue("driveAutoGain")->load() >= 0.5f);
     mChain.drive.setBypassed(!mChain.drive.anyActive());
     // Graphic EQ band gains (Rig A; zero latency; chain bypass via eqOn is safe).
     {

@@ -272,12 +272,20 @@ public:
                       juce::dontSendNotification);
         mHint.setColour(juce::Label::textColourId, colors::textDim);
         addAndMakeVisible(mHint);
+
+        mAutoGain.setButtonText("Auto Gain");
+        addAndMakeVisible(mAutoGain);
+        mAutoGainAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            apvts, "driveAutoGain", mAutoGain);
     }
 
     void resized() override
     {
         auto area = contentArea();
-        mHint.setBounds(area.removeFromBottom(20));
+        auto bottom = area.removeFromBottom(22);
+        mAutoGain.setBounds(bottom.removeFromRight(110));
+        bottom.removeFromRight(10);
+        mHint.setBounds(bottom);
         const int rowH = area.getHeight() / nam_rig::DriveBlock::kSlots;
         for (int sIdx = 0; sIdx < nam_rig::DriveBlock::kSlots; ++sIdx)
         {
@@ -302,6 +310,8 @@ private:
     };
     Row mRows[nam_rig::DriveBlock::kSlots];
     juce::Label mHint;
+    juce::ToggleButton mAutoGain;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mAutoGainAtt;
 };
 
 //==============================================================================

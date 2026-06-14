@@ -56,6 +56,7 @@ public:
     void setDrive(int slot, float v)   { at(slot).drive.store(clamp01(v)); }
     void setTone(int slot, float v)    { at(slot).tone.store(clamp01(v)); }
     void setLevelDb(int slot, float v) { at(slot).levelDb.store(v); }
+    void setAutoGain(bool on) { mAutoGain.store(on); } // level-compensate Drive/Tone (default off)
 
     bool anyActive() const
     {
@@ -142,8 +143,9 @@ public:
             const bool useLp = (v.lpHz > 0.0f);
             const double asym = (v.clip == 2) ? (double)v.bias : 0.0;     // type-2 rail
             const double inBias = (v.clip == 2) ? 0.0 : (double)v.bias;   // type 0/1 input bias
-            const float levelLin = std::pow(10.0f, s.levelDb.load() * 0.05f) * v.outTrim
-                                  * driveMakeup(k, s.drive.load()) * toneMakeup(k, s.tone.load());
+            float levelLin = std::pow(10.0f, s.levelDb.load() * 0.05f) * v.outTrim;
+            if (mAutoGain.load()) // OFF by default: Drive then naturally pushes the amp harder
+                levelLin *= driveMakeup(k, s.drive.load()) * toneMakeup(k, s.tone.load());
 
             const float tilt = (s.tone.load() - 0.5f) * 2.0f;
             const float trebleG = std::pow(10.0f, (tilt * kMaxTiltDb) * 0.05f);
@@ -281,6 +283,7 @@ private:
     static float flush(float v) { return std::abs(v) < 1.0e-30f ? 0.0f : v; }
 
     Slot mSlot[kSlots];
+    std::atomic<bool> mAutoGain{false};
     double mSampleRate = 48000.0;
     bool mPrepared = false;
 };
