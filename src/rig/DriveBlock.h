@@ -58,11 +58,12 @@ public:
     void setLevelDb(int slot, float v) { at(slot).levelDb.store(v); }
     void setAutoGain(bool on) { mAutoGain.store(on); } // level-compensate Drive/Tone (default off)
     void setRange(int slot, int r) { at(slot).range.store(r); } // treble-boost cap switch: 0 Treble/1 Mid/2 Full
+    void setOn(int slot, bool on) { at(slot).on.store(on); }            // footswitch (default on)
 
     bool anyActive() const
     {
         for (int s = 0; s < kSlots; ++s)
-            if ((Kind)mSlot[s].kind.load() != Kind::Off)
+            if ((Kind)mSlot[s].kind.load() != Kind::Off && mSlot[s].on.load())
                 return true;
         return false;
     }
@@ -134,7 +135,7 @@ public:
         {
             Slot &s = mSlot[si];
             const Kind k = (Kind)s.kind.load();
-            if (k == Kind::Off)
+            if (k == Kind::Off || !s.on.load()) // footswitch off -> bypass this slot
                 continue;
             Voicing v = voicingFor(k);
             const int rng = (k == Kind::Boost) ? s.range.load() : 0;
@@ -221,6 +222,7 @@ private:
         std::atomic<float> tone{0.5f};
         std::atomic<float> levelDb{0.0f};
         std::atomic<int> range{0};
+        std::atomic<bool> on{true};
         float hp = 0.0f, lp = 0.0f, toneLp = 0.0f, dcX1 = 0.0f, dcY1 = 0.0f;
         double x0 = 0.0; // ADAA history in double
         int lastKind = -1;
