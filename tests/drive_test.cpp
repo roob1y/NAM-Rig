@@ -55,25 +55,33 @@ static std::vector<float> naiveSlot(Kind k, float drive, const std::vector<float
 {
     const auto v = DriveBlock::voicingFor(k);
     const float preGain = v.gMin * std::pow(v.gMax / v.gMin, drive);
-    const float hpCoef = (v.lowCutHz > 0.0f)
-        ? 1.0f - (float)std::exp(-2.0 * M_PI * v.lowCutHz / SR) : 0.0f;
-    const bool useMid = (v.midDb != 0.0f);
+    const float hpCoef = (v.lowCutHz > 0.0f) ? 1.0f - (float)std::exp(-2.0 * M_PI * v.lowCutHz / SR) : 0.0f;
+    const float lpCoef = (v.lpHz > 0.0f) ? 1.0f - (float)std::exp(-2.0 * M_PI * v.lpHz / SR) : 0.0f;
+    const bool useMid = (v.midDb != 0.0f), useLp = (v.lpHz > 0.0f);
     Biquad mid = useMid ? Biquad::peaking(SR, v.midHz, v.midQ, v.midDb) : Biquad::identity();
-    auto clipF = [&](float x) {
-        return v.clip == 0 ? std::tanh(x) : (x > 1.0f ? 1.0f : (x < -1.0f ? -1.0f : x));
+    const double asym = (v.clip == 2) ? (double)v.bias : 0.0;
+    const double inBias = (v.clip == 2) ? 0.0 : (double)v.bias;
+    auto clipF = [&](double x) -> double {
+        if (v.clip == 0) return std::tanh(x);
+        if (v.clip == 1) return x > 1.0 ? 1.0 : (x < -1.0 ? -1.0 : x);
+        const double lo = 1.0 - asym; return x >= 0.0 ? std::tanh(x) : (x < -lo ? -lo : x);
     };
-    const float dcSub = clipF(v.bias);
+    const float kDcR = 0.9995f;
     std::vector<float> y(in.size());
-    float hp = 0.0f;
+    float hp = 0, lpz = 0, dcx = 0, dcy = 0;
     for (size_t i = 0; i < in.size(); ++i)
     {
         float u = in[i] * preGain;
         if (hpCoef > 0.0f) { hp += hpCoef * (u - hp); u -= hp; }
         if (useMid) u = mid.processSample(u);
-        y[i] = (clipF(u + v.bias) - dcSub) * v.outTrim; // tone flat, level 0 dB
+        float c = (float)clipF((double)u + inBias);
+        if (useLp) { lpz += lpCoef * (c - lpz); c = lpz; }
+        float dcOut = c - dcx + kDcR * dcy; dcx = c; dcy = dcOut; c = dcOut;
+        y[i] = c * v.outTrim; // tone flat, level 0 dB
     }
     return y;
 }
+
 static std::vector<float> realSlot(Kind k, float drive, const std::vector<float> &in)
 {
     DriveBlock d;
@@ -149,8 +157,8 @@ int main()
         auto h2overH1 = [&](const std::vector<float> &y) {
             return goertzel(y, 440.0) / (goertzel(y, 220.0) + 1e-9);
         };
-        CHECK(h2overH1(fz) > 0.02 && h2overH1(fz) > h2overH1(ds),
-              "T6 Fuzz more asymmetric than Dist (h2/h1 %.3f vs %.3f)", h2overH1(fz), h2overH1(ds));
+        CHECK(h2overH1(fz) > 0.03 && h2overH1(fz) > h2overH1(ds) * 5.0,
+              "T6 Fuzz asymmetric (soft/hard) vs symmetric Dist (h2/h1 %.3f vs %.3f)", h2overH1(fz), h2overH1(ds));
     }
 
     // ---- T7: tone tilt up = brighter (odd 7th harmonic above the OD pivot) ----
