@@ -59,6 +59,7 @@ public:
     void setAutoGain(bool on) { mAutoGain.store(on); } // level-compensate Drive/Tone (default off)
     void setRange(int slot, int r) { at(slot).range.store(r); } // treble-boost cap switch: 0 Treble/1 Mid/2 Full
     void setOn(int slot, bool on) { at(slot).on.store(on); }            // footswitch (default on)
+    void setModel(int slot, int m) { at(slot).model.store(m); }         // model within the category
 
     bool anyActive() const
     {
@@ -87,18 +88,56 @@ public:
                            //     level-stable instead of dragged down by clipping)
     };
 
-    static Voicing voicingFor(Kind k)
-    {
-        switch (k)
-        {                       // clip  gMin    gMax  lowCut   midHz  midDb midQ   lpHz   bias   pivot   outTrim
-        case Kind::Boost:      return { 0, 1.0f,  10.0f, 120.0f, 3500.0f, 8.0f, 0.5f,    0.0f, 0.20f, 2500.0f, 0.85f, 0.0f, 0.0f};
-        case Kind::Overdrive:  return { 0, 1.5f,  30.0f, 560.0f,  780.0f, 6.0f, 0.7f, 1300.0f, 0.05f,  720.0f, 1.10f, 1.0f, 1.0f};
-        case Kind::Distortion: return { 1, 2.0f, 130.0f,  50.0f, 1000.0f, 3.0f, 0.6f, 5000.0f, 0.00f, 1500.0f, 0.42f, 0.0f, 1.0f};
-        case Kind::Fuzz:       return { 2, 6.0f, 300.0f,  70.0f,    0.0f, 0.0f, 0.7f,    0.0f, 0.45f,  700.0f, 0.45f, 0.0f, 0.0f};
-        case Kind::Off:
-        default:               return { 0, 1.0f,   1.0f,   0.0f,    0.0f, 0.0f, 0.7f,    0.0f, 0.00f,  700.0f, 1.00f, 0.0f, 0.0f};
+    // A specific pedal MODEL inside a category (Type). A category can hold several
+    // models; the UI picks the Type (category) then the model. hasRange = the
+    // model exposes the 3-way input-cap switch (treble booster only).
+    struct Model { const char *name, *sub; Voicing v; bool hasRange; };
+
+    static const Model *modelsFor(Kind cat, int &count)
+    {                       // clip  gMin    gMax  lowCut   midHz  midDb midQ   lpHz   bias   pivot   outTrim shp post
+        static const Model boost[] = {
+            {"Range '65", "germanium treble boost",
+             { 0, 1.0f, 10.0f, 120.0f, 3500.0f, 8.0f, 0.5f,    0.0f, 0.20f, 2500.0f, 0.85f, 0.0f, 0.0f}, true},
+            {"EP Boost", "FET clean boost",
+             { 0, 1.0f,  6.0f,  40.0f, 5000.0f, 3.0f, 0.6f,    0.0f, 0.05f, 1000.0f, 0.95f, 0.0f, 1.0f}, false},
+        };
+        static const Model od[] = {
+            {"Overdrive", "mid-hump overdrive",
+             { 0, 1.5f, 30.0f, 560.0f,  780.0f, 6.0f, 0.7f, 1300.0f, 0.05f,  720.0f, 1.10f, 1.0f, 1.0f}, false},
+        };
+        static const Model dist[] = {
+            {"Distortion", "hard-clip distortion",
+             { 1, 2.0f,130.0f,  50.0f, 1000.0f, 3.0f, 0.6f, 5000.0f, 0.00f, 1500.0f, 0.42f, 0.0f, 1.0f}, false},
+        };
+        static const Model fuzz[] = {
+            {"Fuzz", "germanium fuzz",
+             { 2, 6.0f,300.0f,  70.0f,    0.0f, 0.0f, 0.7f,    0.0f, 0.45f,  700.0f, 0.45f, 0.0f, 0.0f}, false},
+        };
+        switch (cat)
+        {
+        case Kind::Boost:      count = 2; return boost;
+        case Kind::Overdrive:  count = 1; return od;
+        case Kind::Distortion: count = 1; return dist;
+        case Kind::Fuzz:       count = 1; return fuzz;
+        default:               count = 0; return nullptr;
         }
     }
+
+    static int modelCount(Kind c) { int n = 0; modelsFor(c, n); return n; }
+    static const char *modelName(Kind c, int m)
+    { int n = 0; const Model *a = modelsFor(c, n); return (a && n > 0) ? a[juce::jlimit(0, n - 1, m)].name : ""; }
+    static const char *modelSub(Kind c, int m)
+    { int n = 0; const Model *a = modelsFor(c, n); return (a && n > 0) ? a[juce::jlimit(0, n - 1, m)].sub : ""; }
+    static bool modelHasRange(Kind c, int m)
+    { int n = 0; const Model *a = modelsFor(c, n); return a && n > 0 && a[juce::jlimit(0, n - 1, m)].hasRange; }
+
+    static Voicing voicingFor(Kind c, int m)
+    {
+        int n = 0; const Model *a = modelsFor(c, n);
+        if (!a || n == 0) return { 0, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.7f, 0.0f, 0.0f, 700.0f, 1.0f, 0.0f, 0.0f };
+        return a[juce::jlimit(0, n - 1, m)].v;
+    }
+    static Voicing voicingFor(Kind c) { return voicingFor(c, 0); } // compat (model 0)
 
     // Treble-boost input-cap switch: larger cap (Mid/Full) lets more low-end
     // through and shifts the emphasis down (Treble = bright, Full = fat).
@@ -137,12 +176,14 @@ public:
             const Kind k = (Kind)s.kind.load();
             if (k == Kind::Off || !s.on.load()) // footswitch off -> bypass this slot
                 continue;
-            Voicing v = voicingFor(k);
-            const int rng = (k == Kind::Boost) ? s.range.load() : 0;
-            if (k == Kind::Boost)
+            const int model = s.model.load();
+            Voicing v = voicingFor(k, model);
+            const bool hasRange = modelHasRange(k, model);
+            const int rng = hasRange ? s.range.load() : 0;
+            if (hasRange)
                 applyRange(v, rng);
 
-            const int cfg = (int)k * 8 + rng; // reconfigure the peak on voicing OR range change
+            const int cfg = ((int)k * 16 + model) * 8 + rng; // reconfigure peak on type/model/range change
             if (cfg != s.lastKind)
             {
                 s.lastKind = cfg;
@@ -222,6 +263,7 @@ private:
         std::atomic<float> tone{0.5f};
         std::atomic<float> levelDb{0.0f};
         std::atomic<int> range{0};
+        std::atomic<int> model{0};
         std::atomic<bool> on{true};
         float hp = 0.0f, lp = 0.0f, toneLp = 0.0f, dcX1 = 0.0f, dcY1 = 0.0f;
         double x0 = 0.0; // ADAA history in double
