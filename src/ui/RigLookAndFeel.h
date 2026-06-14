@@ -158,6 +158,13 @@ public:
     }
 
     juce::Font getComboBoxFont(juce::ComboBox &) override { return withHeight(14.0f); }
+    // Reserve the arrow width on BOTH sides so centred text sits in the true middle.
+    void positionComboBoxText(juce::ComboBox &box, juce::Label &label) override
+    {
+        const int m = 22;
+        label.setBounds(m, 1, juce::jmax(1, box.getWidth() - m * 2), box.getHeight() - 2);
+        label.setFont(getComboBoxFont(box));
+    }
     juce::Font getTextButtonFont(juce::TextButton &, int) override { return withHeight(14.0f); }
     juce::Font getLabelFont(juce::Label &l) override
     {

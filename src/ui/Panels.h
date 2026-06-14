@@ -341,7 +341,7 @@ public:
         screw(12.0f, 12.0f); screw((float)getWidth() - 12.0f, 12.0f);
         screw(12.0f, (float)getHeight() - 12.0f); screw((float)getWidth() - 12.0f, (float)getHeight() - 12.0f);
         g.setColour(mActive ? colors::accent : colors::ledOff);
-        g.fillEllipse((float)getWidth() - 19.0f, 12.0f, 7.0f, 7.0f); // status LED
+        g.fillEllipse((float)getWidth() - 34.0f, 16.0f, 7.0f, 7.0f); // status LED (clear of the corner screw)
     }
 
     void resized() override
@@ -440,9 +440,9 @@ public:
     {
         BlockPanel::paint(g);
         g.setColour(colors::text);
-        g.setFont(RigLookAndFeel::withHeight(11.0f).boldened());
-        g.drawText("IN", (int)mInX - 30, (int)mFlowY - 8, 26, 16, juce::Justification::centredRight);
-        g.drawText("OUT", (int)mOutX + 6, (int)mFlowY - 8, 30, 16, juce::Justification::centredLeft);
+        g.setFont(RigLookAndFeel::withHeight(12.0f).boldened());
+        g.drawText("IN", (int)mInX - 44, (int)mFlowY - 9, 28, 18, juce::Justification::centredRight);
+        g.drawText("OUT", (int)mOutX + 18, (int)mFlowY - 9, 32, 18, juce::Justification::centredLeft);
         g.setColour(colors::accentDim);
         for (auto &c : mCables)
             g.drawLine(c.getStartX(), c.getStartY(), c.getEndX(), c.getEndY(), 2.0f);
@@ -454,7 +454,7 @@ public:
         auto bottom = area.removeFromBottom(22);
         mAutoGain.setBounds(bottom.removeFromRight(110));
 
-        const int inM = 40, outM = 46, cable = 22;
+        const int inM = 52, outM = 58, cable = 22;
         area.removeFromLeft(inM);
         area.removeFromRight(outM);
         const int n = nam_rig::DriveBlock::kSlots;
