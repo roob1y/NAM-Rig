@@ -118,7 +118,7 @@ int main()
         CHECK(!d.anyActive(), "T1 anyActive() false when all slots Off");
     }
 
-    // ---- T2: Overdrive has a midrange hump (the TS signature) ----
+    // ---- T2: Overdrive has a midrange hump (the mid-hump signature) ----
     {
         const auto v = DriveBlock::voicingFor(Kind::Overdrive);
         Biquad mid = Biquad::peaking(SR, v.midHz, v.midQ, v.midDb);

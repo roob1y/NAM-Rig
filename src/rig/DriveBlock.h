@@ -3,18 +3,18 @@
 // A/B split: one board feeding both rigs, the common real two-amp live rig).
 //
 // Voicings are tuned to the MEASURED behaviour of the classic circuits they
-// model (ElectroSmash circuit analyses + published responses):
+// model (from published circuit analyses + measured frequency responses):
 //   Off          : out of the path — bit-exact passthrough.
-//   Treble Boost : Dallas Rangemaster — a germanium treble booster. Broad treble
+//   Treble Boost : a germanium treble booster (1960s style). Broad treble
 //                  PEAK (~3.5 kHz) keeping the lows near unity + soft asymmetric
 //                  germanium clip. Bright, mostly clean, breaks up when pushed.
-//   Overdrive    : Ibanez TS808 — the ~720 Hz midrange HUMP into a SYMMETRIC
+//   Overdrive    : a green-box mid-hump overdrive — the ~720 Hz midrange HUMP into a SYMMETRIC
 //                  soft clip (odd harmonics, warm "dirty + clean" layering),
 //                  with the gentle top-end roll-off above ~5 kHz.
-//   Distortion   : Pro Co RAT — a HARD symmetric clip (diodes to ground) tamed
-//                  by the RAT's filter: strong attenuation above ~5 kHz so it is
+//   Distortion   : a hard-clip distortion — a HARD symmetric clip (diodes to ground) tamed
+//                  by a post-clip filter: strong attenuation above ~5 kHz so it is
 //                  aggressive without fizz; lows pass, mids emphasised.
-//   Fuzz         : Fuzz Face — ASYMMETRIC clipping (one rail soft-ish, the other
+//   Fuzz         : a vintage germanium fuzz — ASYMMETRIC clipping (one rail soft-ish, the other
 //                  to cutoff): a prominent 2nd harmonic and a "tilted" clip.
 //
 // Signal per slot:  drive gain -> pre low-cut -> mid/treble peak -> waveshaper
@@ -78,10 +78,10 @@ public:
         float pivotHz;     // tone tilt pivot
         float outTrim;     // voicing output compensation
         float shapeTrack;  // 0 = pre-shaper EQ always on; 1 = EQ (low-cut + mid)
-                           //     scales with the Drive knob (the TS hump blooms
+                           //     scales with the Drive knob (the mid hump blooms
                            //     with gain instead of being a fixed band-pass)
         float midPost;     // 0 = mid peak PRE-clip (treble booster input cap);
-                           //     1 = POST-clip (TS/RAT tone stack -> peak freq is
+                           //     1 = POST-clip (overdrive/distortion tone stack -> peak freq is
                            //     level-stable instead of dragged down by clipping)
     };
 
@@ -134,7 +134,7 @@ public:
 
             const float preGain = v.gMin * std::pow(v.gMax / v.gMin, s.drive.load()); // log
             // How much of the pre-shaper EQ is engaged: static voicings use the
-            // full EQ; for the TS the hump + bass-tighten scale with Drive.
+            // full EQ; for the overdrive the hump + bass-tighten scale with Drive.
             const float shapeAmt = 1.0f - v.shapeTrack * (1.0f - s.drive.load());
             const float hpCoef = (v.lowCutHz > 0.0f) ? coefForHz(v.lowCutHz, sr) : 0.0f;
             const float lpCoef = (v.lpHz > 0.0f) ? coefForHz(v.lpHz, sr) : 0.0f;
@@ -174,7 +174,7 @@ public:
                 x0 = xb;
                 float c = (float)y;
 
-                if (useMid && midPost) { const float m = s.mid.processSample(c); c += shapeAmt * (m - c); } // post-clip peak (TS/RAT tone stack; level-stable)
+                if (useMid && midPost) { const float m = s.mid.processSample(c); c += shapeAmt * (m - c); } // post-clip peak (OD/dist tone stack; level-stable)
                 if (useLp) { lpz += lpCoef * (c - lpz); c += shapeAmt * (lpz - c); } // post low-pass (drive-scaled)
 
                 // DC blocker (one-pole HPF ~4 Hz): removes the offset asymmetric
@@ -225,7 +225,7 @@ private:
         if (type == 1) return x > 1.0 ? 1.0 : (x < -1.0 ? -1.0 : x);
         // type 2 (fuzz): soft saturation on the positive half (tanh -> +1), hard
         // CUTOFF on the negative half (clamp to -lo). Different SHAPES per polarity
-        // -> strong even harmonics at all levels (the Fuzz Face character).
+        // -> strong even harmonics at all levels (the vintage-fuzz character).
         const double lo = 1.0 - asym;
         return x >= 0.0 ? std::tanh(x) : (x < -lo ? -lo : x);
     }

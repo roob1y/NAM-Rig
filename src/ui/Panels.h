@@ -329,10 +329,10 @@ private:
         const char *d = "", *t = "", *l = "";
         switch (k)
         {
-        case 1: d = "Boost"; break;                                   // Rangemaster: one knob
-        case 2: d = "Drive";      t = "Tone";   l = "Level";  break;  // Tube Screamer
-        case 3: d = "Distortion"; t = "Filter"; l = "Volume"; break;  // RAT
-        case 4: d = "Fuzz";                     l = "Volume"; break;  // Fuzz Face (no tone)
+        case 1: d = "Boost"; break;                                   // germanium treble booster: one knob
+        case 2: d = "Drive";      t = "Tone";   l = "Level";  break;  // mid-hump overdrive
+        case 3: d = "Distortion"; t = "Filter"; l = "Volume"; break;  // hard-clip distortion
+        case 4: d = "Fuzz";                     l = "Volume"; break;  // vintage fuzz (no tone)
         default: break;                                               // Off: no knobs
         }
         row.drive->setCaption(d); row.drive->setVisible(*d != '\0');
