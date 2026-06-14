@@ -89,7 +89,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         const juce::String lbl = "Drive " + juce::String(s) + " ";
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
             juce::ParameterID(pid + "Type", 1), lbl + "Type",
-            juce::StringArray{"Off", "Boost", "Overdrive", "Distortion", "Fuzz"}, 0));
+            juce::StringArray{"Off", "Treble Boost", "Overdrive", "Distortion", "Fuzz"}, 0));
         params.push_back(std::make_unique<juce::AudioParameterFloat>(
             juce::ParameterID(pid + "Drive", 1), lbl + "Drive",
             juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));

@@ -253,7 +253,7 @@ public:
             addAndMakeVisible(row.label);
 
             row.type.addItemList(
-                juce::StringArray{"Off", "Boost", "Overdrive", "Distortion", "Fuzz"}, 1);
+                juce::StringArray{"Off", "Treble Boost", "Overdrive", "Distortion", "Fuzz"}, 1);
             row.type.setJustificationType(juce::Justification::centred);
             row.typeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
                 apvts, pid + "Type", row.type);
