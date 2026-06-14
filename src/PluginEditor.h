@@ -42,6 +42,7 @@ private:
     juce::Slider mOutGain{juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox};
     nam_rig::ui::PeakMeter mInMeter, mOutMeter;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mInAtt, mOutAtt;
+    juce::TextButton mCalBtn{"INPUT"}; // opens the global calibration panel
 
     // --- Chain strip + per-block panels ---
     // selectable: 0 gate, 1 comp, 2 ampA, 3 eqA, 4 cabA, 5 ampB, 6 eqB, 7 cabB,
@@ -57,6 +58,7 @@ private:
     nam_rig::ui::ModPanel mModPanel;
     nam_rig::ui::DelayPanel mDelayPanel;
     nam_rig::ui::ReverbPanel mReverbPanel;
+    nam_rig::ui::CalPanel mCalPanel;       // global input-cal overlay (header button)
     std::array<juce::Component *, 13> mPanels;
 
     double mLastTimerMs = 0.0;

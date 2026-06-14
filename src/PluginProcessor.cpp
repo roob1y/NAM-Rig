@@ -498,8 +498,16 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.setPanB(apvts.getRawParameterValue("rigPanB")->load());
     mChain.setPolarityA(apvts.getRawParameterValue("rigPolA")->load() >= 0.5f);
     mChain.setPolarityB(apvts.getRawParameterValue("rigPolB")->load() >= 0.5f);
-    mChain.setInTrimA(juce::Decibels::decibelsToGain(calibrationGainDb(0)));
-    mChain.setInTrimB(juce::Decibels::decibelsToGain(calibrationGainDb(1)));
+    // Input calibration is split: a GLOBAL stage trims the incoming signal to the
+    // reference level so the drive rack + gate/comp get a consistent level, then
+    // each amp gets only the RESIDUAL so its NET calibration is unchanged
+    // (global + residual == calibrationGainDb(rig); see CalNorm.h).
+    const float globalCalDb = nam_rig::CalNorm::globalCalibrationGainDb(
+        apvts.getRawParameterValue("calEnable")->load() >= 0.5f,
+        apvts.getRawParameterValue("calDbu")->load());
+    mChain.setInputCal(juce::Decibels::decibelsToGain(globalCalDb));
+    mChain.setInTrimA(juce::Decibels::decibelsToGain(calibrationGainDb(0) - globalCalDb));
+    mChain.setInTrimB(juce::Decibels::decibelsToGain(calibrationGainDb(1) - globalCalDb));
     mChain.setOutTrimA(juce::Decibels::decibelsToGain(normalizationGainDb(0)));
     mChain.setOutTrimB(juce::Decibels::decibelsToGain(normalizationGainDb(1)));
     const int rigMode = (int)apvts.getRawParameterValue("rigMode")->load();

@@ -98,6 +98,7 @@ public:
     double alignA() const { return mAlignA; }
     double alignB() const { return mAlignB; }
 
+    void setInputCal(float g) { mInputCal = g; } // global, pre-everything
     void setInTrimA(float g) { mInTrimA = g; }
     void setInTrimB(float g) { mInTrimB = g; }
     void setOutTrimA(float g) { mOutTrimA = g; }
@@ -204,6 +205,11 @@ public:
             return;
 
         float *ch0 = buffer.getWritePointer(0);
+
+        // ---- global input calibration (feeds the whole pre-amp section:
+        //      gate -> comp -> drive -> split). Unity by default -> bit-exact. ----
+        if (mInputCal != 1.0f)
+            scale(ch0, numSamples, mInputCal);
 
         // ---- shared mono pre ----
         if (!gate.isBypassed())
@@ -466,6 +472,7 @@ private:
     float mLevelA = 1.0f, mLevelB = 1.0f;
     float mPanA = -1.0f, mPanB = 1.0f; // default hard L / hard R for Dual
     float mPolA = 1.0f, mPolB = 1.0f;  // polarity (+1 / -1)
+    float mInputCal = 1.0f; // global input calibration (pre-split)
     float mInTrimA = 1.0f, mInTrimB = 1.0f;
     float mOutTrimA = 1.0f, mOutTrimB = 1.0f;
     double mAlignA = 0.0, mAlignB = 0.0; // fractional align delay (samples)

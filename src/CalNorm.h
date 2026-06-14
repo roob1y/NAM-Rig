@@ -26,6 +26,22 @@ struct CalNorm
     // Same loudness target as the official NAM plugin.
     static constexpr float kTargetLoudnessDb = -18.0f;
 
+    // Internal reference level (dBu) the SHARED pre-amp section (drive rack,
+    // gate, comp) is voiced at. Equal to the calDbu default so default settings
+    // change nothing. The per-amp calibration is preserved by splitting the
+    // input correction into a global stage (userDbu - reference) feeding the
+    // pre-amp section + a per-rig residual (reference - modelDbu) into each amp;
+    // the two sum back to calibrationGainDb(rig), so amp tone is unchanged.
+    static constexpr float kReferenceDbu = 12.0f;
+
+    // Global input calibration (dB): trims the incoming signal to the reference
+    // so the shared pre-amp stages get a consistent level. Model-independent;
+    // 0 dB (unity) when calibration is disabled.
+    static float globalCalibrationGainDb(bool enabled, float userDbu)
+    {
+        return enabled ? userDbu - kReferenceDbu : 0.0f;
+    }
+
     // Input-gain correction (dB). 0 when disabled or the model has no
     // input_level_dbu metadata.
     static float calibrationGainDb(bool enabled, bool hasInputLevelDbu,

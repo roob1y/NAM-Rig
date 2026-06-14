@@ -305,6 +305,69 @@ private:
 };
 
 //==============================================================================
+// CalPanel - global INPUT calibration, opened from the header INPUT button.
+// Sets the level of the incoming signal (your interface's dBu at 0 dBFS) so the
+// shared pre-amp section (drive rack, gate, comp) is driven consistently; each
+// amp still lands on its own capture level automatically (CalNorm.h splits the
+// correction into this global stage + a per-rig residual). Shown as an overlay
+// over the block-panel area; Close (or selecting any block) hides it.
+class CalPanel : public BlockPanel
+{
+public:
+    std::function<void()> onClose;
+
+    explicit CalPanel(juce::AudioProcessorValueTreeState &apvts)
+        : BlockPanel("INPUT CALIBRATION")
+    {
+        mEnable.setButtonText("Calibrate input level");
+        addAndMakeVisible(mEnable);
+        mEnableAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            apvts, "calEnable", mEnable);
+
+        mDbu.setSliderStyle(juce::Slider::LinearHorizontal);
+        mDbu.setTextBoxStyle(juce::Slider::TextBoxRight, false, 64, 22);
+        mDbu.setTextValueSuffix(" dBu");
+        addAndMakeVisible(mDbu);
+        mDbuAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+            apvts, "calDbu", mDbu);
+
+        mHint.setJustificationType(juce::Justification::topLeft);
+        mHint.setColour(juce::Label::textColourId, colors::textDim);
+        mHint.setText("Tells the rig what your interface sends at 0 dBFS so the drive pedals "
+                      "and both amps are driven at a consistent level. Each amp still hits its "
+                      "own captured sweet spot automatically. Reference is 12 dBu, so the "
+                      "default leaves your sound unchanged - raise or lower it to match a "
+                      "hotter or quieter interface.",
+                      juce::dontSendNotification);
+        addAndMakeVisible(mHint);
+
+        mClose.setButtonText("Close");
+        mClose.onClick = [this] { if (onClose) onClose(); };
+        addAndMakeVisible(mClose);
+    }
+
+    void resized() override
+    {
+        auto area = contentArea();
+        auto bottom = area.removeFromBottom(30);
+        mClose.setBounds(bottom.removeFromRight(96).reduced(0, 3));
+        mEnable.setBounds(area.removeFromTop(28));
+        area.removeFromTop(8);
+        mDbu.setBounds(area.removeFromTop(28).removeFromLeft(340));
+        area.removeFromTop(14);
+        mHint.setBounds(area.removeFromTop(96));
+    }
+
+private:
+    juce::ToggleButton mEnable;
+    juce::Slider mDbu;
+    juce::Label mHint;
+    juce::TextButton mClose;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mEnableAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mDbuAtt;
+};
+
+//==============================================================================
 class AmpPanel : public BlockPanel
 {
 public:
@@ -350,21 +413,8 @@ public:
         mInfo.setColour(juce::Label::textColourId, colors::textDim);
         addAndMakeVisible(mInfo);
 
-        // --- Input calibration + output normalization (NAM-AA parity) ---
-        // Both are gated on the model carrying the matching .nam metadata; the
-        // controls grey out otherwise (see refresh()).
-        mCalToggle.setButtonText("Calibrate input (interface clip dBu)");
-        addAndMakeVisible(mCalToggle);
-        mCalToggleAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            mProc.apvts, "calEnable", mCalToggle);
-
-        mCalSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        mCalSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 22);
-        mCalSlider.setTextValueSuffix(" dBu");
-        addAndMakeVisible(mCalSlider);
-        mCalSliderAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-            mProc.apvts, "calDbu", mCalSlider);
-
+        // --- Output normalization (NAM-AA parity; per-amp loudness). Input
+        //     calibration now lives in the global INPUT panel (header button). ---
         mNormToggle.setButtonText("Normalize output (-18 dB)");
         addAndMakeVisible(mNormToggle);
         mNormToggleAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
@@ -384,11 +434,7 @@ public:
         mLiveAa.setEnabled(aaAvailable);
         mOfflineAa.setEnabled(aaAvailable);
 
-        // Calibration needs input_level_dbu; normalization needs loudness. The
-        // slider is live only when calibration is both available and enabled.
-        const bool hasCal = mProc.hasInputCalibration();
-        mCalToggle.setEnabled(hasCal);
-        mCalSlider.setEnabled(hasCal && mCalToggle.getToggleState());
+        // Normalization needs loudness metadata; grey out otherwise.
         mNormToggle.setEnabled(mProc.hasLoudness());
 
         juce::String info;
@@ -435,11 +481,8 @@ public:
         comboRow(mLiveAaLabel, mLiveAa);
         comboRow(mOfflineAaLabel, mOfflineAa);
 
-        // Calibration + normalization sit below the AA combos in the right column.
+        // Normalization sits below the AA combos in the right column.
         area.removeFromTop(6);
-        mCalToggle.setBounds(area.removeFromTop(24));
-        mCalSlider.setBounds(area.removeFromTop(26).removeFromLeft(240));
-        area.removeFromTop(8);
         mNormToggle.setBounds(area.removeFromTop(24));
     }
 
@@ -451,10 +494,8 @@ private:
     juce::ComboBox mLiveAa, mOfflineAa;
     juce::Label mLiveAaLabel, mOfflineAaLabel;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mLiveAtt, mOfflineAtt;
-    juce::ToggleButton mCalToggle, mNormToggle;
-    juce::Slider mCalSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mCalToggleAtt, mNormToggleAtt;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mCalSliderAtt;
+    juce::ToggleButton mNormToggle;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mNormToggleAtt;
     std::unique_ptr<juce::FileChooser> mChooser;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AmpPanel)

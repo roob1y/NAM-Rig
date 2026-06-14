@@ -19,6 +19,7 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
       mModPanel(p.apvts),
       mDelayPanel(p.apvts),
       mReverbPanel(p.apvts),
+      mCalPanel(p.apvts),
       mPanels{&mGatePanel, &mCompPanel, &mDrivePanel, &mAmpPanelA, &mEqPanelA, &mCabPanelA,
               &mAmpPanelB, &mEqPanelB, &mCabPanelB, &mMixPanel,
               &mModPanel, &mDelayPanel, &mReverbPanel}
@@ -61,6 +62,18 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
     for (auto *panel : mPanels)
         mContent.addChildComponent(*panel); // visibility driven by selection
 
+    // Global input-calibration overlay, toggled by the header INPUT button.
+    mContent.addChildComponent(mCalPanel);
+    mCalPanel.onClose = [this] { mCalPanel.setVisible(false); };
+    mContent.addAndMakeVisible(mCalBtn);
+    mCalBtn.onClick = [this]
+    {
+        const bool show = !mCalPanel.isVisible();
+        mCalPanel.setVisible(show);
+        if (show)
+            mCalPanel.toFront(true);
+    };
+
     mStrip.onSelectionChanged = [this](int i)
     { showPanel(i); };
     mStrip.select(juce::jlimit(0, (int)mPanels.size() - 1, mProc.uiSelectedBlock));
@@ -88,6 +101,7 @@ NamRigEditor::~NamRigEditor()
 
 void NamRigEditor::showPanel(int selectableIndex)
 {
+    mCalPanel.setVisible(false); // selecting a block dismisses the cal overlay
     for (int i = 0; i < (int)mPanels.size(); ++i)
         mPanels[(size_t)i]->setVisible(i == selectableIndex);
     mProc.uiSelectedBlock = selectableIndex;
@@ -157,6 +171,8 @@ void NamRigEditor::resized()
     mTitle.setBounds(header.removeFromLeft(130));
     mPresetBar.setBounds(header.removeFromLeft(380).withSizeKeepingCentre(380, 26));
     header.removeFromLeft(12);
+    mCalBtn.setBounds(header.removeFromLeft(60).withSizeKeepingCentre(58, 26));
+    header.removeFromLeft(12);
 
     auto ioCluster = header.removeFromRight(220);
     auto laidOut = [&](juce::Label &label, juce::Slider &knob, PeakMeter &meter,
@@ -184,6 +200,7 @@ void NamRigEditor::resized()
     // --- Block panel ---
     for (auto *panel : mPanels)
         panel->setBounds(area);
+    mCalPanel.setBounds(area); // overlay occupies the block-panel area
 }
 
 juce::AudioProcessorEditor *NamRigProcessor::createEditor()

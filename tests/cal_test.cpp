@@ -8,6 +8,7 @@
 //    CalNorm and produce the expected dB corrections
 // T3 a model WITHOUT those metadata fields yields unity corrections
 // T4 the corrections fold into linear in/out gains exactly (processBlock math)
+// T5 input cal splits into a global pre-amp stage + per-rig residual (sum == net)
 
 #include "CalNorm.h"
 #include "AaEngine.h"
@@ -119,6 +120,27 @@ int main(int argc, char **argv)
     buf.applyGain(inGain);
     CHECK(approx(buf.getSample(0, 0), 0.5f * inGain, 1e-6f),
           "T4 buffer scaled by folded input gain");
+
+    // ---- T5: input cal splits into a GLOBAL pre-amp stage + per-rig residual
+    //          that sum back to the net. The global stage feeds the drive rack /
+    //          gate / comp; the residual goes into each amp so its NET cal (and
+    //          therefore tone) is unchanged. ----
+    {
+        const float g = CalNorm::globalCalibrationGainDb(true, kUserDbu);
+        const float net = CalNorm::calibrationGainDb(true, true, kUserDbu, kModelDbu);
+        const float residual = net - g;
+        CHECK(approx(g + residual, net, 1e-5f), "T5 global + residual == net cal");
+        CHECK(approx(g, kUserDbu - CalNorm::kReferenceDbu, 1e-5f),
+              "T5 global = userDbu - reference (drives see this)");
+        CHECK(approx(residual, CalNorm::kReferenceDbu - kModelDbu, 1e-5f),
+              "T5 residual = reference - modelDbu (into amp)");
+        CHECK(CalNorm::globalCalibrationGainDb(true, CalNorm::kReferenceDbu) == 0.0f,
+              "T5 default calDbu == reference -> global 0 dB (no change)");
+        const float netNo = CalNorm::calibrationGainDb(true, false, kUserDbu, kModelDbu);
+        CHECK(netNo == 0.0f, "T5 no-metadata amp net cal 0 dB");
+        CHECK(approx(g + (netNo - g), 0.0f, 1e-5f),
+              "T5 no-metadata: residual cancels global at the amp (drives still trimmed)");
+    }
 
     std::printf("\n%s (%d failure%s)\n", gFails == 0 ? "ALL PASS" : "FAILURES",
                 gFails, gFails == 1 ? "" : "s");
