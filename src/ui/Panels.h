@@ -723,8 +723,10 @@ public:
 
         mAutoBtn.onClick = [this] { mProc.autoAlign(); };
         addAndMakeVisible(mAutoBtn);
+        mMatchBtn.onClick = [this] { mProc.matchLevels(); };
+        addAndMakeVisible(mMatchBtn);
         mHint.setColour(juce::Label::textColourId, colors::textDim);
-        mHint.setText("Auto-align probes both voices and sets the nudge + Rig B polarity.",
+        mHint.setText("Auto-align matches timing/polarity; Match Levels matches loudness.",
                       juce::dontSendNotification);
         addAndMakeVisible(mHint);
     }
@@ -739,8 +741,10 @@ public:
         mPanB->setEnabled(dual);
         mPolA.setEnabled(dual);
         mPolB.setEnabled(dual);
-        // Auto-align needs a model in BOTH rigs.
-        mAutoBtn.setEnabled(mProc.isModelLoaded(0) && mProc.isModelLoaded(1));
+        // Auto-align + Match Levels need a model in BOTH rigs.
+        const bool bothLoaded = mProc.isModelLoaded(0) && mProc.isModelLoaded(1);
+        mAutoBtn.setEnabled(bothLoaded);
+        mMatchBtn.setEnabled(bothLoaded);
     }
 
     void resized() override
@@ -768,6 +772,8 @@ public:
         auto alignRow = area.removeFromTop(96);
         mAlign->setBounds(alignRow.removeFromLeft(96).reduced(6, 0));
         mAutoBtn.setBounds(alignRow.removeFromLeft(120).withSizeKeepingCentre(120, 28));
+        alignRow.removeFromLeft(8);
+        mMatchBtn.setBounds(alignRow.removeFromLeft(120).withSizeKeepingCentre(120, 28));
         alignRow.removeFromLeft(10);
         mHint.setBounds(alignRow.withSizeKeepingCentre(alignRow.getWidth(), 40));
     }
@@ -778,7 +784,7 @@ private:
     juce::Label mModeLabel, mALabel, mBLabel, mHint;
     std::unique_ptr<LabeledKnob> mLevelA, mPanA, mLevelB, mPanB, mAlign;
     juce::ToggleButton mPolA, mPolB;
-    juce::TextButton mAutoBtn{"Auto-align"};
+    juce::TextButton mAutoBtn{"Auto-align"}, mMatchBtn{"Match Levels"};
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mModeAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mPolAAtt, mPolBAtt;
 

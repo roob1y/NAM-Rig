@@ -37,6 +37,7 @@
 #include "ReverbBlock.h"
 #include "Lfo.h"        // FracDelayLine (align delay)
 #include "PhaseAlign.h" // cross-correlation measurement
+#include "Biquad.h"     // band-limit for the level-match measurement
 
 #include <algorithm>
 #include <cmath>
@@ -64,6 +65,7 @@ public:
         mFdlA.prepare(kMaxAlignSamples);
         mFdlB.prepare(kMaxAlignSamples);
         mMaxBlock = juce::jmax(1, maxBlockSize);
+        mSampleRate = sampleRate;
         mPrepared = true;
     }
 
@@ -147,6 +149,49 @@ public:
         reset();
 
         return PhaseAlign::measure(a.data(), b.data(), n, kMaxAlignSamples);
+    }
+
+    struct VoiceLevels { double rmsA = 0.0, rmsB = 0.0; };
+
+    // Measure each voice's actual output RMS by rendering a probe through the
+    // FULL voice (cal in-trim -> amp -> eq -> cab -> normalize out-trim), so the
+    // result reflects what's really heard (cab + cal/normalize included). Used
+    // by NamRigProcessor::matchLevels to set the per-rig Level knobs equal.
+    // Same threading contract as measureAlignment (caller suspends processing).
+    VoiceLevels measureLevels()
+    {
+        const int n = 8192; // long window -> stable RMS
+        settleCab(cab);
+        settleCab(cabB);
+        reset();
+
+        std::vector<float> a((size_t)n), b((size_t)n);
+        std::uint32_t s = 0x9e3779b9u;
+        for (int i = 0; i < n; ++i)
+        {
+            s = s * 1103515245u + 12345u;
+            const float v = 0.25f * (float)((int)((s >> 16) & 0x7fff) - 16384) / 16384.0f;
+            a[(size_t)i] = v;
+            b[(size_t)i] = v;
+        }
+
+        renderVoice(0, a.data(), n, true); // withTrims = include cal/normalize
+        reset();
+        renderVoice(1, b.data(), n, true);
+        reset();
+
+        // Perceptual band-limit before RMS. Distortion dumps energy into fizzy
+        // HF harmonics we don't hear as proportionally loud, so plain (or worse,
+        // K-weighted) RMS over-counts a crunchy amp and the match leaves it too
+        // quiet. Bracketing the guitar-loudness band (~80 Hz .. 5 kHz) tracks
+        // perceived loudness much better.
+        bandLimit(a.data(), n);
+        bandLimit(b.data(), n);
+
+        VoiceLevels r;
+        r.rmsA = voiceRms(a.data(), n);
+        r.rmsB = voiceRms(b.data(), n);
+        return r;
     }
 
     // Full chain on a DAW-rate buffer (1 = mono fold, 2 = stereo).
@@ -329,20 +374,50 @@ private:
 
     // Offline-render one voice (amp->eq->cab) in place, chunked by the prepared
     // block size so the convolver never sees an oversized block. Bypass flags
-    // are ignored: alignment is about the full voice's acoustic timing.
-    void renderVoice(int rig, float *buf, int n)
+    // are ignored. withTrims folds in the cal/normalize trims (for level
+    // measurement); alignment leaves them out (gain doesn't shift the lag).
+    void renderVoice(int rig, float *buf, int n, bool withTrims = false)
     {
         AmpBlock &a = rig ? ampB : amp;
         EqBlock &e = rig ? eqB : eq;
         CabBlock &c = rig ? cabB : cab;
+        const float inTrim = rig ? mInTrimB : mInTrimA;
+        const float outTrim = rig ? mOutTrimB : mOutTrimA;
         const int chunk = juce::jmax(1, juce::jmin(mMaxBlock, n));
         for (int pos = 0; pos < n; pos += chunk)
         {
             const int m = juce::jmin(chunk, n - pos);
+            if (withTrims && inTrim != 1.0f) scale(buf + pos, m, inTrim);
             a.process(buf + pos, m);
             e.process(buf + pos, m);
             c.process(buf + pos, m);
+            if (withTrims && outTrim != 1.0f) scale(buf + pos, m, outTrim);
         }
+    }
+
+    // RMS of a rendered voice, skipping the amp's startup ramp.
+    static double voiceRms(const float *x, int n)
+    {
+        const int skip = juce::jmin(1024, n / 4);
+        double sum = 0.0;
+        int cnt = 0;
+        for (int i = skip; i < n; ++i)
+        {
+            sum += (double)x[i] * (double)x[i];
+            ++cnt;
+        }
+        return cnt > 0 ? std::sqrt(sum / (double)cnt) : 0.0;
+    }
+
+    // Bracket the guitar-loudness band (~80 Hz .. 5 kHz) before the RMS so
+    // subsonics and distortion fizz don't skew the level measure. Uses the same
+    // verified RBJ Biquads the EQ/cab run.
+    void bandLimit(float *x, int n) const
+    {
+        Biquad hp = Biquad::highpass(mSampleRate, 80.0);
+        Biquad lp = Biquad::lowpass(mSampleRate, 5000.0);
+        hp.process(x, n);
+        lp.process(x, n);
     }
 
     // Wait out juce::dsp::Convolution's async IR load + crossfade by probing
@@ -390,6 +465,7 @@ private:
     FracDelayLine mFdlA, mFdlB;
     std::vector<float> mVoiceA, mVoiceB;
     int mMaxBlock = 512; // prepared block size (probe render chunk size)
+    double mSampleRate = 48000.0; // for the level-measurement band-limit filters
     bool mPrepared = false;
 };
 

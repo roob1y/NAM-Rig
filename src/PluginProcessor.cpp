@@ -300,6 +300,36 @@ void NamRigProcessor::autoAlign()
     }
 }
 
+void NamRigProcessor::matchLevels()
+{
+    if (!isModelLoaded(0) || !isModelLoaded(1))
+        return;
+
+    suspendProcessing(true);
+    const auto lv = mChain.measureLevels();
+    suspendProcessing(false);
+
+    if (lv.rmsA <= 1.0e-9 || lv.rmsB <= 1.0e-9)
+        return; // a silent voice -> nothing meaningful to match
+
+    // Bring the louder rig down to the quieter (reference) so neither is boosted
+    // into clipping; both end at the same loudness.
+    const double ref = juce::jmin(lv.rmsA, lv.rmsB);
+    auto setLevel = [this](const char *id, double linearRatio)
+    {
+        if (auto *p = apvts.getParameter(id))
+        {
+            const float db = juce::jlimit(-24.0f, 12.0f,
+                                          (float)juce::Decibels::gainToDecibels(linearRatio));
+            p->beginChangeGesture();
+            p->setValueNotifyingHost(p->convertTo0to1(db));
+            p->endChangeGesture();
+        }
+    };
+    setLevel("rigLevelA", ref / lv.rmsA);
+    setLevel("rigLevelB", ref / lv.rmsB);
+}
+
 int NamRigProcessor::requestedFactorNow(int rig) const
 {
     const char *osId = rig == 0 ? "oversample" : "oversampleB";

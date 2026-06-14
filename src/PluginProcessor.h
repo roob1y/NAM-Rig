@@ -65,6 +65,11 @@ public:
     // the offline render. Message thread; wired to the load/Align UI in 2d.
     void autoAlign();
 
+    // Match Levels: probe both voices' actual loudness (cab + cal/normalize
+    // included) and set the per-rig Level params so they come out equal — the
+    // louder rig is brought down, no boost. Suspends processing; message thread.
+    void matchLevels();
+
     // --- Input calibration / output normalization (NAM-AA parity; CalNorm.h) ---
     // Per-rig: each rig is calibrated/normalized from its OWN model metadata,
     // applied as that rig's voice in/out trims. The enable toggles are global;
