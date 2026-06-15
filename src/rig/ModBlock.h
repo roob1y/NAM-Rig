@@ -127,9 +127,6 @@ public:
         mDrumLp[0] = mDrumLp[1] = 0.0f;
         mCabZ1[0] = mCabZ1[1] = 0.0f;
         mCabZ2[0] = mCabZ2[1] = 0.0f;
-        mWindLp[0] = mWindLp[1] = 0.0f;
-        mRumbleLp[0] = mRumbleLp[1] = 0.0f;
-        mNoiseRng = 0x9E3779B9u;
         mRotHornPhase = 0.0;
         mRotDrumPhase = 0.0;
         mRotHornSpeed = kRotSlowHz;
@@ -160,7 +157,6 @@ public:
     void setWidth(float w) { mWidth = w; }         // 0 = mono spread, 1 = 90 deg
     void setDrive(float d) { mRotDrive = d; }      // Rotary: Leslie tube-amp drive
     void setRotFast(bool f) { mRotFast = f; }      // Rotary: slow (chorale) / fast (tremolo)
-    void setRotNoise(bool n) { mRotNoise = n; }    // Rotary: motor/wind mechanical noise on/off
 
     // LFO period in beats for each modSync choice (index 0 = Off = free rate).
     static constexpr int kNumSync = 10;
@@ -200,8 +196,6 @@ public:
         mDrumInc = (double)mRotDrumSpeed / mFs;
         mHornLpCoef = coefForHz(5000.0, mFs); // horn driver: rolls off the extreme top
         mDrumLpCoef = coefForHz(70.0, mFs);   // bass rotor: rolls off the deep lows
-        mWindLpCoef = coefForHz(1500.0, mFs); // wind = noise high-passed above this
-        mRumbleLpCoef = coefForHz(120.0, mFs); // motor rumble = noise low-passed
         const double rOff = (double)mWidth * kRightLfoOffset;
         const float mixTarget = mixFor(ty, mMix); // only Chorus uses the knob
 
@@ -342,10 +336,6 @@ private:
             const float cosD = std::cos(6.2831853f * (float)(mRotDrumPhase + rot));
             const float drum = drumIn * (1.0f - 0.45f * depth * (0.5f - 0.5f * cosD));
 
-            // (Synthesized motor/wind noise removed — it read as a shaker, not
-            //  air. Real cabinet ambience needs a recorded sample; the mRotNoise
-            //  toggle is left as the on/off hook for that if we add it.)
-
             // --- wooden cabinet: low-mid resonant body (peaking biquad, TDF2) ---
             float wet = horn + drum;
             {
@@ -441,10 +431,6 @@ private:
             if (std::abs(f) < 1.0e-30f) f = 0.0f;
         for (auto &f : mCabZ2)
             if (std::abs(f) < 1.0e-30f) f = 0.0f;
-        for (auto &f : mWindLp)
-            if (std::abs(f) < 1.0e-30f) f = 0.0f;
-        for (auto &f : mRumbleLp)
-            if (std::abs(f) < 1.0e-30f) f = 0.0f;
     }
 
     struct ApState { float x1 = 0.0f, y1 = 0.0f; };
@@ -476,10 +462,6 @@ private:
     std::array<float, 2> mCabZ1{}, mCabZ2{};                 // cabinet biquad state
     float mHornLpCoef = 1.0f, mDrumLpCoef = 0.1f;            // per-block driver coeffs
     float mCabB0 = 1.0f, mCabB1 = 0.0f, mCabB2 = 0.0f, mCabA1 = 0.0f, mCabA2 = 0.0f;
-    bool mRotNoise = true;             // Leslie mechanical noise on/off
-    uint32_t mNoiseRng = 0x9E3779B9u;  // wind/rumble noise generator (LCG)
-    std::array<float, 2> mWindLp{}, mRumbleLp{};            // wind HP / rumble LP state
-    float mWindLpCoef = 1.0f, mRumbleLpCoef = 0.1f;
     float mFreeRateHz = 1.0f;
     double mBpm = 120.0;
     int mSyncIndex = 0;
@@ -533,7 +515,6 @@ public:
     void setWidth(int s, float w) { mVoice[idx(s)].setWidth(w); }
     void setDrive(int s, float d) { mVoice[idx(s)].setDrive(d); }
     void setRotFast(int s, bool f) { mVoice[idx(s)].setRotFast(f); }
-    void setRotNoise(int s, bool n) { mVoice[idx(s)].setRotNoise(n); }
     void setSlotBypassed(int s, bool b) { mVoice[idx(s)].setBypassed(b); }
     void setBpm(double bpm)
     {
