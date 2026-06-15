@@ -454,6 +454,23 @@ int main()
               "T15 chorus hardwires LFO (sq==sine), tremolo honours Shape (diff %.3f)", td);
     }
 
+    // ---- T16: flanger stays bounded at max feedback (tone-shaped regen) ----
+    {
+        ModVoice m;
+        m.setType(ModVoice::kFlanger);
+        m.setRateHz(0.3f);
+        m.setDepth(0.8f);
+        m.setFeedback(0.9f);
+        m.setMix(0.5f);
+        m.prepare({SR, BLK});
+        auto l = tone(220.0, 0.4, (int)SR * 2), r = l;
+        run(m, l, r);
+        bool fin = true;
+        double pk = 0;
+        for (float v : l) { if (!std::isfinite(v)) fin = false; pk = std::max(pk, (double)std::abs(v)); }
+        CHECK(fin && pk < 4.0, "T16 flanger max feedback stays bounded (peak %.2f)", pk);
+    }
+
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);
     return gFails == 0 ? 0 : 1;
 }

@@ -756,8 +756,15 @@ public:
         addAndMakeVisible(*mRate);
         addChildComponent(*mDepth);
         addChildComponent(*mFeedback);
-        addAndMakeVisible(*mMix);
+        addChildComponent(*mMix); // chorus only (others hardwire their blend)
         addAndMakeVisible(*mWidth);
+
+        mDrive = std::make_unique<LabeledKnob>(apvts, p + "Drive", "Drive");
+        addChildComponent(*mDrive); // rotary only (Leslie tube amp)
+        mRotFast.setButtonText("Fast");
+        addChildComponent(mRotFast); // rotary only (slow/fast rotor)
+        mRotFastAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            apvts, p + "RotFast", mRotFast);
 
         refresh();
     }
@@ -775,9 +782,15 @@ public:
         mLastType = type;
         mLastSync = sync;
         mLastOn = on;
+        const bool rotary = (type == 5);
         mDepth->setVisible(type != 2);                 // phaser: no depth knob
         mFeedback->setVisible(type == 1 || type == 2); // flanger/phaser
+        mMix->setVisible(nam_rig::ModVoice::mixExposed((nam_rig::ModVoice::Type)type)); // chorus only
         mWave.setVisible(type == 3);                   // tremolo shape
+        mRate->setVisible(!rotary);                    // rotary: slow/fast toggle, not a rate
+        mSync.setVisible(!rotary);
+        mDrive->setVisible(rotary);                    // rotary: Leslie tube drive
+        mRotFast.setVisible(rotary);
         mRate->setEnabled(sync == 0);                  // rate greyed when synced
         repaint();                                     // LED
         resized();
@@ -810,7 +823,9 @@ public:
         auto meta = area.removeFromLeft(112).withSizeKeepingCentre(112, juce::jmin(area.getHeight(), 50));
         mType.setBounds(meta.removeFromTop(24));
         meta.removeFromTop(4);
-        mSync.setBounds(meta.removeFromTop(22).removeFromLeft(88));
+        auto bottomMeta = meta.removeFromTop(22);
+        mSync.setBounds(bottomMeta.withWidth(88));   // shown for non-rotary
+        mRotFast.setBounds(bottomMeta.withWidth(72)); // shown for rotary (overlaps; only one visible)
         area.removeFromLeft(10);
 
         auto onCol = area.removeFromRight(44);
@@ -825,7 +840,7 @@ public:
         std::vector<juce::Component *> vis;
         for (juce::Component *k : {(juce::Component *)mRate.get(), (juce::Component *)mDepth.get(),
                                    (juce::Component *)mFeedback.get(), (juce::Component *)mMix.get(),
-                                   (juce::Component *)mWidth.get()})
+                                   (juce::Component *)mWidth.get(), (juce::Component *)mDrive.get()})
             if (k->isVisible())
                 vis.push_back(k);
         const int nk = (int)vis.size();
@@ -850,7 +865,9 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt, mWaveAtt, mSyncAtt;
     juce::ToggleButton mOn;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mOnAtt;
-    std::unique_ptr<LabeledKnob> mRate, mDepth, mFeedback, mMix, mWidth;
+    std::unique_ptr<LabeledKnob> mRate, mDepth, mFeedback, mMix, mWidth, mDrive;
+    juce::ToggleButton mRotFast;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mRotFastAtt;
 };
 
 class ModPanel : public BlockPanel
