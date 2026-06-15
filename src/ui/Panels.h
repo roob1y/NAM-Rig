@@ -40,6 +40,18 @@ public:
 
     juce::Slider &slider() { return mSlider; }
 
+    // Re-point this knob at a different parameter (used by the drive pedal to
+    // give each pedal TYPE its own Drive/Tone/Level instead of sharing one set).
+    void rebind(juce::AudioProcessorValueTreeState &apvts, const juce::String &paramId)
+    {
+        mAtt.reset(); // destroy the old attachment before making the new one
+        mAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+            apvts, paramId, mSlider);
+        if (auto *param = apvts.getParameter(paramId))
+            mSlider.setDoubleClickReturnValue(
+                true, param->convertFrom0to1(param->getDefaultValue()));
+    }
+
 private:
     juce::Label mLabel;
     juce::Slider mSlider;
@@ -234,9 +246,240 @@ private:
 };
 
 //==============================================================================
+<<<<<<< Updated upstream
 // DrivePanel — the 3-slot series drive rack (shared, feeds both rigs). Each row
 // is one pedal: Type selector (Off/Boost/Overdrive/Distortion/Fuzz) + Drive /
 // Tone / Level. Type=Off bypasses that slot; an all-Off rack is bit-exact.
+=======
+// A round metal footswitch (toggles the pedal On/Off; ring lights amber on).
+class Footswitch : public juce::Button
+{
+public:
+    Footswitch() : juce::Button({}) { setClickingTogglesState(true); }
+    void paintButton(juce::Graphics &g, bool, bool down) override
+    {
+        auto bb = getLocalBounds().toFloat();
+        const float dd = juce::jmin(bb.getWidth(), bb.getHeight());
+        auto c = juce::Rectangle<float>(dd, dd).withCentre(bb.getCentre()).reduced(2.0f);
+        g.setColour(getToggleState() ? colors::accent : colors::ledOff); // ring
+        g.fillEllipse(c);
+        auto cap = c.reduced(3.0f);
+        juce::ColourGradient grad(colors::text.withAlpha(0.80f), cap.getX(), cap.getY(),
+                                  colors::outline, cap.getX(), cap.getBottom(), false);
+        g.setGradientFill(grad);
+        g.fillEllipse(cap);
+        g.setColour(colors::bg.withAlpha(down ? 0.30f : 0.14f)); // dimple
+        g.fillEllipse(cap.reduced(cap.getWidth() * 0.30f));
+    }
+};
+
+// One drive "stomp" in the pedalboard. Top-to-bottom: Type (category), a model
+// selector (when the category has several models), the model's descriptive
+// subtitle, the authentic knobs, the model's mode switch (treble-boost Range),
+// then the footswitch. Only the controls that pedal actually has are shown.
+class DrivePedal : public juce::Component
+{
+public:
+    DrivePedal(juce::AudioProcessorValueTreeState &apvts, int slot)
+        : mApvts(apvts), mSlot(slot)
+    {
+        const juce::String p = "drv" + juce::String(slot + 1);
+
+        mType.addItemList({"Off", "Boost", "Overdrive", "Distortion", "Fuzz"}, 1);
+        mType.setJustificationType(juce::Justification::centred);
+        mTypeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, p + "Type", mType);
+        mType.onChange = [this] { refresh(); };
+        addAndMakeVisible(mType);
+
+        mModel.setJustificationType(juce::Justification::centred);
+        mModel.onChange = [this] { onModelPicked(); }; // manual sync (items are dynamic per category)
+        addChildComponent(mModel);
+
+        mSub.setJustificationType(juce::Justification::centred);
+        mSub.setColour(juce::Label::textColourId, colors::textDim);
+        mSub.setFont(RigLookAndFeel::withHeight(10.5f));
+        addAndMakeVisible(mSub);
+
+        mRange.addItemList({"Treble", "Mid", "Full"}, 1);
+        mRange.setJustificationType(juce::Justification::centred);
+        mRangeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, p + "bRange", mRange); // Range belongs to the Boost (treble booster) only
+        addChildComponent(mRange);
+
+        mOnAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            apvts, p + "On", mOn);
+        mOn.onClick = [this] { refresh(); };
+        addChildComponent(mOn);
+
+        mDrive = std::make_unique<LabeledKnob>(apvts, p + "oDrive", "Drive"); // rebound per type
+        mTone  = std::make_unique<LabeledKnob>(apvts, p + "oTone", "Tone");
+        mLevel = std::make_unique<LabeledKnob>(apvts, p + "oLevel", "Level");
+        addAndMakeVisible(*mDrive);
+        addAndMakeVisible(*mTone);
+        addAndMakeVisible(*mLevel);
+
+        refresh();
+    }
+
+    void refresh()
+    {
+        const int type = mType.getSelectedItemIndex();
+        const juce::String pid = "drv" + juce::String(mSlot + 1);
+        const bool on = mApvts.getRawParameterValue(pid + "On")->load() >= 0.5f;
+        if (type != mLastType)
+            populateModels(type);
+        const int count = nam_rig::DriveBlock::modelCount((nam_rig::DriveBlock::Kind)type);
+        // Model only applies to multi-model categories (Boost). Don't touch the
+        // boost model param when on a single-model type, or it'd reset on switch.
+        int model = (count > 1) ? (int)mApvts.getRawParameterValue(pid + "bModel")->load() : 0;
+        if (count > 1 && model >= count) { model = 0; setModelParam(0); }
+        if (count > 1 && mModel.getSelectedItemIndex() != model)
+            mModel.setSelectedItemIndex(juce::jmax(0, model), juce::dontSendNotification);
+        mActive = (type != 0) && on;
+        if (type == mLastType && on == mLastOn && model == mLastModel) { repaint(); return; }
+        mLastType = type; mLastOn = on; mLastModel = model;
+        configure();
+        resized();
+        repaint();
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        auto b = getLocalBounds().toFloat().reduced(1.0f);
+        juce::ColourGradient eg(colors::tile.brighter(0.05f), 0.0f, b.getY(),
+                                colors::tile.darker(0.18f), 0.0f, b.getBottom(), false);
+        g.setGradientFill(eg);
+        g.fillRoundedRectangle(b, 10.0f);
+        g.setColour(mActive ? colors::accent : colors::outline);
+        g.drawRoundedRectangle(b, 10.0f, mActive ? 1.6f : 1.1f);
+        auto screw = [&](float x, float y) {
+            g.setColour(colors::outline.brighter(0.35f));
+            g.fillEllipse(x - 3.0f, y - 3.0f, 6.0f, 6.0f);
+            g.setColour(colors::bg);
+            g.drawLine(x - 2.0f, y - 1.5f, x + 2.0f, y + 1.5f, 1.0f);
+        };
+        screw(12.0f, 12.0f); screw((float)getWidth() - 12.0f, 12.0f);
+        screw(12.0f, (float)getHeight() - 12.0f); screw((float)getWidth() - 12.0f, (float)getHeight() - 12.0f);
+        g.setColour(mActive ? colors::accent : colors::ledOff);
+        g.fillEllipse((float)getWidth() - 34.0f, 16.0f, 7.0f, 7.0f); // status LED
+    }
+
+    void resized() override
+    {
+        auto area = getLocalBounds().reduced(10, 9);
+        mType.setBounds(area.removeFromTop(24));
+        if (mModel.isVisible())
+        {
+            area.removeFromTop(5);
+            mModel.setBounds(area.removeFromTop(24));
+        }
+        area.removeFromTop(3);
+        mSub.setBounds(area.removeFromTop(13));
+        if (mOn.isVisible())
+        {
+            auto bot = area.removeFromBottom(46);
+            mOn.setBounds(bot.withSizeKeepingCentre(42, 42));
+            area.removeFromBottom(2);
+        }
+        if (mRange.isVisible())
+        {
+            auto rr = area.removeFromBottom(24);
+            mRange.setBounds(rr.withSizeKeepingCentre(juce::jmin(rr.getWidth(), 150), 22));
+            area.removeFromBottom(6);
+        }
+        area.removeFromTop(6);
+        LabeledKnob *ks[3] = {mDrive.get(), mTone.get(), mLevel.get()};
+        int nVis = 0;
+        for (auto *k : ks) if (k->isVisible()) ++nVis;
+        if (nVis == 0) return;
+        const int kw = juce::jmin(86, juce::jmax(1, area.getWidth() / nVis));
+        auto grp = area.withSizeKeepingCentre(kw * nVis, juce::jmin(area.getHeight(), 104));
+        for (auto *k : ks)
+            if (k->isVisible())
+                k->setBounds(grp.removeFromLeft(kw).reduced(4, 0));
+    }
+
+private:
+    void populateModels(int type)
+    {
+        const auto cat = (nam_rig::DriveBlock::Kind)type;
+        const int n = nam_rig::DriveBlock::modelCount(cat);
+        mModel.clear(juce::dontSendNotification);
+        for (int i = 0; i < n; ++i)
+            mModel.addItem(nam_rig::DriveBlock::modelName(cat, i), i + 1);
+        mModel.setVisible(type != 0 && n > 1); // only when there is a real choice
+    }
+    void onModelPicked()
+    {
+        setModelParam(mModel.getSelectedItemIndex());
+        refresh();
+    }
+    void setModelParam(int idx)
+    {
+        if (auto *prm = mApvts.getParameter("drv" + juce::String(mSlot + 1) + "bModel"))
+            prm->setValueNotifyingHost(prm->convertTo0to1((float)juce::jmax(0, idx)));
+    }
+    void configure()
+    {
+        const juce::String p = "drv" + juce::String(mSlot + 1);
+        const int type = mType.getSelectedItemIndex();
+        const int model = juce::jmax(0, mModel.getSelectedItemIndex());
+        const auto cat = (nam_rig::DriveBlock::Kind)type;
+        // Re-point the shared knob widgets at the ACTIVE type's own parameters,
+        // so each pedal type keeps its own Drive/Tone/Level. Hidden knobs keep
+        // their last binding (harmless — the audio path reads params directly).
+        switch (type)
+        {
+        case 1: // Boost (one knob)
+            mDrive->rebind(mApvts, p + "bDrive"); mDrive->setCaption("Boost");
+            mDrive->setVisible(true); mTone->setVisible(false); mLevel->setVisible(false);
+            break;
+        case 2: // Overdrive
+            mDrive->rebind(mApvts, p + "oDrive"); mDrive->setCaption("Drive");
+            mTone->rebind(mApvts, p + "oTone");   mTone->setCaption("Tone");
+            mLevel->rebind(mApvts, p + "oLevel"); mLevel->setCaption("Level");
+            mDrive->setVisible(true); mTone->setVisible(true); mLevel->setVisible(true);
+            break;
+        case 3: // Distortion
+            mDrive->rebind(mApvts, p + "dDrive"); mDrive->setCaption("Distortion");
+            mTone->rebind(mApvts, p + "dTone");   mTone->setCaption("Filter");
+            mLevel->rebind(mApvts, p + "dLevel"); mLevel->setCaption("Volume");
+            mDrive->setVisible(true); mTone->setVisible(true); mLevel->setVisible(true);
+            break;
+        case 4: // Fuzz (no tone)
+            mDrive->rebind(mApvts, p + "fDrive"); mDrive->setCaption("Fuzz");
+            mLevel->rebind(mApvts, p + "fLevel"); mLevel->setCaption("Volume");
+            mDrive->setVisible(true); mTone->setVisible(false); mLevel->setVisible(true);
+            break;
+        default: // Off
+            mDrive->setVisible(false); mTone->setVisible(false); mLevel->setVisible(false);
+            break;
+        }
+        mSub.setText(type == 0 ? juce::String("select a pedal")
+                               : juce::String(nam_rig::DriveBlock::modelSub(cat, model)),
+                     juce::dontSendNotification);
+        mRange.setVisible(nam_rig::DriveBlock::modelHasRange(cat, model));
+        mOn.setVisible(type != 0);
+    }
+
+    juce::AudioProcessorValueTreeState &mApvts;
+    int mSlot;
+    juce::Label mSub;
+    juce::ComboBox mType, mModel, mRange;
+    Footswitch mOn;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt, mRangeAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mOnAtt;
+    std::unique_ptr<LabeledKnob> mDrive, mTone, mLevel;
+    int mLastType = -1, mLastModel = -1;
+    bool mLastOn = true, mActive = false;
+};
+
+//==============================================================================
+// DrivePanel - the drive section as a left-to-right PEDALBOARD: three stomps in
+// series (IN left, OUT right) joined by patch cables, contrasting with the
+// rack-style (top-down) amp + mod sections.
+>>>>>>> Stashed changes
 class DrivePanel : public BlockPanel
 {
 public:
@@ -765,6 +1008,10 @@ public:
         addChildComponent(mRotFast); // rotary only (slow/fast rotor)
         mRotFastAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             apvts, p + "RotFast", mRotFast);
+        mAir.setButtonText("Air");
+        addChildComponent(mAir); // rotary only (motor/wind noise)
+        mAirAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            apvts, p + "RotNoise", mAir);
 
         refresh();
     }
@@ -791,6 +1038,7 @@ public:
         mSync.setVisible(!rotary);
         mDrive->setVisible(rotary);                    // rotary: Leslie tube drive
         mRotFast.setVisible(rotary);
+        mAir.setVisible(rotary);                       // rotary: motor/wind noise
         mRate->setEnabled(sync == 0);                  // rate greyed when synced
         repaint();                                     // LED
         resized();
@@ -824,8 +1072,10 @@ public:
         mType.setBounds(meta.removeFromTop(24));
         meta.removeFromTop(4);
         auto bottomMeta = meta.removeFromTop(22);
-        mSync.setBounds(bottomMeta.withWidth(88));   // shown for non-rotary
-        mRotFast.setBounds(bottomMeta.withWidth(72)); // shown for rotary (overlaps; only one visible)
+        mSync.setBounds(bottomMeta.withWidth(88));         // non-rotary
+        mRotFast.setBounds(bottomMeta.removeFromLeft(54)); // rotary: slow/fast (left)
+        bottomMeta.removeFromLeft(4);
+        mAir.setBounds(bottomMeta.removeFromLeft(54));     // rotary: Air noise (right)
         area.removeFromLeft(10);
 
         auto onCol = area.removeFromRight(44);
@@ -866,8 +1116,8 @@ private:
     juce::ToggleButton mOn;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mOnAtt;
     std::unique_ptr<LabeledKnob> mRate, mDepth, mFeedback, mMix, mWidth, mDrive;
-    juce::ToggleButton mRotFast;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mRotFastAtt;
+    juce::ToggleButton mRotFast, mAir;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mRotFastAtt, mAirAtt;
 };
 
 class ModPanel : public BlockPanel
