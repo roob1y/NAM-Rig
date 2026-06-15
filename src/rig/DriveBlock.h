@@ -96,7 +96,7 @@ public:
     static const Model *modelsFor(Kind cat, int &count)
     {                       // clip  gMin    gMax  lowCut   midHz  midDb midQ   lpHz   bias   pivot   outTrim shp post
         static const Model boost[] = {
-            {"Range '65", "germanium treble boost",
+            {"Range '65", "treble boost  rev2",
              { 0, 1.0f, 20.0f, 2600.0f,   0.0f, 0.0f, 0.7f,    0.0f, 0.20f, 2500.0f, 0.95f, 0.0f, 0.0f}, true},
             {"EP Boost", "FET clean boost",
              { 0, 1.0f,  6.0f,  40.0f, 5000.0f, 3.0f, 0.6f,    0.0f, 0.05f, 1000.0f, 0.95f, 0.0f, 1.0f}, false},
@@ -353,3 +353,4 @@ private:
 };
 
 } // namespace nam_rig
+    
