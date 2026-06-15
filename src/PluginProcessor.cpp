@@ -90,23 +90,49 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
             juce::ParameterID(pid + "Type", 1), lbl + "Type",
             juce::StringArray{"Off", "Boost", "Overdrive", "Distortion", "Fuzz"}, 0));
-        params.push_back(std::make_unique<juce::AudioParameterFloat>(
-            juce::ParameterID(pid + "Drive", 1), lbl + "Drive",
-            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
-        params.push_back(std::make_unique<juce::AudioParameterFloat>(
-            juce::ParameterID(pid + "Tone", 1), lbl + "Tone",
-            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
-        params.push_back(std::make_unique<juce::AudioParameterFloat>(
-            juce::ParameterID(pid + "Level", 1), lbl + "Level",
-            juce::NormalisableRange<float>(-12.0f, 12.0f, 0.1f), 0.0f,
-            juce::AudioParameterFloatAttributes().withLabel("dB")));
-        params.push_back(std::make_unique<juce::AudioParameterChoice>(
-            juce::ParameterID(pid + "Range", 1), lbl + "Range",
-            juce::StringArray{"Treble", "Mid", "Full"}, 0)); // treble-boost cap switch
         params.push_back(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID(pid + "On", 1), lbl + "On", true)); // footswitch
+        // Per-TYPE controls: each pedal type keeps its own knobs (no sharing
+        // across types within a slot). Drive/Tone are 0..1; Level/Volume in dB.
+        // Boost: one Boost knob + input-cap Range + model select.
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(pid + "bDrive", 1), lbl + "Boost",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID(pid + "bRange", 1), lbl + "Boost Range",
+            juce::StringArray{"Treble", "Mid", "Full"}, 0)); // treble-boost cap switch
         params.push_back(std::make_unique<juce::AudioParameterInt>(
-            juce::ParameterID(pid + "Model", 1), lbl + "Model", 0, 3, 0)); // model within category
+            juce::ParameterID(pid + "bModel", 1), lbl + "Boost Model", 0, 3, 0));
+        // Overdrive: Drive / Tone / Level.
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(pid + "oDrive", 1), lbl + "OD Drive",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(pid + "oTone", 1), lbl + "OD Tone",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(pid + "oLevel", 1), lbl + "OD Level",
+            juce::NormalisableRange<float>(-12.0f, 12.0f, 0.1f), 0.0f,
+            juce::AudioParameterFloatAttributes().withLabel("dB")));
+        // Distortion: Distortion / Filter / Volume.
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(pid + "dDrive", 1), lbl + "Dist Drive",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(pid + "dTone", 1), lbl + "Dist Filter",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(pid + "dLevel", 1), lbl + "Dist Volume",
+            juce::NormalisableRange<float>(-12.0f, 12.0f, 0.1f), 0.0f,
+            juce::AudioParameterFloatAttributes().withLabel("dB")));
+        // Fuzz: Fuzz / Volume (no tone control).
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(pid + "fDrive", 1), lbl + "Fuzz",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(pid + "fLevel", 1), lbl + "Fuzz Volume",
+            juce::NormalisableRange<float>(-12.0f, 12.0f, 0.1f), 0.0f,
+            juce::AudioParameterFloatAttributes().withLabel("dB")));
     }
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID("driveAutoGain", 1), "Drive Auto Gain", false));
@@ -499,13 +525,39 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     for (int s = 0; s < nam_rig::DriveBlock::kSlots; ++s)
     {
         const juce::String pid = "drv" + juce::String(s + 1);
-        mChain.drive.setKind(s, (int)apvts.getRawParameterValue(pid + "Type")->load());
-        mChain.drive.setDrive(s, apvts.getRawParameterValue(pid + "Drive")->load());
-        mChain.drive.setTone(s, apvts.getRawParameterValue(pid + "Tone")->load());
-        mChain.drive.setLevelDb(s, apvts.getRawParameterValue(pid + "Level")->load());
-        mChain.drive.setRange(s, (int)apvts.getRawParameterValue(pid + "Range")->load());
-        mChain.drive.setOn(s, apvts.getRawParameterValue(pid + "On")->load() >= 0.5f);
-        mChain.drive.setModel(s, (int)apvts.getRawParameterValue(pid + "Model")->load());
+        auto g = [&](const char *suf) { return apvts.getRawParameterValue(pid + suf)->load(); };
+        const int type = (int)g("Type");
+        mChain.drive.setKind(s, type);
+        mChain.drive.setOn(s, g("On") >= 0.5f);
+        // Read only the ACTIVE type's own params (each type is independent).
+        switch (type)
+        {
+        case 1: // Boost
+            mChain.drive.setDrive(s, g("bDrive"));
+            mChain.drive.setRange(s, (int)g("bRange"));
+            mChain.drive.setModel(s, (int)g("bModel"));
+            mChain.drive.setTone(s, 0.5f); mChain.drive.setLevelDb(s, 0.0f);
+            break;
+        case 2: // Overdrive
+            mChain.drive.setDrive(s, g("oDrive"));
+            mChain.drive.setTone(s, g("oTone"));
+            mChain.drive.setLevelDb(s, g("oLevel"));
+            mChain.drive.setRange(s, 0); mChain.drive.setModel(s, 0);
+            break;
+        case 3: // Distortion
+            mChain.drive.setDrive(s, g("dDrive"));
+            mChain.drive.setTone(s, g("dTone"));
+            mChain.drive.setLevelDb(s, g("dLevel"));
+            mChain.drive.setRange(s, 0); mChain.drive.setModel(s, 0);
+            break;
+        case 4: // Fuzz (no tone control)
+            mChain.drive.setDrive(s, g("fDrive"));
+            mChain.drive.setTone(s, 0.5f);
+            mChain.drive.setLevelDb(s, g("fLevel"));
+            mChain.drive.setRange(s, 0); mChain.drive.setModel(s, 0);
+            break;
+        default: break; // Off
+        }
     }
     mChain.drive.setAutoGain(apvts.getRawParameterValue("driveAutoGain")->load() >= 0.5f);
     mChain.drive.setBypassed(!mChain.drive.anyActive());

@@ -300,7 +300,7 @@ public:
         mRange.addItemList({"Treble", "Mid", "Full"}, 1);
         mRange.setJustificationType(juce::Justification::centred);
         mRangeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-            apvts, p + "Range", mRange);
+            apvts, p + "bRange", mRange); // Range belongs to the Boost (treble booster) only
         addChildComponent(mRange);
 
         mOnAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
@@ -308,9 +308,9 @@ public:
         mOn.onClick = [this] { refresh(); };
         addChildComponent(mOn);
 
-        mDrive = std::make_unique<LabeledKnob>(apvts, p + "Drive", "Drive");
-        mTone  = std::make_unique<LabeledKnob>(apvts, p + "Tone", "Tone");
-        mLevel = std::make_unique<LabeledKnob>(apvts, p + "Level", "Level");
+        mDrive = std::make_unique<LabeledKnob>(apvts, p + "oDrive", "Drive"); // rebound per type
+        mTone  = std::make_unique<LabeledKnob>(apvts, p + "oTone", "Tone");
+        mLevel = std::make_unique<LabeledKnob>(apvts, p + "oLevel", "Level");
         addAndMakeVisible(*mDrive);
         addAndMakeVisible(*mTone);
         addAndMakeVisible(*mLevel);
@@ -325,10 +325,12 @@ public:
         const bool on = mApvts.getRawParameterValue(pid + "On")->load() >= 0.5f;
         if (type != mLastType)
             populateModels(type);
-        int model = (int)mApvts.getRawParameterValue(pid + "Model")->load();
         const int count = nam_rig::DriveBlock::modelCount((nam_rig::DriveBlock::Kind)type);
-        if (count > 0 && model >= count) { model = 0; setModelParam(0); }
-        if (mModel.getSelectedItemIndex() != model)
+        // Model only applies to multi-model categories (Boost). Don't touch the
+        // boost model param when on a single-model type, or it'd reset on switch.
+        int model = (count > 1) ? (int)mApvts.getRawParameterValue(pid + "bModel")->load() : 0;
+        if (count > 1 && model >= count) { model = 0; setModelParam(0); }
+        if (count > 1 && mModel.getSelectedItemIndex() != model)
             mModel.setSelectedItemIndex(juce::jmax(0, model), juce::dontSendNotification);
         mActive = (type != 0) && on;
         if (type == mLastType && on == mLastOn && model == mLastModel) { repaint(); return; }
@@ -411,29 +413,48 @@ private:
     }
     void setModelParam(int idx)
     {
-        if (auto *prm = mApvts.getParameter("drv" + juce::String(mSlot + 1) + "Model"))
+        if (auto *prm = mApvts.getParameter("drv" + juce::String(mSlot + 1) + "bModel"))
             prm->setValueNotifyingHost(prm->convertTo0to1((float)juce::jmax(0, idx)));
     }
     void configure()
     {
+        const juce::String p = "drv" + juce::String(mSlot + 1);
         const int type = mType.getSelectedItemIndex();
         const int model = juce::jmax(0, mModel.getSelectedItemIndex());
         const auto cat = (nam_rig::DriveBlock::Kind)type;
-        const char *d = "", *t = "", *l = "";
+        // Re-point the shared knob widgets at the ACTIVE type's own parameters,
+        // so each pedal type keeps its own Drive/Tone/Level. Hidden knobs keep
+        // their last binding (harmless — the audio path reads params directly).
         switch (type)
         {
-        case 1: d = "Boost"; break;
-        case 2: d = "Drive";      t = "Tone";   l = "Level";  break;
-        case 3: d = "Distortion"; t = "Filter"; l = "Volume"; break;
-        case 4: d = "Fuzz";                     l = "Volume"; break;
-        default: break;
+        case 1: // Boost (one knob)
+            mDrive->rebind(mApvts, p + "bDrive"); mDrive->setCaption("Boost");
+            mDrive->setVisible(true); mTone->setVisible(false); mLevel->setVisible(false);
+            break;
+        case 2: // Overdrive
+            mDrive->rebind(mApvts, p + "oDrive"); mDrive->setCaption("Drive");
+            mTone->rebind(mApvts, p + "oTone");   mTone->setCaption("Tone");
+            mLevel->rebind(mApvts, p + "oLevel"); mLevel->setCaption("Level");
+            mDrive->setVisible(true); mTone->setVisible(true); mLevel->setVisible(true);
+            break;
+        case 3: // Distortion
+            mDrive->rebind(mApvts, p + "dDrive"); mDrive->setCaption("Distortion");
+            mTone->rebind(mApvts, p + "dTone");   mTone->setCaption("Filter");
+            mLevel->rebind(mApvts, p + "dLevel"); mLevel->setCaption("Volume");
+            mDrive->setVisible(true); mTone->setVisible(true); mLevel->setVisible(true);
+            break;
+        case 4: // Fuzz (no tone)
+            mDrive->rebind(mApvts, p + "fDrive"); mDrive->setCaption("Fuzz");
+            mLevel->rebind(mApvts, p + "fLevel"); mLevel->setCaption("Volume");
+            mDrive->setVisible(true); mTone->setVisible(false); mLevel->setVisible(true);
+            break;
+        default: // Off
+            mDrive->setVisible(false); mTone->setVisible(false); mLevel->setVisible(false);
+            break;
         }
         mSub.setText(type == 0 ? juce::String("select a pedal")
                                : juce::String(nam_rig::DriveBlock::modelSub(cat, model)),
                      juce::dontSendNotification);
-        mDrive->setCaption(d); mDrive->setVisible(*d != '\0');
-        mTone->setCaption(t);  mTone->setVisible(*t != '\0');
-        mLevel->setCaption(l); mLevel->setVisible(*l != '\0');
         mRange.setVisible(nam_rig::DriveBlock::modelHasRange(cat, model));
         mOn.setVisible(type != 0);
     }
