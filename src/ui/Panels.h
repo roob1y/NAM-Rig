@@ -41,6 +41,18 @@ public:
     juce::Slider &slider() { return mSlider; }
     void setCaption(const juce::String &c) { mLabel.setText(c, juce::dontSendNotification); }
 
+    // Re-point this knob at a different parameter (used by the drive pedal to
+    // give each pedal TYPE its own Drive/Tone/Level instead of sharing one set).
+    void rebind(juce::AudioProcessorValueTreeState &apvts, const juce::String &paramId)
+    {
+        mAtt.reset(); // destroy the old attachment before making the new one
+        mAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+            apvts, paramId, mSlider);
+        if (auto *param = apvts.getParameter(paramId))
+            mSlider.setDoubleClickReturnValue(
+                true, param->convertFrom0to1(param->getDefaultValue()));
+    }
+
 private:
     juce::Label mLabel;
     juce::Slider mSlider;
@@ -973,6 +985,10 @@ public:
         addChildComponent(mRotFast); // rotary only (slow/fast rotor)
         mRotFastAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             apvts, p + "RotFast", mRotFast);
+        mAir.setButtonText("Air");
+        addChildComponent(mAir); // rotary only (motor/wind noise)
+        mAirAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            apvts, p + "RotNoise", mAir);
 
         refresh();
     }
@@ -999,6 +1015,7 @@ public:
         mSync.setVisible(!rotary);
         mDrive->setVisible(rotary);                    // rotary: Leslie tube drive
         mRotFast.setVisible(rotary);
+        mAir.setVisible(rotary);                       // rotary: motor/wind noise
         mRate->setEnabled(sync == 0);                  // rate greyed when synced
         repaint();                                     // LED
         resized();
@@ -1032,8 +1049,10 @@ public:
         mType.setBounds(meta.removeFromTop(24));
         meta.removeFromTop(4);
         auto bottomMeta = meta.removeFromTop(22);
-        mSync.setBounds(bottomMeta.withWidth(88));   // shown for non-rotary
-        mRotFast.setBounds(bottomMeta.withWidth(72)); // shown for rotary (overlaps; only one visible)
+        mSync.setBounds(bottomMeta.withWidth(88));         // non-rotary
+        mRotFast.setBounds(bottomMeta.removeFromLeft(54)); // rotary: slow/fast (left)
+        bottomMeta.removeFromLeft(4);
+        mAir.setBounds(bottomMeta.removeFromLeft(54));     // rotary: Air noise (right)
         area.removeFromLeft(10);
 
         auto onCol = area.removeFromRight(44);
@@ -1074,8 +1093,8 @@ private:
     juce::ToggleButton mOn;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mOnAtt;
     std::unique_ptr<LabeledKnob> mRate, mDepth, mFeedback, mMix, mWidth, mDrive;
-    juce::ToggleButton mRotFast;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mRotFastAtt;
+    juce::ToggleButton mRotFast, mAir;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mRotFastAtt, mAirAtt;
 };
 
 class ModPanel : public BlockPanel
