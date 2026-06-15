@@ -1261,6 +1261,18 @@ public:
         mType.onChange = [this] { refresh(); };
         addAndMakeVisible(mIcon);
 
+        // Shimmer pitch interval (only shown for Shimmer).
+        mPitch.addItemList({"Octave", "+2 Oct", "Fifth+Oct"}, 1);
+        addChildComponent(mPitch);
+        mPitchAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, "revPitch", mPitch);
+
+        // Freeze — infinite sustain, shown for every character.
+        mFreeze.setButtonText("Freeze");
+        addAndMakeVisible(mFreeze);
+        mFreezeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            apvts, "revFreeze", mFreeze);
+
         // Build every knob once; refresh() shows the subset the character uses.
         mDecay = std::make_unique<LabeledKnob>(apvts, "revDecay", "Decay");
         mSize = std::make_unique<LabeledKnob>(apvts, "revSize", "Size");
@@ -1269,16 +1281,20 @@ public:
         mMod = std::make_unique<LabeledKnob>(apvts, "revMod", "Mod");
         mShimmer = std::make_unique<LabeledKnob>(apvts, "revShimmer", "Shimmer");
         mTension = std::make_unique<LabeledKnob>(apvts, "revTension", "Tension");
+        mSwell = std::make_unique<LabeledKnob>(apvts, "revSwell", "Swell");
+        mWidth = std::make_unique<LabeledKnob>(apvts, "revWidth", "Width");
         mMix = std::make_unique<LabeledKnob>(apvts, "revMix", "Mix");
-        // Decay / Tone / Mix are common to every character; the rest are voiced.
+        // Decay / Tone / Width / Mix are common to every character; rest are voiced.
         addAndMakeVisible(*mDecay);
         addAndMakeVisible(*mTone);
+        addAndMakeVisible(*mWidth);
         addAndMakeVisible(*mMix);
         addChildComponent(*mSize);
         addChildComponent(*mPredelay);
         addChildComponent(*mMod);
         addChildComponent(*mShimmer);
         addChildComponent(*mTension);
+        addChildComponent(*mSwell);
 
         refresh();
     }
@@ -1300,6 +1316,8 @@ public:
         mMod->setVisible(RB::modExposed(t));
         mShimmer->setVisible(RB::shimmerExposed(t));
         mTension->setVisible(RB::tensionExposed(t));
+        mSwell->setVisible(RB::swellExposed(t));
+        mPitch.setVisible(RB::pitchExposed(t));
         mTone->setCaption(RB::toneCaption(t)); // "Damping" / "Tone" (spring)
         resized();
     }
@@ -1311,7 +1329,14 @@ public:
         auto top = area.removeFromTop(50);
         mIcon.setBounds(top.removeFromLeft(66).withSizeKeepingCentre(64, juce::jmin(top.getHeight(), 46)));
         top.removeFromLeft(12);
-        mType.setBounds(top.removeFromLeft(170).withSizeKeepingCentre(170, 26));
+        mType.setBounds(top.removeFromLeft(160).withSizeKeepingCentre(160, 26));
+        mFreeze.setBounds(top.removeFromRight(78).withSizeKeepingCentre(78, 24)); // top-right
+        top.removeFromRight(10);
+        if (mPitch.isVisible())
+        {
+            top.removeFromLeft(10);
+            mPitch.setBounds(top.removeFromLeft(118).withSizeKeepingCentre(118, 26));
+        }
         area.removeFromTop(10);
 
         // Lay out only the visible knobs, centered — the lineup changes per
@@ -1319,8 +1344,9 @@ public:
         std::vector<juce::Component *> vis;
         for (juce::Component *k : {(juce::Component *)mDecay.get(), (juce::Component *)mSize.get(),
                                    (juce::Component *)mPredelay.get(), (juce::Component *)mTone.get(),
-                                   (juce::Component *)mMod.get(), (juce::Component *)mShimmer.get(),
-                                   (juce::Component *)mTension.get(), (juce::Component *)mMix.get()})
+                                   (juce::Component *)mMod.get(), (juce::Component *)mTension.get(),
+                                   (juce::Component *)mShimmer.get(), (juce::Component *)mSwell.get(),
+                                   (juce::Component *)mWidth.get(), (juce::Component *)mMix.get()})
             if (k->isVisible())
                 vis.push_back(k);
 
@@ -1328,7 +1354,7 @@ public:
         if (nk == 0)
             return;
         area = area.withSizeKeepingCentre(area.getWidth(), juce::jmin(area.getHeight(), 160));
-        const int w = juce::jmin(120, area.getWidth() / nk);
+        const int w = juce::jmin(116, area.getWidth() / nk);
         auto row = area.withSizeKeepingCentre(w * nk, area.getHeight());
         for (auto *k : vis)
             k->setBounds(row.removeFromLeft(w).reduced(6, 0));
@@ -1338,9 +1364,11 @@ private:
     juce::AudioProcessorValueTreeState &mApvts;
     int mLastType = -1;
     ReverbIcon mIcon;
-    juce::ComboBox mType;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt;
-    std::unique_ptr<LabeledKnob> mDecay, mSize, mPredelay, mTone, mMod, mShimmer, mTension, mMix;
+    juce::ComboBox mType, mPitch;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt, mPitchAtt;
+    juce::ToggleButton mFreeze;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mFreezeAtt;
+    std::unique_ptr<LabeledKnob> mDecay, mSize, mPredelay, mTone, mMod, mShimmer, mTension, mSwell, mWidth, mMix;
 };
 
 //==============================================================================

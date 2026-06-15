@@ -73,7 +73,8 @@ int main()
     }
     { // T2 predelay shift exact
         auto onset = [&](float preMs) -> long long {
-            ReverbBlock v; v.setMix(1.0f); v.setPredelayMs(preMs); v.prepare({SR, BLK});
+            // Plate exposes Pre-Delay directly (Hall folds it into Size).
+            ReverbBlock v; v.setType(ReverbBlock::kPlate); v.setMix(1.0f); v.setPredelayMs(preMs); v.prepare({SR, BLK});
             std::vector<float> l((size_t)SR, 0.0f), r = l; l[0] = r[0] = 1.0f; run(v, l, r);
             for (size_t i = 0; i < l.size(); ++i) if (std::abs(l[i]) > 1e-9f || std::abs(r[i]) > 1e-9f) return (long long)i;
             return -1; };
@@ -210,6 +211,106 @@ int main()
         CHECK(ReverbBlock::tensionExposed(T::kSpring) && !ReverbBlock::tensionExposed(T::kHall), "T13 Tension only on Spring");
         bool allNamed = true; for (int t = 0; t < ReverbBlock::kNumTypes; ++t) if (!ReverbBlock::typeName(t) || !ReverbBlock::typeName(t)[0]) allNamed = false;
         CHECK(allNamed, "T13 all %d characters are named", ReverbBlock::kNumTypes);
+    }
+
+    // ===================== T14: wet low-cut keeps the lows out =====================
+    {
+        ReverbBlock v; v.setType(ReverbBlock::kHall); v.setMix(1.0f); v.setDecaySeconds(2.0f); v.prepare({SR, BLK});
+        std::mt19937 rng(3); std::uniform_real_distribution<float> dist(-0.4f, 0.4f);
+        std::vector<float> l((size_t)SR * 3, 0.0f), r;
+        for (size_t i = 0; i < (size_t)SR * 2; ++i) l[i] = dist(rng);
+        r = l; run(v, l, r);
+        const double lo = binMag(l, 45.0, (size_t)(SR*0.5), (size_t)SR);
+        const double mid = binMag(l, 900.0, (size_t)(SR*0.5), (size_t)SR);
+        CHECK(lo < 0.6 * mid, "T14 wet low-cut: 45Hz %.3g << 900Hz %.3g", lo, mid);
+    }
+
+    // ===================== T15: auto-makeup tames level vs decay =====================
+    {
+        auto wetRms = [&](float t60) {
+            ReverbBlock v; v.setType(ReverbBlock::kHall); v.setMix(1.0f); v.setDecaySeconds(t60); v.prepare({SR, BLK});
+            std::mt19937 rng(5); std::uniform_real_distribution<float> dist(-0.3f, 0.3f);
+            std::vector<float> l((size_t)SR * 3, 0.0f), r;
+            for (size_t i = 0; i < l.size(); ++i) l[i] = dist(rng);
+            r = l; run(v, l, r);
+            double e = 0; size_t a = (size_t)(SR*1.5); for (size_t i = a; i < l.size(); ++i) e += (double)l[i]*l[i];
+            return std::sqrt(e / (double)(l.size()-a));
+        };
+        const double rShort = wetRms(1.0f), rLong = wetRms(8.0f);
+        CHECK(rLong < rShort * 1.6, "T15 makeup holds level: rms(8s)=%.3g vs rms(1s)=%.3g (<1.6x)", rLong, rShort);
+    }
+
+    // ===================== T16: ducking compresses wet under loud input =====================
+    {
+        auto wetUnder = [&](float amp){
+            ReverbBlock v; v.setType(ReverbBlock::kHall); v.setMix(1.0f); v.setDecaySeconds(2.0f); v.prepare({SR, BLK});
+            std::vector<float> l((size_t)SR * 2, 0.0f), r;
+            for (size_t i = 0; i < l.size(); ++i) l[i] = (float)(amp * std::sin(2.0*M_PI*300.0*(double)i/SR));
+            r = l; run(v, l, r);
+            double e=0; size_t a=(size_t)(SR*1.5); for(size_t i=a;i<l.size();++i) e+=(double)l[i]*l[i];
+            return std::sqrt(e/(double)(l.size()-a));
+        };
+        const double loud = wetUnder(0.5f), quiet = wetUnder(0.05f);
+        // Without ducking this ratio would be ~10 (linear). Ducking pulls it down.
+        CHECK(loud / quiet < 9.3, "T16 ducking compresses wet: loud/quiet = %.2f (<9.3, linear=10)", loud / quiet);
+    }
+
+    // ===================== T17: Width = 0 collapses to mono =====================
+    {
+        auto corr = [&](float width){
+            ReverbBlock v; v.setType(ReverbBlock::kPlate); v.setMix(1.0f); v.setWidth(width); v.setDecaySeconds(2.0f); v.prepare({SR, BLK});
+            std::vector<float> l((size_t)SR, 0.0f), rr = l; l[0]=rr[0]=1.0f; run(v, l, rr);
+            double ll=0,r2=0,lr=0; for(size_t i=2400;i<l.size();++i){ll+=(double)l[i]*l[i];r2+=(double)rr[i]*rr[i];lr+=(double)l[i]*rr[i];}
+            return lr/std::sqrt(ll*r2+1e-30);
+        };
+        const double c0 = corr(0.0f), c1 = corr(1.0f);
+        CHECK(c0 > 0.999, "T17 Width=0 -> mono (corr=%.4f)", c0);
+        CHECK(c1 < 0.9, "T17 Width=1 -> stereo (corr=%.2f)", c1);
+    }
+
+    // ===================== T18: Freeze sustains the tail =====================
+    {
+        ReverbBlock v; v.setType(ReverbBlock::kHall); v.setMix(1.0f); v.setDecaySeconds(2.0f); v.prepare({SR, BLK});
+        std::mt19937 rng(9); std::uniform_real_distribution<float> dist(-0.4f, 0.4f);
+        const size_t N = (size_t)SR * 9;
+        std::vector<float> l(N, 0.0f), r(N, 0.0f);
+        for (size_t i = 0; i < (size_t)(SR*0.5); ++i) l[i] = r[i] = dist(rng);
+        size_t p = 0; bool froze = false;
+        for (; p < N; p += BLK) {
+            if (!froze && p >= (size_t)(SR*0.6)) { v.setFreeze(true); froze = true; }
+            v.process(l.data()+p, r.data()+p, (int)std::min<size_t>(BLK, N-p));
+        }
+        auto e=[&](double t0,double t1){double s=0;for(size_t i=(size_t)(SR*t0);i<(size_t)(SR*t1);++i)s+=(double)l[i]*l[i];return s;};
+        const double early = e(3.0,3.5), late = e(8.0,8.5);
+        bool finite=true; for(auto s:l) if(!std::isfinite(s)) finite=false;
+        CHECK(finite, "T18 freeze stays finite");
+        CHECK(late > early * 0.5, "T18 freeze sustains (late %.3g vs early %.3g)", late, early);
+    }
+
+    // ===================== T19: Bloom swells in (slower onset for higher Swell) =====================
+    {
+        auto earlyEnergy = [&](float swell){
+            ReverbBlock v; v.setType(ReverbBlock::kBloom); v.setMix(1.0f); v.setDecaySeconds(3.0f); v.setSwell(swell); v.prepare({SR, BLK});
+            std::vector<float> l((size_t)SR * 2, 0.0f), r=l; l[0]=r[0]=1.0f; run(v,l,r);
+            double e=0; for(size_t i=0;i<(size_t)(SR*0.3);++i) e+=(double)l[i]*l[i]; return e;
+        };
+        const double fast = earlyEnergy(0.0f), slow = earlyEnergy(1.0f);
+        CHECK(fast > slow * 2.0, "T19 bloom swell: fast-attack early energy %.3g >> slow %.3g", fast, slow);
+    }
+
+    // ===================== T20: Shimmer pitch interval selector =====================
+    {
+        auto bin = [&](int pitch, double f){
+            ReverbBlock v; v.setType(ReverbBlock::kShimmer); v.setMix(1.0f); v.setShimmer(1.0f); v.setPitch(pitch);
+            v.setDecaySeconds(4.0f); v.setDampHz(16000.0f); v.prepare({SR, BLK});
+            std::vector<float> l((size_t)SR*4, 0.0f), r;
+            for (size_t i=0;i<(size_t)SR;++i) l[i]=(float)(0.3*std::sin(2.0*M_PI*200.0*(double)i/SR));
+            r=l; run(v,l,r);
+            return binMag(l, f, (size_t)(SR*1.5), (size_t)(SR*2.0));
+        };
+        const double rOct  = bin(0, 800.0) / (bin(0, 400.0) + 1e-12);  // +1 octave
+        const double r2Oct = bin(1, 800.0) / (bin(1, 400.0) + 1e-12);  // +2 octaves
+        CHECK(r2Oct > rOct, "T20 +2oct pushes energy higher: 800/400 ratio %.2f > %.2f", r2Oct, rOct);
     }
 
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);

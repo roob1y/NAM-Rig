@@ -356,6 +356,20 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::ParameterID("revTension", 1), "Reverb Tension",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
 
+    // Reverb guardrail + extra controls (see rig/ReverbBlock.h). Width and Freeze
+    // are global; Swell is Bloom-only; Pitch is Shimmer-only. Appended last.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("revWidth", 1), "Reverb Width",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("revSwell", 1), "Reverb Swell",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.4f));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("revPitch", 1), "Reverb Shimmer Pitch",
+        juce::StringArray{"Octave", "+2 Oct", "Fifth+Oct"}, 0));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("revFreeze", 1), "Reverb Freeze", false));
+
     return {params.begin(), params.end()};
 }
 
@@ -680,6 +694,10 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.reverb.setMod(apvts.getRawParameterValue("revMod")->load());
     mChain.reverb.setShimmer(apvts.getRawParameterValue("revShimmer")->load());
     mChain.reverb.setTension(apvts.getRawParameterValue("revTension")->load());
+    mChain.reverb.setWidth(apvts.getRawParameterValue("revWidth")->load());
+    mChain.reverb.setSwell(apvts.getRawParameterValue("revSwell")->load());
+    mChain.reverb.setPitch((int)apvts.getRawParameterValue("revPitch")->load());
+    mChain.reverb.setFreeze(apvts.getRawParameterValue("revFreeze")->load() >= 0.5f);
     mChain.reverb.setBypassed(apvts.getRawParameterValue("reverbOn")->load() < 0.5f);
 
     mChain.process(buffer);
