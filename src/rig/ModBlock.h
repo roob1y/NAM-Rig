@@ -300,13 +300,16 @@ private:
             // (double the Width offset) so the sound throws across the field.
             const double rot = off * 2.0; // ~opposite L/R for the stereo throw
 
-            // --- tube power amp: clean at Drive 0, asymmetric growl when pushed ---
+            // --- tube power amp: clean at Drive 0, asymmetric growl when pushed.
+            // Pre-gain into a soft clip, then MAKEUP ~2.6/pre (not 1/pre, which
+            // collapsed the level) so driving compresses + thickens without
+            // getting quiet. Small bias adds the even-harmonic tube warmth. ---
             float xd = x;
             if (mRotDrive > 0.0f)
             {
-                const float k = 1.0f + mRotDrive * 5.0f;
-                const float b = 0.18f * mRotDrive;
-                const float sat = (std::tanh((x + b) * k) - std::tanh(b * k)) / k;
+                const float pre = 1.0f + mRotDrive * 5.0f;
+                const float bias = 0.15f * mRotDrive;
+                const float sat = (std::tanh(x * pre + bias) - std::tanh(bias)) * (2.6f / pre);
                 xd = x + mRotDrive * (sat - x);
             }
 
