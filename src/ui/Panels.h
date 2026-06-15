@@ -5,6 +5,7 @@
 #include "ui/CompMeter.h"
 #include "ui/CompCurve.h"
 #include "ui/ModFxIcon.h"
+#include "ui/ReverbIcon.h"
 
 namespace nam_rig::ui
 {
@@ -1242,35 +1243,104 @@ private:
 };
 
 //==============================================================================
+// REVERB — a typed CHARACTER reverb, presented like a single modulation slot:
+// a Character selector + animated icon, and a row of knobs where only the
+// controls that character actually has are shown (the rest are hardwired to its
+// sweet spot in ReverbBlock). The voicing introspection (sizeExposed/...) is the
+// single source of truth shared with the audio thread + tests.
 class ReverbPanel : public BlockPanel
 {
 public:
-    explicit ReverbPanel(juce::AudioProcessorValueTreeState &apvts) : BlockPanel("REVERB")
+    explicit ReverbPanel(juce::AudioProcessorValueTreeState &apvts)
+        : BlockPanel("REVERB"), mApvts(apvts)
     {
-        const std::pair<const char *, const char *> defs[] = {
-            {"revSize", "Size"},         {"revDecay", "Decay"},
-            {"revDamp", "Damping"},      {"revPredelay", "Pre-Delay"},
-            {"revMix", "Mix"}};
-        for (const auto &[id, caption] : defs)
-        {
-            mKnobs.push_back(std::make_unique<LabeledKnob>(apvts, id, caption));
-            addAndMakeVisible(*mKnobs.back());
-        }
+        mType.addItemList({"Room", "Hall", "Plate", "Spring", "Shimmer", "Ambience", "Bloom"}, 1);
+        addAndMakeVisible(mType);
+        mTypeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, "revType", mType);
+        mType.onChange = [this] { refresh(); };
+        addAndMakeVisible(mIcon);
+
+        // Build every knob once; refresh() shows the subset the character uses.
+        mDecay = std::make_unique<LabeledKnob>(apvts, "revDecay", "Decay");
+        mSize = std::make_unique<LabeledKnob>(apvts, "revSize", "Size");
+        mPredelay = std::make_unique<LabeledKnob>(apvts, "revPredelay", "Pre-Delay");
+        mTone = std::make_unique<LabeledKnob>(apvts, "revDamp", "Damping");
+        mMod = std::make_unique<LabeledKnob>(apvts, "revMod", "Mod");
+        mShimmer = std::make_unique<LabeledKnob>(apvts, "revShimmer", "Shimmer");
+        mTension = std::make_unique<LabeledKnob>(apvts, "revTension", "Tension");
+        mMix = std::make_unique<LabeledKnob>(apvts, "revMix", "Mix");
+        // Decay / Tone / Mix are common to every character; the rest are voiced.
+        addAndMakeVisible(*mDecay);
+        addAndMakeVisible(*mTone);
+        addAndMakeVisible(*mMix);
+        addChildComponent(*mSize);
+        addChildComponent(*mPredelay);
+        addChildComponent(*mMod);
+        addChildComponent(*mShimmer);
+        addChildComponent(*mTension);
+
+        refresh();
+    }
+
+    void refresh()
+    {
+        const int type = (int)mApvts.getRawParameterValue("revType")->load();
+        const bool on = mApvts.getRawParameterValue("reverbOn")->load() >= 0.5f;
+        mIcon.setType(type);
+        mIcon.setActive(on);
+        if (type == mLastType)
+            return;
+        mLastType = type;
+
+        using RB = nam_rig::ReverbBlock;
+        const auto t = (RB::Type)type;
+        mSize->setVisible(RB::sizeExposed(t));
+        mPredelay->setVisible(RB::predelayExposed(t));
+        mMod->setVisible(RB::modExposed(t));
+        mShimmer->setVisible(RB::shimmerExposed(t));
+        mTension->setVisible(RB::tensionExposed(t));
+        mTone->setCaption(RB::toneCaption(t)); // "Damping" / "Tone" (spring)
+        resized();
     }
 
     void resized() override
     {
         auto area = contentArea();
-        area = area.withSizeKeepingCentre(area.getWidth(),
-                                          juce::jmin(area.getHeight(), 170));
-        const int w = juce::jmin(140, area.getWidth() / (int)mKnobs.size());
-        auto row = area.withSizeKeepingCentre(w * (int)mKnobs.size(), area.getHeight());
-        for (auto &k : mKnobs)
+
+        auto top = area.removeFromTop(50);
+        mIcon.setBounds(top.removeFromLeft(66).withSizeKeepingCentre(64, juce::jmin(top.getHeight(), 46)));
+        top.removeFromLeft(12);
+        mType.setBounds(top.removeFromLeft(170).withSizeKeepingCentre(170, 26));
+        area.removeFromTop(10);
+
+        // Lay out only the visible knobs, centered — the lineup changes per
+        // character so the panel never shows a control that does nothing.
+        std::vector<juce::Component *> vis;
+        for (juce::Component *k : {(juce::Component *)mDecay.get(), (juce::Component *)mSize.get(),
+                                   (juce::Component *)mPredelay.get(), (juce::Component *)mTone.get(),
+                                   (juce::Component *)mMod.get(), (juce::Component *)mShimmer.get(),
+                                   (juce::Component *)mTension.get(), (juce::Component *)mMix.get()})
+            if (k->isVisible())
+                vis.push_back(k);
+
+        const int nk = (int)vis.size();
+        if (nk == 0)
+            return;
+        area = area.withSizeKeepingCentre(area.getWidth(), juce::jmin(area.getHeight(), 160));
+        const int w = juce::jmin(120, area.getWidth() / nk);
+        auto row = area.withSizeKeepingCentre(w * nk, area.getHeight());
+        for (auto *k : vis)
             k->setBounds(row.removeFromLeft(w).reduced(6, 0));
     }
 
 private:
-    std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
+    juce::AudioProcessorValueTreeState &mApvts;
+    int mLastType = -1;
+    ReverbIcon mIcon;
+    juce::ComboBox mType;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt;
+    std::unique_ptr<LabeledKnob> mDecay, mSize, mPredelay, mTone, mMod, mShimmer, mTension, mMix;
 };
 
 //==============================================================================
