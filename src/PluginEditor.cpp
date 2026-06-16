@@ -28,6 +28,10 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
     addAndMakeVisible(mContent);
     mContent.setSize(kBaseW, kBaseH);
 
+    // Momentary mod-slot solo (dial-in): editor buttons -> processor state.
+    mModPanel.onSetSolo = [this](int slot, bool on) { mProc.setModSolo(slot, on); };
+    mModPanel.getSolo = [this](int slot) { return mProc.getModSolo(slot); };
+
     // --- Header ---
     mTitle.setFont(RigLookAndFeel::withHeight(22.0f).boldened());
     mTitle.setColour(juce::Label::textColourId, colors::text);

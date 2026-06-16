@@ -106,6 +106,20 @@ public:
     int uiSelectedBlock = 2; // strip selection, default AMP
     int uiWidth = 0;         // last editor width, 0 = use default
 
+    // Momentary mod-slot solo (dial-in tool; not a parameter -> not saved, not
+    // automated). When any slot is soloed, only soloed slots are heard. Set by
+    // the editor's solo buttons, read in updateChainParameters.
+    std::atomic<bool> modSolo[nam_rig::ModBlock::kSlots]{};
+    void setModSolo(int slot, bool on)
+    {
+        if (slot >= 0 && slot < nam_rig::ModBlock::kSlots)
+            modSolo[(size_t)slot].store(on);
+    }
+    bool getModSolo(int slot) const
+    {
+        return slot >= 0 && slot < nam_rig::ModBlock::kSlots && modSolo[(size_t)slot].load();
+    }
+
 private:
     void updateLatency();
     int requestedFactorNow(int rig) const; // per-rig oversample param + offline bump

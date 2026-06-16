@@ -602,6 +602,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         mChain.mod.setSeries(s, apvts.getRawParameterValue(modIds[s][13])->load() >= 0.5f);
         mChain.mod.setHornDrum(s, apvts.getRawParameterValue(modIds[s][14])->load());
         mChain.mod.setSlotBypassed(s, apvts.getRawParameterValue(modIds[s][15])->load() < 0.5f);
+        mChain.mod.setSlotSolo(s, modSolo[(size_t)s].load()); // momentary dial-in solo
     }
     mChain.mod.setBypassed(apvts.getRawParameterValue("modOn")->load() < 0.5f);
     // Section routing + parallel blend pad + global mod-mix (whole-section).

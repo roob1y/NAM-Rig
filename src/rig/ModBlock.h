@@ -950,17 +950,17 @@ public:
     void process(float *left, float *right, int numSamples) override
     {
         bool anyActive = false;
-        for (auto &v : mVoice)
-            if (!v.isBypassed()) { anyActive = true; break; }
+        for (int s = 0; s < kSlots; ++s)
+            if (slotAudible(s)) { anyActive = true; break; }
         if (!anyActive) return; // section idle -> fully transparent (no level-lock)
 
         mLock.observeInput(left, right, numSamples); // dry section input (intact at entry)
         if (mParallel)
             processParallel(left, right, numSamples);
         else
-            for (auto &v : mVoice) // SERIES: slots chained in place (unchanged)
-                if (!v.isBypassed())
-                    v.process(left, right, numSamples);
+            for (int s = 0; s < kSlots; ++s) // SERIES: slots chained in place
+                if (slotAudible(s))
+                    mVoice[(size_t)s].process(left, right, numSamples);
         mLock.applyOutput(left, right, numSamples);   // lock to the input level
     }
 
@@ -1022,6 +1022,10 @@ public:
     void setP2Ratio(int s, float r) { mVoice[idx(s)].setP2Ratio(r); }
     void setSeries(int s, bool ser) { mVoice[idx(s)].setSeries(ser); }
     void setSlotBypassed(int s, bool b) { mVoice[idx(s)].setBypassed(b); }
+    // Momentary solo (dial-in): if ANY slot is soloed, only soloed slots are
+    // audible (solo overrides bypass); otherwise the normal per-slot bypass
+    // applies. Works in both Series and Parallel.
+    void setSlotSolo(int s, bool on) { mSolo[idx(s)] = on; }
     void setBpm(double bpm)
     {
         for (auto &v : mVoice)
@@ -1030,6 +1034,13 @@ public:
 
 private:
     static size_t idx(int s) { return (size_t)std::min(std::max(s, 0), kSlots - 1); }
+    bool anySolo() const { return mSolo[0] || mSolo[1] || mSolo[2]; }
+    // A slot is audible if it's soloed (when any solo is active, solo overrides
+    // bypass) or, with no solo active, simply not bypassed.
+    bool slotAudible(int s) const
+    {
+        return anySolo() ? mSolo[(size_t)s] : !mVoice[(size_t)s].isBypassed();
+    }
 
     // PARALLEL routing: each active slot processes a copy of the dry input into
     // its own branch; the branches are summed by the (bypass-aware, smoothed) pad
@@ -1047,7 +1058,7 @@ private:
         // 2) each active slot -> its own fully-processed branch from the dry input
         for (int s = 0; s < kSlots; ++s)
         {
-            if (mVoice[(size_t)s].isBypassed()) continue;
+            if (!slotAudible(s)) continue;
             for (size_t i = 0; i < N; ++i)
             {
                 mBranchL[(size_t)s][i] = mDryL[i];
@@ -1063,19 +1074,19 @@ private:
         float sum = 0.0f;
         for (int s = 0; s < kSlots; ++s)
         {
-            if (mVoice[(size_t)s].isBypassed()) wT[s] = 0.0f;
+            if (!slotAudible(s)) wT[s] = 0.0f;
             sum += wT[s];
         }
         if (sum > 1.0e-12f)
         {
             for (int s = 0; s < kSlots; ++s) wT[s] /= sum;
         }
-        else // puck sat on bypassed node(s): spread evenly over the active slots
+        else // puck sat on inactive node(s): spread evenly over the audible slots
         {
             int act = 0;
-            for (int s = 0; s < kSlots; ++s) act += mVoice[(size_t)s].isBypassed() ? 0 : 1;
+            for (int s = 0; s < kSlots; ++s) act += slotAudible(s) ? 1 : 0;
             for (int s = 0; s < kSlots; ++s)
-                wT[s] = mVoice[(size_t)s].isBypassed() ? 0.0f : 1.0f / (float)std::max(1, act);
+                wT[s] = slotAudible(s) ? 1.0f / (float)std::max(1, act) : 0.0f;
         }
         // 4) blend the branches (smoothed weights) + one global mod-mix vs dry
         for (size_t i = 0; i < N; ++i)
@@ -1085,7 +1096,7 @@ private:
             float busL = 0.0f, busR = 0.0f;
             for (int s = 0; s < kSlots; ++s)
             {
-                if (mVoice[(size_t)s].isBypassed()) continue;
+                if (!slotAudible(s)) continue;
                 busL += mWz[(size_t)s] * mBranchL[(size_t)s][i];
                 busR += mWz[(size_t)s] * mBranchR[(size_t)s][i];
             }
@@ -1096,6 +1107,7 @@ private:
 
     std::array<ModVoice, kSlots> mVoice;
     ModLevelLock mLock; // section-level output loudness match
+    bool mSolo[kSlots] = {false, false, false}; // momentary dial-in solo (not a param)
     // ---- section routing state ----
     bool mParallel = false;                  // false = series, true = parallel
     float mPadX = 0.5f, mPadY = 1.0f / 3.0f; // blend puck (default = centroid = equal blend)

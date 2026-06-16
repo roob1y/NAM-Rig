@@ -785,6 +785,12 @@ public:
             apvts, p + "On", mOn);
         mOn.onClick = [this] { refresh(); };
 
+        // Solo = momentary dial-in (NOT an APVTS param): reports clicks via onSolo.
+        mSolo.setButtonText("S");
+        mSolo.setClickingTogglesState(true);
+        addAndMakeVisible(mSolo);
+        mSolo.onClick = [this] { if (onSolo) onSolo(mSlot, mSolo.getToggleState()); };
+
         mRate = std::make_unique<LabeledKnob>(apvts, p + "Rate", "Rate");
         mDepth = std::make_unique<LabeledKnob>(apvts, p + "Depth", "Depth");
         mFeedback = std::make_unique<LabeledKnob>(apvts, p + "Feedback", "Feedback");
@@ -829,6 +835,11 @@ public:
 
         refresh();
     }
+
+    // Momentary solo: reports clicks to the owner; the owner pushes the live state
+    // back so the button reflects it after an editor reopen / external change.
+    std::function<void(int, bool)> onSolo;
+    void setSoloState(bool on) { mSolo.setToggleState(on, juce::dontSendNotification); }
 
     void refresh()
     {
@@ -914,6 +925,8 @@ public:
 
         auto onCol = area.removeFromRight(44);
         mOn.setBounds(onCol.withSizeKeepingCentre(44, 22));
+        area.removeFromRight(6);
+        mSolo.setBounds(area.removeFromRight(30).withSizeKeepingCentre(30, 22));
         area.removeFromRight(8);
         if (mInvert.isVisible())
         {
@@ -960,6 +973,7 @@ private:
     juce::ComboBox mType, mWave, mSync;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt, mWaveAtt, mSyncAtt;
     juce::ToggleButton mOn;
+    juce::ToggleButton mSolo; // momentary dial-in (not APVTS-attached)
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mOnAtt;
     std::unique_ptr<LabeledKnob> mRate, mDepth, mFeedback, mMix, mWidth, mDrive, mManual, mP2Ratio, mHornDrum;
     juce::ToggleButton mRotFast, mInvert, mSeries;
@@ -1122,6 +1136,11 @@ public:
         {
             mLanes[(size_t)s] = std::make_unique<ModSlotLane>(apvts, s);
             addAndMakeVisible(*mLanes[(size_t)s]);
+            mLanes[(size_t)s]->onSolo = [this](int slot, bool on) {
+                if (onSetSolo) onSetSolo(slot, on);
+                updatePadActive(); // pad geometry follows the audible (soloed) slots
+                repaint();
+            };
         }
         mRouting.addItemList({"Series", "Parallel"}, 1);
         addAndMakeVisible(mRouting);
@@ -1139,15 +1158,32 @@ public:
         refreshRouting();
     }
 
+    // Editor wires these to the processor's momentary solo (not an APVTS param).
+    std::function<void(int, bool)> onSetSolo; // -> processor.setModSolo
+    std::function<bool(int)> getSolo;         // -> processor.getModSolo
+
     void refresh()
     {
-        for (auto &l : mLanes)
-            if (l) l->refresh();
-        // feed the pad which slots are enabled (drives triangle/line/point)
-        mPad->setActiveSlots(mApvts.getRawParameterValue("mod1On")->load() >= 0.5f,
-                             mApvts.getRawParameterValue("mod2On")->load() >= 0.5f,
-                             mApvts.getRawParameterValue("mod3On")->load() >= 0.5f);
+        for (int s = 0; s < nam_rig::ModBlock::kSlots; ++s)
+            if (mLanes[(size_t)s])
+            {
+                mLanes[(size_t)s]->refresh();
+                if (getSolo) mLanes[(size_t)s]->setSoloState(getSolo(s)); // reflect live solo
+            }
+        updatePadActive();
         refreshRouting();
+    }
+
+    // Pad geometry follows the AUDIBLE slots: the soloed ones if any solo is
+    // active, otherwise the enabled (On) slots.
+    void updatePadActive()
+    {
+        const bool anySolo = getSolo && (getSolo(0) || getSolo(1) || getSolo(2));
+        auto audible = [&](int s) {
+            if (anySolo) return getSolo(s);
+            return mApvts.getRawParameterValue("mod" + juce::String(s + 1) + "On")->load() >= 0.5f;
+        };
+        mPad->setActiveSlots(audible(0), audible(1), audible(2));
     }
 
     // Show/hide the parallel-only controls (pad + Mod Mix) and relayout when the
