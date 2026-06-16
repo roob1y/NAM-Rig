@@ -966,29 +966,209 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mRotFastAtt, mInvertAtt, mSeriesAtt;
 };
 
+// Draggable blend pad for PARALLEL routing. The puck sets the slot weights
+// (barycentric, same geometry as ModBlock::padWeights). Backed by two hidden
+// sliders attached to modPadX/modPadY, so host automation and saved state work
+// for free: dragging writes the params; external moves repaint the puck.
+//
+// The geometry follows the ENABLED slots: 3 on = triangle (node1 top-centre /
+// node2 bottom-left / node3 bottom-right); 2 on = a line crossfading those two;
+// 1 on = a point. The puck is always CONSTRAINED to that geometry, so it can't
+// wander into dead square corners.
+class BlendPad : public juce::Component, private juce::Slider::Listener
+{
+public:
+    explicit BlendPad(juce::AudioProcessorValueTreeState &apvts)
+    {
+        for (auto *s : {&mX, &mY})
+        {
+            s->setRange(0.0, 1.0, 0.0);
+            addChildComponent(*s); // hidden: the pad is the visible control
+            s->addListener(this);
+        }
+        mXAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "modPadX", mX);
+        mYAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "modPadY", mY);
+    }
+
+    // Which slots are enabled -> drives triangle/line/point geometry. Re-projects
+    // the puck onto the new shape when the set changes (so it never sits off it).
+    void setActiveSlots(bool a0, bool a1, bool a2)
+    {
+        if (a0 == mActive[0] && a1 == mActive[1] && a2 == mActive[2])
+            return;
+        mActive[0] = a0;
+        mActive[1] = a1;
+        mActive[2] = a2;
+        const auto p = constrain((float)mX.getValue(), (float)mY.getValue());
+        mX.setValue(p.x, juce::sendNotificationSync);
+        mY.setValue(p.y, juce::sendNotificationSync);
+        repaint();
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        const auto r = padRect();
+        int act[3], n = 0;
+        for (int i = 0; i < 3; ++i)
+            if (mActive[i]) act[n++] = i;
+
+        if (n >= 3 || n == 0) // triangle (n==0 shouldn't happen; show the full shape)
+        {
+            juce::Path tri;
+            tri.startNewSubPath(scr(r, 0));
+            tri.lineTo(scr(r, 1));
+            tri.lineTo(scr(r, 2));
+            tri.closeSubPath();
+            g.setColour(colors::panel.brighter(0.06f));
+            g.fillPath(tri);
+            g.setColour(colors::outline);
+            g.strokePath(tri, juce::PathStrokeType(1.2f));
+        }
+        else if (n == 2) // crossfade line between the two enabled nodes
+        {
+            g.setColour(colors::outline);
+            g.drawLine(juce::Line<float>(scr(r, act[0]), scr(r, act[1])), 1.4f);
+        }
+
+        g.setFont(RigLookAndFeel::withHeight(10.0f));
+        for (int i = 0; i < 3; ++i)
+        {
+            const auto p = scr(r, i);
+            g.setColour(mActive[i] ? colors::accentDim : colors::outline);
+            g.fillEllipse(p.x - 3.0f, p.y - 3.0f, 6.0f, 6.0f);
+            g.setColour(mActive[i] ? colors::textDim : colors::outline);
+            const float ly = (i == 0) ? p.y - 14.0f : p.y + 3.0f;
+            g.drawText(juce::String(i + 1), (int)(p.x - 8.0f), (int)ly, 16, 11, juce::Justification::centred);
+        }
+
+        const auto pk = scr(r, (float)mX.getValue(), (float)mY.getValue());
+        g.setColour(colors::accent);
+        g.fillEllipse(pk.x - 5.0f, pk.y - 5.0f, 10.0f, 10.0f);
+        g.setColour(colors::panel);
+        g.drawEllipse(pk.x - 5.0f, pk.y - 5.0f, 10.0f, 10.0f, 1.5f);
+    }
+
+    void mouseDown(const juce::MouseEvent &e) override { drag(e); }
+    void mouseDrag(const juce::MouseEvent &e) override { drag(e); }
+
+private:
+    void sliderValueChanged(juce::Slider *) override { repaint(); }
+
+    // Node positions in (padX, padY) parameter space (matches ModBlock::padWeights).
+    static juce::Point<float> node(int i)
+    {
+        if (i == 0) return {0.5f, 1.0f};
+        if (i == 1) return {0.0f, 0.0f};
+        return {1.0f, 0.0f};
+    }
+    juce::Rectangle<float> padRect() const
+    {
+        auto b = getLocalBounds().toFloat().reduced(12.0f);
+        const float s = juce::jmin(b.getWidth(), b.getHeight());
+        return juce::Rectangle<float>(s, s).withCentre(b.getCentre());
+    }
+    juce::Point<float> scr(juce::Rectangle<float> r, float x, float y) const
+    {
+        return {r.getX() + x * r.getWidth(), r.getY() + (1.0f - y) * r.getHeight()};
+    }
+    juce::Point<float> scr(juce::Rectangle<float> r, int nodeIdx) const
+    {
+        const auto v = node(nodeIdx);
+        return scr(r, v.x, v.y);
+    }
+    // Project a raw (0..1) point onto the active geometry (triangle/line/point).
+    juce::Point<float> constrain(float x, float y) const
+    {
+        int act[3], n = 0;
+        for (int i = 0; i < 3; ++i)
+            if (mActive[i]) act[n++] = i;
+        if (n >= 3 || n == 0)
+        {
+            float w[3];
+            nam_rig::ModBlock::padWeights(x, y, w); // clamp + renormalise into the triangle
+            return {0.5f * w[0] + w[2], w[0]};      // barycentric point back to (x,y)
+        }
+        if (n == 1)
+            return node(act[0]);
+        const auto A = node(act[0]), B = node(act[1]); // n == 2: project onto the segment
+        const auto AB = B - A;
+        const float denom = AB.x * AB.x + AB.y * AB.y;
+        float t = denom > 1.0e-9f ? ((x - A.x) * AB.x + (y - A.y) * AB.y) / denom : 0.0f;
+        t = juce::jlimit(0.0f, 1.0f, t);
+        return {A.x + t * AB.x, A.y + t * AB.y};
+    }
+    void drag(const juce::MouseEvent &e)
+    {
+        const auto r = padRect();
+        const float rx = juce::jlimit(0.0f, 1.0f, (e.position.x - r.getX()) / r.getWidth());
+        const float ry = juce::jlimit(0.0f, 1.0f, 1.0f - (e.position.y - r.getY()) / r.getHeight());
+        const auto p = constrain(rx, ry);
+        mX.setValue(p.x, juce::sendNotificationSync);
+        mY.setValue(p.y, juce::sendNotificationSync);
+    }
+
+    juce::Slider mX, mY;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mXAtt, mYAtt;
+    bool mActive[3] = {true, true, true};
+};
+
 class ModPanel : public BlockPanel
 {
 public:
-    explicit ModPanel(juce::AudioProcessorValueTreeState &apvts) : BlockPanel("MODULATION")
+    explicit ModPanel(juce::AudioProcessorValueTreeState &apvts)
+        : BlockPanel("MODULATION"), mApvts(apvts)
     {
         for (int s = 0; s < nam_rig::ModBlock::kSlots; ++s)
         {
             mLanes[(size_t)s] = std::make_unique<ModSlotLane>(apvts, s);
             addAndMakeVisible(*mLanes[(size_t)s]);
         }
+        mRouting.addItemList({"Series", "Parallel"}, 1);
+        addAndMakeVisible(mRouting);
+        mRoutingAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, "modRouting", mRouting);
+        mRouting.onChange = [this] { refreshRouting(); };
+
+        mPad = std::make_unique<BlendPad>(apvts);
+        addChildComponent(*mPad); // parallel only
+
+        mModMix = std::make_unique<LabeledKnob>(apvts, "modMix", "Mix");
+        mModMix->setRotationReadout(10.0);
+        addChildComponent(*mModMix); // parallel only
+
+        refreshRouting();
     }
 
     void refresh()
     {
         for (auto &l : mLanes)
             if (l) l->refresh();
+        // feed the pad which slots are enabled (drives triangle/line/point)
+        mPad->setActiveSlots(mApvts.getRawParameterValue("mod1On")->load() >= 0.5f,
+                             mApvts.getRawParameterValue("mod2On")->load() >= 0.5f,
+                             mApvts.getRawParameterValue("mod3On")->load() >= 0.5f);
+        refreshRouting();
+    }
+
+    // Show/hide the parallel-only controls (pad + Mod Mix) and relayout when the
+    // Series/Parallel routing changes (from the toggle or host automation).
+    void refreshRouting()
+    {
+        const bool par = (mRouting.getSelectedId() == 2);
+        if (par == mParallel)
+            return;
+        mParallel = par;
+        mPad->setVisible(par);
+        mModMix->setVisible(par);
+        resized();
+        repaint();
     }
 
     void paint(juce::Graphics &g) override
     {
         BlockPanel::paint(g); // panel body + "MODULATION" title
-        if (mSpine.getHeight() <= 0)
-            return;
+        if (mParallel || mSpine.getHeight() <= 0)
+            return; // parallel routing: the series spine doesn't apply
         const float x = (float)mSpine.getCentreX();
         g.setColour(colors::outline);
         g.drawLine(x, (float)mSpine.getY(), x, (float)mSpine.getBottom(), 1.5f);
@@ -1008,6 +1188,19 @@ public:
     void resized() override
     {
         auto area = contentArea();
+        // right control strip: routing toggle always; pad + Mod Mix in parallel.
+        auto strip = area.removeFromRight(108);
+        area.removeFromRight(8);
+        mRouting.setBounds(strip.removeFromTop(24));
+        strip.removeFromTop(8);
+        if (mParallel)
+        {
+            mModMix->setBounds(strip.removeFromTop(62).reduced(20, 0));
+            strip.removeFromTop(6);
+            const int sq = juce::jmin(strip.getWidth(), strip.getHeight());
+            mPad->setBounds(strip.removeFromTop(sq).withSizeKeepingCentre(sq, sq));
+        }
+
         auto spine = area.removeFromLeft(20);
         area.removeFromLeft(4);
         const int n = nam_rig::ModBlock::kSlots, gap = 8;
@@ -1029,6 +1222,12 @@ private:
     std::array<std::unique_ptr<ModSlotLane>, (size_t)nam_rig::ModBlock::kSlots> mLanes;
     juce::Rectangle<int> mSpine;
     std::vector<float> mArrowYs;
+    juce::ComboBox mRouting;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mRoutingAtt;
+    std::unique_ptr<BlendPad> mPad;
+    std::unique_ptr<LabeledKnob> mModMix;
+    juce::AudioProcessorValueTreeState &mApvts;
+    bool mParallel = false;
 };
 
 //==============================================================================
