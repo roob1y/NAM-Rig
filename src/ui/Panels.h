@@ -865,11 +865,13 @@ public:
         // (the M-126 "Width" term reads as the stereo control here, so call the
         // sweep "Sweep") and the stereo knob is "Spread" (so there aren't two
         // "Width"s). Uni-Vibe uses the authentic vibe terms: Rate -> "Speed",
-        // Depth -> "Intensity".
+        // Depth -> "Intensity". Rotary: Depth drives the swirl intensity (doppler
+        // + directional pulse + drum throb) -> labelled "Wom" after the Leslie's
+        // directional amplitude pulse.
         const bool flanger = (type == 1);
         const bool uniVibe = (type == 6);
         mRate->setCaption(uniVibe ? "Speed" : "Rate");
-        mDepth->setCaption(flanger ? "Sweep" : (uniVibe ? "Intensity" : "Depth"));
+        mDepth->setCaption(flanger ? "Sweep" : uniVibe ? "Intensity" : rotary ? "Wom" : "Depth");
         mWidth->setCaption(flanger ? "Spread" : "Width");
         mP2Ratio->setVisible(type == 8);               // bi-phase: Sweep Gen 2 ratio
         mSeries.setVisible(type == 8);                  // bi-phase: series/parallel
