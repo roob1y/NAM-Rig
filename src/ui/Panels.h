@@ -1300,7 +1300,7 @@ public:
             const float rad = 3.0f + 4.0f * (mActive[i] ? w[i] : 0.0f);
             g.setColour(mActive[i] ? colors::laneColour(i) : colors::outline);
             g.fillEllipse(p.x - rad, p.y - rad, rad * 2.0f, rad * 2.0f);
-            const float ly = (i == 0) ? p.y - 15.0f : p.y + 5.0f;
+            const float ly = (i == 0) ? p.y - 13.0f - rad : p.y + 3.0f + rad; // clear the (weighted) node
             if (mActive[i]) // blend weight as a percentage, in the lane colour
             {
                 g.setColour(colors::laneColour(i));
