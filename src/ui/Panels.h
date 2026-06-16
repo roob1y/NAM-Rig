@@ -1367,7 +1367,8 @@ private:
         b.removeFromTop(15.0f); // "MOD MIX" header
         // Keep the triangle well-proportioned (square), centred in the box -- the
         // box itself is tall (fills the strip), the triangle isn't stretched.
-        b = b.reduced(22.0f, 16.0f);
+        // Margins leave room for the weight-% labels (which clear the grown nodes).
+        b = b.reduced(24.0f, 26.0f);
         const float s = juce::jmin(b.getWidth(), b.getHeight());
         return juce::Rectangle<float>(s, s).withCentre(b.getCentre());
     }
