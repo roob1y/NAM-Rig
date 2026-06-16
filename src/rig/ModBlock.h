@@ -967,9 +967,12 @@ public:
             if (mParallel)
                 processParallel(left, right, numSamples);
             else
-                for (int s = 0; s < kSlots; ++s) // SERIES: slots chained in place
+                for (int pos = 0; pos < kSlots; ++pos) // SERIES: slots chained in place, in chain order
+                {
+                    const int s = mOrder[pos];
                     if (slotAudible(s))
                         mVoice[(size_t)s].process(left, right, numSamples);
+                }
         }
         if (postOn) // POST: end-of-section effect runs on the combined output
             mPost.process(left, right, numSamples);
@@ -989,6 +992,25 @@ public:
     bool parallel() const { return mParallel; }
     void setPad(float x, float y) { mPadX = x; mPadY = y; } // parallel blend puck (0..1 each)
     void setModMix(float m) { mModMix = m; }                // parallel: mod-bus vs dry (1 = full bus)
+
+    // SERIES chain order: mOrder[pos] = the slot processed at that position.
+    // a/b/c must be a permutation of 0..kSlots-1; a malformed order (duplicate or
+    // out-of-range slot) is rejected and the identity {0,1,2} is kept, so a bad
+    // value can never drop or double a slot. Default identity = bit-exact to the
+    // old fixed-order series loop. Ignored in parallel (branches are summed).
+    void setChainOrder(int a, int b, int c)
+    {
+        const int in[kSlots] = {a, b, c};
+        bool seen[kSlots] = {false, false, false};
+        for (int k = 0; k < kSlots; ++k)
+        {
+            if (in[k] < 0 || in[k] >= kSlots || seen[in[k]])
+                return; // not a permutation -> keep existing order
+            seen[in[k]] = true;
+        }
+        for (int k = 0; k < kSlots; ++k) mOrder[k] = in[k];
+    }
+    int chainOrder(int pos) const { return mOrder[idx(pos)]; }
 
     // Cartesian blend pad -> kSlots normalised slot weights. Barycentric over a
     // triangle (slot0 top-centre, slot1 bottom-left, slot2 bottom-right): inside
@@ -1144,6 +1166,7 @@ private:
     ModLevelLock mLock; // section-level output loudness match
     bool mSolo[kSlots] = {false, false, false}; // momentary dial-in solo (not a param)
     // ---- section routing state ----
+    int mOrder[kSlots] = {0, 1, 2};          // series chain order (mOrder[pos] = slot)
     bool mParallel = false;                  // false = series, true = parallel
     float mPadX = 0.5f, mPadY = 1.0f / 3.0f; // blend puck (default = centroid = equal blend)
     float mModMix = 1.0f;                    // parallel: mod-bus vs dry (1 = full bus)

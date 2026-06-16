@@ -1211,6 +1211,194 @@ private:
     bool mInternalSet = false; // true while WE move the puck (vs host/preset)
 };
 
+// Draggable chain-order rack for SERIES routing -- the twin of the BlendPad.
+// Shows the three front slots stacked IN->OUT in processing order; drag a chip
+// up/down to reorder the chain. Reads/writes the single modChainOrder choice
+// param (the six permutations), so order saves + automates like any param. The
+// rack fills the right strip in Series, exactly where the pad sits in Parallel.
+class ChainRack : public juce::Component
+{
+public:
+    explicit ChainRack(juce::AudioProcessorValueTreeState &apvts) : mApvts(apvts)
+    {
+        readOrder();
+    }
+
+    // Pull the order from the param (called on the editor timer). Skipped mid-drag
+    // so a timer tick can't fight the user's drag.
+    void refresh()
+    {
+        if (mDragging)
+            return;
+        readOrder();
+        repaint();
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        auto b = getLocalBounds().toFloat().reduced(2.0f);
+        g.setColour(colors::textDim);
+        g.setFont(RigLookAndFeel::withHeight(9.0f));
+        g.drawText("IN", b.removeFromTop(12.0f).toNearestInt(), juce::Justification::centred);
+        g.drawText("OUT", b.removeFromBottom(12.0f).toNearestInt(), juce::Justification::centred);
+
+        const float cx = b.getCentreX();
+        g.setColour(colors::outline); // spine behind the chips
+        g.drawLine(cx, b.getY(), cx, b.getBottom(), 1.5f);
+
+        for (int pos = 0; pos < nam_rig::ModBlock::kSlots; ++pos)
+        {
+            const int slot = mOrder[pos];
+            const bool drag = (mDragging && slot == mDragSlot);
+            auto chip = chipRect(pos);
+            if (drag)
+                chip = chip.withY(juce::jlimit(b.getY(), b.getBottom() - chip.getHeight(),
+                                               mDragY - chip.getHeight() * 0.5f));
+            g.setColour(drag ? colors::panel.brighter(0.12f) : colors::panel.brighter(0.04f));
+            g.fillRoundedRectangle(chip, 6.0f);
+            g.setColour(drag ? colors::accent : colors::outline);
+            g.drawRoundedRectangle(chip, 6.0f, drag ? 1.4f : 1.0f);
+
+            auto txt = chip.reduced(8.0f, 0.0f);
+            g.setColour(colors::textDim); // grip dots
+            const float gx = txt.getX();
+            for (int d = 0; d < 3; ++d)
+                g.fillEllipse(gx, txt.getCentreY() - 4.0f + d * 4.0f, 1.6f, 1.6f);
+            txt.removeFromLeft(10.0f);
+            g.setColour(colors::accentDim);
+            g.setFont(RigLookAndFeel::withHeight(10.0f));
+            g.drawText(juce::String(slot + 1), txt.removeFromRight(12.0f).toNearestInt(),
+                       juce::Justification::centredRight);
+            g.setColour(colors::text);
+            g.setFont(RigLookAndFeel::withHeight(11.0f));
+            g.drawText(effectName(slotType(slot)), txt.toNearestInt(), juce::Justification::centredLeft);
+
+            if (pos < nam_rig::ModBlock::kSlots - 1 && !mDragging) // flow arrow to the next chip
+            {
+                const float ay = chipRect(pos).getBottom()
+                                 + (chipRect(pos + 1).getY() - chipRect(pos).getBottom()) * 0.5f;
+                g.setColour(colors::accentDim);
+                juce::Path tri;
+                tri.addTriangle(cx - 3.0f, ay - 2.5f, cx + 3.0f, ay - 2.5f, cx, ay + 3.0f);
+                g.fillPath(tri);
+            }
+        }
+    }
+
+    void mouseDown(const juce::MouseEvent &e) override
+    {
+        const int pos = posAtY(e.position.y);
+        if (pos < 0)
+            return;
+        mDragging = true;
+        mDragSlot = mOrder[pos];
+        mDragY = e.position.y;
+        repaint();
+    }
+    void mouseDrag(const juce::MouseEvent &e) override
+    {
+        if (!mDragging)
+            return;
+        mDragY = e.position.y;
+        auto b = getLocalBounds().toFloat().reduced(2.0f);
+        b.removeFromTop(12.0f);
+        b.removeFromBottom(12.0f);
+        const float step = b.getHeight() / (float)nam_rig::ModBlock::kSlots;
+        int tgt = (int)std::floor((mDragY - b.getY()) / juce::jmax(1.0f, step));
+        tgt = juce::jlimit(0, nam_rig::ModBlock::kSlots - 1, tgt);
+        if (tgt != posOfSlot(mDragSlot)) // rebuild the order with the dragged slot at tgt
+        {
+            int rest[nam_rig::ModBlock::kSlots], n = 0;
+            for (int p = 0; p < nam_rig::ModBlock::kSlots; ++p)
+                if (mOrder[p] != mDragSlot) rest[n++] = mOrder[p];
+            int w = 0;
+            for (int p = 0; p < nam_rig::ModBlock::kSlots; ++p)
+                mOrder[p] = (p == tgt) ? mDragSlot : rest[w++];
+        }
+        repaint();
+    }
+    void mouseUp(const juce::MouseEvent &) override
+    {
+        if (!mDragging)
+            return;
+        mDragging = false;
+        writeOrder();
+        repaint();
+    }
+
+private:
+    static const int *perm(int i) // row i of the six permutations of {0,1,2}
+    {
+        static const int P[6][3] = {
+            {0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}};
+        return P[juce::jlimit(0, 5, i)];
+    }
+    void readOrder()
+    {
+        const int oi = juce::jlimit(0, 5, (int)mApvts.getRawParameterValue("modChainOrder")->load());
+        const int *p = perm(oi);
+        for (int k = 0; k < nam_rig::ModBlock::kSlots; ++k) mOrder[k] = p[k];
+    }
+    void writeOrder()
+    {
+        int idx = 0;
+        for (int i = 0; i < 6; ++i)
+        {
+            const int *p = perm(i);
+            if (p[0] == mOrder[0] && p[1] == mOrder[1] && p[2] == mOrder[2]) { idx = i; break; }
+        }
+        if (auto *prm = mApvts.getParameter("modChainOrder"))
+        {
+            const float norm = prm->convertTo0to1((float)idx);
+            if (std::abs(prm->getValue() - norm) > 1.0e-6f)
+            {
+                prm->beginChangeGesture();
+                prm->setValueNotifyingHost(norm);
+                prm->endChangeGesture();
+            }
+        }
+    }
+    int slotType(int slot) const
+    {
+        return (int)mApvts.getRawParameterValue("mod" + juce::String(slot + 1) + "Type")->load();
+    }
+    static juce::String effectName(int type)
+    {
+        static const char *kNames[] = {"Chorus", "Flanger", "Phaser",   "Tremolo", "Vibrato",
+                                       "Rotary", "Uni-Vibe", "Harm Trem", "Bi-Phase"};
+        return (type >= 0 && type < 9) ? kNames[type] : "-";
+    }
+    int posOfSlot(int slot) const
+    {
+        for (int p = 0; p < nam_rig::ModBlock::kSlots; ++p)
+            if (mOrder[p] == slot) return p;
+        return 0;
+    }
+    juce::Rectangle<float> chipRect(int pos) const
+    {
+        auto b = getLocalBounds().toFloat().reduced(2.0f);
+        b.removeFromTop(12.0f);
+        b.removeFromBottom(12.0f);
+        const float step = b.getHeight() / (float)nam_rig::ModBlock::kSlots;
+        const float h = juce::jmin(30.0f, step - 6.0f);
+        const float cyc = b.getY() + step * pos + step * 0.5f;
+        return juce::Rectangle<float>(b.getX() + 2.0f, cyc - h * 0.5f, b.getWidth() - 4.0f, h);
+    }
+    int posAtY(float y) const
+    {
+        for (int p = 0; p < nam_rig::ModBlock::kSlots; ++p)
+            if (chipRect(p).getY() - 3.0f <= y && y <= chipRect(p).getBottom() + 3.0f)
+                return p;
+        return -1;
+    }
+
+    juce::AudioProcessorValueTreeState &mApvts;
+    int mOrder[nam_rig::ModBlock::kSlots] = {0, 1, 2};
+    bool mDragging = false;
+    int mDragSlot = 0;
+    float mDragY = 0.0f;
+};
+
 class ModPanel : public BlockPanel
 {
 public:
@@ -1254,6 +1442,9 @@ public:
         mModMix->setRotationReadout(10.0);
         addChildComponent(*mModMix); // parallel only
 
+        mRack = std::make_unique<ChainRack>(apvts);
+        addChildComponent(*mRack); // series only (fills the strip where the pad sits in parallel)
+
         refreshRouting();
     }
 
@@ -1270,6 +1461,7 @@ public:
                 if (getSolo) mLanes[(size_t)s]->setSoloState(getSolo(s)); // reflect live solo
             }
         if (mPostLane) mPostLane->refresh();
+        if (mRack) mRack->refresh();
         updatePadActive();
         refreshRouting();
     }
@@ -1285,16 +1477,19 @@ public:
         mPad->setActiveSlots(enabled(0), enabled(1), enabled(2));
     }
 
-    // Show/hide the parallel-only controls (pad + Mod Mix) and relayout when the
-    // Series/Parallel routing changes (from the toggle or host automation).
+    // Show/hide the routing-dependent right-strip controls and relayout when the
+    // Series/Parallel routing changes (from the toggle or host automation). The
+    // strip holds the blend pad + Mod Mix in Parallel and the chain-order rack in
+    // Series -- the two faces of "how the slots combine".
     void refreshRouting()
     {
         const bool par = (mRouting.getSelectedId() == 2);
-        if (par == mParallel)
-            return;
-        mParallel = par;
         mPad->setVisible(par);
         mModMix->setVisible(par);
+        mRack->setVisible(!par);
+        if (par == mParallel)
+            return; // visibility refreshed; layout already matches the mode
+        mParallel = par;
         resized();
         repaint();
     }
@@ -1352,6 +1547,10 @@ public:
             const int sq = juce::jmin(strip.getWidth(), strip.getHeight());
             mPad->setBounds(strip.removeFromTop(sq).withSizeKeepingCentre(sq, sq));
         }
+        else
+        {
+            mRack->setBounds(strip); // chain-order rack fills the series strip
+        }
 
         const int n = nam_rig::ModBlock::kSlots, gap = 8;
         // Spine column spans the FULL height: IN at the top, down through the
@@ -1389,6 +1588,7 @@ private:
     juce::ComboBox mRouting;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mRoutingAtt;
     std::unique_ptr<BlendPad> mPad;
+    std::unique_ptr<ChainRack> mRack;
     std::unique_ptr<LabeledKnob> mModMix;
     juce::AudioProcessorValueTreeState &mApvts;
     bool mParallel = false;

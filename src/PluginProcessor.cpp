@@ -199,6 +199,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("modMix", 1), "Mod Mix",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+    // Series chain order: which slot runs at each position. One choice param (the
+    // six permutations of the three slots) so it saves/automates as a single value
+    // without the inconsistency a per-position param set could hit. Default
+    // "1-2-3" = the fixed order, so old presets are unchanged. Only acts in Series.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("modChainOrder", 1), "Mod Chain Order",
+        juce::StringArray{"1-2-3", "1-3-2", "2-1-3", "2-3-1", "3-1-2", "3-2-1"}, 0));
 
     // POST modulation block: a dedicated end-of-section effect (rotary/tremolo/
     // harm-trem "speaker/amp" stage) that processes the combined output of the 3
@@ -717,6 +724,13 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.mod.setPad(apvts.getRawParameterValue("modPadX")->load(),
                       apvts.getRawParameterValue("modPadY")->load());
     mChain.mod.setModMix(apvts.getRawParameterValue("modMix")->load());
+    // Map the chain-order choice (six permutations) to the slot sequence.
+    {
+        static const int kPerm[6][3] = {
+            {0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}};
+        const int oi = juce::jlimit(0, 5, (int)apvts.getRawParameterValue("modChainOrder")->load());
+        mChain.mod.setChainOrder(kPerm[oi][0], kPerm[oi][1], kPerm[oi][2]);
+    }
     // Post block (end-of-section effect).
     mChain.mod.setPostType((int)apvts.getRawParameterValue("postType")->load());
     mChain.mod.setPostWaveform((int)apvts.getRawParameterValue("postWave")->load());

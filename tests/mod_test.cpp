@@ -47,6 +47,8 @@
 //       overrides bypass, and clears back to the full mix
 //   T33 POST block: runs at the END of the section (== standalone when alone,
 //       == hand-chained after a front slot); its bypass works
+//   T34 series chain order: default {0,1,2} == fixed-order series (bit-exact);
+//       reordering two effects changes the sound; a malformed order is rejected
 #include "rig/ModBlock.h"
 #include <cstdio>
 #include <cmath>
@@ -1459,6 +1461,60 @@ int main()
             double d = 0;
             for (size_t i = 0; i < x.size(); ++i) d = std::max(d, (double)std::abs(la[i] - lb[i]));
             CHECK(d < 1e-6, "T33 solo mutes the post effect (== soloed slot alone, diff %.2e)", d);
+        }
+    }
+
+    // ---- T34: SERIES chain order (reorderable processing sequence) ----
+    {
+        const int N = (int)SR * 2;
+        auto x = tone(700.0, 0.5, N);
+
+        // Two slots with DISTINCT, order-sensitive effects: a flanger (feedback
+        // comb) and a chorus, both enabled. cfg sets everything but the order.
+        auto cfg = [&](ModBlock &m) {
+            m.setLevelLock(false); // bit-exact series comparisons
+            m.setType(0, ModVoice::kFlanger); m.setRateHz(0, 0.5f); m.setDepth(0, 0.8f);
+            m.setFeedback(0, 0.7f); m.setMix(0, 0.5f); m.setManual(0, 0.4f);
+            m.setType(1, ModVoice::kChorus); m.setRateHz(1, 1.3f); m.setDepth(1, 0.7f); m.setMix(1, 0.5f);
+            m.setSlotBypassed(0, false); m.setSlotBypassed(1, false); m.setSlotBypassed(2, true);
+        };
+
+        // (a) default order {0,1,2} is bit-exact to a section that never touched
+        // the order (the old fixed-order series loop).
+        {
+            ModBlock def, plain;
+            cfg(def); def.setChainOrder(0, 1, 2); def.prepare({SR, BLK});
+            cfg(plain); plain.prepare({SR, BLK}); // chain order never set -> identity
+            auto la = x, ra = x, lb = x, rb = x;
+            run(def, la, ra);
+            run(plain, lb, rb);
+            double d = 0;
+            for (size_t i = 0; i < x.size(); ++i) d = std::max(d, (double)std::abs(la[i] - lb[i]));
+            CHECK(d < 1e-6, "T34 default chain order == fixed-order series (diff %.2e)", d);
+        }
+
+        // (b) swapping the two effects' order changes the output (order matters).
+        {
+            ModBlock fwd, rev;
+            cfg(fwd); fwd.setChainOrder(0, 1, 2); fwd.prepare({SR, BLK}); // flanger -> chorus
+            cfg(rev); rev.setChainOrder(1, 0, 2); rev.prepare({SR, BLK}); // chorus -> flanger
+            auto la = x, ra = x, lb = x, rb = x;
+            run(fwd, la, ra);
+            run(rev, lb, rb);
+            double d = 0;
+            for (size_t i = 0; i < x.size(); ++i) d = std::max(d, (double)std::abs(la[i] - lb[i]));
+            CHECK(d > 0.02, "T34 reordering the chain changes the sound (diff %.2f)", d);
+        }
+
+        // (c) a malformed order (duplicate / out-of-range slot) is rejected and the
+        // identity is kept, so no slot is ever dropped or doubled.
+        {
+            ModBlock bad;
+            cfg(bad); bad.setChainOrder(0, 1, 2); bad.prepare({SR, BLK});
+            bad.setChainOrder(0, 0, 1); // duplicate -> ignored
+            bad.setChainOrder(3, 1, 2); // out of range -> ignored
+            const bool ok = (bad.chainOrder(0) == 0 && bad.chainOrder(1) == 1 && bad.chainOrder(2) == 2);
+            CHECK(ok, "T34 malformed chain order rejected (keeps a valid permutation)");
         }
     }
 
