@@ -1365,12 +1365,13 @@ private:
     {
         auto b = getLocalBounds().toFloat();
         b.removeFromTop(15.0f); // "MOD MIX" header
-        // Keep the triangle well-proportioned (square), centred in the box -- the
-        // box itself is tall (fills the strip), the triangle isn't stretched.
-        // Margins leave room for the weight-% labels (which clear the grown nodes).
+        // Fit an EQUILATERAL triangle (height = base * sqrt(3)/2), centred in the
+        // box. Margins leave room for the weight-% labels (which clear the nodes).
         b = b.reduced(24.0f, 26.0f);
-        const float s = juce::jmin(b.getWidth(), b.getHeight());
-        return juce::Rectangle<float>(s, s).withCentre(b.getCentre());
+        const float k = 0.8660254f; // equilateral height / base
+        float w = b.getWidth(), h = w * k;
+        if (h > b.getHeight()) { h = b.getHeight(); w = h / k; } // height-limited
+        return juce::Rectangle<float>(w, h).withCentre(b.getCentre());
     }
     juce::Point<float> scr(juce::Rectangle<float> r, float x, float y) const
     {
