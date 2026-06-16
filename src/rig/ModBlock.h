@@ -205,7 +205,9 @@ public:
         const double rate = (double)effectiveRateHz();
         mLfo.setRateHz((float)rate);
         mLfo.setWaveform(ty == kTremolo ? mUserWave : authenticWave(ty)); // shape hardwired per type
-        mLfo2.setRateHz((float)(rate * (double)mP2Ratio)); // Bi-Phase Sweep Gen 2 = Gen 1 x ratio
+        // Bi-Phase Sweep Gen 2 = Gen 1 x ratio, but clamped to the same musical
+        // ceiling so the detune can't push one core into the buzzy zone.
+        mLfo2.setRateHz((float)std::min((double)maxRateHz(ty), rate * (double)mP2Ratio));
         mLfo2.setWaveform(Lfo::Sine);
         const float dMax = depthMax(ty);
         mBakedBbd = bakedBbd(ty);
