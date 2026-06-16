@@ -101,9 +101,10 @@ public:
         g.setColour(colors::outline);
         g.drawRoundedRectangle(b, 8.0f, 1.0f);
 
-        g.setColour(colors::accent);
-        g.setFont(RigLookAndFeel::withHeight(15.0f).boldened());
-        g.drawText(mTitle, getLocalBounds().removeFromTop(34).reduced(16, 0),
+        // Section title: spaced orange caps (matches the design mockup).
+        g.setColour(juce::Colour(0xffeb9b43));
+        g.setFont(RigLookAndFeel::withHeight(13.0f).withExtraKerningFactor(0.14f));
+        g.drawText(mTitle.toUpperCase(), getLocalBounds().removeFromTop(34).reduced(16, 0),
                    juce::Justification::centredLeft);
     }
 
@@ -1817,6 +1818,9 @@ public:
 
     void resized() override
     {
+        // Routing toggle (Series/Parallel) sits in the header's top-right corner.
+        mRouting.setBounds(getLocalBounds().removeFromTop(34).reduced(16, 5).removeFromRight(104));
+
         auto area = contentArea();
         const int n = nam_rig::ModBlock::kSlots, gap = 8;
 
@@ -1838,8 +1842,6 @@ public:
         // pad + Mod Mix in parallel, chain rack in series.
         auto strip = area.removeFromRight(150);
         area.removeFromRight(10);
-        mRouting.setBounds(strip.removeFromTop(24));
-        strip.removeFromTop(8);
         if (mParallel)
         {
             mModMix->setBounds(strip.removeFromBottom(58).reduced(26, 0));
