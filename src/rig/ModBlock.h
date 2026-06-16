@@ -58,7 +58,15 @@ public:
     static constexpr double kRightLfoOffset = 0.25; // 90 degrees at Width = 1
     static constexpr float kPhaserFixedDepth = 1.0f; // phaser sweep is hardwired
     static constexpr float kPhaserFbMax = 0.7f;      // musical resonance ceiling (no whistle)
-    static constexpr float kUniFeedback = 0.3f;      // uni-vibe resonance is hardwired
+    static constexpr float kUniFeedback = 0.3f;      // uni-vibe resonance is hardwired (positive fb)
+    // Photocell warp (replaces the old pow-skew): the incandescent lamp heats
+    // faster than it cools (asymmetric one-pole), and the LDR maps light to stage
+    // frequency through a power law -- the authentic lopsided Uni-Vibe throb.
+    static constexpr float kUniLampHeatMs = 8.0f;    // filament heating time constant
+    static constexpr float kUniLampCoolMs = 55.0f;   // filament cooling (slower -> lopsided)
+    static constexpr float kUniCellGamma = 1.5f;     // photoconductive transfer: fc ~ light^gamma
+    static constexpr float kUniAmDepth = 0.10f;      // subtle photocell amplitude ripple
+    static constexpr float kUniDepthMin = 0.10f;     // always some throb (never dead-static)
 
     // ---- per-effect voicing (public so the tests + UI can read it) ----
     static int authenticWave(Type t) { return t == kFlanger ? Lfo::Triangle : Lfo::Sine; }
@@ -137,6 +145,7 @@ public:
         mFbLp[0] = mFbLp[1] = 0.0f;
         mXoverLp[0] = mXoverLp[1] = 0.0f;
         mBbdLp[0] = mBbdLp[1] = 0.0f;
+        mUniLamp[0] = mUniLamp[1] = 0.5f; // lamp at mid brightness (no startup snap)
         mTremG[0] = mTremG[1] = 1.0f; // unity gain (no mute on start)
         mHornLp[0] = mHornLp[1] = 0.0f;
         mDrumLp[0] = mDrumLp[1] = 0.0f;
@@ -217,6 +226,10 @@ public:
         mXoverCoef = coefForHz(kHarmXoverHz, mFs);
         mTremCoef = coefForMs(1.5f, mFs);   // de-click smoothing for tremolo gain
         mFbLpCoef = coefForHz(6500.0, mFs); // flanger feedback tone-shaping
+        // Uni-Vibe lamp filament: fixed (rate-independent) heat/cool one-poles, so
+        // the asymmetry deepens as the LFO speeds up -- just like the real lamp.
+        mUniHeatCoef = coefForMs(kUniLampHeatMs, mFs);
+        mUniCoolCoef = coefForMs(kUniLampCoolMs, mFs);
         // Leslie: two fixed speeds (the Rate knob picks slow vs fast at its
         // midpoint), each rotor ramped with inertia -- horn light/quick, drum
         // heavy/slow -- which is the characteristic spin-up.
@@ -420,29 +433,63 @@ private:
         }
         case kUniVibe:
         {
-            // staggered allpass centres + hardwired resonance. The vibe's throb
-            // comes from an ASYMMETRIC (skewed) lamp sweep + a touch of amplitude.
+            // 4-stage opto phaser, rebuilt on the same ZDF/TPT all-pass solver as
+            // the Bi-Phase phasor6 but with PER-STAGE alpha_i for the staggered
+            // photocell centres ({0.5,1,1.8,3.2}x400 Hz). Each TPT all-pass is
+            // affine in its input (ap_i = alpha_i*in + beta_i, alpha_i = 2G_i-1,
+            // beta_i = 2(1-G_i)*s_i), so the cascade collapses to y = A*u + B with
+            //   A = prod(alpha_i)          (vs the phaser's alpha^4)
+            //   B = nested products         (B <- alpha_i*B + beta_i, stage order)
+            // and the positive feedback loop resolves zero-delay (no mFbState lag):
+            //   u = (x + fb*B)/(1 - fb*A);  denom >= 0.7 for fb 0.3 -> always stable.
+            //
+            // The sweep is the AUTHENTIC photocell warp, not a static curve bend:
+            // the lamp filament heats faster than it cools (asymmetric one-pole)
+            // so the bright/dark dwell is lopsided -- and more so the faster you
+            // sweep, exactly like the hardware -- and the LDR maps light to stage
+            // frequency through a power law (fc ~ light^gamma).
             static const double mult[kPhaserStages] = {0.5, 1.0, 1.8, 3.2};
-            const float g01 = 0.5f + 0.5f * lfo;
-            const float skew = std::pow(g01, 1.8f);
-            const float ulfo = skew * 2.0f - 1.0f;
-            float v = x + kUniFeedback * mFbState[(size_t)ch];
+
+            // lamp + photocell: asymmetric thermal envelope, then power-law transfer
+            const float drive = 0.5f + 0.5f * lfo; // LFO -> lamp drive [0,1]
+            float &lamp = mUniLamp[(size_t)ch];
+            lamp += (drive > lamp ? mUniHeatCoef : mUniCoolCoef) * (drive - lamp);
+            const float cell = std::pow(std::max(0.0f, lamp), kUniCellGamma); // LDR transfer
+            const float w = cell * 2.0f - 1.0f;                               // warped control [-1,1]
+            // depth floored so the knob-down position still breathes (no dead-static)
+            const float uDepth = kUniDepthMin + depth * (1.0f - kUniDepthMin);
+
+            // per-stage ZDF/TPT all-pass: gather alpha_i/G_i/beta_i, build A and B
+            ApState *ap = &mAllpass[(size_t)(ch * kPhaserStages)];
+            float alpha[kPhaserStages], G[kPhaserStages], beta[kPhaserStages];
+            float A = 1.0f, B = 0.0f;
             for (int s = 0; s < kPhaserStages; ++s)
             {
                 const double fc = std::min(
                     0.45 * mFs,
-                    kUniCenterHz * mult[s] * std::pow(2.0, (double)ulfo * (double)depth));
-                const double tanw = std::tan(3.14159265358979323846 * fc / mFs);
-                const float a = (float)((tanw - 1.0) / (tanw + 1.0));
-                auto &st = mAllpass[(size_t)(ch * kPhaserStages + s)];
-                const float y = a * v + st.x1 - a * st.y1;
-                st.x1 = v;
-                st.y1 = y;
-                v = y;
+                    std::max(20.0, mult[s] * kUniCenterHz * std::pow(2.0, (double)w * (double)uDepth)));
+                const double g = std::tan(3.14159265358979323846 * fc / mFs);
+                G[s] = (float)(g / (1.0 + g));
+                alpha[s] = 2.0f * G[s] - 1.0f;
+                beta[s] = 2.0f * (1.0f - G[s]) * ap[s].s;
+                A *= alpha[s];              // A = product of alpha_i
+                B = alpha[s] * B + beta[s]; // B = nested products (forward accumulation)
             }
-            mFbState[(size_t)ch] = v;
-            v *= 1.0f - 0.12f * depth * skew; // subtle lamp amplitude movement
-            return (1.0f - mMixZ) * x + mMixZ * v;
+
+            const float fb = kUniFeedback;                  // hardwired resonance
+            const float u = (x + fb * B) / (1.0f - fb * A); // positive feedback, zero-delay
+
+            // single pass: true stage outputs + TPT integrator updates
+            float in = u;
+            for (int s = 0; s < kPhaserStages; ++s)
+            {
+                const float out = alpha[s] * in + beta[s];
+                const float v = (in - ap[s].s) * G[s];
+                ap[s].s += 2.0f * v; // s_new = s + 2v (trapezoidal update)
+                in = out;
+            }
+            in *= 1.0f - kUniAmDepth * uDepth * cell; // subtle photocell amplitude ripple
+            return (1.0f - mMixZ) * x + mMixZ * in;
         }
         case kHarmTrem:
         {
@@ -540,11 +587,7 @@ private:
     void flushDenormals()
     {
         for (auto &st : mAllpass)
-        {
-            if (std::abs(st.x1) < 1.0e-30f) st.x1 = 0.0f;
-            if (std::abs(st.y1) < 1.0e-30f) st.y1 = 0.0f;
             if (std::abs(st.s) < 1.0e-30f) st.s = 0.0f;
-        }
         for (auto *bank : {&mBiA, &mBiB})
             for (auto &c : *bank)
                 for (auto &v : c.s)
@@ -567,9 +610,9 @@ private:
             if (std::abs(f) < 1.0e-30f) f = 0.0f;
     }
 
-    // x1/y1 = Direct-Form-I state (still used by Uni-Vibe until its own upgrade);
-    // s = TPT integrator state used by the ZDF Phaser.
-    struct ApState { float x1 = 0.0f, y1 = 0.0f, s = 0.0f; };
+    // s = TPT integrator state, shared by the ZDF Phaser and the Uni-Vibe
+    // all-passes (Direct-Form x1/y1 retired when Uni-Vibe moved to ZDF/TPT).
+    struct ApState { float s = 0.0f; };
 
     double mFs = 48000.0;
     Type mType = kChorus;
@@ -582,6 +625,7 @@ private:
     std::array<float, 2> mFbLp{};            // flanger feedback tone state
     std::array<float, 2> mXoverLp{};         // harmonic-trem / rotary crossover state
     std::array<float, 2> mBbdLp{};           // BBD HF-rolloff state
+    std::array<float, 2> mUniLamp{};         // uni-vibe lamp thermal envelope (per ch)
     std::array<float, 2> mTremG{1.0f, 1.0f}; // smoothed tremolo gain (de-click)
     float mDepth = 0.5f, mFeedback = 0.0f, mMix = 0.5f;
     float mDepthZ = 0.5f, mMixZ = 0.5f, mSmoothK = 0.01f;
@@ -595,6 +639,7 @@ private:
     float mBakedBbd = 0.0f;                     // per-block, from bakedBbd(type)
     float mBbdCoef = 1.0f, mXoverCoef = 0.1f;   // per-block filter coeffs
     float mTremCoef = 1.0f, mFbLpCoef = 1.0f;   // tremolo de-click, flanger fb tone
+    float mUniHeatCoef = 1.0f, mUniCoolCoef = 1.0f; // uni-vibe lamp heat/cool one-poles
     double mRotHornPhase = 0.0, mRotDrumPhase = 0.0;                     // Leslie rotor phases
     double mHornInc = 0.0, mDrumInc = 0.0;                              // per-sample increments
     float mRotHornSpeed = kRotSlowHz, mRotDrumSpeed = kRotSlowHz * 0.78f; // ramping Hz (inertia)

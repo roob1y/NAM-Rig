@@ -26,6 +26,9 @@
 //   T22 Bi-Phase parallel stereo A/B split scales with Width
 //   T23 Bi-Phase resonance grows with feedback (impulse ring)
 //   T24 Bi-Phase second sweep generator (P2Ratio) changes the motion
+//   T25 Uni-Vibe sweep is asymmetric (photocell warp) + more lopsided when faster
+//   T26 Uni-Vibe ZDF: bounded across depth/rate extremes; sweep moves the spectrum
+//       (incl. at depth 0, where the depth floor keeps it breathing)
 #include "rig/ModBlock.h"
 #include <cstdio>
 #include <cmath>
@@ -736,6 +739,98 @@ int main()
         for (size_t i = 4800; i < a.size(); ++i)
             d = std::max(d, (double)std::abs(a[i] - b[i]));
         CHECK(d > 0.02, "T24 Bi-Phase Gen 2 ratio changes the sweep (max diff %.3f)", d);
+    }
+
+    // ---- T25: Uni-Vibe sweep is asymmetric (photocell warp) + more so when faster ----
+    {
+        // The old pow-skew was a static curve on the LFO -> rate-independent and,
+        // measured per cycle, time-symmetric. The lamp model heats faster than it
+        // cools, so the sweep is lopsided, and (because the time constants are
+        // fixed) it gets MORE lopsided as the LFO speeds up. Metric: correlate the
+        // wet envelope with its own time-reverse over the steady tail. A symmetric
+        // sweep matches its reverse (corr ~1); asymmetry lowers it. The fast sweep
+        // must be less symmetric than the slow one. (Thresholds first-run est.)
+        auto revCorr = [](float rateHz) {
+            ModVoice m;
+            m.setType(ModVoice::kUniVibe);
+            m.setRateHz(rateHz);
+            m.setDepth(0.9f);
+            m.prepare({SR, BLK});
+            auto l = tone(800.0, 0.5, (int)SR * 4), r = l; // notches sweep past 800 Hz
+            run(m, l, r);
+            std::vector<float> tail(l.begin() + (int)SR, l.end()); // drop the startup
+            auto env = envelope(tail, 128);
+            const size_t n = env.size();
+            double mean = 0;
+            for (double e : env) mean += e;
+            mean /= (double)n;
+            double cov = 0, var = 0;
+            for (size_t i = 0; i < n; ++i)
+            {
+                const double a = env[i] - mean, b = env[n - 1 - i] - mean;
+                cov += a * b;
+                var += a * a;
+            }
+            return cov / (var + 1e-12); // normalized self-reverse correlation
+        };
+        const double aSlow = revCorr(1.0f);
+        const double aFast = revCorr(8.0f);
+        CHECK(std::isfinite(aSlow) && std::isfinite(aFast) && aFast < aSlow - 0.02,
+              "T25 uni-vibe sweep asymmetric, more lopsided when faster (corr slow %.3f -> fast %.3f)",
+              aSlow, aFast);
+    }
+
+    // ---- T26: Uni-Vibe ZDF bounded across extremes; sweep moves the spectrum ----
+    {
+        // (a) the zero-delay positive-feedback resolve stays finite + bounded at
+        // the control extremes (depth 0/1 x rate 0/10).
+        bool ok = true;
+        double pk = 0;
+        for (float d : {0.0f, 1.0f})
+            for (float rt : {0.0f, 10.0f})
+            {
+                ModVoice m;
+                m.setType(ModVoice::kUniVibe);
+                m.setRateHz(rt);
+                m.setDepth(d);
+                m.prepare({SR, BLK});
+                auto l = tone(440.0, 0.4, (int)SR), r = l;
+                run(m, l, r);
+                for (float v : l) { if (!std::isfinite(v)) ok = false; pk = std::max(pk, (double)std::abs(v)); }
+            }
+        CHECK(ok && pk < 4.0, "T26 uni-vibe ZDF bounded across depth/rate extremes (peak %.2f)", pk);
+
+        // (b)/(c) the swept all-pass chain (hardwired 50/50 mix) moves the spectrum
+        // over time. Tested at full depth AND at depth 0, where the depth floor
+        // (kUniDepthMin) must keep it breathing rather than freezing static.
+        auto specMoves = [](float depth) {
+            ModVoice m;
+            m.setType(ModVoice::kUniVibe);
+            m.setRateHz(0.2f);
+            m.setDepth(depth);
+            m.prepare({SR, BLK});
+            std::vector<float> l((size_t)SR * 5, 0.0f);
+            for (int kk = 0; kk < 40; ++kk)
+            {
+                const double f = 100.0 * std::pow(80.0, kk / 39.0);
+                for (size_t i = 0; i < l.size(); ++i)
+                    l[i] += (float)(0.02 * std::sin(2.0 * M_PI * f * (double)i / SR + kk));
+            }
+            auto r = l;
+            run(m, l, r);
+            double diff = 0, ref = 0;
+            for (int kk = 0; kk < 40; ++kk)
+            {
+                const double f = 100.0 * std::pow(80.0, kk / 39.0);
+                const double m1 = mag(l, (size_t)SR, (size_t)SR / 2, f);
+                const double m2 = mag(l, (size_t)(SR * 3.5), (size_t)SR / 2, f);
+                diff += std::abs(m1 - m2);
+                ref += std::max(m1, m2);
+            }
+            return diff / ref;
+        };
+        CHECK(specMoves(0.9f) > 0.10, "T26 uni-vibe sweeps the spectrum at depth 0.9 (rel diff %.2f)", specMoves(0.9f));
+        CHECK(specMoves(0.0f) > 0.02, "T26 depth-floor keeps it breathing at depth 0 (rel diff %.2f)", specMoves(0.0f));
     }
 
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);
