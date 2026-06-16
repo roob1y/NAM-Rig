@@ -765,21 +765,28 @@ public:
         addAndMakeVisible(mNum);
         addAndMakeVisible(mIcon);
 
-        mType.addItemList({"Chorus", "Flanger", "Phaser", "Tremolo",
-                           "Vibrato", "Rotary", "Uni-Vibe", "Harm Trem", "Bi-Phase"}, 1);
-        // Restrict the list per position: front slots can't pick the post effects
-        // (Tremolo/Rotary/Harm Trem = item ids 4/6/8); the post lane only offers
-        // those three. (Greyed = unselectable; the param stays enum-aligned so
-        // presets are unaffected.)
-        for (int id = 1; id <= 9; ++id)
+        // Only the effects valid for this position appear in the list (item id =
+        // enum + 1, so the id carries the ModVoice::Type). Front = the 6 front
+        // effects; post = the 3 amp/speaker effects. The param stays the full
+        // 9-choice enum (presets unaffected), so the combo is synced by hand --
+        // a filtered list can't use a ComboBoxAttachment.
+        if (isFront)
         {
-            const bool isPostId = (id == 4 || id == 6 || id == 8);
-            mType.setItemEnabled(id, isFront ? !isPostId : isPostId);
+            mType.addItem("Chorus", 1);
+            mType.addItem("Flanger", 2);
+            mType.addItem("Phaser", 3);
+            mType.addItem("Vibrato", 5);
+            mType.addItem("Uni-Vibe", 7);
+            mType.addItem("Bi-Phase", 9);
+        }
+        else
+        {
+            mType.addItem("Tremolo", 4);
+            mType.addItem("Rotary", 6);
+            mType.addItem("Harm Trem", 8);
         }
         addAndMakeVisible(mType);
-        mTypeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-            apvts, p + "Type", mType);
-        mType.onChange = [this] { refresh(); };
+        mType.onChange = [this] { syncTypeParam(); };
 
         mSync.addItemList({"Off", "1/1", "1/2", "1/4", "1/4.", "1/4T",
                            "1/8", "1/8.", "1/8T", "1/16"}, 1);
@@ -858,10 +865,32 @@ public:
     std::function<void(int, bool)> onSolo;
     void setSoloState(bool on) { mSolo.setToggleState(on, juce::dontSendNotification); }
 
+    // Write the filtered type combo's selection (item id = enum + 1) back to the
+    // full 9-choice Type parameter.
+    void syncTypeParam()
+    {
+        const int id = mType.getSelectedId();
+        if (id <= 0)
+            return;
+        if (auto *prm = mApvts.getParameter(mPrefix + "Type"))
+        {
+            const float norm = prm->convertTo0to1((float)(id - 1));
+            if (std::abs(prm->getValue() - norm) > 1.0e-6f)
+            {
+                prm->beginChangeGesture();
+                prm->setValueNotifyingHost(norm);
+                prm->endChangeGesture();
+            }
+        }
+        refresh();
+    }
+
     void refresh()
     {
         const juce::String p = mPrefix;
         const int type = (int)mApvts.getRawParameterValue(p + "Type")->load();
+        if (mType.getSelectedId() != type + 1) // keep the filtered combo in sync
+            mType.setSelectedId(type + 1, juce::dontSendNotification);
         const int sync = (int)mApvts.getRawParameterValue(p + "Sync")->load();
         const bool on = mApvts.getRawParameterValue(p + "On")->load() >= 0.5f;
         mIcon.setType(type);
@@ -992,7 +1021,7 @@ private:
     juce::Label mNum;
     ModFxIcon mIcon;
     juce::ComboBox mType, mWave, mSync;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt, mWaveAtt, mSyncAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mWaveAtt, mSyncAtt; // (Type combo synced by hand)
     juce::ToggleButton mOn;
     juce::ToggleButton mSolo; // momentary dial-in (not APVTS-attached)
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mOnAtt;
@@ -1159,7 +1188,17 @@ public:
                 apvts, "mod" + juce::String(s + 1), juce::String(s + 1), s);
             addAndMakeVisible(*mLanes[(size_t)s]);
             mLanes[(size_t)s]->onSolo = [this](int slot, bool on) {
-                if (onSetSolo) onSetSolo(slot, on); // momentary: audio only, blend untouched
+                if (!onSetSolo) return;
+                // Exclusive solo: turning one on clears the others (radio style);
+                // clicking the lit one again clears it. Audio only, blend untouched.
+                if (on)
+                    for (int k = 0; k < nam_rig::ModBlock::kSlots; ++k)
+                        onSetSolo(k, k == slot);
+                else
+                    onSetSolo(slot, false);
+                if (getSolo)
+                    for (int k = 0; k < nam_rig::ModBlock::kSlots; ++k)
+                        if (mLanes[(size_t)k]) mLanes[(size_t)k]->setSoloState(getSolo(k));
             };
         }
         // Dedicated POST lane: runs at the END of the section (rotary/tremolo/

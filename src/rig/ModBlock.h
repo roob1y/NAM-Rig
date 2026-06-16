@@ -956,7 +956,9 @@ public:
         bool anyFront = false;
         for (int s = 0; s < kSlots; ++s)
             if (slotAudible(s)) { anyFront = true; break; }
-        const bool postOn = !mPost.isBypassed();
+        // Solo is a dial-in tool: it mutes the post effect too, so you hear the
+        // soloed front slot in isolation.
+        const bool postOn = !mPost.isBypassed() && !anySolo();
         if (!anyFront && !postOn) return; // section idle -> fully transparent (no level-lock)
 
         mLock.observeInput(left, right, numSamples); // dry section input (intact at entry)

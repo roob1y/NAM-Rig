@@ -1437,6 +1437,29 @@ int main()
             for (size_t i = 0; i < x.size(); ++i) d = std::max(d, (double)std::abs(on[i] - off[i]));
             CHECK(d > 0.05, "T33 post bypass works (post changes the output, diff %.2f)", d);
         }
+
+        // (d) solo mutes the post effect: soloing a front slot with the post on
+        // yields ONLY that slot (== standalone), the post is silenced.
+        {
+            ModBlock m;
+            m.setLevelLock(false);
+            m.setType(0, ModVoice::kChorus); m.setRateHz(0, 1.0f); m.setDepth(0, 0.7f); m.setMix(0, 1.0f);
+            m.setSlotBypassed(0, false); m.setSlotBypassed(1, true); m.setSlotBypassed(2, true);
+            m.setPostType(ModVoice::kTremolo); m.setPostRateHz(4.0f); m.setPostDepth(0.8f); m.setPostMix(1.0f);
+            m.setPostBypassed(false);
+            m.setSlotSolo(0, true); // solo front slot 0 -> post should mute
+            m.prepare({SR, BLK});
+            ModVoice ref;
+            ref.setType(ModVoice::kChorus);
+            ref.setRateHz(1.0f); ref.setDepth(0.7f); ref.setMix(1.0f);
+            ref.prepare({SR, BLK});
+            auto la = x, ra = x, lb = x, rb = x;
+            run(m, la, ra);
+            run(ref, lb, rb);
+            double d = 0;
+            for (size_t i = 0; i < x.size(); ++i) d = std::max(d, (double)std::abs(la[i] - lb[i]));
+            CHECK(d < 1e-6, "T33 solo mutes the post effect (== soloed slot alone, diff %.2e)", d);
+        }
     }
 
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);
