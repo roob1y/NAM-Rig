@@ -26,7 +26,7 @@
 //   T22 Bi-Phase parallel stereo A/B split scales with Width
 //   T23 Bi-Phase resonance grows with feedback (impulse ring)
 //   T24 Bi-Phase second sweep generator (P2Ratio) changes the motion
-//   T25 Uni-Vibe sweep is asymmetric (photocell warp) + more lopsided when faster
+//   T25 photocell warp lopsided (slow cool > fast heat) + more so when faster
 //   T26 Uni-Vibe ZDF: bounded across depth/rate extremes; sweep moves the spectrum
 //       (incl. at depth 0, where the depth floor keeps it breathing)
 #include "rig/ModBlock.h"
@@ -741,43 +741,41 @@ int main()
         CHECK(d > 0.02, "T24 Bi-Phase Gen 2 ratio changes the sweep (max diff %.3f)", d);
     }
 
-    // ---- T25: Uni-Vibe sweep is asymmetric (photocell warp) + more so when faster ----
+    // ---- T25: photocell warp is asymmetric, and more lopsided when faster ----
     {
-        // The old pow-skew was a static curve on the LFO -> rate-independent and,
-        // measured per cycle, time-symmetric. The lamp model heats faster than it
-        // cools, so the sweep is lopsided, and (because the time constants are
-        // fixed) it gets MORE lopsided as the LFO speeds up. Metric: correlate the
-        // wet envelope with its own time-reverse over the steady tail. A symmetric
-        // sweep matches its reverse (corr ~1); asymmetry lowers it. The fast sweep
-        // must be less symmetric than the slow one. (Thresholds first-run est.)
-        auto revCorr = [](float rateHz) {
+        // Drive the photocell warp DIRECTLY with a SYMMETRIC triangle (so the
+        // input contributes no asymmetry) at two rates. The lamp heats fast and
+        // cools slow, so the warped control spends LONGER falling than rising --
+        // and, because the lamp's time constants are fixed, that bias GROWS as the
+        // drive speeds up (the lamp can't keep up). Measure (fall - rise) sample
+        // counts over a steady cycle; a symmetric warp would give ~0.
+        auto fallBias = [](double rateHz) {
             ModVoice m;
             m.setType(ModVoice::kUniVibe);
-            m.setRateHz(rateHz);
-            m.setDepth(0.9f);
-            m.prepare({SR, BLK});
-            auto l = tone(800.0, 0.5, (int)SR * 4), r = l; // notches sweep past 800 Hz
-            run(m, l, r);
-            std::vector<float> tail(l.begin() + (int)SR, l.end()); // drop the startup
-            auto env = envelope(tail, 128);
-            const size_t n = env.size();
-            double mean = 0;
-            for (double e : env) mean += e;
-            mean /= (double)n;
-            double cov = 0, var = 0;
-            for (size_t i = 0; i < n; ++i)
+            m.prepare({SR, BLK}); // lamp coeffs are set here (rate-independent)
+            const int period = (int)(SR / rateHz);
+            std::vector<float> ctl;
+            for (int c = 0; c < 30; ++c) // run several cycles to reach steady state
+                for (int i = 0; i < period; ++i)
+                {
+                    const float f = (float)i / (float)period;                  // 0..1
+                    const float tri = (f < 0.5f) ? (-1.0f + 4.0f * f)          // symmetric
+                                                 : (3.0f - 4.0f * f);          // triangle [-1,1]
+                    ctl.push_back(m.uniVibeWarp(0, tri));
+                }
+            int rising = 0, falling = 0; // over the last (steady) cycle
+            for (size_t i = ctl.size() - (size_t)period; i + 1 < ctl.size(); ++i)
             {
-                const double a = env[i] - mean, b = env[n - 1 - i] - mean;
-                cov += a * b;
-                var += a * a;
+                if (ctl[i + 1] > ctl[i]) ++rising;
+                else if (ctl[i + 1] < ctl[i]) ++falling;
             }
-            return cov / (var + 1e-12); // normalized self-reverse correlation
+            return (double)(falling - rising) / (double)period; // >0 = slow cool dominates
         };
-        const double aSlow = revCorr(1.0f);
-        const double aFast = revCorr(8.0f);
-        CHECK(std::isfinite(aSlow) && std::isfinite(aFast) && aFast < aSlow - 0.02,
-              "T25 uni-vibe sweep asymmetric, more lopsided when faster (corr slow %.3f -> fast %.3f)",
-              aSlow, aFast);
+        const double slow = fallBias(1.0);
+        const double fast = fallBias(8.0);
+        CHECK(fast > slow + 0.01 && fast > 0.0,
+              "T25 photocell warp lopsided, more so when faster (fall bias slow %.3f -> fast %.3f)",
+              slow, fast);
     }
 
     // ---- T26: Uni-Vibe ZDF bounded across extremes; sweep moves the spectrum ----

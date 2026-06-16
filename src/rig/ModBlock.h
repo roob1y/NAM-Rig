@@ -102,6 +102,20 @@ public:
     }
     static bool mixExposed(Type t) { return t == kChorus || t == kFlanger; }
 
+    // Uni-Vibe photocell sweep warp (the authentic lopsided lamp motion): an
+    // asymmetric thermal one-pole on the lamp drive (heats fast / cools slow)
+    // feeding the LDR power-law transfer. Advances the per-channel lamp state.
+    // Public so the test can drive it directly (the coeffs are set in prepare()).
+    // Returns the warped sweep control in [-1, 1].
+    float uniVibeWarp(int ch, float lfo)
+    {
+        const float drive = 0.5f + 0.5f * lfo; // LFO -> lamp drive [0,1]
+        float &lamp = mUniLamp[(size_t)ch];
+        lamp += (drive > lamp ? mUniHeatCoef : mUniCoolCoef) * (drive - lamp);
+        const float cell = std::pow(std::max(0.0f, lamp), kUniCellGamma); // LDR transfer
+        return cell * 2.0f - 1.0f;                                        // warped control [-1,1]
+    }
+
     const char *name() const override { return "Modulation"; }
 
     void prepare(const BlockContext &ctx) override
@@ -127,6 +141,10 @@ public:
         mLfo.prepare(mFs);
         mLfo2.prepare(mFs); // Bi-Phase Sweep Gen 2
         mSmoothK = 1.0f - std::exp((float)(-1.0 / (0.010 * mFs))); // 10 ms
+        // Uni-Vibe lamp filament: fixed heat/cool one-poles (rate-independent), so
+        // the sweep gets more lopsided as the LFO speeds up -- like the real lamp.
+        mUniHeatCoef = coefForMs(kUniLampHeatMs, mFs);
+        mUniCoolCoef = coefForMs(kUniLampCoolMs, mFs);
         reset();
         mPrepared = true;
     }
@@ -226,10 +244,6 @@ public:
         mXoverCoef = coefForHz(kHarmXoverHz, mFs);
         mTremCoef = coefForMs(1.5f, mFs);   // de-click smoothing for tremolo gain
         mFbLpCoef = coefForHz(6500.0, mFs); // flanger feedback tone-shaping
-        // Uni-Vibe lamp filament: fixed (rate-independent) heat/cool one-poles, so
-        // the asymmetry deepens as the LFO speeds up -- just like the real lamp.
-        mUniHeatCoef = coefForMs(kUniLampHeatMs, mFs);
-        mUniCoolCoef = coefForMs(kUniLampCoolMs, mFs);
         // Leslie: two fixed speeds (the Rate knob picks slow vs fast at its
         // midpoint), each rotor ramped with inertia -- horn light/quick, drum
         // heavy/slow -- which is the characteristic spin-up.
@@ -450,12 +464,9 @@ private:
             // frequency through a power law (fc ~ light^gamma).
             static const double mult[kPhaserStages] = {0.5, 1.0, 1.8, 3.2};
 
-            // lamp + photocell: asymmetric thermal envelope, then power-law transfer
-            const float drive = 0.5f + 0.5f * lfo; // LFO -> lamp drive [0,1]
-            float &lamp = mUniLamp[(size_t)ch];
-            lamp += (drive > lamp ? mUniHeatCoef : mUniCoolCoef) * (drive - lamp);
-            const float cell = std::pow(std::max(0.0f, lamp), kUniCellGamma); // LDR transfer
-            const float w = cell * 2.0f - 1.0f;                               // warped control [-1,1]
+            // lamp + photocell: asymmetric thermal envelope -> power-law transfer
+            const float w = uniVibeWarp(ch, lfo);    // warped sweep control [-1,1]
+            const float cell = 0.5f * (w + 1.0f);    // back to [0,1] for the AM term
             // depth floored so the knob-down position still breathes (no dead-static)
             const float uDepth = kUniDepthMin + depth * (1.0f - kUniDepthMin);
 
