@@ -1320,7 +1320,7 @@ public:
             return;
         const float x = (float)mSpine.getCentreX();
         const float top = (float)mSpine.getY();
-        const float bot = (float)mPostDivider.getY(); // line touches the OUT box edge
+        const float bot = (float)mPostDivider.getY(); // line runs down to the OUT box
         g.setColour(colors::outline);
         g.drawLine(x, top, x, bot, 1.5f);
         g.setColour(colors::accentDim);
