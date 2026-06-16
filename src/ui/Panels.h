@@ -1302,35 +1302,52 @@ public:
     void paint(juce::Graphics &g) override
     {
         BlockPanel::paint(g); // panel body + "MODULATION" title
-        // POST divider (always shown -- the post lane runs in both routing modes).
+        // "OUT" divider above the post lane (the output stage; shown in both modes),
+        // aligned under the spine's "IN" marker.
         if (mPostDivider.getHeight() > 0)
         {
             const float dy = (float)mPostDivider.getCentreY();
             g.setColour(colors::outline);
             g.drawLine((float)mPostDivider.getX(), dy, (float)mPostDivider.getRight(), dy, 1.0f);
             g.setColour(colors::accent);
-            g.setFont(RigLookAndFeel::withHeight(10.0f).boldened());
-            g.fillRect(mPostDivider.getX(), mPostDivider.getY(), 64, mPostDivider.getHeight());
+            g.setFont(RigLookAndFeel::withHeight(9.0f).boldened());
+            g.fillRect(mSpine.getX() - 4, mPostDivider.getY(), 30, mPostDivider.getHeight());
             g.setColour(colors::panel);
-            g.drawText("POST", mPostDivider.getX() + 4, mPostDivider.getY(),
-                       56, mPostDivider.getHeight(), juce::Justification::centredLeft);
+            g.drawText("OUT", mSpine.getX() - 4, mPostDivider.getY(), 30, mPostDivider.getHeight(),
+                       juce::Justification::centred);
         }
-        if (mParallel || mSpine.getHeight() <= 0)
-            return; // parallel routing: the series spine doesn't apply
+        if (mSpine.getHeight() <= 0)
+            return;
         const float x = (float)mSpine.getCentreX();
+        const float top = (float)mSpine.getY();
+        const float bot = (float)mPostDivider.getY(); // line touches the OUT box edge
         g.setColour(colors::outline);
-        g.drawLine(x, (float)mSpine.getY(), x, (float)mSpine.getBottom(), 1.5f);
+        g.drawLine(x, top, x, bot, 1.5f);
         g.setColour(colors::accentDim);
-        for (float fy : mArrowYs)
+        if (mParallel)
         {
-            juce::Path tri;
-            tri.addTriangle(x - 3.0f, fy - 2.0f, x + 3.0f, fy - 2.0f, x, fy + 3.0f);
-            g.fillPath(tri);
+            // Parallel: the input bus feeds each lane in parallel (right-pointing
+            // triangles, matching the series ones).
+            for (float yC : mLaneCenters)
+            {
+                juce::Path tri;
+                tri.addTriangle(x - 2.0f, yC - 3.0f, x - 2.0f, yC + 3.0f, x + 4.0f, yC);
+                g.fillPath(tri);
+            }
+        }
+        else
+        {
+            // Series: signal flows lane to lane (down-arrows between slots).
+            for (float fy : mArrowYs)
+            {
+                juce::Path tri;
+                tri.addTriangle(x - 3.0f, fy - 2.0f, x + 3.0f, fy - 2.0f, x, fy + 3.0f);
+                g.fillPath(tri);
+            }
         }
         g.setColour(colors::textDim);
         g.setFont(RigLookAndFeel::withHeight(9.0f));
         g.drawText("IN", mSpine.getX() - 3, mSpine.getY() - 13, 26, 11, juce::Justification::centred);
-        g.drawText("OUT", mSpine.getX() - 3, mSpine.getBottom() + 3, 26, 11, juce::Justification::centred);
     }
 
     void resized() override
@@ -1350,26 +1367,23 @@ public:
         }
 
         const int n = nam_rig::ModBlock::kSlots, gap = 8;
-        // Reserve the bottom for the dedicated POST lane (a "POST" divider label
-        // above one lane). The three front slots take the rest.
+        // Spine column spans the FULL height: IN at the top, down through the
+        // slots, to the OUT (post) stage at the bottom.
+        mSpine = area.removeFromLeft(20).withTrimmedTop(14).withTrimmedBottom(16);
+        area.removeFromLeft(4);
+        // Reserve the bottom for the dedicated POST lane, under an "OUT" divider.
         auto postRegion = area.removeFromBottom(area.getHeight() / 4);
         mPostDivider = postRegion.removeFromTop(16);
         area.removeFromBottom(gap);
-        {
-            auto postLane = postRegion;
-            postLane.removeFromLeft(24); // align with the front lanes (spine + gap)
-            if (mPostLane) mPostLane->setBounds(postLane.reduced(0, 2));
-        }
-
-        auto spine = area.removeFromLeft(20);
-        area.removeFromLeft(4);
+        if (mPostLane) mPostLane->setBounds(postRegion.reduced(0, 2));
+        // Front lanes fill the rest.
         const int laneH = (area.getHeight() - gap * (n - 1)) / n;
         mArrowYs.clear();
-        mSpine = spine.withTrimmedTop(14).withTrimmedBottom(16);
         for (int s = 0; s < n; ++s)
         {
             auto lane = area.removeFromTop(laneH);
             mLanes[(size_t)s]->setBounds(lane);
+            mLaneCenters[(size_t)s] = (float)lane.getCentreY(); // for the parallel spine taps
             if (s < n - 1)
             {
                 mArrowYs.push_back((float)area.removeFromTop(gap).getCentreY());
@@ -1382,6 +1396,7 @@ private:
     std::unique_ptr<ModSlotLane> mPostLane;
     juce::Rectangle<int> mSpine, mPostDivider;
     std::vector<float> mArrowYs;
+    std::array<float, (size_t)nam_rig::ModBlock::kSlots> mLaneCenters{}; // parallel spine taps
     juce::ComboBox mRouting;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mRoutingAtt;
     std::unique_ptr<BlendPad> mPad;
