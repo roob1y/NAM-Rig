@@ -76,8 +76,8 @@ public:
     {
         switch (t)
         {
-        case kChorus:
-        case kFlanger: return knobMix; // M-126 has a Dry->Delay Mix knob
+        case kChorus: return knobMix;
+        case kFlanger: return knobMix * 0.5f; // knob spans dry..50/50 (deepest flange) -- can't thin past the sweet spot
         case kPhaser:
         case kUniVibe: return 0.5f;
         default: return 1.0f; // vibrato / rotary / tremolo / harm-trem = full wet

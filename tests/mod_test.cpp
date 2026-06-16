@@ -422,8 +422,10 @@ int main()
             ModVoice::bakedBbd(ModVoice::kChorus) > 0.0f &&
             ModVoice::bakedBbd(ModVoice::kPhaser) == 0.0f &&
             ModVoice::authenticWave(ModVoice::kFlanger) == Lfo::Triangle &&
-            ModVoice::authenticWave(ModVoice::kChorus) == Lfo::Sine;
-        CHECK(ok, "T13 voicing constants (tremolo capped, BBD baked on delay types, flanger=triangle)");
+            ModVoice::authenticWave(ModVoice::kChorus) == Lfo::Sine &&
+            ModVoice::mixFor(ModVoice::kFlanger, 1.0f) == 0.5f &&  // flanger Mix caps at 50/50
+            ModVoice::mixFor(ModVoice::kFlanger, 0.0f) == 0.0f;    // ...and reaches fully dry
+        CHECK(ok, "T13 voicing constants (tremolo capped, BBD baked on delay types, flanger=triangle, flanger mix caps 50/50)");
     }
 
     // ---- T14: tremolo at full depth keeps headroom (no dead silence/square) ----
