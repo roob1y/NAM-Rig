@@ -92,7 +92,11 @@ public:
             juce::Path value;
             value.addCentredArc(centre.x, centre.y, arcR, arcR, 0.0f,
                                 juce::jmin(fillFrom, angle), juce::jmax(fillFrom, angle), true);
-            g.setColour(enabled ? colors::accent : colors::accentDim);
+            // Per-knob fill colour (mod lanes tint their arcs); else the global accent.
+            const juce::Colour fill = slider.isColourSpecified(juce::Slider::rotarySliderFillColourId)
+                                          ? slider.findColour(juce::Slider::rotarySliderFillColourId)
+                                          : colors::accent;
+            g.setColour(enabled ? fill : fill.withMultipliedSaturation(0.6f).darker(0.4f));
             g.strokePath(value, juce::PathStrokeType(lineW, juce::PathStrokeType::curved,
                                                      juce::PathStrokeType::rounded));
         }
@@ -103,6 +107,39 @@ public:
         p.addRoundedRectangle(-lineW * 0.5f, -innerR, lineW, innerR * 0.55f, lineW * 0.4f);
         g.setColour(enabled ? colors::text : colors::textDim);
         g.fillPath(p, juce::AffineTransform::rotation(angle).translated(centre.x, centre.y));
+    }
+
+    // Buttons flagged with a "pill" property draw as a filled/outlined pill with
+    // centred text (the mod-lane On / S toggles) instead of a checkbox + label.
+    void drawToggleButton(juce::Graphics &g, juce::ToggleButton &b,
+                          bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override
+    {
+        if (!b.getProperties()["pill"].equals(true))
+        {
+            LookAndFeel_V4::drawToggleButton(g, b, shouldDrawButtonAsHighlighted, shouldDrawButtonAsDown);
+            return;
+        }
+        auto r = b.getLocalBounds().toFloat().reduced(1.0f);
+        const bool on = b.getToggleState();
+        // Optional per-button tint via TextButton::buttonOnColourId; default = accent.
+        const juce::Colour onCol = b.isColourSpecified(juce::TextButton::buttonOnColourId)
+                                       ? b.findColour(juce::TextButton::buttonOnColourId)
+                                       : colors::accent;
+        if (on)
+        {
+            g.setColour(shouldDrawButtonAsHighlighted ? onCol.brighter(0.08f) : onCol);
+            g.fillRoundedRectangle(r, 5.0f);
+        }
+        else
+        {
+            g.setColour(shouldDrawButtonAsHighlighted ? colors::tileSel : colors::tile);
+            g.fillRoundedRectangle(r, 5.0f);
+            g.setColour(colors::outline);
+            g.drawRoundedRectangle(r, 5.0f, 1.0f);
+        }
+        g.setColour(on ? colors::bg : colors::textDim);
+        g.setFont(RigLookAndFeel::withHeight(12.0f));
+        g.drawText(b.getButtonText(), b.getLocalBounds(), juce::Justification::centred);
     }
 
     void drawLinearSlider(juce::Graphics &g, int x, int y, int width, int height,

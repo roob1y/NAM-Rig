@@ -40,6 +40,10 @@ public:
 
     juce::Slider &slider() { return mSlider; }
 
+    // Tint the value arc (per-lane mod colour). The LookAndFeel reads this colour
+    // id and falls back to the global accent when it isn't set.
+    void setAccent(juce::Colour c) { mSlider.setColour(juce::Slider::rotarySliderFillColourId, c); }
+
     // Relabel at runtime (the mod flanger renames Depth->Width to match the M-126).
     void setCaption(const juce::String &caption)
     {
@@ -893,7 +897,10 @@ public:
         addAndMakeVisible(mNum);
         addAndMakeVisible(mIcon);
 
-        mScope = std::make_unique<LaneScope>(apvts, p, colors::laneColour(soloSlot));
+        const juce::Colour laneCol = colors::laneColour(soloSlot);
+        mIcon.setAccent(laneCol); // tint the glyph + box border per lane
+
+        mScope = std::make_unique<LaneScope>(apvts, p, laneCol);
         addAndMakeVisible(*mScope); // live LFO/effect motion for this slot
 
         // Only the effects valid for this position appear in the list (item id =
@@ -932,6 +939,7 @@ public:
             apvts, p + "Wave", mWave);
 
         mOn.setButtonText("On");
+        mOn.getProperties().set("pill", true); // pill style (filled when on)
         addAndMakeVisible(mOn);
         mOnAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             apvts, p + "On", mOn);
@@ -942,6 +950,8 @@ public:
         {
             mSolo.setButtonText("S");
             mSolo.setClickingTogglesState(true);
+            mSolo.getProperties().set("pill", true);
+            mSolo.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xffe0b53d)); // solo = warm yellow
             addAndMakeVisible(mSolo);
             mSolo.onClick = [this] { if (onSolo) onSolo(mSoloSlot, mSolo.getToggleState()); };
         }
@@ -986,7 +996,10 @@ public:
         for (LabeledKnob *k : {mRate.get(), mDepth.get(), mFeedback.get(), mMix.get(),
                                mWidth.get(), mDrive.get(), mManual.get(), mP2Ratio.get(),
                                mHornDrum.get()})
+        {
             k->setRotationReadout(10.0);
+            k->setAccent(laneCol); // value arc tinted to the lane colour
+        }
 
         refresh();
     }
@@ -1079,17 +1092,13 @@ public:
         g.fillRoundedRectangle(b, 8.0f);
         g.setColour(colors::outline);
         g.drawRoundedRectangle(b, 8.0f, 1.0f);
-        g.setColour(mLastOn ? colors::accent : colors::ledOff);
-        g.fillEllipse(mLedX - 3.5f, mLedY - 3.5f, 7.0f, 7.0f);
     }
 
     void resized() override
     {
         auto area = getLocalBounds().reduced(9, 7);
         auto numCol = area.removeFromLeft(16);
-        mNum.setBounds(numCol.removeFromTop(numCol.getHeight() / 2));
-        mLedX = (float)numCol.getCentreX();
-        mLedY = (float)numCol.getCentreY();
+        mNum.setBounds(numCol); // lane number (LED removed)
         area.removeFromLeft(6);
 
         auto iconCol = area.removeFromLeft(62);
@@ -1166,7 +1175,6 @@ private:
     int mSoloSlot = -1; // 0-based front slot for solo; -1 = post lane (no solo)
     int mLastType = -1, mLastSync = -1;
     bool mLastOn = true;
-    float mLedX = 0.0f, mLedY = 0.0f;
     juce::Label mNum;
     ModFxIcon mIcon;
     std::unique_ptr<LaneScope> mScope;
@@ -1236,6 +1244,12 @@ public:
 
     void paint(juce::Graphics &g) override
     {
+        auto box = getLocalBounds().toFloat().reduced(1.0f); // bordered container (matches the rack)
+        g.setColour(colors::scopeBg);
+        g.fillRoundedRectangle(box, 8.0f);
+        g.setColour(colors::outline);
+        g.drawRoundedRectangle(box, 8.0f, 1.0f);
+
         const auto r = padRect();
         int act[3], n = 0;
         for (int i = 0; i < 3; ++i)
@@ -1279,9 +1293,21 @@ public:
             const float rad = 3.0f + 4.0f * (mActive[i] ? w[i] : 0.0f);
             g.setColour(mActive[i] ? colors::laneColour(i) : colors::outline);
             g.fillEllipse(p.x - rad, p.y - rad, rad * 2.0f, rad * 2.0f);
-            g.setColour(mActive[i] ? colors::laneColour(i) : colors::outline);
-            const float ly = (i == 0) ? p.y - 14.0f : p.y + 4.0f;
-            g.drawText(juce::String(i + 1), (int)(p.x - 8.0f), (int)ly, 16, 11, juce::Justification::centred);
+            const float ly = (i == 0) ? p.y - 15.0f : p.y + 5.0f;
+            if (mActive[i]) // blend weight as a percentage, in the lane colour
+            {
+                g.setColour(colors::laneColour(i));
+                // Anchor the corner labels inward so they never clip the box edge:
+                // bottom-left reads from the node rightward, bottom-right leftward.
+                const auto just = (i == 1) ? juce::Justification::centredLeft
+                                  : (i == 2) ? juce::Justification::centredRight
+                                             : juce::Justification::centred;
+                const int lx = (i == 1) ? (int)(p.x - 2.0f)
+                               : (i == 2) ? (int)(p.x - 38.0f)
+                                          : (int)(p.x - 20.0f);
+                g.drawText(juce::String(juce::roundToInt(w[i] * 100.0f)) + "%",
+                           lx, (int)ly, 40, 11, just);
+            }
         }
 
         // Puck takes the blended colour of the three lane accents by weight.
@@ -1330,7 +1356,8 @@ private:
     }
     juce::Rectangle<float> padRect() const
     {
-        auto b = getLocalBounds().toFloat().reduced(12.0f);
+        // Extra horizontal margin so the corner weight-% labels sit inside the box.
+        auto b = getLocalBounds().toFloat().reduced(22.0f, 16.0f);
         const float s = juce::jmin(b.getWidth(), b.getHeight());
         return juce::Rectangle<float>(s, s).withCentre(b.getCentre());
     }
@@ -1410,52 +1437,66 @@ public:
 
     void paint(juce::Graphics &g) override
     {
-        auto b = getLocalBounds().toFloat().reduced(2.0f);
+        // Header + bordered container (matches the blend pad's framing).
         g.setColour(colors::textDim);
         g.setFont(RigLookAndFeel::withHeight(9.0f));
-        g.drawText("IN", b.removeFromTop(12.0f).toNearestInt(), juce::Justification::centred);
-        g.drawText("OUT", b.removeFromBottom(12.0f).toNearestInt(), juce::Justification::centred);
+        g.drawText("SIGNAL FLOW", getLocalBounds().removeFromTop(13),
+                   juce::Justification::centred);
+        const auto box = boxRect();
+        g.setColour(colors::scopeBg);
+        g.fillRoundedRectangle(box, 8.0f);
+        g.setColour(colors::outline);
+        g.drawRoundedRectangle(box, 8.0f, 1.0f);
 
-        const float cx = b.getCentreX();
+        const auto inner = innerRect();
+        const float cx = inner.getCentreX();
         g.setColour(colors::outline); // spine behind the chips
-        g.drawLine(cx, b.getY(), cx, b.getBottom(), 1.5f);
+        g.drawLine(cx, box.getY() + 14.0f, cx, box.getBottom() - 14.0f, 1.5f);
+        g.setColour(colors::textDim);
+        g.setFont(RigLookAndFeel::withHeight(9.0f));
+        g.drawText("IN", (int)cx - 13, (int)box.getY() + 2, 26, 11, juce::Justification::centred);
+        g.drawText("OUT", (int)cx - 13, (int)box.getBottom() - 13, 26, 11, juce::Justification::centred);
+
+        for (int pos = 0; pos < nam_rig::ModBlock::kSlots - 1; ++pos) // flow arrows between chips
+            if (!mDragging)
+            {
+                const float ay = (chipRect(pos).getBottom() + chipRect(pos + 1).getY()) * 0.5f;
+                g.setColour(colors::textDim);
+                juce::Path tri;
+                tri.addTriangle(cx - 3.0f, ay - 2.5f, cx + 3.0f, ay - 2.5f, cx, ay + 3.0f);
+                g.fillPath(tri);
+            }
 
         for (int pos = 0; pos < nam_rig::ModBlock::kSlots; ++pos)
         {
             const int slot = mOrder[pos];
             const bool drag = (mDragging && slot == mDragSlot);
+            const juce::Colour laneCol = colors::laneColour(slot);
             auto chip = chipRect(pos);
             if (drag)
-                chip = chip.withY(juce::jlimit(b.getY(), b.getBottom() - chip.getHeight(),
+                chip = chip.withY(juce::jlimit(inner.getY(), inner.getBottom() - chip.getHeight(),
                                                mDragY - chip.getHeight() * 0.5f));
-            g.setColour(drag ? colors::panel.brighter(0.12f) : colors::panel.brighter(0.04f));
-            g.fillRoundedRectangle(chip, 6.0f);
-            g.setColour(drag ? colors::accent : colors::outline);
-            g.drawRoundedRectangle(chip, 6.0f, drag ? 1.4f : 1.0f);
+            g.setColour(drag ? colors::panel.brighter(0.10f) : colors::panel.brighter(0.03f));
+            g.fillRoundedRectangle(chip, 7.0f);
+            g.setColour(laneCol.withAlpha(drag ? 1.0f : 0.85f));
+            g.drawRoundedRectangle(chip, 7.0f, drag ? 1.6f : 1.2f);
 
-            auto txt = chip.reduced(8.0f, 0.0f);
-            g.setColour(colors::textDim); // grip dots
-            const float gx = txt.getX();
+            auto row = chip.reduced(7.0f, 0.0f);
+            g.setColour(colors::textDim); // grip dots (2x3)
+            const float gx = row.removeFromLeft(6.0f).getX();
             for (int d = 0; d < 3; ++d)
-                g.fillEllipse(gx, txt.getCentreY() - 4.0f + d * 4.0f, 1.6f, 1.6f);
-            txt.removeFromLeft(10.0f);
-            g.setColour(colors::accentDim);
+                for (int e = 0; e < 2; ++e)
+                    g.fillEllipse(gx + e * 3.0f, row.getCentreY() - 4.0f + d * 4.0f, 1.5f, 1.5f);
+            row.removeFromLeft(4.0f);
+            drawGlyph(g, row.removeFromLeft(16.0f), slotType(slot), laneCol);
+            row.removeFromLeft(7.0f);
+            g.setColour(laneCol); // slot number on the right
             g.setFont(RigLookAndFeel::withHeight(10.0f));
-            g.drawText(juce::String(slot + 1), txt.removeFromRight(12.0f).toNearestInt(),
+            g.drawText(juce::String(slot + 1), row.removeFromRight(12.0f).toNearestInt(),
                        juce::Justification::centredRight);
-            g.setColour(colors::text);
-            g.setFont(RigLookAndFeel::withHeight(11.0f));
-            g.drawText(effectName(slotType(slot)), txt.toNearestInt(), juce::Justification::centredLeft);
-
-            if (pos < nam_rig::ModBlock::kSlots - 1 && !mDragging) // flow arrow to the next chip
-            {
-                const float ay = chipRect(pos).getBottom()
-                                 + (chipRect(pos + 1).getY() - chipRect(pos).getBottom()) * 0.5f;
-                g.setColour(colors::accentDim);
-                juce::Path tri;
-                tri.addTriangle(cx - 3.0f, ay - 2.5f, cx + 3.0f, ay - 2.5f, cx, ay + 3.0f);
-                g.fillPath(tri);
-            }
+            g.setColour(colors::text); // effect name
+            g.setFont(RigLookAndFeel::withHeight(11.5f));
+            g.drawText(effectName(slotType(slot)), row.toNearestInt(), juce::Justification::centredLeft);
         }
     }
 
@@ -1474,9 +1515,7 @@ public:
         if (!mDragging)
             return;
         mDragY = e.position.y;
-        auto b = getLocalBounds().toFloat().reduced(2.0f);
-        b.removeFromTop(12.0f);
-        b.removeFromBottom(12.0f);
+        const auto b = innerRect();
         const float step = b.getHeight() / (float)nam_rig::ModBlock::kSlots;
         int tgt = (int)std::floor((mDragY - b.getY()) / juce::jmax(1.0f, step));
         tgt = juce::jlimit(0, nam_rig::ModBlock::kSlots - 1, tgt);
@@ -1548,22 +1587,69 @@ private:
             if (mOrder[p] == slot) return p;
         return 0;
     }
+    juce::Rectangle<float> boxRect() const // bordered container, below the header
+    {
+        auto b = getLocalBounds().toFloat().reduced(1.0f);
+        b.removeFromTop(15.0f); // "SIGNAL FLOW" header
+        return b;
+    }
+    juce::Rectangle<float> innerRect() const // chip area inside the box (IN/OUT reserved)
+    {
+        auto b = boxRect().reduced(9.0f, 8.0f);
+        b.removeFromTop(11.0f);    // IN
+        b.removeFromBottom(11.0f); // OUT
+        return b;
+    }
     juce::Rectangle<float> chipRect(int pos) const
     {
-        auto b = getLocalBounds().toFloat().reduced(2.0f);
-        b.removeFromTop(12.0f);
-        b.removeFromBottom(12.0f);
+        auto b = innerRect();
         const float step = b.getHeight() / (float)nam_rig::ModBlock::kSlots;
-        const float h = juce::jmin(30.0f, step - 6.0f);
+        const float h = juce::jmin(30.0f, step - 8.0f);
         const float cyc = b.getY() + step * pos + step * 0.5f;
-        return juce::Rectangle<float>(b.getX() + 2.0f, cyc - h * 0.5f, b.getWidth() - 4.0f, h);
+        return juce::Rectangle<float>(b.getX(), cyc - h * 0.5f, b.getWidth(), h);
     }
     int posAtY(float y) const
     {
         for (int p = 0; p < nam_rig::ModBlock::kSlots; ++p)
-            if (chipRect(p).getY() - 3.0f <= y && y <= chipRect(p).getBottom() + 3.0f)
+            if (chipRect(p).getY() - 4.0f <= y && y <= chipRect(p).getBottom() + 4.0f)
                 return p;
         return -1;
+    }
+    // A tiny effect glyph for the chip (rotary = ring+dot, tremolo = bars, else a
+    // sine squiggle), tinted to the lane colour.
+    static void drawGlyph(juce::Graphics &g, juce::Rectangle<float> r, int type, juce::Colour c)
+    {
+        g.setColour(c);
+        const float cx = r.getCentreX(), cy = r.getCentreY();
+        if (type == 5) // rotary
+        {
+            const float rad = juce::jmin(r.getWidth(), r.getHeight()) * 0.42f;
+            g.drawEllipse(cx - rad, cy - rad, rad * 2.0f, rad * 2.0f, 1.2f);
+            g.fillEllipse(cx - 1.4f, cy - rad - 1.4f, 2.8f, 2.8f);
+        }
+        else if (type == 3) // tremolo: pulsing bars
+        {
+            for (int i = 0; i < 3; ++i)
+            {
+                const float bx = r.getX() + 1.0f + (float)i * (r.getWidth() - 2.0f) / 3.0f;
+                const float h = r.getHeight() * (0.5f + 0.16f * (float)((i + 1) % 2 ? 1 : -1) + 0.34f);
+                g.fillRoundedRectangle(bx, cy - h * 0.5f, (r.getWidth() - 2.0f) / 3.0f - 1.6f, h, 1.0f);
+            }
+        }
+        else // sine squiggle
+        {
+            juce::Path p;
+            const int N = 18;
+            for (int i = 0; i <= N; ++i)
+            {
+                const float t = (float)i / (float)N;
+                const float x = r.getX() + t * r.getWidth();
+                const float y = cy - std::sin(t * 6.2831853f * 1.5f) * r.getHeight() * 0.34f;
+                if (i == 0) p.startNewSubPath(x, y);
+                else p.lineTo(x, y);
+            }
+            g.strokePath(p, juce::PathStrokeType(1.6f, juce::PathStrokeType::curved));
+        }
     }
 
     juce::AudioProcessorValueTreeState &mApvts;
@@ -1732,35 +1818,41 @@ public:
     void resized() override
     {
         auto area = contentArea();
-        // right control strip: routing toggle always; pad + Mod Mix in parallel.
-        auto strip = area.removeFromRight(108);
-        area.removeFromRight(8);
+        const int n = nam_rig::ModBlock::kSlots, gap = 8;
+
+        // Spine column spans the FULL height: IN at the top, down through the
+        // slots, to the OUT (post) stage at the bottom.
+        mSpine = area.removeFromLeft(20).withTrimmedTop(14).withTrimmedBottom(16);
+        area.removeFromLeft(4);
+
+        // POST lane spans the full remaining width at the bottom (under the OUT
+        // divider), so the right-hand rack/pad does NOT sit beside it.
+        auto postRegion = area.removeFromBottom(area.getHeight() / 4);
+        mPostDivider = postRegion.removeFromTop(16);
+        mPostLaneY = (float)postRegion.getCentreY(); // OUT label sits next to the post lane
+        if (mPostLane) mPostLane->setBounds(postRegion.reduced(0, 2));
+        area.removeFromBottom(gap);
+
+        // Right strip -- now only as tall as the 3 front lanes, and wider, to give
+        // the signal-flow rack / Cartesian pad more room. Routing toggle on top;
+        // pad + Mod Mix in parallel, chain rack in series.
+        auto strip = area.removeFromRight(150);
+        area.removeFromRight(10);
         mRouting.setBounds(strip.removeFromTop(24));
         strip.removeFromTop(8);
         if (mParallel)
         {
-            mModMix->setBounds(strip.removeFromTop(62).reduced(20, 0));
-            strip.removeFromTop(6);
+            mModMix->setBounds(strip.removeFromBottom(58).reduced(26, 0));
+            strip.removeFromBottom(6);
             const int sq = juce::jmin(strip.getWidth(), strip.getHeight());
-            mPad->setBounds(strip.removeFromTop(sq).withSizeKeepingCentre(sq, sq));
+            mPad->setBounds(strip.withSizeKeepingCentre(sq, sq));
         }
         else
         {
             mRack->setBounds(strip); // chain-order rack fills the series strip
         }
 
-        const int n = nam_rig::ModBlock::kSlots, gap = 8;
-        // Spine column spans the FULL height: IN at the top, down through the
-        // slots, to the OUT (post) stage at the bottom.
-        mSpine = area.removeFromLeft(20).withTrimmedTop(14).withTrimmedBottom(16);
-        area.removeFromLeft(4);
-        // Reserve the bottom for the dedicated POST lane, under an "OUT" divider.
-        auto postRegion = area.removeFromBottom(area.getHeight() / 4);
-        mPostDivider = postRegion.removeFromTop(16);
-        mPostLaneY = (float)postRegion.getCentreY(); // OUT label sits next to the post lane
-        area.removeFromBottom(gap);
-        if (mPostLane) mPostLane->setBounds(postRegion.reduced(0, 2));
-        // Front lanes fill the rest.
+        // Front lanes fill the rest of the upper region.
         const int laneH = (area.getHeight() - gap * (n - 1)) / n;
         mArrowYs.clear();
         for (int s = 0; s < n; ++s)
@@ -1769,9 +1861,7 @@ public:
             mLanes[(size_t)s]->setBounds(lane);
             mLaneCenters[(size_t)s] = (float)lane.getCentreY(); // for the parallel spine taps
             if (s < n - 1)
-            {
                 mArrowYs.push_back((float)area.removeFromTop(gap).getCentreY());
-            }
         }
     }
 
