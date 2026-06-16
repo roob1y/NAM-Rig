@@ -183,6 +183,22 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         params.push_back(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID(p + "On", 1), n + "Enable", s == 1));
     }
+    // Mod section routing (whole-section, not per-slot): Series chains the slots;
+    // Parallel runs each slot on the dry input and blends them on a Cartesian pad
+    // (modPadX/modPadY), then one global Mod Mix vs dry. Default Series keeps the
+    // existing behaviour. (Distinct from each slot's Bi-Phase "Series" toggle.)
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("modRouting", 1), "Mod Routing",
+        juce::StringArray{"Series", "Parallel"}, 0));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("modPadX", 1), "Mod Blend X",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.5f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("modPadY", 1), "Mod Blend Y",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 1.0f / 3.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("modMix", 1), "Mod Mix",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
 
     // --- Delay (rig/DelayBlock.h; verified by tests/delay_test.cpp) ---
     // Order must match DelayBlock::kSyncBeats — append only.
@@ -588,6 +604,11 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         mChain.mod.setSlotBypassed(s, apvts.getRawParameterValue(modIds[s][15])->load() < 0.5f);
     }
     mChain.mod.setBypassed(apvts.getRawParameterValue("modOn")->load() < 0.5f);
+    // Section routing + parallel blend pad + global mod-mix (whole-section).
+    mChain.mod.setParallel(apvts.getRawParameterValue("modRouting")->load() >= 0.5f);
+    mChain.mod.setPad(apvts.getRawParameterValue("modPadX")->load(),
+                      apvts.getRawParameterValue("modPadY")->load());
+    mChain.mod.setModMix(apvts.getRawParameterValue("modMix")->load());
 
     if (auto *ph = getPlayHead())
         if (auto pos = ph->getPosition())

@@ -43,6 +43,8 @@
 //       sum=1 / clamped outside); parallel single-slot == standalone voice; the
 //       pad blends between nodes; a bypassed node drops out; pad + Level Lock
 //       hold steady loudness as the puck moves
+//   T32 momentary solo: isolates a slot in series + parallel (== standalone),
+//       overrides bypass, and clears back to the full mix
 #include "rig/ModBlock.h"
 #include <cstdio>
 #include <cmath>
@@ -1263,6 +1265,100 @@ int main()
             const double r1 = rms(b, b.size() - w2, w2);
             CHECK(std::abs(r0 / r1 - 1.0) < 0.15,
                   "T31 Level Lock holds loudness across the pad (node0 %.3f vs node1 %.3f)", r0, r1);
+        }
+    }
+
+    // ---- T32: momentary solo isolates a slot (series + parallel; overrides bypass) ----
+    {
+        const int N = (int)SR * 2;
+        auto x = tone(700.0, 0.5, N);
+        auto setup3 = [](ModBlock &m) {
+            m.setType(0, ModVoice::kChorus);  m.setRateHz(0, 1.0f); m.setDepth(0, 0.7f); m.setMix(0, 1.0f);
+            m.setType(1, ModVoice::kTremolo); m.setRateHz(1, 4.0f); m.setDepth(1, 0.6f); m.setMix(1, 1.0f);
+            m.setType(2, ModVoice::kVibrato); m.setRateHz(2, 5.0f); m.setDepth(2, 0.7f);
+            m.setSlotBypassed(0, false);
+            m.setSlotBypassed(1, false);
+            m.setSlotBypassed(2, false);
+        };
+        auto refTrem = [](ModVoice &v) {
+            v.setType(ModVoice::kTremolo);
+            v.setRateHz(4.0f);
+            v.setDepth(0.6f);
+            v.setMix(1.0f);
+        };
+
+        // (a) SERIES: solo slot 1 -> output == standalone tremolo (others muted).
+        {
+            ModBlock m;
+            m.setLevelLock(false);
+            setup3(m);
+            m.setSlotSolo(1, true);
+            m.prepare({SR, BLK});
+            ModVoice ref;
+            refTrem(ref);
+            ref.prepare({SR, BLK});
+            auto la = x, ra = x, lb = x, rb = x;
+            run(m, la, ra);
+            run(ref, lb, rb);
+            double d = 0;
+            for (size_t i = 0; i < x.size(); ++i) d = std::max(d, (double)std::abs(la[i] - lb[i]));
+            CHECK(d < 1e-6, "T32 series solo isolates the slot (== standalone, diff %.2e)", d);
+        }
+
+        // (b) PARALLEL: solo slot 1 -> the bus is just that branch (after settle).
+        {
+            ModBlock m;
+            m.setLevelLock(false);
+            m.setParallel(true);
+            m.setModMix(1.0f);
+            m.setPad(0.5f, 1.0f / 3.0f);
+            setup3(m);
+            m.setSlotSolo(1, true);
+            m.prepare({SR, BLK});
+            ModVoice ref;
+            refTrem(ref);
+            ref.prepare({SR, BLK});
+            auto la = x, ra = x, lb = x, rb = x;
+            run(m, la, ra);
+            run(ref, lb, rb);
+            double d = 0;
+            for (size_t i = (size_t)SR; i < x.size(); ++i) d = std::max(d, (double)std::abs(la[i] - lb[i]));
+            CHECK(d < 1e-3, "T32 parallel solo isolates the branch (== standalone after settle, diff %.2e)", d);
+        }
+
+        // (c) solo OVERRIDES bypass: all slots bypassed, solo slot 1 -> still heard.
+        {
+            ModBlock m;
+            m.setLevelLock(false);
+            setup3(m);
+            m.setSlotBypassed(0, true);
+            m.setSlotBypassed(1, true);
+            m.setSlotBypassed(2, true);
+            m.setSlotSolo(1, true);
+            m.prepare({SR, BLK});
+            auto l = x, r = x;
+            run(m, l, r);
+            double pk = 0;
+            for (float v : l) pk = std::max(pk, (double)std::abs(v));
+            CHECK(pk > 0.1, "T32 solo overrides bypass (soloed slot still heard, peak %.2f)", pk);
+        }
+
+        // (d) clearing solo restores the full series mix (differs from soloed).
+        {
+            ModBlock soloed, full;
+            soloed.setLevelLock(false);
+            full.setLevelLock(false);
+            setup3(soloed);
+            setup3(full);
+            soloed.setSlotSolo(1, true);
+            soloed.prepare({SR, BLK});
+            full.prepare({SR, BLK});
+            auto ls = x, rs = x, lf = x, rf = x;
+            run(soloed, ls, rs);
+            run(full, lf, rf);
+            double d = 0;
+            for (size_t i = 0; i < x.size(); ++i) d = std::max(d, (double)std::abs(ls[i] - lf[i]));
+            CHECK(d > 0.05, "T32 full mix differs from soloed (no-solo restores others, diff %.2f)", d);
         }
     }
 
