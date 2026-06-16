@@ -46,6 +46,25 @@ public:
         mLabel.setText(caption, juce::dontSendNotification);
     }
 
+    // Show the value box as a 0..top reading of the knob's ROTATION (pedal-style,
+    // "everything goes to 10") instead of raw parameter units -- so a lane of
+    // mixed params (Hz, 0..1, ratios) all read on one friendly scale. Display
+    // only: the underlying parameter, presets and automation are untouched. Reads
+    // the slider's live range/skew, so a per-effect Speed cap still maps full
+    // rotation to the top of the scale. Call updateReadout() after a range change.
+    void setRotationReadout(double top = 10.0)
+    {
+        auto *s = &mSlider;
+        mSlider.textFromValueFunction = [s, top](double v) {
+            return juce::String(s->valueToProportionOfLength(v) * top, 1);
+        };
+        mSlider.valueFromTextFunction = [s, top](const juce::String &t) {
+            return s->proportionOfLengthToValue(juce::jlimit(0.0, 1.0, t.getDoubleValue() / top));
+        };
+        mSlider.updateText();
+    }
+    void updateReadout() { mSlider.updateText(); }
+
     // Re-point this knob at a different parameter (used by the drive pedal to
     // give each pedal TYPE its own Drive/Tone/Level instead of sharing one set).
     void rebind(juce::AudioProcessorValueTreeState &apvts, const juce::String &paramId)
@@ -798,6 +817,13 @@ public:
         mSeriesAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             apvts, p + "Series", mSeries);
 
+        // Every knob in the lane reads 0..10 by rotation (pedal-style), so the
+        // mixed underlying params (Speed in Hz, the rest 0..1, Sweep 2 a ratio)
+        // all show on one consistent scale instead of exposing raw units.
+        for (LabeledKnob *k : {mRate.get(), mDepth.get(), mFeedback.get(), mMix.get(),
+                               mWidth.get(), mDrive.get(), mManual.get(), mP2Ratio.get()})
+            k->setRotationReadout(10.0);
+
         refresh();
     }
 
@@ -821,17 +847,23 @@ public:
         mWave.setVisible(type == 3);                   // tremolo shape
         mRate->setVisible(!rotary);                    // rotary: slow/fast toggle, not a rate
         if (!rotary) // knob ends exactly at this effect's rate ceiling (no dead travel past the internal cap)
+        {
             mRate->slider().setNormalisableRange(
                 {0.03, (double)nam_rig::ModVoice::maxRateHz((nam_rig::ModVoice::Type)type), 0.01, 0.35});
+            mRate->updateReadout(); // re-evaluate the 0..10 text against the new range
+        }
         mSync.setVisible(!rotary);
         mDrive->setVisible(rotary);                    // rotary: Leslie tube drive
         mRotFast.setVisible(rotary);
         mManual->setVisible(type == 1);                // flanger: static comb position
         mInvert.setVisible(type == 1);                 // flanger: phase invert
-        // M-126 naming on the flanger lane: the sweep knob is "Width", and the
-        // stereo control becomes "Spread" so there aren't two "Width" knobs.
+        // Per-effect knob naming. M-126 flanger: sweep knob is "Width", stereo
+        // becomes "Spread" (so there aren't two "Width"s). Uni-Vibe uses the
+        // authentic vibe terms: Rate -> "Speed", Depth -> "Intensity".
         const bool flanger = (type == 1);
-        mDepth->setCaption(flanger ? "Width" : "Depth");
+        const bool uniVibe = (type == 6);
+        mRate->setCaption(uniVibe ? "Speed" : "Rate");
+        mDepth->setCaption(flanger ? "Width" : (uniVibe ? "Intensity" : "Depth"));
         mWidth->setCaption(flanger ? "Spread" : "Width");
         mP2Ratio->setVisible(type == 8);               // bi-phase: Sweep Gen 2 ratio
         mSeries.setVisible(type == 8);                  // bi-phase: series/parallel
