@@ -749,12 +749,17 @@ private:
 class ModSlotLane : public juce::Component
 {
 public:
-    ModSlotLane(juce::AudioProcessorValueTreeState &apvts, int slot)
-        : mApvts(apvts), mSlot(slot)
+    // prefix = APVTS id prefix ("mod1".."mod3" for front slots, "post" for the
+    // post block). soloSlot = 0-based slot for the solo button, or -1 for the
+    // post lane (no solo). label = the small lane badge ("1".."3" or "P").
+    ModSlotLane(juce::AudioProcessorValueTreeState &apvts, juce::String prefix,
+                juce::String label, int soloSlot)
+        : mApvts(apvts), mPrefix(std::move(prefix)), mSoloSlot(soloSlot)
     {
-        const juce::String p = "mod" + juce::String(slot + 1);
+        const juce::String p = mPrefix;
+        const bool isFront = (soloSlot >= 0);
 
-        mNum.setText(juce::String(slot + 1), juce::dontSendNotification);
+        mNum.setText(label, juce::dontSendNotification);
         mNum.setJustificationType(juce::Justification::centred);
         mNum.setColour(juce::Label::textColourId, colors::textDim);
         addAndMakeVisible(mNum);
@@ -762,6 +767,15 @@ public:
 
         mType.addItemList({"Chorus", "Flanger", "Phaser", "Tremolo",
                            "Vibrato", "Rotary", "Uni-Vibe", "Harm Trem", "Bi-Phase"}, 1);
+        // Restrict the list per position: front slots can't pick the post effects
+        // (Tremolo/Rotary/Harm Trem = item ids 4/6/8); the post lane only offers
+        // those three. (Greyed = unselectable; the param stays enum-aligned so
+        // presets are unaffected.)
+        for (int id = 1; id <= 9; ++id)
+        {
+            const bool isPostId = (id == 4 || id == 6 || id == 8);
+            mType.setItemEnabled(id, isFront ? !isPostId : isPostId);
+        }
         addAndMakeVisible(mType);
         mTypeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
             apvts, p + "Type", mType);
@@ -785,11 +799,14 @@ public:
             apvts, p + "On", mOn);
         mOn.onClick = [this] { refresh(); };
 
-        // Solo = momentary dial-in (NOT an APVTS param): reports clicks via onSolo.
-        mSolo.setButtonText("S");
-        mSolo.setClickingTogglesState(true);
-        addAndMakeVisible(mSolo);
-        mSolo.onClick = [this] { if (onSolo) onSolo(mSlot, mSolo.getToggleState()); };
+        // Solo = momentary dial-in (front slots only; NOT an APVTS param).
+        if (isFront)
+        {
+            mSolo.setButtonText("S");
+            mSolo.setClickingTogglesState(true);
+            addAndMakeVisible(mSolo);
+            mSolo.onClick = [this] { if (onSolo) onSolo(mSoloSlot, mSolo.getToggleState()); };
+        }
 
         mRate = std::make_unique<LabeledKnob>(apvts, p + "Rate", "Rate");
         mDepth = std::make_unique<LabeledKnob>(apvts, p + "Depth", "Depth");
@@ -843,7 +860,7 @@ public:
 
     void refresh()
     {
-        const juce::String p = "mod" + juce::String(mSlot + 1);
+        const juce::String p = mPrefix;
         const int type = (int)mApvts.getRawParameterValue(p + "Type")->load();
         const int sync = (int)mApvts.getRawParameterValue(p + "Sync")->load();
         const bool on = mApvts.getRawParameterValue(p + "On")->load() >= 0.5f;
@@ -926,8 +943,11 @@ public:
         auto onCol = area.removeFromRight(44);
         mOn.setBounds(onCol.withSizeKeepingCentre(44, 22));
         area.removeFromRight(6);
-        mSolo.setBounds(area.removeFromRight(30).withSizeKeepingCentre(30, 22));
-        area.removeFromRight(8);
+        if (mSoloSlot >= 0) // front slots only
+        {
+            mSolo.setBounds(area.removeFromRight(30).withSizeKeepingCentre(30, 22));
+            area.removeFromRight(8);
+        }
         if (mInvert.isVisible())
         {
             mInvert.setBounds(area.removeFromRight(50).withSizeKeepingCentre(50, 22));
@@ -964,7 +984,8 @@ public:
 
 private:
     juce::AudioProcessorValueTreeState &mApvts;
-    int mSlot;
+    juce::String mPrefix;
+    int mSoloSlot = -1; // 0-based front slot for solo; -1 = post lane (no solo)
     int mLastType = -1, mLastSync = -1;
     bool mLastOn = true;
     float mLedX = 0.0f, mLedY = 0.0f;
@@ -1134,12 +1155,18 @@ public:
     {
         for (int s = 0; s < nam_rig::ModBlock::kSlots; ++s)
         {
-            mLanes[(size_t)s] = std::make_unique<ModSlotLane>(apvts, s);
+            mLanes[(size_t)s] = std::make_unique<ModSlotLane>(
+                apvts, "mod" + juce::String(s + 1), juce::String(s + 1), s);
             addAndMakeVisible(*mLanes[(size_t)s]);
             mLanes[(size_t)s]->onSolo = [this](int slot, bool on) {
                 if (onSetSolo) onSetSolo(slot, on); // momentary: audio only, blend untouched
             };
         }
+        // Dedicated POST lane: runs at the END of the section (rotary/tremolo/
+        // harm-trem). No solo; only the post effects are selectable.
+        mPostLane = std::make_unique<ModSlotLane>(apvts, "post", "P", -1);
+        addAndMakeVisible(*mPostLane);
+
         mRouting.addItemList({"Series", "Parallel"}, 1);
         addAndMakeVisible(mRouting);
         mRoutingAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
@@ -1168,6 +1195,7 @@ public:
                 mLanes[(size_t)s]->refresh();
                 if (getSolo) mLanes[(size_t)s]->setSoloState(getSolo(s)); // reflect live solo
             }
+        if (mPostLane) mPostLane->refresh();
         updatePadActive();
         refreshRouting();
     }
@@ -1200,6 +1228,19 @@ public:
     void paint(juce::Graphics &g) override
     {
         BlockPanel::paint(g); // panel body + "MODULATION" title
+        // POST divider (always shown -- the post lane runs in both routing modes).
+        if (mPostDivider.getHeight() > 0)
+        {
+            const float dy = (float)mPostDivider.getCentreY();
+            g.setColour(colors::outline);
+            g.drawLine((float)mPostDivider.getX(), dy, (float)mPostDivider.getRight(), dy, 1.0f);
+            g.setColour(colors::accent);
+            g.setFont(RigLookAndFeel::withHeight(10.0f).boldened());
+            g.fillRect(mPostDivider.getX(), mPostDivider.getY(), 64, mPostDivider.getHeight());
+            g.setColour(colors::panel);
+            g.drawText("POST", mPostDivider.getX() + 4, mPostDivider.getY(),
+                       56, mPostDivider.getHeight(), juce::Justification::centredLeft);
+        }
         if (mParallel || mSpine.getHeight() <= 0)
             return; // parallel routing: the series spine doesn't apply
         const float x = (float)mSpine.getCentreX();
@@ -1234,9 +1275,20 @@ public:
             mPad->setBounds(strip.removeFromTop(sq).withSizeKeepingCentre(sq, sq));
         }
 
+        const int n = nam_rig::ModBlock::kSlots, gap = 8;
+        // Reserve the bottom for the dedicated POST lane (a "POST" divider label
+        // above one lane). The three front slots take the rest.
+        auto postRegion = area.removeFromBottom(area.getHeight() / 4);
+        mPostDivider = postRegion.removeFromTop(16);
+        area.removeFromBottom(gap);
+        {
+            auto postLane = postRegion;
+            postLane.removeFromLeft(24); // align with the front lanes (spine + gap)
+            if (mPostLane) mPostLane->setBounds(postLane.reduced(0, 2));
+        }
+
         auto spine = area.removeFromLeft(20);
         area.removeFromLeft(4);
-        const int n = nam_rig::ModBlock::kSlots, gap = 8;
         const int laneH = (area.getHeight() - gap * (n - 1)) / n;
         mArrowYs.clear();
         mSpine = spine.withTrimmedTop(14).withTrimmedBottom(16);
@@ -1253,7 +1305,8 @@ public:
 
 private:
     std::array<std::unique_ptr<ModSlotLane>, (size_t)nam_rig::ModBlock::kSlots> mLanes;
-    juce::Rectangle<int> mSpine;
+    std::unique_ptr<ModSlotLane> mPostLane;
+    juce::Rectangle<int> mSpine, mPostDivider;
     std::vector<float> mArrowYs;
     juce::ComboBox mRouting;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mRoutingAtt;

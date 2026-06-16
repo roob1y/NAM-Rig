@@ -920,12 +920,15 @@ class ModBlock : public StereoBlock
 public:
     static constexpr int kSlots = 3;
 
+    ModBlock() { mPost.setBypassed(true); } // post effect off until explicitly enabled
+
     const char *name() const override { return "Modulation"; }
 
     void prepare(const BlockContext &ctx) override
     {
         for (auto &v : mVoice)
             v.prepare(ctx);
+        mPost.prepare(ctx); // end-of-section post effect (e.g. rotary "speaker")
         mLock.prepare(ctx.sampleRate);
         mSmoothK = 1.0f - std::exp((float)(-1.0 / (0.010 * ctx.sampleRate))); // 10 ms blend de-zip
         const size_t cap = (size_t)std::max(1, ctx.maxBlockSize);
@@ -942,6 +945,7 @@ public:
     {
         for (auto &v : mVoice)
             v.reset();
+        mPost.reset();
         mLock.reset();
         for (auto &w : mWz) w = 1.0f / (float)kSlots;
         mModMixZ = mModMix;
@@ -949,18 +953,24 @@ public:
 
     void process(float *left, float *right, int numSamples) override
     {
-        bool anyActive = false;
+        bool anyFront = false;
         for (int s = 0; s < kSlots; ++s)
-            if (slotAudible(s)) { anyActive = true; break; }
-        if (!anyActive) return; // section idle -> fully transparent (no level-lock)
+            if (slotAudible(s)) { anyFront = true; break; }
+        const bool postOn = !mPost.isBypassed();
+        if (!anyFront && !postOn) return; // section idle -> fully transparent (no level-lock)
 
         mLock.observeInput(left, right, numSamples); // dry section input (intact at entry)
-        if (mParallel)
-            processParallel(left, right, numSamples);
-        else
-            for (int s = 0; s < kSlots; ++s) // SERIES: slots chained in place
-                if (slotAudible(s))
-                    mVoice[(size_t)s].process(left, right, numSamples);
+        if (anyFront)
+        {
+            if (mParallel)
+                processParallel(left, right, numSamples);
+            else
+                for (int s = 0; s < kSlots; ++s) // SERIES: slots chained in place
+                    if (slotAudible(s))
+                        mVoice[(size_t)s].process(left, right, numSamples);
+        }
+        if (postOn) // POST: end-of-section effect runs on the combined output
+            mPost.process(left, right, numSamples);
         mLock.applyOutput(left, right, numSamples);   // lock to the input level
     }
 
@@ -1002,7 +1012,7 @@ public:
         double s = 0.0;
         for (auto &v : mVoice)
             s += v.latencySamples();
-        return s;
+        return s + mPost.latencySamples();
     }
 
     // ---- per-slot controls (slot 0..kSlots-1) ----
@@ -1026,10 +1036,32 @@ public:
     // audible (solo overrides bypass); otherwise the normal per-slot bypass
     // applies. Works in both Series and Parallel.
     void setSlotSolo(int s, bool on) { mSolo[idx(s)] = on; }
+
+    // ---- POST block: a dedicated end-of-section effect (rotary / tremolo /
+    // harm-trem "speaker/amp" stage) that runs on the combined output of the
+    // three front slots, in both Series and Parallel, inside the Level Lock. ----
+    void setPostType(int t) { mPost.setType(t); }
+    void setPostWaveform(int w) { mPost.setWaveform(w); }
+    void setPostSyncIndex(int i) { mPost.setSyncIndex(i); }
+    void setPostRateHz(float hz) { mPost.setRateHz(hz); }
+    void setPostDepth(float d) { mPost.setDepth(d); }
+    void setPostFeedback(float f) { mPost.setFeedback(f); }
+    void setPostMix(float m) { mPost.setMix(m); }
+    void setPostWidth(float w) { mPost.setWidth(w); }
+    void setPostDrive(float d) { mPost.setDrive(d); }
+    void setPostRotFast(bool f) { mPost.setRotFast(f); }
+    void setPostHornDrum(float b) { mPost.setHornDrum(b); }
+    void setPostManual(float m) { mPost.setManual(m); }
+    void setPostInvert(bool inv) { mPost.setInvert(inv); }
+    void setPostP2Ratio(float r) { mPost.setP2Ratio(r); }
+    void setPostSeries(bool s) { mPost.setSeries(s); }
+    void setPostBypassed(bool b) { mPost.setBypassed(b); }
+
     void setBpm(double bpm)
     {
         for (auto &v : mVoice)
             v.setBpm(bpm);
+        mPost.setBpm(bpm);
     }
 
 private:
@@ -1106,6 +1138,7 @@ private:
     }
 
     std::array<ModVoice, kSlots> mVoice;
+    ModVoice mPost; // dedicated end-of-section post effect (rotary/tremolo/harm-trem)
     ModLevelLock mLock; // section-level output loudness match
     bool mSolo[kSlots] = {false, false, false}; // momentary dial-in solo (not a param)
     // ---- section routing state ----

@@ -45,6 +45,8 @@
 //       hold steady loudness as the puck moves
 //   T32 momentary solo: isolates a slot in series + parallel (== standalone),
 //       overrides bypass, and clears back to the full mix
+//   T33 POST block: runs at the END of the section (== standalone when alone,
+//       == hand-chained after a front slot); its bypass works
 #include "rig/ModBlock.h"
 #include <cstdio>
 #include <cmath>
@@ -1359,6 +1361,81 @@ int main()
             double d = 0;
             for (size_t i = 0; i < x.size(); ++i) d = std::max(d, (double)std::abs(ls[i] - lf[i]));
             CHECK(d > 0.05, "T32 full mix differs from soloed (no-solo restores others, diff %.2f)", d);
+        }
+    }
+
+    // ---- T33: POST block runs at the end of the section ----
+    {
+        const int N = (int)SR * 2;
+        auto x = tone(700.0, 0.5, N);
+
+        // (a) post-only (all front slots off) == a standalone voice of that effect.
+        {
+            ModBlock m;
+            m.setLevelLock(false);
+            for (int s = 0; s < ModBlock::kSlots; ++s) m.setSlotBypassed(s, true);
+            m.setPostType(ModVoice::kTremolo);
+            m.setPostRateHz(4.0f); m.setPostDepth(0.6f); m.setPostMix(1.0f);
+            m.setPostBypassed(false);
+            m.prepare({SR, BLK});
+            ModVoice ref;
+            ref.setType(ModVoice::kTremolo);
+            ref.setRateHz(4.0f); ref.setDepth(0.6f); ref.setMix(1.0f);
+            ref.prepare({SR, BLK});
+            auto la = x, ra = x, lb = x, rb = x;
+            run(m, la, ra);
+            run(ref, lb, rb);
+            double d = 0;
+            for (size_t i = 0; i < x.size(); ++i) d = std::max(d, (double)std::abs(la[i] - lb[i]));
+            CHECK(d < 1e-6, "T33 post-only == standalone voice (diff %.2e)", d);
+        }
+
+        // (b) post runs AFTER the front section: series chorus -> post tremolo ==
+        // the same two voices chained by hand.
+        {
+            ModBlock m;
+            m.setLevelLock(false); // series (default)
+            m.setType(0, ModVoice::kChorus); m.setRateHz(0, 1.0f); m.setDepth(0, 0.7f); m.setMix(0, 1.0f);
+            m.setSlotBypassed(0, false);
+            m.setSlotBypassed(1, true); m.setSlotBypassed(2, true);
+            m.setPostType(ModVoice::kTremolo);
+            m.setPostRateHz(4.0f); m.setPostDepth(0.6f); m.setPostMix(1.0f);
+            m.setPostBypassed(false);
+            m.prepare({SR, BLK});
+
+            ModVoice front, post;
+            front.setType(ModVoice::kChorus); front.setRateHz(1.0f); front.setDepth(0.7f); front.setMix(1.0f);
+            post.setType(ModVoice::kTremolo); post.setRateHz(4.0f); post.setDepth(0.6f); post.setMix(1.0f);
+            front.prepare({SR, BLK});
+            post.prepare({SR, BLK});
+
+            auto la = x, ra = x, lb = x, rb = x;
+            run(m, la, ra);
+            run(front, lb, rb); // chorus
+            run(post, lb, rb);  // then tremolo on the chorus output
+            double d = 0;
+            for (size_t i = 0; i < x.size(); ++i) d = std::max(d, (double)std::abs(la[i] - lb[i]));
+            CHECK(d < 1e-6, "T33 post runs after the front section (== hand-chained, diff %.2e)", d);
+        }
+
+        // (c) post bypass works: enabling the post effect changes the output.
+        {
+            auto runPost = [&](bool postOn) {
+                ModBlock m;
+                m.setLevelLock(false);
+                m.setType(0, ModVoice::kChorus); m.setRateHz(0, 1.0f); m.setDepth(0, 0.7f); m.setMix(0, 1.0f);
+                m.setSlotBypassed(0, false); m.setSlotBypassed(1, true); m.setSlotBypassed(2, true);
+                m.setPostType(ModVoice::kTremolo); m.setPostRateHz(4.0f); m.setPostDepth(0.8f); m.setPostMix(1.0f);
+                m.setPostBypassed(!postOn);
+                m.prepare({SR, BLK});
+                auto l = x, r = x;
+                run(m, l, r);
+                return l;
+            };
+            auto off = runPost(false), on = runPost(true);
+            double d = 0;
+            for (size_t i = 0; i < x.size(); ++i) d = std::max(d, (double)std::abs(on[i] - off[i]));
+            CHECK(d > 0.05, "T33 post bypass works (post changes the output, diff %.2f)", d);
         }
     }
 

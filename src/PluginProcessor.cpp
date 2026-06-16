@@ -200,6 +200,60 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::ParameterID("modMix", 1), "Mod Mix",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
 
+    // POST modulation block: a dedicated end-of-section effect (rotary/tremolo/
+    // harm-trem "speaker/amp" stage) that processes the combined output of the 3
+    // front slots. Same control superset as a slot (enum-aligned Type; the editor
+    // only offers the post effects). Off by default; Rotary when first enabled.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("postType", 1), "Post Type",
+        juce::StringArray{"Chorus", "Flanger", "Phaser", "Tremolo",
+                          "Vibrato", "Rotary", "Uni-Vibe", "Harm Trem", "Bi-Phase"},
+        5)); // default Rotary
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("postWave", 1), "Post Waveform",
+        juce::StringArray{"Sine", "Triangle", "Square", "S&H"}, 0));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("postSync", 1), "Post Sync",
+        juce::StringArray{"Off", "1/1", "1/2", "1/4", "1/4.", "1/4T",
+                          "1/8", "1/8.", "1/8T", "1/16"},
+        0));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("postRate", 1), "Post Rate",
+        juce::NormalisableRange<float>(0.03f, 20.0f, 0.01f, 0.35f), 0.8f,
+        juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("postDepth", 1), "Post Depth",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("postFeedback", 1), "Post Feedback",
+        juce::NormalisableRange<float>(0.0f, 0.95f, 0.01f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("postMix", 1), "Post Mix",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("postWidth", 1), "Post Width",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("postDrive", 1), "Post Drive",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("postRotFast", 1), "Post Rotary Fast", false));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("postManual", 1), "Post Manual",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.3f));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("postInvert", 1), "Post Invert", false));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("postP2Ratio", 1), "Post Sweep 2",
+        juce::NormalisableRange<float>(0.5f, 2.0f, 0.01f, 0.63f), 1.5f));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("postSeries", 1), "Post Series", false));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("postHornDrum", 1), "Post Horn/Drum",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("postOn", 1), "Post Enable", false)); // off by default
+
     // --- Delay (rig/DelayBlock.h; verified by tests/delay_test.cpp) ---
     // Order must match DelayBlock::kSyncBeats — append only.
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
@@ -346,19 +400,26 @@ NamRigProcessor::NamRigProcessor()
     // knobs to the new type's defaults (suppressed during state/preset loads).
     for (int s = 1; s <= nam_rig::ModBlock::kSlots; ++s)
         apvts.addParameterListener("mod" + juce::String(s) + "Type", this);
+    apvts.addParameterListener("postType", this); // the post block resets too
 }
 
 NamRigProcessor::~NamRigProcessor()
 {
     for (int s = 1; s <= nam_rig::ModBlock::kSlots; ++s)
         apvts.removeParameterListener("mod" + juce::String(s) + "Type", this);
+    apvts.removeParameterListener("postType", this);
 }
 
 void NamRigProcessor::parameterChanged(const juce::String &paramID, float)
 {
     if (mSuppressTypeReset.load())
         return; // a state/preset load is in progress -> keep the saved knobs
-    if (paramID.startsWith("mod") && paramID.endsWith("Type"))
+    if (paramID == "postType")
+    {
+        mPendingTypeReset.fetch_or(1 << nam_rig::ModBlock::kSlots); // post = bit kSlots
+        triggerAsyncUpdate();
+    }
+    else if (paramID.startsWith("mod") && paramID.endsWith("Type"))
     {
         const int slot = paramID[3] - '1'; // "mod1Type".."mod3Type" -> 0..2
         if (slot >= 0 && slot < nam_rig::ModBlock::kSlots)
@@ -376,11 +437,7 @@ void NamRigProcessor::handleAsyncUpdate()
     static const char *const suffix[] = {"Wave", "Sync", "Rate", "Depth", "Feedback",
                                          "Mix", "Width", "Drive", "RotFast", "Manual",
                                          "Invert", "P2Ratio", "Series", "HornDrum"};
-    for (int s = 0; s < nam_rig::ModBlock::kSlots; ++s)
-    {
-        if (!(mask & (1 << s)))
-            continue;
-        const juce::String p = "mod" + juce::String(s + 1);
+    auto resetPrefix = [&](const juce::String &p) {
         for (auto *sfx : suffix)
             if (auto *prm = apvts.getParameter(p + sfx))
             {
@@ -388,7 +445,12 @@ void NamRigProcessor::handleAsyncUpdate()
                 prm->setValueNotifyingHost(prm->getDefaultValue());
                 prm->endChangeGesture();
             }
-    }
+    };
+    for (int s = 0; s < nam_rig::ModBlock::kSlots; ++s)
+        if (mask & (1 << s))
+            resetPrefix("mod" + juce::String(s + 1));
+    if (mask & (1 << nam_rig::ModBlock::kSlots))
+        resetPrefix("post");
 }
 
 float NamRigProcessor::calibrationGainDb(int rig) const
@@ -655,6 +717,23 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.mod.setPad(apvts.getRawParameterValue("modPadX")->load(),
                       apvts.getRawParameterValue("modPadY")->load());
     mChain.mod.setModMix(apvts.getRawParameterValue("modMix")->load());
+    // Post block (end-of-section effect).
+    mChain.mod.setPostType((int)apvts.getRawParameterValue("postType")->load());
+    mChain.mod.setPostWaveform((int)apvts.getRawParameterValue("postWave")->load());
+    mChain.mod.setPostSyncIndex((int)apvts.getRawParameterValue("postSync")->load());
+    mChain.mod.setPostRateHz(apvts.getRawParameterValue("postRate")->load());
+    mChain.mod.setPostDepth(apvts.getRawParameterValue("postDepth")->load());
+    mChain.mod.setPostFeedback(apvts.getRawParameterValue("postFeedback")->load());
+    mChain.mod.setPostMix(apvts.getRawParameterValue("postMix")->load());
+    mChain.mod.setPostWidth(apvts.getRawParameterValue("postWidth")->load());
+    mChain.mod.setPostDrive(apvts.getRawParameterValue("postDrive")->load());
+    mChain.mod.setPostRotFast(apvts.getRawParameterValue("postRotFast")->load() >= 0.5f);
+    mChain.mod.setPostManual(apvts.getRawParameterValue("postManual")->load());
+    mChain.mod.setPostInvert(apvts.getRawParameterValue("postInvert")->load() >= 0.5f);
+    mChain.mod.setPostP2Ratio(apvts.getRawParameterValue("postP2Ratio")->load());
+    mChain.mod.setPostSeries(apvts.getRawParameterValue("postSeries")->load() >= 0.5f);
+    mChain.mod.setPostHornDrum(apvts.getRawParameterValue("postHornDrum")->load());
+    mChain.mod.setPostBypassed(apvts.getRawParameterValue("postOn")->load() < 0.5f);
 
     if (auto *ph = getPlayHead())
         if (auto pos = ph->getPosition())
