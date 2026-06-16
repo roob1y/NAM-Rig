@@ -51,6 +51,7 @@ public:
     static constexpr int kBiPhaseStages = 6;                                   // Mu-Tron Bi-Phase: 6 stages per phasor
     static constexpr double kBiPhaseCenterHz = 500.0, kBiPhaseOctaves = 2.4;   // tunable by ear
     static constexpr float kBiPhaseFbMax = 0.65f;                              // musical resonance ceiling (no whistle)
+    static constexpr float kBiPhaseDepthMin = 0.15f;                           // always some sweep (never dead-static)
     // One Bi-Phase phasor's TPT integrator states (6 stages), per channel.
     // Declared here (before phasor6's signature uses it).
     struct PhasorCore { float s[kBiPhaseStages] = {0.0f}; };
@@ -461,9 +462,11 @@ private:
             // no click. In parallel the two cores pan opposite (A/B stereo split)
             // by Width; mono at Width 0. Shared Feedback, 50/50 mix (notch effect).
             const float fb = mFeedback * kBiPhaseFbMax; // knob maps to the musical resonance window
-            const float a = phasor6(mBiA[(size_t)ch], x, mLfo.value(off), depth, fb);
+            // Depth knob remapped to [min..1] so the sweep never sits dead-static.
+            const float bpDepth = kBiPhaseDepthMin + depth * (1.0f - kBiPhaseDepthMin);
+            const float a = phasor6(mBiA[(size_t)ch], x, mLfo.value(off), bpDepth, fb);
             const float bIn = (1.0f - mSeriesZ) * x + mSeriesZ * a; // parallel(x) -> series(A(x))
-            const float b = phasor6(mBiB[(size_t)ch], bIn, mLfo2.value(off), depth, fb);
+            const float b = phasor6(mBiB[(size_t)ch], bIn, mLfo2.value(off), bpDepth, fb);
             const float w = mWidth;
             const float panA = (ch == 0) ? 0.5f + 0.5f * w : 0.5f - 0.5f * w;
             const float panB = (ch == 0) ? 0.5f - 0.5f * w : 0.5f + 0.5f * w;
