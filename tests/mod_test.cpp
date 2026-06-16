@@ -17,6 +17,11 @@
 //   T13 per-effect voicing constants (depthMax / bakedBbd / authenticWave)
 //   T14 tremolo at full depth keeps headroom (never dead silence / square)
 //   T15 only Tremolo honours the Shape waveform; others hardwire their LFO
+//   T16 flanger stays bounded at max feedback (incl. Invert on)
+//   T17 ZDF/TPT phaser: bounded at high feedback + resonance grows with feedback
+//   T18 flanger Manual shifts the static comb position
+//   T19 flanger Invert flips the comb polarity (notch <-> peak)
+//   T20 free Rate capped per effect (flanger 20 Hz, others 10 Hz; sync uncapped)
 #include "rig/ModBlock.h"
 #include <cstdio>
 #include <cmath>
@@ -460,7 +465,7 @@ int main()
         m.setType(ModVoice::kFlanger);
         m.setRateHz(0.3f);
         m.setDepth(0.8f);
-        m.setFeedback(0.9f);
+        m.setFeedback(0.95f); // new Regen ceiling
         m.setMix(0.5f);
         m.prepare({SR, BLK});
         auto l = tone(220.0, 0.4, (int)SR * 2), r = l;
@@ -469,6 +474,171 @@ int main()
         double pk = 0;
         for (float v : l) { if (!std::isfinite(v)) fin = false; pk = std::max(pk, (double)std::abs(v)); }
         CHECK(fin && pk < 4.0, "T16 flanger max feedback stays bounded (peak %.2f)", pk);
+
+        // same, with Invert on (negative regen) -> must also stay bounded
+        ModVoice mi;
+        mi.setType(ModVoice::kFlanger);
+        mi.setRateHz(0.3f);
+        mi.setDepth(0.8f);
+        mi.setFeedback(0.95f);
+        mi.setInvert(true);
+        mi.setMix(0.5f);
+        mi.prepare({SR, BLK});
+        auto li = tone(220.0, 0.4, (int)SR * 2), ri = li;
+        run(mi, li, ri);
+        bool fin2 = true;
+        double pk2 = 0;
+        for (float v : li) { if (!std::isfinite(v)) fin2 = false; pk2 = std::max(pk2, (double)std::abs(v)); }
+        CHECK(fin2 && pk2 < 4.0, "T16 flanger invert + max feedback stays bounded (peak %.2f)", pk2);
+    }
+
+    // ---- T17: ZDF/TPT phaser — high feedback bounded; resonance grows with feedback ----
+    {
+        // Run the phaser over a 40-tone log-spaced bed (same construction as T4),
+        // with the sweep almost frozen (slow rate) so the spectrum is ~stationary.
+        auto runPhaser = [](float fb) {
+            ModVoice m;
+            m.setType(ModVoice::kPhaser);
+            m.setRateHz(0.05f); // near-frozen sweep -> stable notch positions to measure
+            m.setFeedback(fb);
+            m.setMix(0.5f);
+            m.prepare({SR, BLK});
+            std::vector<float> l((size_t)SR * 2, 0.0f);
+            for (int kk = 0; kk < 40; ++kk)
+            {
+                const double f = 100.0 * std::pow(80.0, kk / 39.0);
+                for (size_t i = 0; i < l.size(); ++i)
+                    l[i] += (float)(0.02 * std::sin(2.0 * M_PI * f * (double)i / SR + kk));
+            }
+            auto r = l;
+            run(m, l, r);
+            return l;
+        };
+
+        // (a) unconditional stability: full-up feedback stays finite + bounded
+        auto hi = runPhaser(0.99f);
+        bool fin = true;
+        double pk = 0;
+        for (float v : hi) { if (!std::isfinite(v)) fin = false; pk = std::max(pk, (double)std::abs(v)); }
+        CHECK(fin && pk < 4.0, "T17 phaser high feedback stays bounded (peak %.2f)", pk);
+
+        // (b) resonance: feedback pushes the loop poles toward the unit circle, so
+        // the network rings. Freeze the sweep (rate 0 -> stationary fc) and feed an
+        // impulse; the decay-tail energy must grow monotonically with feedback.
+        // (A spectral-probe metric is unreliable here: the resonant peaks are
+        // narrow and fall between coarse probe tones.)
+        auto tailEnergy = [](float fb) {
+            ModVoice m;
+            m.setType(ModVoice::kPhaser);
+            m.setRateHz(0.0f); // frozen sweep -> stationary resonant frequency
+            m.setFeedback(fb);
+            m.setMix(0.5f);
+            m.prepare({SR, BLK});
+            std::vector<float> l((size_t)SR / 4, 0.0f); // 0.25 s
+            l[0] = 1.0f;                                // impulse
+            auto r = l;
+            run(m, l, r);
+            double e = 0;
+            for (size_t i = 400; i < l.size(); ++i) // skip the direct transient
+                e += (double)l[i] * (double)l[i];
+            return e;
+        };
+        const double e0 = tailEnergy(0.0f);
+        const double e4 = tailEnergy(0.4f);
+        const double e8 = tailEnergy(0.8f);
+        CHECK(e0 < e4 && e4 < e8 && e8 > 1e-6,
+              "T17 phaser rings more with feedback (tail energy %.2e < %.2e < %.2e)", e0, e4, e8);
+    }
+
+    // ---- T18: flanger Manual shifts the static comb position ----
+    {
+        // depth 0 -> no sweep, so the delay = Manual base only. The delayed copy
+        // shows up as a secondary peak in the impulse response; its time = delay.
+        auto combDelayMs = [](float manual) {
+            ModVoice m;
+            m.setType(ModVoice::kFlanger);
+            m.setDepth(0.0f);     // static comb (no sweep)
+            m.setFeedback(0.0f);
+            m.setManual(manual);
+            m.setMix(0.5f);
+            m.prepare({SR, BLK});
+            std::vector<float> l((size_t)SR / 10, 0.0f);
+            l[0] = 1.0f;          // impulse
+            auto r = l;
+            run(m, l, r);
+            size_t pkAt = 0;
+            double pk = 0;
+            for (size_t i = 8; i < l.size(); ++i) // skip the dry impulse
+                if (std::abs(l[i]) > pk) { pk = std::abs(l[i]); pkAt = i; }
+            return (double)pkAt * 1000.0 / SR;
+        };
+        const double dLo = combDelayMs(0.0f); // ~kFlMinMs (0.5 ms)
+        const double dHi = combDelayMs(1.0f); // ~kFlManualMaxMs (8 ms)
+        CHECK(dHi > dLo + 2.0, "T18 Manual moves the comb (delay %.2f -> %.2f ms)", dLo, dHi);
+    }
+
+    // ---- T19: flanger Invert flips the comb polarity (notch <-> peak) ----
+    {
+        // Static comb; invert negates the delayed path, so dry+wet becomes dry-wet
+        // -> peaks and notches swap. Per-frequency magnitudes should anti-correlate.
+        auto combMags = [](bool inv) {
+            ModVoice m;
+            m.setType(ModVoice::kFlanger);
+            m.setDepth(0.0f);
+            m.setFeedback(0.0f);
+            m.setManual(0.5f); // mid delay -> several notches across the probe band
+            m.setInvert(inv);
+            m.setMix(0.5f);
+            m.prepare({SR, BLK});
+            std::vector<float> l((size_t)SR, 0.0f);
+            for (int kk = 0; kk < 40; ++kk)
+            {
+                const double f = 200.0 + kk * 55.0; // 200..2345 Hz
+                for (size_t i = 0; i < l.size(); ++i)
+                    l[i] += (float)(0.02 * std::sin(2.0 * M_PI * f * (double)i / SR + kk));
+            }
+            auto r = l;
+            run(m, l, r);
+            std::vector<double> mags;
+            for (int kk = 0; kk < 40; ++kk)
+                mags.push_back(mag(l, (size_t)SR / 2, (size_t)SR / 2, 200.0 + kk * 55.0));
+            return mags;
+        };
+        auto off = combMags(false), on = combMags(true);
+        double mo = 0, mn = 0;
+        for (size_t i = 0; i < off.size(); ++i) { mo += off[i]; mn += on[i]; }
+        mo /= (double)off.size();
+        mn /= (double)on.size();
+        double cov = 0, vo = 0, vn = 0;
+        for (size_t i = 0; i < off.size(); ++i)
+        {
+            const double a = off[i] - mo, b = on[i] - mn;
+            cov += a * b; vo += a * a; vn += b * b;
+        }
+        const double corr = cov / (std::sqrt(vo * vn) + 1e-12);
+        CHECK(corr < -0.3, "T19 flanger Invert flips comb polarity (corr %.2f < -0.3)", corr);
+    }
+
+    // ---- T20: free Rate is capped per effect (flanger 20 Hz, others 10 Hz) ----
+    {
+        ModVoice f;
+        f.setType(ModVoice::kFlanger);
+        f.setRateHz(20.0f);
+        CHECK(std::abs(f.effectiveRateHz() - 20.0f) < 0.01f,
+              "T20 flanger free rate reaches 20 Hz (%.2f)", f.effectiveRateHz());
+
+        ModVoice c;
+        c.setType(ModVoice::kChorus);
+        c.setRateHz(20.0f);
+        CHECK(std::abs(c.effectiveRateHz() - 10.0f) < 0.01f,
+              "T20 non-flanger free rate capped at 10 Hz (%.2f)", c.effectiveRateHz());
+
+        // sync ignores the cap (honours the host division): 1/16 @240 BPM = 16 Hz
+        ModVoice s;
+        s.setType(ModVoice::kChorus);
+        s.setBpm(240.0);
+        s.setSyncIndex(9);
+        CHECK(s.effectiveRateHz() > 10.0f, "T20 synced rate not capped (%.2f Hz)", s.effectiveRateHz());
     }
 
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);

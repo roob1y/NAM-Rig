@@ -39,11 +39,12 @@ public:
 
     // Voicing constants (fixed; knobs scale within these)
     static constexpr double kChorusBaseMs = 7.0, kChorusSpreadMs = 10.0;
-    static constexpr double kFlangerBaseMs = 1.0, kFlangerSpreadMs = 5.0;
+    // M-126-style wide flanger: Manual sets a static base delay, Width sweeps above it.
+    static constexpr double kFlMinMs = 0.5, kFlManualMaxMs = 8.0, kFlSweepMs = 6.0, kFlMaxMs = 14.0;
     static constexpr double kVibBaseMs = 2.0, kVibSpreadMs = 8.0;
     static constexpr double kRotBaseMs = 3.0, kRotSpreadMs = 4.0;
     static constexpr float kRotSlowHz = 0.72f, kRotFastHz = 6.6f; // chorale / tremolo
-    static constexpr double kPhaserCenterHz = 700.0, kPhaserOctaves = 2.0;
+    static constexpr double kPhaserCenterHz = 650.0, kPhaserOctaves = 2.6; // opened-up sweep (~107 Hz..3.9 kHz); tunable by ear
     static constexpr double kUniCenterHz = 400.0;
     static constexpr double kHarmXoverHz = 800.0;
     static constexpr int kPhaserStages = 4;
@@ -75,14 +76,14 @@ public:
     {
         switch (t)
         {
-        case kChorus: return knobMix;
-        case kFlanger:
+        case kChorus:
+        case kFlanger: return knobMix; // M-126 has a Dry->Delay Mix knob
         case kPhaser:
         case kUniVibe: return 0.5f;
         default: return 1.0f; // vibrato / rotary / tremolo / harm-trem = full wet
         }
     }
-    static bool mixExposed(Type t) { return t == kChorus; }
+    static bool mixExposed(Type t) { return t == kChorus || t == kFlanger; }
 
     const char *name() const override { return "Modulation"; }
 
@@ -134,6 +135,7 @@ public:
         mLfo.reset();
         mDepthZ = mDepth;
         mMixZ = mMix;
+        mManualZ = mManual;
     }
 
     // ---- parameters (audio thread) ----
@@ -154,6 +156,8 @@ public:
     void setDepth(float d) { mDepth = d; }
     void setFeedback(float f) { mFeedback = f; }   // Flanger/Phaser only
     void setMix(float m) { mMix = m; }
+    void setManual(float m) { mManual = m; }       // Flanger: static comb position (M-126 Manual)
+    void setInvert(bool inv) { mInvert = inv; }    // Flanger: phase-invert the wet/regen path
     void setWidth(float w) { mWidth = w; }         // 0 = mono spread, 1 = 90 deg
     void setDrive(float d) { mRotDrive = d; }      // Rotary: Leslie tube-amp drive
     void setRotFast(bool f) { mRotFast = f; }      // Rotary: slow (chorale) / fast (tremolo)
@@ -166,10 +170,16 @@ public:
                                                0.5, 0.75, 1.0 / 3.0, 0.25};
         return (i > 0 && i < kNumSync) ? beats[i] : 0.0;
     }
+    // Free-rate ceiling per effect. The M-126 flanger sweeps up to 20 Hz (fast,
+    // metallic); other effects stay musical at <=10 Hz. Sync ignores this (it
+    // honours the host division).
+    static float maxRateHz(Type t) { return t == kFlanger ? 20.0f : 10.0f; }
     float effectiveRateHz() const
     {
         const double beats = syncBeats(mSyncIndex);
-        return beats > 0.0 ? (float)((mBpm / 60.0) / beats) : mFreeRateHz;
+        if (beats > 0.0)
+            return (float)((mBpm / 60.0) / beats); // synced: honour the division
+        return std::min(mFreeRateHz, maxRateHz(mType)); // free: cap per effect
     }
 
     void process(float *left, float *right, int numSamples) override
@@ -203,6 +213,7 @@ public:
         {
             mDepthZ += mSmoothK * (mDepth - mDepthZ);
             mMixZ += mSmoothK * (mixTarget - mMixZ);
+            mManualZ += mSmoothK * (mManual - mManualZ); // de-zipper the Manual knob
             const float depth = mDepthZ * dMax; // voiced musical maximum
 
             // pass the LFO phase OFFSET (not value) so multi-tap effects can
@@ -243,11 +254,21 @@ private:
         }
         case kFlanger:
         {
-            const double sweepMs =
-                kFlangerBaseMs + (double)depth * kFlangerSpreadMs * (0.5 + 0.5 * (double)lfo);
+            // M-126-style: Manual sets the static comb position, Width (depth)
+            // sweeps a wide range above it, and Invert phase-flips the delayed
+            // path -- which moves the comb (notch<->peak) AND flips the regen
+            // polarity, exactly like the hardware's single phase-invert switch.
+            // BBD voicing (HF rolloff + soft clip) is baked in via bbdColor().
+            const double manualBaseMs =
+                kFlMinMs + (double)mManualZ * (kFlManualMaxMs - kFlMinMs);
+            const double sweepMs = (double)depth * kFlSweepMs * (0.5 + 0.5 * (double)lfo);
+            const double delayMs =
+                std::min(kFlMaxMs, std::max(kFlMinMs, manualBaseMs + sweepMs));
             mLine[(size_t)ch].write(x + mFeedback * mFbState[(size_t)ch]);
-            float wet = mLine[(size_t)ch].readFrac(std::max(2.0, sweepMs * 0.001 * mFs));
+            float wet = mLine[(size_t)ch].readFrac(std::max(2.0, delayMs * 0.001 * mFs));
             wet = bbdColor(ch, wet);
+            if (mInvert)
+                wet = -wet; // phase-invert: flips comb polarity + regen together
             float &flp = mFbLp[(size_t)ch];
             flp += mFbLpCoef * (wet - flp); // tone-shape the regen (tames fizz)
             mFbState[(size_t)ch] = flp;
@@ -255,25 +276,51 @@ private:
         }
         case kPhaser:
         {
-            // 4 first-order allpasses, classic sweep hardwired (depth fixed);
-            // Feedback (resonance) is the one exposed control.
+            // 4-stage phaser, rebuilt as ZDF/TPT (topology-preserving) first-order
+            // all-passes with the global feedback resolved with ZERO delay -- no
+            // unit-sample lag in the regen path, so the resonance is placed
+            // accurately and the sweep stays clean even as fc moves fast. All four
+            // stages share one swept centre. Each TPT all-pass is affine in its
+            // input: ap_i = alpha*in_i + beta_i, with alpha = 2G-1 (depends only on
+            // fc) and beta_i = 2(1-G)*s_i (depends only on the stored state). The
+            // chain therefore collapses to y_chain = A*u + B and the loop solves
+            // analytically. Feedback is NEGATIVE in the loop (authentic Phase-90
+            // notch structure): u = (x - k*B)/(1 + k*A); denom > 0 for all k >= 0,
+            // so the loop is unconditionally stable and the full range is usable.
             const double fc = std::min(
                 0.45 * mFs,
                 kPhaserCenterHz * std::pow(2.0, (double)lfo * kPhaserOctaves * (double)kPhaserFixedDepth));
-            const double tanw = std::tan(3.14159265358979323846 * fc / mFs);
-            const float a = (float)((tanw - 1.0) / (tanw + 1.0));
+            const double g = std::tan(3.14159265358979323846 * fc / mFs);
+            const float G = (float)(g / (1.0 + g));
+            const float alpha = 2.0f * G - 1.0f; // per-stage instantaneous gain, |alpha| < 1
 
-            float v = x + mFeedback * mFbState[(size_t)ch];
-            for (int s = 0; s < kPhaserStages; ++s)
+            // Per-channel state block (ch0 -> states 0..3, ch1 -> 4..7): fully decoupled.
+            ApState *ap = &mAllpass[(size_t)(ch * kPhaserStages)];
+
+            // Gather each stage's state contribution and build B via Horner:
+            // B = alpha^3*b0 + alpha^2*b1 + alpha*b2 + b3.
+            float beta[kPhaserStages];
+            float B = 0.0f;
+            for (int i = 0; i < kPhaserStages; ++i)
             {
-                auto &st = mAllpass[(size_t)(ch * kPhaserStages + s)];
-                const float y = a * v + st.x1 - a * st.y1;
-                st.x1 = v;
-                st.y1 = y;
-                v = y;
+                beta[i] = 2.0f * (1.0f - G) * ap[i].s;
+                B = alpha * B + beta[i];
             }
-            mFbState[(size_t)ch] = v;
-            return (1.0f - mMixZ) * x + mMixZ * v;
+            const float A = alpha * alpha * alpha * alpha; // alpha^4
+
+            const float k = mFeedback;
+            const float u = (x - k * B) / (1.0f + k * A); // zero-delay resolved chain input
+
+            // Single evaluation pass: true output per stage + TPT integrator update.
+            float in = u;
+            for (int i = 0; i < kPhaserStages; ++i)
+            {
+                const float out = alpha * in + beta[i]; // = ap_i (reuses precomputed beta_i)
+                const float v = (in - ap[i].s) * G;
+                ap[i].s += 2.0f * v;                     // s_new = s + 2v (trapezoidal update)
+                in = out;
+            }
+            return (1.0f - mMixZ) * x + mMixZ * in;
         }
         case kTremolo:
         {
@@ -414,6 +461,7 @@ private:
         {
             if (std::abs(st.x1) < 1.0e-30f) st.x1 = 0.0f;
             if (std::abs(st.y1) < 1.0e-30f) st.y1 = 0.0f;
+            if (std::abs(st.s) < 1.0e-30f) st.s = 0.0f;
         }
         for (auto &f : mFbState)
             if (std::abs(f) < 1.0e-30f) f = 0.0f;
@@ -433,7 +481,9 @@ private:
             if (std::abs(f) < 1.0e-30f) f = 0.0f;
     }
 
-    struct ApState { float x1 = 0.0f, y1 = 0.0f; };
+    // x1/y1 = Direct-Form-I state (still used by Uni-Vibe until its own upgrade);
+    // s = TPT integrator state used by the ZDF Phaser.
+    struct ApState { float x1 = 0.0f, y1 = 0.0f, s = 0.0f; };
 
     double mFs = 48000.0;
     Type mType = kChorus;
@@ -447,6 +497,8 @@ private:
     std::array<float, 2> mTremG{1.0f, 1.0f}; // smoothed tremolo gain (de-click)
     float mDepth = 0.5f, mFeedback = 0.0f, mMix = 0.5f;
     float mDepthZ = 0.5f, mMixZ = 0.5f, mSmoothK = 0.01f;
+    float mManual = 0.3f, mManualZ = 0.3f; // Flanger Manual (static comb position)
+    bool mInvert = false;                  // Flanger phase-invert switch
     float mWidth = 1.0f;
     int mUserWave = 0;                          // Tremolo's Shape choice
     float mBakedBbd = 0.0f;                     // per-block, from bakedBbd(type)
@@ -515,6 +567,8 @@ public:
     void setWidth(int s, float w) { mVoice[idx(s)].setWidth(w); }
     void setDrive(int s, float d) { mVoice[idx(s)].setDrive(d); }
     void setRotFast(int s, bool f) { mVoice[idx(s)].setRotFast(f); }
+    void setManual(int s, float m) { mVoice[idx(s)].setManual(m); }
+    void setInvert(int s, bool inv) { mVoice[idx(s)].setInvert(inv); }
     void setSlotBypassed(int s, bool b) { mVoice[idx(s)].setBypassed(b); }
     void setBpm(double bpm)
     {
