@@ -1819,7 +1819,7 @@ public:
     void resized() override
     {
         // Routing toggle (Series/Parallel) sits in the header's top-right corner.
-        mRouting.setBounds(getLocalBounds().removeFromTop(34).reduced(16, 5).removeFromRight(104));
+        mRouting.setBounds(getLocalBounds().removeFromTop(34).reduced(16, 6).removeFromRight(86));
 
         auto area = contentArea();
         const int n = nam_rig::ModBlock::kSlots, gap = 8;

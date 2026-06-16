@@ -24,17 +24,22 @@ public:
     {
         if (a != mActive) { mActive = a; repaint(); }
     }
+    // Per-lane tint for the glyph + box border (defaults to the global accent).
+    void setAccent(juce::Colour c)
+    {
+        if (c != mAccent) { mAccent = c; repaint(); }
+    }
 
     void paint(juce::Graphics &g) override
     {
         auto b = getLocalBounds().toFloat();
         g.setColour(colors::tile);
         g.fillRoundedRectangle(b, 6.0f);
-        g.setColour(colors::outline);
+        g.setColour(mActive ? mAccent.withAlpha(0.7f) : colors::outline);
         g.drawRoundedRectangle(b.reduced(0.5f), 6.0f, 1.0f);
 
         auto a = b.reduced(8.0f, 9.0f);
-        const juce::Colour c = mActive ? colors::accent : colors::textDim;
+        const juce::Colour c = mActive ? mAccent : colors::textDim;
         const float ph = mPhase;          // 0..1 animation phase
         const float L = a.getX(), R = a.getRight(), T = a.getY(), B = a.getBottom();
         const float W = a.getWidth(), H = a.getHeight(), cy = a.getCentreY(), cx = a.getCentreX();
@@ -171,6 +176,7 @@ private:
     int mType = 0;
     bool mActive = true;
     float mPhase = 0.0f;
+    juce::Colour mAccent = colors::accent;
 };
 
 } // namespace nam_rig::ui
