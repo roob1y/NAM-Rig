@@ -35,6 +35,10 @@
 //       harmonics; finite/bounded across the drive range
 //   T29 Rotary Horn/Drum balance: neutral at center, solos a rotor at each
 //       extreme (drum-band tone ducks toward horn, horn-band toward drum)
+//   T30 section Level Lock: corrects a static level offset to unity; locks the
+//       long-term level of an AM (tremolo) signal while preserving its pulse;
+//       silence-safe (no noise-floor boost / runaway); disabled = bit-exact;
+//       integration: a 50/50 flanger's section level is pulled back to input
 #include "rig/ModBlock.h"
 #include <cstdio>
 #include <cmath>
@@ -298,6 +302,7 @@ int main()
     // ---- T9: section = voices in series ----
     {
         ModBlock sec;
+        sec.setLevelLock(false); // bit-exact series check: no section makeup gain
         sec.setType(0, ModVoice::kTremolo);
         sec.setRateHz(0, 4.0f);
         sec.setDepth(0, 0.6f);
@@ -333,6 +338,8 @@ int main()
             m.setSlotBypassed(2, true);
         };
         ModBlock chorusOnly, stacked;
+        chorusOnly.setLevelLock(false); // compare raw series sums, no makeup gain
+        stacked.setLevelLock(false);
         makeChorus(chorusOnly);
         makeChorus(stacked);
         stacked.setType(1, ModVoice::kTremolo);
@@ -997,6 +1004,129 @@ int main()
               "T29 full horn ducks the drum-band tone (%.4f vs center %.4f)", level(120.0, 1.0f), level(120.0, 0.5f));
         CHECK(level(2000.0, 0.0f) < 0.6 * level(2000.0, 0.5f),
               "T29 full drum ducks the horn-band tone (%.4f vs center %.4f)", level(2000.0, 0.0f), level(2000.0, 0.5f));
+    }
+
+    // ---- T30: section Level Lock keeps output level steady across changes ----
+    {
+        using nam_rig::ModLevelLock;
+        const int N = (int)SR * 3;
+        auto rms = [](const std::vector<float> &x, size_t from, size_t len) {
+            double s = 0;
+            for (size_t i = 0; i < len; ++i) s += (double)x[from + i] * x[from + i];
+            return std::sqrt(s / (double)len);
+        };
+
+        // (a) a static section offset (x0.6) is pulled back to the input level.
+        {
+            ModLevelLock lk; lk.prepare(SR);
+            auto in = tone(1000.0, 0.5, N);
+            std::vector<float> out(in.size());
+            for (size_t p = 0; p < in.size(); p += BLK)
+            {
+                const int n = (int)std::min<size_t>(BLK, in.size() - p);
+                for (int i = 0; i < n; ++i) out[p + (size_t)i] = in[p + (size_t)i] * 0.6f;
+                lk.observeInput(in.data() + p, in.data() + p, n);
+                lk.applyOutput(out.data() + p, out.data() + p, n);
+            }
+            const size_t w = (size_t)SR / 2;
+            const double ratio = rms(out, out.size() - w, w) / rms(in, in.size() - w, w);
+            CHECK(std::abs(ratio - 1.0) < 0.08, "T30 static offset corrected to unity (out/in %.3f)", ratio);
+        }
+
+        // (b) a 4 Hz tremolo (depth 0.8) on the output: long-term level locked to
+        // the input, but the rhythmic pulse passes through (slow TC ignores it).
+        {
+            ModLevelLock lk; lk.prepare(SR);
+            auto in = tone(1000.0, 0.5, N);
+            std::vector<float> out(in.size());
+            for (size_t p = 0; p < in.size(); p += BLK)
+            {
+                const int n = (int)std::min<size_t>(BLK, in.size() - p);
+                for (int i = 0; i < n; ++i)
+                {
+                    const double t = (double)(p + (size_t)i) / SR;
+                    const float g = (float)(1.0 - 0.8 * (0.5 + 0.5 * std::sin(2.0 * M_PI * 4.0 * t)));
+                    out[p + (size_t)i] = in[p + (size_t)i] * g;
+                }
+                lk.observeInput(in.data() + p, in.data() + p, n);
+                lk.applyOutput(out.data() + p, out.data() + p, n);
+            }
+            const size_t w = (size_t)SR; // integer number of tremolo cycles
+            const double ratio = rms(out, out.size() - w, w) / rms(in, in.size() - w, w);
+            CHECK(std::abs(ratio - 1.0) < 0.12, "T30 AM long-term level locked (out/in %.3f)", ratio);
+            std::vector<float> tail(out.end() - (long)w, out.end());
+            auto env = envelope(tail, 48);
+            double mn = 1e9, mx = 0;
+            for (auto e : env) { mn = std::min(mn, e); mx = std::max(mx, e); }
+            CHECK(mn / mx < 0.4, "T30 tremolo pulse preserved through lock (min/max %.2f < 0.4)", mn / mx);
+        }
+
+        // (c) silence-safe: silent input holds unity (no noise-floor boost); a
+        // silenced output under live input doesn't run the gain away.
+        {
+            ModLevelLock lk; lk.prepare(SR);
+            std::vector<float> z((size_t)SR, 0.0f), small((size_t)SR, 1.0e-4f);
+            for (size_t p = 0; p < z.size(); p += BLK)
+            {
+                const int n = (int)std::min<size_t>(BLK, z.size() - p);
+                lk.observeInput(z.data() + p, z.data() + p, n);
+                lk.applyOutput(small.data() + p, small.data() + p, n);
+            }
+            bool finite = true;
+            for (float v : small) if (!std::isfinite(v)) finite = false;
+            CHECK(finite && std::abs(lk.gain() - 1.0f) < 0.05f,
+                  "T30 silent input holds unity gain (g %.3f)", lk.gain());
+
+            ModLevelLock lk2; lk2.prepare(SR);
+            auto in = tone(1000.0, 0.5, (int)SR);
+            std::vector<float> out((size_t)SR, 0.0f); // effect killed the signal
+            for (size_t p = 0; p < in.size(); p += BLK)
+            {
+                const int n = (int)std::min<size_t>(BLK, in.size() - p);
+                lk2.observeInput(in.data() + p, in.data() + p, n);
+                lk2.applyOutput(out.data() + p, out.data() + p, n);
+            }
+            CHECK(lk2.gain() <= ModLevelLock::kMaxGain + 1e-6f,
+                  "T30 silent output keeps the gain bounded (g %.3f)", lk2.gain());
+        }
+
+        // (d) disabled = bit-exact passthrough.
+        {
+            ModLevelLock lk; lk.prepare(SR); lk.setEnabled(false);
+            auto out = tone(500.0, 0.7, (int)SR / 2), ref = out;
+            lk.observeInput(out.data(), out.data(), (int)out.size());
+            lk.applyOutput(out.data(), out.data(), (int)out.size());
+            bool same = true;
+            for (size_t i = 0; i < out.size(); ++i) if (out[i] != ref[i]) { same = false; break; }
+            CHECK(same, "T30 disabled lock is bit-exact passthrough");
+        }
+
+        // (e) integration: a 50/50 flanger shifts the section level; with the lock
+        // on, the section output RMS sits closer to the input than raw.
+        {
+            auto runFlanger = [&](bool lock) {
+                ModBlock m;
+                m.setLevelLock(lock);
+                m.setType(0, ModVoice::kFlanger);
+                m.setRateHz(0, 0.3f);
+                m.setDepth(0, 0.7f);
+                m.setMix(0, 1.0f);
+                m.setSlotBypassed(0, false);
+                m.setSlotBypassed(1, true);
+                m.setSlotBypassed(2, true);
+                m.prepare({SR, BLK});
+                auto l = tone(800.0, 0.5, N), r = l;
+                run(m, l, r);
+                return l;
+            };
+            auto in = tone(800.0, 0.5, N);
+            const size_t w = (size_t)SR;
+            const double rin = rms(in, in.size() - w, w);
+            const double rLocked = rms(runFlanger(true), (size_t)N - w, w);
+            const double rRaw = rms(runFlanger(false), (size_t)N - w, w);
+            CHECK(std::abs(rLocked - rin) < std::abs(rRaw - rin) || std::abs(rLocked / rin - 1.0) < 0.1,
+                  "T30 lock tightens section level (locked %.3f raw %.3f vs in %.3f)", rLocked, rRaw, rin);
+        }
     }
 
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);
