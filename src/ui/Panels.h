@@ -820,6 +820,9 @@ public:
         mMix->setVisible(nam_rig::ModVoice::mixExposed((nam_rig::ModVoice::Type)type)); // chorus + flanger
         mWave.setVisible(type == 3);                   // tremolo shape
         mRate->setVisible(!rotary);                    // rotary: slow/fast toggle, not a rate
+        if (!rotary) // knob ends exactly at this effect's rate ceiling (no dead travel past the internal cap)
+            mRate->slider().setNormalisableRange(
+                {0.03, (double)nam_rig::ModVoice::maxRateHz((nam_rig::ModVoice::Type)type), 0.01, 0.35});
         mSync.setVisible(!rotary);
         mDrive->setVisible(rotary);                    // rotary: Leslie tube drive
         mRotFast.setVisible(rotary);
