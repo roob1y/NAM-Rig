@@ -39,6 +39,7 @@ public:
 
     // Voicing constants (fixed; knobs scale within these)
     static constexpr double kChorusBaseMs = 7.0, kChorusSpreadMs = 10.0;
+    static constexpr float kChorusMaxRateHz = 3.5f; // keep chorus a chorus (faster -> vibrato/warble); tunable
     // M-126-style wide flanger: Manual sets a static base delay, Width sweeps above it.
     static constexpr double kFlMinMs = 0.5, kFlManualMaxMs = 8.0, kFlSweepMs = 6.0, kFlMaxMs = 14.0;
     static constexpr double kVibBaseMs = 2.0, kVibSpreadMs = 8.0;
@@ -89,7 +90,10 @@ public:
     static int authenticWave(Type t) { return t == kFlanger ? Lfo::Triangle : Lfo::Sine; }
     static float depthMax(Type t)
     {
-        return (t == kTremolo || t == kHarmTrem) ? 0.85f : 1.0f; // keep AM short of silence
+        // Tremolo now chops to full silence at max depth (de-click smoothing in
+        // processSample stops the square/S&H clicks). Harm-trem stays short of
+        // silence for now -- its full-depth chop comes with the LR4 rework.
+        return (t == kHarmTrem) ? 0.85f : 1.0f;
     }
     static float bakedBbd(Type t)
     {
@@ -272,9 +276,15 @@ public:
         return (i > 0 && i < kNumSync) ? beats[i] : 0.0;
     }
     // Free-rate ceiling per effect. The M-126 flanger sweeps up to 20 Hz (fast,
-    // metallic); other effects stay musical at <=10 Hz. Sync ignores this (it
-    // honours the host division).
-    static float maxRateHz(Type t) { return t == kFlanger ? 20.0f : 10.0f; }
+    // metallic); chorus stays slow so it never tips into vibrato/warble; other
+    // effects stay musical at <=10 Hz. Sync ignores this (it honours the host
+    // division).
+    static float maxRateHz(Type t)
+    {
+        if (t == kFlanger) return 20.0f;
+        if (t == kChorus) return kChorusMaxRateHz;
+        return 10.0f;
+    }
     float effectiveRateHz() const
     {
         const double beats = syncBeats(mSyncIndex);

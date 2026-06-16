@@ -861,13 +861,15 @@ public:
         mRotFast.setVisible(rotary);
         mManual->setVisible(type == 1);                // flanger: static comb position
         mInvert.setVisible(type == 1);                 // flanger: phase invert
-        // Per-effect knob naming. M-126 flanger: sweep knob is "Width", stereo
-        // becomes "Spread" (so there aren't two "Width"s). Uni-Vibe uses the
-        // authentic vibe terms: Rate -> "Speed", Depth -> "Intensity".
+        // Per-effect knob naming. M-126 flanger: the sweep-amount knob is "Sweep"
+        // (the M-126 "Width" term reads as the stereo control here, so call the
+        // sweep "Sweep") and the stereo knob is "Spread" (so there aren't two
+        // "Width"s). Uni-Vibe uses the authentic vibe terms: Rate -> "Speed",
+        // Depth -> "Intensity".
         const bool flanger = (type == 1);
         const bool uniVibe = (type == 6);
         mRate->setCaption(uniVibe ? "Speed" : "Rate");
-        mDepth->setCaption(flanger ? "Width" : (uniVibe ? "Intensity" : "Depth"));
+        mDepth->setCaption(flanger ? "Sweep" : (uniVibe ? "Intensity" : "Depth"));
         mWidth->setCaption(flanger ? "Spread" : "Width");
         mP2Ratio->setVisible(type == 8);               // bi-phase: Sweep Gen 2 ratio
         mSeries.setVisible(type == 8);                  // bi-phase: series/parallel

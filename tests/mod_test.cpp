@@ -2,7 +2,7 @@
 // (measurement-first). Exits nonzero on any FAIL.
 //
 // ModVoice = one voiced effect; ModBlock = 3-slot series section.
-//   T1  tremolo depth (capped to its voiced musical maximum)
+//   T1  tremolo depth tracks the depth knob (now full-range)
 //   T2  tremolo rate via envelope period
 //   T3  chorus stays inside its designed sweep window
 //   T4  phaser notches move (hardwired sweep)
@@ -15,13 +15,13 @@
 //   T11 harmonic tremolo bands anti-correlated
 //   T12 Width controls the stereo spread
 //   T13 per-effect voicing constants (depthMax / bakedBbd / authenticWave)
-//   T14 tremolo at full depth keeps headroom (never dead silence / square)
+//   T14 tremolo at full depth chops to near-silence (full-depth chop)
 //   T15 only Tremolo honours the Shape waveform; others hardwire their LFO
 //   T16 flanger stays bounded at max feedback (incl. Invert on)
 //   T17 ZDF/TPT phaser: bounded at high feedback + resonance grows with feedback
 //   T18 flanger Manual shifts the static comb position
 //   T19 flanger Invert flips the comb polarity (notch <-> peak)
-//   T20 free Rate capped per effect (flanger 20 Hz, others 10 Hz; sync uncapped)
+//   T20 free Rate capped per effect (flanger 20 Hz, chorus 3.5 Hz, others 10 Hz; sync uncapped)
 //   T21 Bi-Phase finite + non-silent (parallel & series)
 //   T22 Bi-Phase parallel stereo A/B split scales with Width
 //   T23 Bi-Phase resonance grows with feedback (impulse ring)
@@ -430,7 +430,8 @@ int main()
     // ---- T13: per-effect voicing constants ----
     {
         const bool ok =
-            ModVoice::depthMax(ModVoice::kTremolo) < 1.0f &&
+            ModVoice::depthMax(ModVoice::kTremolo) == 1.0f &&   // tremolo now chops to full silence
+            ModVoice::depthMax(ModVoice::kHarmTrem) < 1.0f &&    // harm-trem still short of silence (LR4 rework pending)
             ModVoice::depthMax(ModVoice::kChorus) == 1.0f &&
             ModVoice::bakedBbd(ModVoice::kChorus) > 0.0f &&
             ModVoice::bakedBbd(ModVoice::kPhaser) == 0.0f &&
@@ -438,10 +439,10 @@ int main()
             ModVoice::authenticWave(ModVoice::kChorus) == Lfo::Sine &&
             ModVoice::mixFor(ModVoice::kFlanger, 1.0f) == 0.5f &&  // flanger Mix caps at 50/50
             ModVoice::mixFor(ModVoice::kFlanger, 0.0f) == 0.0f;    // ...and reaches fully dry
-        CHECK(ok, "T13 voicing constants (tremolo capped, BBD baked on delay types, flanger=triangle, flanger mix caps 50/50)");
+        CHECK(ok, "T13 voicing constants (tremolo chops full / harm-trem capped, BBD baked on delay types, flanger=triangle, flanger mix caps 50/50)");
     }
 
-    // ---- T14: tremolo at full depth keeps headroom (no dead silence/square) ----
+    // ---- T14: tremolo at full depth chops to near-silence (full-depth chop) ----
     {
         ModVoice m;
         m.setType(ModVoice::kTremolo);
@@ -455,7 +456,7 @@ int main()
         auto env = envelope(tail, 48);
         double mn = 1e9, mx = 0;
         for (auto e : env) { mn = std::min(mn, e); mx = std::max(mx, e); }
-        CHECK(mn / mx > 0.10, "T14 full depth keeps headroom (min/max %.2f > 0.10 = no silence)", mn / mx);
+        CHECK(mn / mx < 0.10, "T14 full depth chops deep (min/max %.2f < 0.10 = near-silence trough)", mn / mx);
     }
 
     // ---- T15: only Tremolo honours the Shape waveform ----
@@ -642,11 +643,18 @@ int main()
         CHECK(std::abs(f.effectiveRateHz() - 20.0f) < 0.01f,
               "T20 flanger free rate reaches 20 Hz (%.2f)", f.effectiveRateHz());
 
+        ModVoice t;
+        t.setType(ModVoice::kTremolo);
+        t.setRateHz(20.0f);
+        CHECK(std::abs(t.effectiveRateHz() - 10.0f) < 0.01f,
+              "T20 standard free rate capped at 10 Hz (%.2f)", t.effectiveRateHz());
+
+        // chorus is held slower still so it never tips into vibrato/warble
         ModVoice c;
         c.setType(ModVoice::kChorus);
         c.setRateHz(20.0f);
-        CHECK(std::abs(c.effectiveRateHz() - 10.0f) < 0.01f,
-              "T20 non-flanger free rate capped at 10 Hz (%.2f)", c.effectiveRateHz());
+        CHECK(std::abs(c.effectiveRateHz() - ModVoice::kChorusMaxRateHz) < 0.01f,
+              "T20 chorus free rate capped at %.2f Hz (%.2f)", ModVoice::kChorusMaxRateHz, c.effectiveRateHz());
 
         // sync ignores the cap (honours the host division): 1/16 @240 BPM = 16 Hz
         ModVoice s;
