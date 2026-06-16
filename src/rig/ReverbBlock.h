@@ -254,15 +254,24 @@ private:
 //   predelay : integer delay line feeding the driver (exact predelay shift)
 //   mod      : a tiny LFO wander on the (fractional) pickups, de-metallicises
 //   freeze   : sig0 -> 0 (lossless plate) + input muted = infinite sustain
-// Stability: explicit biharmonic needs mu = kappa*k/h^2 < 0.25; we sit at 0.22.
+// Pickups read BENDING STRAIN (curvature = Laplacian at the node) like a real piezo
+// contact mic, not raw displacement: a force-driven plate's displacement rolls off
+// ~12 dB/oct (dark/low-endy); curvature adds ~+12 dB/oct and restores the bright vintage plate
+// balance. A gentle output low-shelf trims residual low boom. Stability: explicit
+// biharmonic needs mu = kappa*k/h^2 < 0.25 (we sit at 0.24); the explicit sig1 term
+// tightens that bound, so sig1 is clamped to kS1Max.
 class PlateReverb
 {
 public:
     static constexpr int kNx = 38, kNy = 26;        // grid incl. fixed 0 border
     static constexpr int kN = kNx * kNy;
-    static constexpr double kMu = 0.22;             // kappa*k/h^2, stability < 0.25
+    static constexpr double kMu = 0.24;             // kappa*k/h^2, stability < 0.25
     static constexpr double kTension = 0.04;        // small tension (Courant) term
-    static constexpr float kOutGain = 0.20f;        // engine -> GuardMixer level
+    static constexpr float kOutGain = 0.22f;        // engine -> GuardMixer level
+    static constexpr double kS1Max = 0.006;         // sig1 stability clamp (blow-up ~0.015 @ mu 0.24)
+    static constexpr double kFreezeS1 = 1.0e-6;     // freeze: hold full-range (not an LF drone)
+    static constexpr float kShelfHz = 220.0f;       // output low-shelf corner
+    static constexpr float kShelfGain = 0.7f;       // ~ -3 dB below kShelfHz (trim residual low boom)
 
     void prepare(double fs)
     {
@@ -274,7 +283,7 @@ public:
         mPickR = idx((3 * kNx) / 4, kNy / 3 + 1);
         mMu2 = kMu * kMu; mLam2 = kTension * kTension;
         mPredelay.prepare((int)std::ceil(0.2 * mFs) + 8);
-        mLfo.prepare(mFs); mLfo.setRateHz(0.7f);
+        mLfo.prepare(mFs); mLfo.setRateHz(0.7f); mShelfA = reverb_detail::onePole(kShelfHz, mFs);
         recompute();
         reset();
         mPrepared = true;
@@ -286,7 +295,7 @@ public:
         std::fill(mU2.begin(), mU2.end(), 0.0);
         std::fill(mLap.begin(), mLap.end(), 0.0); std::fill(mLap1.begin(), mLap1.end(), 0.0);
         std::fill(mBih.begin(), mBih.end(), 0.0);
-        mPredelay.reset(); mLfo.reset();
+        mPredelay.reset(); mLfo.reset(); mShelfL = mShelfR = 0.0f;
     }
 
     void setDecaySeconds(float t60) { mT60 = std::max(0.1f, t60); mDirty = true; }
@@ -303,6 +312,7 @@ public:
         const double s0 = mFreeze ? 0.0 : mS0;
         const float inGain = mFreeze ? 0.0f : 1.0f;
         const double inv = 1.0 / (1.0 + s0);
+        const double s1 = mFreeze ? kFreezeS1 : mS1;   // freeze holds full-range, not an LF drone
         const float md = mMod * 0.4f;               // <= 0.4-node subtle pickup wander
         const int blx = mPickL % kNx, bly = mPickL / kNx;
         const int brx = mPickR % kNx, bry = mPickR / kNx;
@@ -331,7 +341,7 @@ public:
                     const double un1 = mU1[(size_t)i];
                     mU2[(size_t)i] = inv * (2.0 * mU[(size_t)i] - un1 - mMu2 * mBih[(size_t)i]
                                             + mLam2 * mLap[(size_t)i] + s0 * un1
-                                            + 2.0 * mS1 * (mLap[(size_t)i] - mLap1[(size_t)i]) + force);
+                                            + 2.0 * s1 * (mLap[(size_t)i] - mLap1[(size_t)i]) + force);
                 }
             // rotate state (O(1) pointer swaps): mU<-u^{n+1}, mU1<-u^n, mLap1<-Lap(u^n)
             mU.swap(mU1); mU.swap(mU2); mLap.swap(mLap1);
@@ -342,10 +352,13 @@ public:
                 oL = bilin((float)blx + md * mLfo.value(0.0),  (float)bly + md * mLfo.value(0.27));
                 oR = bilin((float)brx + md * mLfo.value(0.5),  (float)bry + md * mLfo.value(0.13));
             }
-            else { oL = (float)mU[(size_t)mPickL]; oR = (float)mU[(size_t)mPickR]; }
+            else { oL = (float)mLap1[(size_t)mPickL]; oR = (float)mLap1[(size_t)mPickR]; } // curvature = bending strain
 
+            // output low-shelf (~ -3 dB below kShelfHz) then engine level
+            mShelfL += mShelfA * (oL - mShelfL); oL = kShelfGain * mShelfL + (oL - mShelfL);
+            reverb_detail::flush(mShelfL);
             left[n] = kOutGain * oL;
-            if (stereo) right[n] = kOutGain * oR;
+            if (stereo) { mShelfR += mShelfA * (oR - mShelfR); oR = kShelfGain * mShelfR + (oR - mShelfR); reverb_detail::flush(mShelfR); right[n] = kOutGain * oR; }
             mLfo.advance();
         }
     }
@@ -358,8 +371,8 @@ private:
         int y0 = std::clamp((int)std::floor(fy), 1, kNy - 2);
         const float tx = fx - (float)x0, ty = fy - (float)y0;
         const int i = y0 * kNx + x0;
-        const double a = mU[(size_t)i], b = mU[(size_t)(i + 1)];
-        const double c = mU[(size_t)(i + kNx)], d = mU[(size_t)(i + kNx + 1)];
+        const double a = mLap1[(size_t)i], b = mLap1[(size_t)(i + 1)];
+        const double c = mLap1[(size_t)(i + kNx)], d = mLap1[(size_t)(i + kNx + 1)];
         return (float)((a * (1.0 - tx) + b * tx) * (1.0 - ty) + (c * (1.0 - tx) + d * tx) * ty);
     }
     void recompute()
@@ -367,6 +380,7 @@ private:
         mS0 = (3.0 * std::log(10.0) / (double)std::max(0.1f, mT60)) / mFs; // T60 -> sig0
         const double hz = std::clamp((double)mDampHz, 500.0, 20000.0);
         mS1 = (0.6 * (12000.0 / hz)) / mFs;                                // Damp Hz -> sig1
+        mS1 = std::min(mS1, kS1Max);                                       // explicit-sig1 stability clamp
         mDirty = false;
     }
 
@@ -377,6 +391,7 @@ private:
     FracDelayLine mPredelay;
     Lfo mLfo;
     float mT60 = 2.0f, mDampHz = 7000.0f, mPredelayMs = 10.0f, mMod = 0.3f;
+    float mShelfL = 0.0f, mShelfR = 0.0f, mShelfA = 0.0f; // output low-shelf state/coef
     bool mPrepared = false, mDirty = true, mFreeze = false;
 };
 
