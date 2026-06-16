@@ -725,6 +725,7 @@ int main()
             m.setDepth(0.7f);
             m.setP2Ratio(ratio);
             m.setSeries(false);
+            m.setWidth(0.0f); // mono-sum both cores so Gen 2 (Core B) is in the measured channel
             m.prepare({SR, BLK});
             auto l = tone(1000.0, 0.5, (int)SR), r = l;
             run(m, l, r);

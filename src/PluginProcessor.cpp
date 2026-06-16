@@ -174,7 +174,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
             juce::ParameterID(p + "Invert", 1), n + "Invert", false)); // Flanger phase invert
         params.push_back(std::make_unique<juce::AudioParameterFloat>(
             juce::ParameterID(p + "P2Ratio", 1), n + "Sweep 2",
-            juce::NormalisableRange<float>(0.25f, 4.0f, 0.01f, 0.5f), 1.5f)); // Bi-Phase Gen 2 rate ratio
+            juce::NormalisableRange<float>(0.5f, 2.0f, 0.01f, 0.63f), 1.5f)); // Bi-Phase Gen 2 ratio (musical detune, taper centred on 1.0)
         params.push_back(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID(p + "Series", 1), n + "Series", false)); // Bi-Phase series/parallel
         params.push_back(std::make_unique<juce::AudioParameterBool>(
