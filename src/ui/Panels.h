@@ -1302,25 +1302,11 @@ public:
     void paint(juce::Graphics &g) override
     {
         BlockPanel::paint(g); // panel body + "MODULATION" title
-        // "OUT" divider above the post lane (the output stage; shown in both modes),
-        // aligned under the spine's "IN" marker.
-        if (mPostDivider.getHeight() > 0)
-        {
-            const float dy = (float)mPostDivider.getCentreY();
-            g.setColour(colors::outline);
-            g.drawLine((float)mPostDivider.getX(), dy, (float)mPostDivider.getRight(), dy, 1.0f);
-            g.setColour(colors::accent);
-            g.setFont(RigLookAndFeel::withHeight(9.0f).boldened());
-            g.fillRect(mSpine.getX() - 4, mPostDivider.getY(), 30, mPostDivider.getHeight());
-            g.setColour(colors::panel);
-            g.drawText("OUT", mSpine.getX() - 4, mPostDivider.getY(), 30, mPostDivider.getHeight(),
-                       juce::Justification::centred);
-        }
         if (mSpine.getHeight() <= 0)
             return;
         const float x = (float)mSpine.getCentreX();
         const float top = (float)mSpine.getY();
-        const float bot = (float)mPostDivider.getY(); // line runs down to the OUT box
+        const float bot = mPostLaneY - 7.0f; // line ends just above the OUT label
         g.setColour(colors::outline);
         g.drawLine(x, top, x, bot, 1.5f);
         g.setColour(colors::accentDim);
@@ -1348,6 +1334,7 @@ public:
         g.setColour(colors::textDim);
         g.setFont(RigLookAndFeel::withHeight(9.0f));
         g.drawText("IN", mSpine.getX() - 3, mSpine.getY() - 13, 26, 11, juce::Justification::centred);
+        g.drawText("OUT", mSpine.getX() - 3, (int)mPostLaneY - 5, 26, 11, juce::Justification::centred);
     }
 
     void resized() override
@@ -1374,6 +1361,7 @@ public:
         // Reserve the bottom for the dedicated POST lane, under an "OUT" divider.
         auto postRegion = area.removeFromBottom(area.getHeight() / 4);
         mPostDivider = postRegion.removeFromTop(16);
+        mPostLaneY = (float)postRegion.getCentreY(); // OUT label sits next to the post lane
         area.removeFromBottom(gap);
         if (mPostLane) mPostLane->setBounds(postRegion.reduced(0, 2));
         // Front lanes fill the rest.
@@ -1397,6 +1385,7 @@ private:
     juce::Rectangle<int> mSpine, mPostDivider;
     std::vector<float> mArrowYs;
     std::array<float, (size_t)nam_rig::ModBlock::kSlots> mLaneCenters{}; // parallel spine taps
+    float mPostLaneY = 0.0f;                                             // OUT label / line end
     juce::ComboBox mRouting;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mRoutingAtt;
     std::unique_ptr<BlendPad> mPad;
