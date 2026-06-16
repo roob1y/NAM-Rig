@@ -34,7 +34,7 @@ public:
     enum Type
     {
         kChorus = 0, kFlanger, kPhaser, kTremolo,
-        kVibrato, kRotary, kUniVibe, kHarmTrem
+        kVibrato, kRotary, kUniVibe, kHarmTrem, kBiPhase
     };
 
     // Voicing constants (fixed; knobs scale within these)
@@ -48,6 +48,8 @@ public:
     static constexpr double kUniCenterHz = 400.0;
     static constexpr double kHarmXoverHz = 800.0;
     static constexpr int kPhaserStages = 4;
+    static constexpr int kBiPhaseStages = 6;                                   // Mu-Tron Bi-Phase: 6 stages per phasor
+    static constexpr double kBiPhaseCenterHz = 500.0, kBiPhaseOctaves = 2.4;   // tunable by ear
     static constexpr double kRightLfoOffset = 0.25; // 90 degrees at Width = 1
     static constexpr float kPhaserFixedDepth = 1.0f; // phaser sweep is hardwired
     static constexpr float kUniFeedback = 0.3f;      // uni-vibe resonance is hardwired
@@ -79,6 +81,7 @@ public:
         case kChorus: return knobMix;
         case kFlanger: return knobMix * 0.5f; // knob spans dry..50/50 (deepest flange) -- can't thin past the sweet spot
         case kPhaser:
+        case kBiPhase:
         case kUniVibe: return 0.5f;
         default: return 1.0f; // vibrato / rotary / tremolo / harm-trem = full wet
         }
@@ -108,6 +111,7 @@ public:
         for (auto &d : mLine)
             d.prepare(maxDelay);
         mLfo.prepare(mFs);
+        mLfo2.prepare(mFs); // Bi-Phase Sweep Gen 2
         mSmoothK = 1.0f - std::exp((float)(-1.0 / (0.010 * mFs))); // 10 ms
         reset();
         mPrepared = true;
@@ -119,6 +123,10 @@ public:
             d.reset();
         for (auto &ap : mAllpass)
             ap = {};
+        for (auto &c : mBiA)
+            c = {};
+        for (auto &c : mBiB)
+            c = {};
         mFbState[0] = mFbState[1] = 0.0f;
         mFbLp[0] = mFbLp[1] = 0.0f;
         mXoverLp[0] = mXoverLp[1] = 0.0f;
@@ -133,9 +141,11 @@ public:
         mRotHornSpeed = kRotSlowHz;
         mRotDrumSpeed = kRotSlowHz * 0.78f;
         mLfo.reset();
+        mLfo2.reset();
         mDepthZ = mDepth;
         mMixZ = mMix;
         mManualZ = mManual;
+        mSeriesZ = mSeries ? 1.0f : 0.0f;
     }
 
     // ---- parameters (audio thread) ----
@@ -158,6 +168,8 @@ public:
     void setMix(float m) { mMix = m; }
     void setManual(float m) { mManual = m; }       // Flanger: static comb position (M-126 Manual)
     void setInvert(bool inv) { mInvert = inv; }    // Flanger: phase-invert the wet/regen path
+    void setP2Ratio(float r) { mP2Ratio = r; }     // Bi-Phase: Sweep Gen 2 rate as a ratio of Gen 1
+    void setSeries(bool s) { mSeries = s; }        // Bi-Phase: series (true) vs parallel (false) routing
     void setWidth(float w) { mWidth = w; }         // 0 = mono spread, 1 = 90 deg
     void setDrive(float d) { mRotDrive = d; }      // Rotary: Leslie tube-amp drive
     void setRotFast(bool f) { mRotFast = f; }      // Rotary: slow (chorale) / fast (tremolo)
@@ -189,6 +201,8 @@ public:
         const double rate = (double)effectiveRateHz();
         mLfo.setRateHz((float)rate);
         mLfo.setWaveform(ty == kTremolo ? mUserWave : authenticWave(ty)); // shape hardwired per type
+        mLfo2.setRateHz((float)(rate * (double)mP2Ratio)); // Bi-Phase Sweep Gen 2 = Gen 1 x ratio
+        mLfo2.setWaveform(Lfo::Sine);
         const float dMax = depthMax(ty);
         mBakedBbd = bakedBbd(ty);
         mBbdCoef = coefForHz(12000.0 - 10000.0 * (double)mBakedBbd, mFs);
@@ -214,6 +228,7 @@ public:
             mDepthZ += mSmoothK * (mDepth - mDepthZ);
             mMixZ += mSmoothK * (mixTarget - mMixZ);
             mManualZ += mSmoothK * (mManual - mManualZ); // de-zipper the Manual knob
+            mSeriesZ += mSmoothK * ((mSeries ? 1.0f : 0.0f) - mSeriesZ); // de-click the routing toggle
             const float depth = mDepthZ * dMax; // voiced musical maximum
 
             // pass the LFO phase OFFSET (not value) so multi-tap effects can
@@ -223,6 +238,7 @@ public:
                 right[i] = processSample(1, right[i], rOff, depth);
 
             mLfo.advance();
+            mLfo2.advance(); // Bi-Phase Sweep Gen 2
             mRotHornPhase += mHornInc;
             if (mRotHornPhase >= 1.0) mRotHornPhase -= 1.0;
             mRotDrumPhase += mDrumInc;
@@ -429,8 +445,63 @@ private:
             const float wet = low * (1.0f - depth * g) + high * (1.0f - depth * (1.0f - g));
             return (1.0f - mMixZ) * x + mMixZ * wet;
         }
+        case kBiPhase:
+        {
+            // Mu-Tron Bi-Phase: two 6-stage ZDF phasors. Core A is swept by Sweep
+            // Gen 1 (mLfo), Core B by Sweep Gen 2 (mLfo2 = Gen1 x P2Ratio) -- two
+            // detuned LFOs give the complex, non-repeating motion. Series/parallel
+            // is a smoothed crossfade (mSeriesZ) applied to BOTH Core B's input and
+            // the output combine, so toggling the routing never steps the states ->
+            // no click. In parallel the two cores pan opposite (A/B stereo split)
+            // by Width; mono at Width 0. Shared Feedback, 50/50 mix (notch effect).
+            const float a = phasor6(mBiA[(size_t)ch], x, mLfo.value(off), depth, mFeedback);
+            const float bIn = (1.0f - mSeriesZ) * x + mSeriesZ * a; // parallel(x) -> series(A(x))
+            const float b = phasor6(mBiB[(size_t)ch], bIn, mLfo2.value(off), depth, mFeedback);
+            const float w = mWidth;
+            const float panA = (ch == 0) ? 0.5f + 0.5f * w : 0.5f - 0.5f * w;
+            const float panB = (ch == 0) ? 0.5f - 0.5f * w : 0.5f + 0.5f * w;
+            const float parallelWet = panA * a + panB * b;
+            const float wet = (1.0f - mSeriesZ) * parallelWet + mSeriesZ * b;
+            return (1.0f - mMixZ) * x + mMixZ * wet;
+        }
         }
         return x;
+    }
+
+    // One 6-stage ZDF/TPT phasor with zero-delay-resolved negative feedback (the
+    // Bi-Phase building block). beta[0] is the INPUT-side stage, so the forward
+    // Horner accumulation weights it by alpha^(N-1) -- matching the cascade, where
+    // stage 0's output passes through every later stage. fc is clamped on BOTH
+    // sides before tan() so a deep sweep can never cross Nyquist and NaN out.
+    float phasor6(PhasorCore &c, float x, float lfoVal, float depth, float fb)
+    {
+        double fc = kBiPhaseCenterHz *
+                    std::pow(2.0, (double)lfoVal * kBiPhaseOctaves * (double)depth);
+        fc = std::min(0.45 * mFs, std::max(20.0, fc));
+        const double g = std::tan(3.14159265358979323846 * fc / mFs);
+        const float G = (float)(g / (1.0 + g));
+        const float alpha = 2.0f * G - 1.0f;
+
+        float beta[kBiPhaseStages];
+        float B = 0.0f;
+        for (int i = 0; i < kBiPhaseStages; ++i)
+        {
+            beta[i] = 2.0f * (1.0f - G) * c.s[i];
+            B = alpha * B + beta[i]; // forward Horner: beta[0] ends up x alpha^(N-1)
+        }
+        const float a2 = alpha * alpha;
+        const float A = a2 * a2 * a2; // alpha^6
+
+        const float u = (x - fb * B) / (1.0f + fb * A); // negative feedback (Phase-90 notch), denom > 0
+        float in = u;
+        for (int i = 0; i < kBiPhaseStages; ++i)
+        {
+            const float out = alpha * in + beta[i];
+            const float v = (in - c.s[i]) * G;
+            c.s[i] += 2.0f * v; // TPT integrator update
+            in = out;
+        }
+        return in;
     }
 
     // Baked bucket-brigade colour for the delay-based types (chorus/flanger/
@@ -463,6 +534,10 @@ private:
             if (std::abs(st.y1) < 1.0e-30f) st.y1 = 0.0f;
             if (std::abs(st.s) < 1.0e-30f) st.s = 0.0f;
         }
+        for (auto *bank : {&mBiA, &mBiB})
+            for (auto &c : *bank)
+                for (auto &v : c.s)
+                    if (std::abs(v) < 1.0e-30f) v = 0.0f;
         for (auto &f : mFbState)
             if (std::abs(f) < 1.0e-30f) f = 0.0f;
         for (auto &f : mXoverLp)
@@ -484,10 +559,14 @@ private:
     // x1/y1 = Direct-Form-I state (still used by Uni-Vibe until its own upgrade);
     // s = TPT integrator state used by the ZDF Phaser.
     struct ApState { float x1 = 0.0f, y1 = 0.0f, s = 0.0f; };
+    // One Bi-Phase phasor's TPT integrator states (6 stages), per channel.
+    struct PhasorCore { float s[kBiPhaseStages] = {0.0f}; };
 
     double mFs = 48000.0;
     Type mType = kChorus;
     Lfo mLfo;
+    Lfo mLfo2; // Bi-Phase Sweep Generator 2
+    std::array<PhasorCore, 2> mBiA{}, mBiB{}; // Bi-Phase cores A/B, per channel
     std::array<FracDelayLine, 2> mLine;
     std::array<ApState, 2 * kPhaserStages> mAllpass{};
     std::array<float, 2> mFbState{};
@@ -499,6 +578,9 @@ private:
     float mDepthZ = 0.5f, mMixZ = 0.5f, mSmoothK = 0.01f;
     float mManual = 0.3f, mManualZ = 0.3f; // Flanger Manual (static comb position)
     bool mInvert = false;                  // Flanger phase-invert switch
+    float mP2Ratio = 1.5f;                 // Bi-Phase Sweep Gen 2 rate ratio
+    bool mSeries = false;                  // Bi-Phase series (true) / parallel (false)
+    float mSeriesZ = 0.0f;                 // smoothed routing crossfade (de-click)
     float mWidth = 1.0f;
     int mUserWave = 0;                          // Tremolo's Shape choice
     float mBakedBbd = 0.0f;                     // per-block, from bakedBbd(type)
@@ -569,6 +651,8 @@ public:
     void setRotFast(int s, bool f) { mVoice[idx(s)].setRotFast(f); }
     void setManual(int s, float m) { mVoice[idx(s)].setManual(m); }
     void setInvert(int s, bool inv) { mVoice[idx(s)].setInvert(inv); }
+    void setP2Ratio(int s, float r) { mVoice[idx(s)].setP2Ratio(r); }
+    void setSeries(int s, bool ser) { mVoice[idx(s)].setSeries(ser); }
     void setSlotBypassed(int s, bool b) { mVoice[idx(s)].setBypassed(b); }
     void setBpm(double bpm)
     {

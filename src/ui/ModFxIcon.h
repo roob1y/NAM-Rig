@@ -150,6 +150,10 @@ public:
             g.fillRoundedRectangle(L, B - H * 0.42f, W, H * 0.42f, 2.0f); // low band
             break;
         }
+        case 8: // Bi-Phase — two phasers sweeping at offset phases (dual notch)
+            stroke(sinePath(cy - H * 0.12f, H * 0.20f, 1.5f, ph), 1.8f, 1.0f);
+            stroke(sinePath(cy + H * 0.12f, H * 0.20f, 1.5f, ph + 0.4f), 1.8f, 0.55f);
+            break;
         default:
             break;
         }

@@ -742,7 +742,7 @@ public:
         addAndMakeVisible(mIcon);
 
         mType.addItemList({"Chorus", "Flanger", "Phaser", "Tremolo",
-                           "Vibrato", "Rotary", "Uni-Vibe", "Harm Trem"}, 1);
+                           "Vibrato", "Rotary", "Uni-Vibe", "Harm Trem", "Bi-Phase"}, 1);
         addAndMakeVisible(mType);
         mTypeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
             apvts, p + "Type", mType);
@@ -791,6 +791,13 @@ public:
         mInvertAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             apvts, p + "Invert", mInvert);
 
+        mP2Ratio = std::make_unique<LabeledKnob>(apvts, p + "P2Ratio", "Sweep 2");
+        addChildComponent(*mP2Ratio); // bi-phase only (Sweep Gen 2 rate ratio)
+        mSeries.setButtonText("Series");
+        addChildComponent(mSeries); // bi-phase only (series/parallel routing)
+        mSeriesAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            apvts, p + "Series", mSeries);
+
         refresh();
     }
 
@@ -809,7 +816,7 @@ public:
         mLastOn = on;
         const bool rotary = (type == 5);
         mDepth->setVisible(type != 2);                 // phaser: no depth knob
-        mFeedback->setVisible(type == 1 || type == 2); // flanger/phaser
+        mFeedback->setVisible(type == 1 || type == 2 || type == 8); // flanger/phaser/bi-phase
         mMix->setVisible(nam_rig::ModVoice::mixExposed((nam_rig::ModVoice::Type)type)); // chorus + flanger
         mWave.setVisible(type == 3);                   // tremolo shape
         mRate->setVisible(!rotary);                    // rotary: slow/fast toggle, not a rate
@@ -823,6 +830,8 @@ public:
         const bool flanger = (type == 1);
         mDepth->setCaption(flanger ? "Width" : "Depth");
         mWidth->setCaption(flanger ? "Spread" : "Width");
+        mP2Ratio->setVisible(type == 8);               // bi-phase: Sweep Gen 2 ratio
+        mSeries.setVisible(type == 8);                  // bi-phase: series/parallel
         mRate->setEnabled(sync == 0);                  // rate greyed when synced
         repaint();                                     // LED
         resized();
@@ -868,6 +877,11 @@ public:
             mInvert.setBounds(area.removeFromRight(50).withSizeKeepingCentre(50, 22));
             area.removeFromRight(8);
         }
+        if (mSeries.isVisible())
+        {
+            mSeries.setBounds(area.removeFromRight(64).withSizeKeepingCentre(64, 22));
+            area.removeFromRight(8);
+        }
         if (mWave.isVisible())
         {
             mWave.setBounds(area.removeFromRight(84).withSizeKeepingCentre(84, 24));
@@ -876,8 +890,8 @@ public:
 
         std::vector<juce::Component *> vis;
         for (juce::Component *k : {(juce::Component *)mRate.get(), (juce::Component *)mDepth.get(),
-                                   (juce::Component *)mFeedback.get(), (juce::Component *)mManual.get(),
-                                   (juce::Component *)mMix.get(),
+                                   (juce::Component *)mFeedback.get(), (juce::Component *)mP2Ratio.get(),
+                                   (juce::Component *)mManual.get(), (juce::Component *)mMix.get(),
                                    (juce::Component *)mWidth.get(), (juce::Component *)mDrive.get()})
             if (k->isVisible())
                 vis.push_back(k);
@@ -903,9 +917,9 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt, mWaveAtt, mSyncAtt;
     juce::ToggleButton mOn;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mOnAtt;
-    std::unique_ptr<LabeledKnob> mRate, mDepth, mFeedback, mMix, mWidth, mDrive, mManual;
-    juce::ToggleButton mRotFast, mInvert;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mRotFastAtt, mInvertAtt;
+    std::unique_ptr<LabeledKnob> mRate, mDepth, mFeedback, mMix, mWidth, mDrive, mManual, mP2Ratio;
+    juce::ToggleButton mRotFast, mInvert, mSeries;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mRotFastAtt, mInvertAtt, mSeriesAtt;
 };
 
 class ModPanel : public BlockPanel

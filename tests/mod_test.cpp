@@ -22,6 +22,10 @@
 //   T18 flanger Manual shifts the static comb position
 //   T19 flanger Invert flips the comb polarity (notch <-> peak)
 //   T20 free Rate capped per effect (flanger 20 Hz, others 10 Hz; sync uncapped)
+//   T21 Bi-Phase finite + non-silent (parallel & series)
+//   T22 Bi-Phase parallel stereo A/B split scales with Width
+//   T23 Bi-Phase resonance grows with feedback (impulse ring)
+//   T24 Bi-Phase second sweep generator (P2Ratio) changes the motion
 #include "rig/ModBlock.h"
 #include <cstdio>
 #include <cmath>
@@ -641,6 +645,96 @@ int main()
         s.setBpm(240.0);
         s.setSyncIndex(9);
         CHECK(s.effectiveRateHz() > 10.0f, "T20 synced rate not capped (%.2f Hz)", s.effectiveRateHz());
+    }
+
+    // ---- T21: Bi-Phase finite + non-silent (parallel and series) ----
+    {
+        bool ok = true;
+        for (bool series : {false, true})
+        {
+            ModVoice m;
+            m.setType(ModVoice::kBiPhase);
+            m.setRateHz(2.0f);
+            m.setDepth(0.7f);
+            m.setFeedback(0.5f);
+            m.setP2Ratio(1.5f);
+            m.setSeries(series);
+            m.prepare({SR, BLK});
+            auto l = tone(440.0, 0.3, (int)SR), r = l;
+            run(m, l, r);
+            double e = 0;
+            bool fin = true;
+            for (float v : l) { if (!std::isfinite(v)) fin = false; e += (double)v * v; }
+            if (!fin || e < 1e-3) ok = false;
+        }
+        CHECK(ok, "T21 Bi-Phase finite + non-silent (parallel & series)");
+    }
+
+    // ---- T22: Bi-Phase parallel stereo A/B split scales with Width ----
+    {
+        auto spread = [](float width) {
+            ModVoice m;
+            m.setType(ModVoice::kBiPhase);
+            m.setRateHz(2.0f);
+            m.setDepth(0.7f);
+            m.setP2Ratio(1.5f);
+            m.setSeries(false); // parallel
+            m.setWidth(width);
+            m.prepare({SR, BLK});
+            auto l = tone(1000.0, 0.5, (int)SR), r = l;
+            run(m, l, r);
+            double d = 0;
+            for (size_t i = 4800; i < l.size(); ++i)
+                d = std::max(d, (double)std::abs(l[i] - r[i]));
+            return d;
+        };
+        CHECK(spread(0.0f) < 1e-6, "T22 Bi-Phase width 0 -> L==R (max diff %.2e)", spread(0.0f));
+        CHECK(spread(1.0f) > 0.02, "T22 Bi-Phase width 1 -> A/B stereo split (max diff %.3f)", spread(1.0f));
+    }
+
+    // ---- T23: Bi-Phase resonance grows with feedback (impulse ring, frozen sweep) ----
+    {
+        auto tailEnergy = [](float fb) {
+            ModVoice m;
+            m.setType(ModVoice::kBiPhase);
+            m.setRateHz(0.0f); // frozen sweep -> stationary resonant frequency
+            m.setDepth(0.7f);
+            m.setFeedback(fb);
+            m.setSeries(false);
+            m.prepare({SR, BLK});
+            std::vector<float> l((size_t)SR / 4, 0.0f);
+            l[0] = 1.0f; // impulse
+            auto r = l;
+            run(m, l, r);
+            double e = 0;
+            for (size_t i = 400; i < l.size(); ++i)
+                e += (double)l[i] * (double)l[i];
+            return e;
+        };
+        const double e0 = tailEnergy(0.0f), e4 = tailEnergy(0.4f), e8 = tailEnergy(0.8f);
+        CHECK(e0 < e4 && e4 < e8 && e8 > 1e-6,
+              "T23 Bi-Phase rings more with feedback (tail %.2e < %.2e < %.2e)", e0, e4, e8);
+    }
+
+    // ---- T24: Bi-Phase second sweep generator (P2Ratio) changes the motion ----
+    {
+        auto runRatio = [](float ratio) {
+            ModVoice m;
+            m.setType(ModVoice::kBiPhase);
+            m.setRateHz(2.0f);
+            m.setDepth(0.7f);
+            m.setP2Ratio(ratio);
+            m.setSeries(false);
+            m.prepare({SR, BLK});
+            auto l = tone(1000.0, 0.5, (int)SR), r = l;
+            run(m, l, r);
+            return l;
+        };
+        auto a = runRatio(1.0f), b = runRatio(2.5f);
+        double d = 0;
+        for (size_t i = 4800; i < a.size(); ++i)
+            d = std::max(d, (double)std::abs(a[i] - b[i]));
+        CHECK(d > 0.02, "T24 Bi-Phase Gen 2 ratio changes the sweep (max diff %.3f)", d);
     }
 
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);

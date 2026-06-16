@@ -136,7 +136,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
             juce::ParameterID(p + "Type", 1), n + "Type",
             juce::StringArray{"Chorus", "Flanger", "Phaser", "Tremolo",
-                              "Vibrato", "Rotary", "Uni-Vibe", "Harm Trem"},
+                              "Vibrato", "Rotary", "Uni-Vibe", "Harm Trem", "Bi-Phase"},
             0));
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
             juce::ParameterID(p + "Wave", 1), n + "Waveform",
@@ -172,6 +172,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
             juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.3f)); // Flanger static comb position
         params.push_back(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID(p + "Invert", 1), n + "Invert", false)); // Flanger phase invert
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(p + "P2Ratio", 1), n + "Sweep 2",
+            juce::NormalisableRange<float>(0.25f, 4.0f, 0.01f, 0.5f), 1.5f)); // Bi-Phase Gen 2 rate ratio
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID(p + "Series", 1), n + "Series", false)); // Bi-Phase series/parallel
         params.push_back(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID(p + "On", 1), n + "Enable", s == 1));
     }
@@ -556,10 +561,10 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
 
     // Stereo section (all zero-latency; plain chain bypass is safe).
     // 3-slot mod section (ids prebuilt = no per-block string alloc; cf. EQ bands)
-    static const char *const modIds[3][13] = {
-        {"mod1Type", "mod1Wave", "mod1Sync", "mod1Rate", "mod1Depth", "mod1Feedback", "mod1Mix", "mod1Width", "mod1Drive", "mod1RotFast", "mod1Manual", "mod1Invert", "mod1On"},
-        {"mod2Type", "mod2Wave", "mod2Sync", "mod2Rate", "mod2Depth", "mod2Feedback", "mod2Mix", "mod2Width", "mod2Drive", "mod2RotFast", "mod2Manual", "mod2Invert", "mod2On"},
-        {"mod3Type", "mod3Wave", "mod3Sync", "mod3Rate", "mod3Depth", "mod3Feedback", "mod3Mix", "mod3Width", "mod3Drive", "mod3RotFast", "mod3Manual", "mod3Invert", "mod3On"}};
+    static const char *const modIds[3][15] = {
+        {"mod1Type", "mod1Wave", "mod1Sync", "mod1Rate", "mod1Depth", "mod1Feedback", "mod1Mix", "mod1Width", "mod1Drive", "mod1RotFast", "mod1Manual", "mod1Invert", "mod1P2Ratio", "mod1Series", "mod1On"},
+        {"mod2Type", "mod2Wave", "mod2Sync", "mod2Rate", "mod2Depth", "mod2Feedback", "mod2Mix", "mod2Width", "mod2Drive", "mod2RotFast", "mod2Manual", "mod2Invert", "mod2P2Ratio", "mod2Series", "mod2On"},
+        {"mod3Type", "mod3Wave", "mod3Sync", "mod3Rate", "mod3Depth", "mod3Feedback", "mod3Mix", "mod3Width", "mod3Drive", "mod3RotFast", "mod3Manual", "mod3Invert", "mod3P2Ratio", "mod3Series", "mod3On"}};
     for (int s = 0; s < nam_rig::ModBlock::kSlots; ++s)
     {
         mChain.mod.setType(s, (int)apvts.getRawParameterValue(modIds[s][0])->load());
@@ -574,7 +579,9 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         mChain.mod.setRotFast(s, apvts.getRawParameterValue(modIds[s][9])->load() >= 0.5f);
         mChain.mod.setManual(s, apvts.getRawParameterValue(modIds[s][10])->load());
         mChain.mod.setInvert(s, apvts.getRawParameterValue(modIds[s][11])->load() >= 0.5f);
-        mChain.mod.setSlotBypassed(s, apvts.getRawParameterValue(modIds[s][12])->load() < 0.5f);
+        mChain.mod.setP2Ratio(s, apvts.getRawParameterValue(modIds[s][12])->load());
+        mChain.mod.setSeries(s, apvts.getRawParameterValue(modIds[s][13])->load() >= 0.5f);
+        mChain.mod.setSlotBypassed(s, apvts.getRawParameterValue(modIds[s][14])->load() < 0.5f);
     }
     mChain.mod.setBypassed(apvts.getRawParameterValue("modOn")->load() < 0.5f);
 
