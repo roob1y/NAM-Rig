@@ -101,10 +101,11 @@ public:
         g.setColour(colors::outline);
         g.drawRoundedRectangle(b, 8.0f, 1.0f);
 
-        // Section title: spaced orange caps (matches the design mockup).
+        // Section title: spaced orange caps (matches the design mockup), centred
+        // vertically in the header band (panel top -> first content row).
         g.setColour(juce::Colour(0xffeb9b43));
         g.setFont(RigLookAndFeel::withHeight(13.0f).withExtraKerningFactor(0.14f));
-        g.drawText(mTitle.toUpperCase(), getLocalBounds().removeFromTop(34).reduced(16, 0),
+        g.drawText(mTitle.toUpperCase(), getLocalBounds().removeFromTop(contentArea().getY()).reduced(16, 0),
                    juce::Justification::centredLeft);
     }
 
@@ -1245,7 +1246,12 @@ public:
 
     void paint(juce::Graphics &g) override
     {
-        auto box = getLocalBounds().toFloat().reduced(1.0f); // bordered container (matches the rack)
+        g.setColour(colors::textDim); // header (mirrors the rack's "SIGNAL FLOW")
+        g.setFont(RigLookAndFeel::withHeight(9.0f));
+        g.drawText("MOD MIX", getLocalBounds().removeFromTop(13), juce::Justification::centred);
+        auto box = getLocalBounds().toFloat(); // bordered container (matches the rack)
+        box.removeFromTop(15.0f);
+        box = box.reduced(1.0f);
         g.setColour(colors::scopeBg);
         g.fillRoundedRectangle(box, 8.0f);
         g.setColour(colors::outline);
@@ -1357,8 +1363,11 @@ private:
     }
     juce::Rectangle<float> padRect() const
     {
-        // Extra horizontal margin so the corner weight-% labels sit inside the box.
-        auto b = getLocalBounds().toFloat().reduced(22.0f, 16.0f);
+        auto b = getLocalBounds().toFloat();
+        b.removeFromTop(15.0f); // "MOD MIX" header
+        // Keep the triangle well-proportioned (square), centred in the box -- the
+        // box itself is tall (fills the strip), the triangle isn't stretched.
+        b = b.reduced(22.0f, 16.0f);
         const float s = juce::jmin(b.getWidth(), b.getHeight());
         return juce::Rectangle<float>(s, s).withCentre(b.getCentre());
     }
@@ -1699,7 +1708,7 @@ public:
         mPad = std::make_unique<BlendPad>(apvts);
         addChildComponent(*mPad); // parallel only
 
-        mModMix = std::make_unique<LabeledKnob>(apvts, "modMix", "Mix");
+        mModMix = std::make_unique<LabeledKnob>(apvts, "modMix", "Dry / Wet");
         mModMix->setRotationReadout(10.0);
         addChildComponent(*mModMix); // parallel only
 
@@ -1818,8 +1827,10 @@ public:
 
     void resized() override
     {
-        // Routing toggle (Series/Parallel) sits in the header's top-right corner.
-        mRouting.setBounds(getLocalBounds().removeFromTop(34).reduced(16, 6).removeFromRight(86));
+        // Routing toggle (Series/Parallel) sits in the header's top-right corner,
+        // vertically centred in the same band as the title.
+        auto hdr = getLocalBounds().removeFromTop(contentArea().getY()).reduced(16, 0);
+        mRouting.setBounds(hdr.removeFromRight(86).withSizeKeepingCentre(86, 24));
 
         auto area = contentArea();
         const int n = nam_rig::ModBlock::kSlots, gap = 8;
@@ -1846,8 +1857,7 @@ public:
         {
             mModMix->setBounds(strip.removeFromBottom(58).reduced(26, 0));
             strip.removeFromBottom(6);
-            const int sq = juce::jmin(strip.getWidth(), strip.getHeight());
-            mPad->setBounds(strip.withSizeKeepingCentre(sq, sq));
+            mPad->setBounds(strip); // fill the strip -> a taller blend triangle
         }
         else
         {
