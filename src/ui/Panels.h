@@ -1137,9 +1137,7 @@ public:
             mLanes[(size_t)s] = std::make_unique<ModSlotLane>(apvts, s);
             addAndMakeVisible(*mLanes[(size_t)s]);
             mLanes[(size_t)s]->onSolo = [this](int slot, bool on) {
-                if (onSetSolo) onSetSolo(slot, on);
-                updatePadActive(); // pad geometry follows the audible (soloed) slots
-                repaint();
+                if (onSetSolo) onSetSolo(slot, on); // momentary: audio only, blend untouched
             };
         }
         mRouting.addItemList({"Series", "Parallel"}, 1);
@@ -1174,16 +1172,15 @@ public:
         refreshRouting();
     }
 
-    // Pad geometry follows the AUDIBLE slots: the soloed ones if any solo is
-    // active, otherwise the enabled (On) slots.
+    // Pad geometry follows the ENABLED (On) slots only. Solo is momentary and
+    // must NOT move the puck / rewrite the blend, so it is deliberately excluded
+    // here -- soloing leaves the blend exactly as the user set it.
     void updatePadActive()
     {
-        const bool anySolo = getSolo && (getSolo(0) || getSolo(1) || getSolo(2));
-        auto audible = [&](int s) {
-            if (anySolo) return getSolo(s);
+        auto enabled = [&](int s) {
             return mApvts.getRawParameterValue("mod" + juce::String(s + 1) + "On")->load() >= 0.5f;
         };
-        mPad->setActiveSlots(audible(0), audible(1), audible(2));
+        mPad->setActiveSlots(enabled(0), enabled(1), enabled(2));
     }
 
     // Show/hide the parallel-only controls (pad + Mod Mix) and relayout when the
