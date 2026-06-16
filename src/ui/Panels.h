@@ -798,6 +798,8 @@ public:
 
         mDrive = std::make_unique<LabeledKnob>(apvts, p + "Drive", "Drive");
         addChildComponent(*mDrive); // rotary only (Leslie tube amp)
+        mHornDrum = std::make_unique<LabeledKnob>(apvts, p + "HornDrum", "Horn/Drum");
+        addChildComponent(*mHornDrum); // rotary only (horn<->drum balance)
         mRotFast.setButtonText("Fast");
         addChildComponent(mRotFast); // rotary only (slow/fast rotor)
         mRotFastAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
@@ -821,7 +823,8 @@ public:
         // mixed underlying params (Speed in Hz, the rest 0..1, Sweep 2 a ratio)
         // all show on one consistent scale instead of exposing raw units.
         for (LabeledKnob *k : {mRate.get(), mDepth.get(), mFeedback.get(), mMix.get(),
-                               mWidth.get(), mDrive.get(), mManual.get(), mP2Ratio.get()})
+                               mWidth.get(), mDrive.get(), mManual.get(), mP2Ratio.get(),
+                               mHornDrum.get()})
             k->setRotationReadout(10.0);
 
         refresh();
@@ -854,6 +857,7 @@ public:
         }
         mSync.setVisible(!rotary);
         mDrive->setVisible(rotary);                    // rotary: Leslie tube drive
+        mHornDrum->setVisible(rotary);                 // rotary: horn<->drum balance
         mRotFast.setVisible(rotary);
         mManual->setVisible(type == 1);                // flanger: static comb position
         mInvert.setVisible(type == 1);                 // flanger: phase invert
@@ -927,7 +931,8 @@ public:
         for (juce::Component *k : {(juce::Component *)mRate.get(), (juce::Component *)mDepth.get(),
                                    (juce::Component *)mFeedback.get(), (juce::Component *)mP2Ratio.get(),
                                    (juce::Component *)mManual.get(), (juce::Component *)mMix.get(),
-                                   (juce::Component *)mWidth.get(), (juce::Component *)mDrive.get()})
+                                   (juce::Component *)mWidth.get(), (juce::Component *)mDrive.get(),
+                                   (juce::Component *)mHornDrum.get()})
             if (k->isVisible())
                 vis.push_back(k);
         const int nk = (int)vis.size();
@@ -952,7 +957,7 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt, mWaveAtt, mSyncAtt;
     juce::ToggleButton mOn;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mOnAtt;
-    std::unique_ptr<LabeledKnob> mRate, mDepth, mFeedback, mMix, mWidth, mDrive, mManual, mP2Ratio;
+    std::unique_ptr<LabeledKnob> mRate, mDepth, mFeedback, mMix, mWidth, mDrive, mManual, mP2Ratio, mHornDrum;
     juce::ToggleButton mRotFast, mInvert, mSeries;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mRotFastAtt, mInvertAtt, mSeriesAtt;
 };

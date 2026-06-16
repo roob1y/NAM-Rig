@@ -44,6 +44,23 @@ public:
     static constexpr double kVibBaseMs = 2.0, kVibSpreadMs = 8.0;
     static constexpr double kRotBaseMs = 3.0, kRotSpreadMs = 4.0;
     static constexpr float kRotSlowHz = 0.72f, kRotFastHz = 6.6f; // chorale / tremolo
+    // Leslie angle-dependent EQ (CCRMA / Smith-Lee model, DAFx-02): as the horn
+    // rotates away from the mic the level drops AND highs roll off faster than
+    // lows -- i.e. a high-shelf tilt whose HF gain tracks the horn-facing factor.
+    // This is the "2D" angle behaviour a static body biquad can't produce; the
+    // facing signal (cosH/face) is already computed in kRotary, so no new LFO.
+    static constexpr float kRotHornTiltHz = 3000.0f; // angle-shelf corner
+    static constexpr float kRotHornTiltDepth = 0.6f; // HF cut when horn faces fully away (0..1)
+    // Fixed horn-throat presence shaping (angle-INDEPENDENT "H0" voicing), layered
+    // on the ~250 Hz wooden-body resonance for a fuller measured-average tone.
+    static constexpr double kRotThroatHz = 1600.0, kRotThroatQ = 0.9, kRotThroatDb = 2.5;
+    // Leslie tube power-amp voicing. The amp colours the tone even clean (warmth
+    // floor + output-transformer HF rolloff), and the Drive saturation breaks up
+    // mid-first (pre/de-emphasis "honk") and is ADAA-anti-aliased in processSample.
+    static constexpr float kAmpWarmth = 0.06f;   // always-on tube softening (0 = off)
+    static constexpr double kAmpEmphHz = 900.0, kAmpEmphQ = 0.7, kAmpEmphDb = 4.0; // pre/de-emphasis
+    static constexpr float kAmpToneHz = 5500.0f; // output-transformer rolloff corner
+    static constexpr float kAmpToneHf = 0.62f;   // HF gain above the corner (~ -4 dB)
     static constexpr double kPhaserCenterHz = 650.0, kPhaserOctaves = 2.6; // opened-up sweep (~107 Hz..3.9 kHz); tunable by ear
     static constexpr double kUniCenterHz = 400.0;
     static constexpr double kHarmXoverHz = 800.0;
@@ -107,6 +124,35 @@ public:
     // feeding the LDR power-law transfer. Advances the per-channel lamp state.
     // Public so the test can drive it directly (the coeffs are set in prepare()).
     // Returns the warped sweep control in [-1, 1].
+    // Leslie angle-dependent horn-tilt HF gain (single source of truth, public so
+    // T27 can check the law directly). face in [0,1] (1 = horn facing the mic),
+    // depth scales it so the angle colour only acts when the rotor is working.
+    // Returns 1 at face=1 (flat/bright); 1 - kRotHornTiltDepth at face=0,depth=1.
+    static float hornTiltGain(float face, float depth)
+    {
+        return 1.0f - kRotHornTiltDepth * depth * (1.0f - face);
+    }
+
+    // Rotary horn/drum balance gain (single source of truth, public so T29 can
+    // check the law). k in [0,1]: 0.5 = both rotors at unity (neutral, the level
+    // you like); toward 1 fades the drum out (1 = horn solo); toward 0 fades the
+    // horn out (0 = drum solo). horn=true returns the horn gain, else the drum.
+    static float rotorBalance(float k, bool horn)
+    {
+        return std::min(1.0f, 2.0f * (horn ? k : 1.0f - k));
+    }
+
+    // Leslie tube-amp saturation CURVE (memoryless; the processSample path applies
+    // it via first-order ADAA to anti-alias). Public so T28 can check the curve.
+    // drive in [0,1]; the warmth floor keeps a faint tube softening even clean.
+    static float ampShape(float x, float drive)
+    {
+        const float dEff = std::max(drive, kAmpWarmth);
+        const float pre = 1.0f + dEff * 5.0f;
+        const float bias = 0.15f * dEff;
+        return (std::tanh(x * pre + bias) - std::tanh(bias)) * (2.6f / pre);
+    }
+
     float uniVibeWarp(int ch, float lfo)
     {
         const float drive = 0.5f + 0.5f * lfo; // LFO -> lamp drive [0,1]
@@ -121,19 +167,19 @@ public:
     void prepare(const BlockContext &ctx) override
     {
         mFs = ctx.sampleRate;
-        // wooden-cabinet resonance: peaking biquad ~250 Hz, Q 1.2, +4 dB (RBJ)
-        {
-            const double fc = 250.0, Q = 1.2, gainDb = 4.0;
-            const double A = std::pow(10.0, gainDb / 40.0);
-            const double w0 = 2.0 * 3.14159265358979323846 * fc / mFs;
-            const double cw = std::cos(w0), sw = std::sin(w0), al = sw / (2.0 * Q);
-            const double a0 = 1.0 + al / A;
-            mCabB0 = (float)((1.0 + al * A) / a0);
-            mCabB1 = (float)((-2.0 * cw) / a0);
-            mCabB2 = (float)((1.0 - al * A) / a0);
-            mCabA1 = (float)((-2.0 * cw) / a0);
-            mCabA2 = (float)((1.0 - al / A) / a0);
-        }
+        // Leslie body voicing (angle-INDEPENDENT "H0"): the wooden-cabinet
+        // resonance (~250 Hz peaking) PLUS a horn-throat presence bump (~1.6 kHz),
+        // two RBJ peaking biquads in series -> closer to the measured average tone.
+        rbjPeaking(250.0, 1.2, 4.0, mFs, mCabB0, mCabB1, mCabB2, mCabA1, mCabA2);
+        rbjPeaking(kRotThroatHz, kRotThroatQ, kRotThroatDb, mFs,
+                   mThB0, mThB1, mThB2, mThA1, mThA2);
+        mHornTiltCoef = coefForHz(kRotHornTiltHz, mFs); // angle-shelf split corner
+        // Tube-amp pre/de-emphasis: boost the mids INTO the clipper then cut them
+        // back after, so the midrange breaks up first (the amp "honk"); the +/-
+        // pair nulls to ~flat when undriven. Plus the transformer HF-rolloff corner.
+        rbjPeaking(kAmpEmphHz, kAmpEmphQ, kAmpEmphDb, mFs, mApB0, mApB1, mApB2, mApA1, mApA2);
+        rbjPeaking(kAmpEmphHz, kAmpEmphQ, -kAmpEmphDb, mFs, mAqB0, mAqB1, mAqB2, mAqA1, mAqA2);
+        mAmpToneCoef = coefForHz(kAmpToneHz, mFs);
         const int maxDelay =
             (int)std::ceil((kChorusBaseMs + kChorusSpreadMs + 2.0) * 0.001 * mFs);
         for (auto &d : mLine)
@@ -169,6 +215,14 @@ public:
         mDrumLp[0] = mDrumLp[1] = 0.0f;
         mCabZ1[0] = mCabZ1[1] = 0.0f;
         mCabZ2[0] = mCabZ2[1] = 0.0f;
+        mThZ1[0] = mThZ1[1] = 0.0f;
+        mThZ2[0] = mThZ2[1] = 0.0f;
+        mHornTiltLp[0] = mHornTiltLp[1] = 0.0f;
+        mApZ1[0] = mApZ1[1] = mApZ2[0] = mApZ2[1] = 0.0f;
+        mAqZ1[0] = mAqZ1[1] = mAqZ2[0] = mAqZ2[1] = 0.0f;
+        mAmpX1[0] = mAmpX1[1] = 0.0f;
+        mAmpF1[0] = mAmpF1[1] = 0.0f;
+        mAmpToneLp[0] = mAmpToneLp[1] = 0.0f;
         mRotHornPhase = 0.0;
         mRotDrumPhase = 0.0;
         mRotHornSpeed = kRotSlowHz;
@@ -178,6 +232,7 @@ public:
         mDepthZ = mDepth;
         mMixZ = mMix;
         mManualZ = mManual;
+        mHornDrumZ = mHornDrum;
         mSeriesZ = mSeries ? 1.0f : 0.0f;
     }
 
@@ -206,6 +261,7 @@ public:
     void setWidth(float w) { mWidth = w; }         // 0 = mono spread, 1 = 90 deg
     void setDrive(float d) { mRotDrive = d; }      // Rotary: Leslie tube-amp drive
     void setRotFast(bool f) { mRotFast = f; }      // Rotary: slow (chorale) / fast (tremolo)
+    void setHornDrum(float b) { mHornDrum = b; }   // Rotary: horn<->drum balance (0.5 = both full)
 
     // LFO period in beats for each modSync choice (index 0 = Off = free rate).
     static constexpr int kNumSync = 10;
@@ -263,6 +319,7 @@ public:
             mDepthZ += mSmoothK * (mDepth - mDepthZ);
             mMixZ += mSmoothK * (mixTarget - mMixZ);
             mManualZ += mSmoothK * (mManual - mManualZ); // de-zipper the Manual knob
+            mHornDrumZ += mSmoothK * (mHornDrum - mHornDrumZ); // de-zipper Horn/Drum balance
             mSeriesZ += mSmoothK * ((mSeries ? 1.0f : 0.0f) - mSeriesZ); // de-click the routing toggle
             const float depth = mDepthZ * dMax; // voiced musical maximum
 
@@ -398,18 +455,52 @@ private:
             // (double the Width offset) so the sound throws across the field.
             const double rot = off * 2.0; // ~opposite L/R for the stereo throw
 
-            // --- tube power amp: clean at Drive 0, asymmetric growl when pushed.
-            // Pre-gain into a soft clip, then MAKEUP ~2.6/pre (not 1/pre, which
-            // collapsed the level) so driving compresses + thickens without
-            // getting quiet. Small bias adds the even-harmonic tube warmth. ---
-            float xd = x;
-            if (mRotDrive > 0.0f)
+            // --- tube power amp: an ALWAYS-ON voice (mid-focused breakup + output-
+            // transformer HF rolloff) layered with the Drive saturation. The
+            // makeup ~2.6/pre (not 1/pre, which collapsed the level) keeps the
+            // pushed level up; the warmth floor keeps a faint tube colour even
+            // clean. The saturation is ADAA anti-aliased so its harmonics don't
+            // fold back as digital fizz. ---
+            const float dEff = std::max(mRotDrive, kAmpWarmth);
+            // pre-emphasis: boost the mids INTO the clipper (they break up first)
+            float pe;
             {
-                const float pre = 1.0f + mRotDrive * 5.0f;
-                const float bias = 0.15f * mRotDrive;
-                const float sat = (std::tanh(x * pre + bias) - std::tanh(bias)) * (2.6f / pre);
-                xd = x + mRotDrive * (sat - x);
+                float &z1 = mApZ1[(size_t)ch], &z2 = mApZ2[(size_t)ch];
+                pe = mApB0 * x + z1;
+                z1 = mApB1 * x - mApA1 * pe + z2;
+                z2 = mApB2 * x - mApA2 * pe;
             }
+            // ADAA(tanh): F(u) = ln(cosh(pre*u+bias))/pre - tanh(bias)*u is the
+            // antiderivative of the shaper; y = (F(pe)-F(pe1))/(pe-pe1) (first-order
+            // antiderivative anti-aliasing), falling back to the direct curve when
+            // the step is tiny.
+            const float pre = 1.0f + dEff * 5.0f;
+            const float bias = 0.15f * dEff;
+            const float tb = std::tanh(bias);
+            float &pe1 = mAmpX1[(size_t)ch];
+            float &F1 = mAmpF1[(size_t)ch];
+            const float Fc = std::log(std::cosh(pe * pre + bias)) / pre - tb * pe;
+            const float dpe = pe - pe1;
+            const float shaped = (std::abs(dpe) > 1.0e-4f)
+                                     ? (Fc - F1) / dpe
+                                     : (std::tanh(pe * pre + bias) - tb);
+            pe1 = pe;
+            F1 = Fc;
+            const float sat = shaped * (2.6f / pre); // makeup: compress + thicken
+            // de-emphasis: cut the mids back out (nulls the pre when undriven)
+            float de;
+            {
+                float &z1 = mAqZ1[(size_t)ch], &z2 = mAqZ2[(size_t)ch];
+                de = mAqB0 * sat + z1;
+                z1 = mAqB1 * sat - mAqA1 * de + z2;
+                z2 = mAqB2 * sat - mAqA2 * de;
+            }
+            // Drive blends the amped signal over the clean input (always >= warmth)
+            const float amped = x + dEff * (de - x);
+            // output-transformer bandwidth: gentle always-on HF rolloff (shelf)
+            float &tl = mAmpToneLp[(size_t)ch];
+            tl += mAmpToneCoef * (amped - tl);
+            const float xd = tl + kAmpToneHf * (amped - tl);
 
             // --- 800 Hz crossover ---
             float &xo = mXoverLp[(size_t)ch];
@@ -427,6 +518,15 @@ private:
             const float dir = face * face;         // peaked -> the "wom" pulse
             horn *= 1.0f - 0.80f * depth * (1.0f - dir);
 
+            // angle-dependent tone (CCRMA): highs roll off as the horn turns away.
+            // One-pole split (low band = tlp), then re-add the high band scaled by
+            // hornTiltGain(face,depth) -> a high-shelf that brightens facing the
+            // mic and darkens pointing away. gHf in [1-kRotHornTiltDepth, 1] so the
+            // high band is only ever attenuated -> always bounded.
+            float &tlp = mHornTiltLp[(size_t)ch];
+            tlp += mHornTiltCoef * (horn - tlp);
+            horn = tlp + hornTiltGain(face, depth) * (horn - tlp);
+
             // --- bass drum: high-pass the deep lows, slow amplitude throb ---
             float &dlp = mDrumLp[(size_t)ch];
             dlp += mDrumLpCoef * (lowB - dlp);
@@ -434,13 +534,26 @@ private:
             const float cosD = std::cos(6.2831853f * (float)(mRotDrumPhase + rot));
             const float drum = drumIn * (1.0f - 0.45f * depth * (0.5f - 0.5f * cosD));
 
-            // --- wooden cabinet: low-mid resonant body (peaking biquad, TDF2) ---
-            float wet = horn + drum;
+            // --- horn/drum balance: neutral at 0.5 (both unity, bit-exact), fades
+            // the opposite rotor out toward each extreme (horn solo / drum solo) ---
+            float wet = rotorBalance(mHornDrumZ, true) * horn
+                      + rotorBalance(mHornDrumZ, false) * drum;
+
+            // --- cabinet body voicing (angle-independent "H0"): wooden-body
+            // resonance (~250 Hz) then horn-throat presence (~1.6 kHz), two RBJ
+            // peaking biquads in series (TDF2) ---
             {
                 float &z1 = mCabZ1[(size_t)ch], &z2 = mCabZ2[(size_t)ch];
                 const float y = mCabB0 * wet + z1;
                 z1 = mCabB1 * wet - mCabA1 * y + z2;
                 z2 = mCabB2 * wet - mCabA2 * y;
+                wet = y;
+            }
+            {
+                float &z1 = mThZ1[(size_t)ch], &z2 = mThZ2[(size_t)ch];
+                const float y = mThB0 * wet + z1;
+                z1 = mThB1 * wet - mThA1 * y + z2;
+                z2 = mThB2 * wet - mThA2 * y;
                 wet = y;
             }
             return (1.0f - mMixZ) * x + mMixZ * wet;
@@ -594,6 +707,20 @@ private:
     {
         return 1.0f - (float)std::exp(-1.0 / ((double)std::max(0.05f, ms) * 0.001 * fs));
     }
+    // RBJ peaking-EQ biquad coefficients, normalised so a0 = 1 (TDF2-ready).
+    static void rbjPeaking(double fc, double Q, double gainDb, double fs,
+                           float &b0, float &b1, float &b2, float &a1, float &a2)
+    {
+        const double A = std::pow(10.0, gainDb / 40.0);
+        const double w0 = 2.0 * 3.14159265358979323846 * fc / fs;
+        const double cw = std::cos(w0), sw = std::sin(w0), al = sw / (2.0 * Q);
+        const double a0 = 1.0 + al / A;
+        b0 = (float)((1.0 + al * A) / a0);
+        b1 = (float)((-2.0 * cw) / a0);
+        b2 = (float)((1.0 - al * A) / a0);
+        a1 = (float)((-2.0 * cw) / a0);
+        a2 = (float)((1.0 - al / A) / a0);
+    }
 
     void flushDenormals()
     {
@@ -619,6 +746,15 @@ private:
             if (std::abs(f) < 1.0e-30f) f = 0.0f;
         for (auto &f : mCabZ2)
             if (std::abs(f) < 1.0e-30f) f = 0.0f;
+        for (auto &f : mThZ1)
+            if (std::abs(f) < 1.0e-30f) f = 0.0f;
+        for (auto &f : mThZ2)
+            if (std::abs(f) < 1.0e-30f) f = 0.0f;
+        for (auto &f : mHornTiltLp)
+            if (std::abs(f) < 1.0e-30f) f = 0.0f;
+        for (auto *bank : {&mApZ1, &mApZ2, &mAqZ1, &mAqZ2, &mAmpToneLp})
+            for (auto &f : *bank)
+                if (std::abs(f) < 1.0e-30f) f = 0.0f;
     }
 
     // s = TPT integrator state, shared by the ZDF Phaser and the Uni-Vibe
@@ -641,6 +777,7 @@ private:
     float mDepth = 0.5f, mFeedback = 0.0f, mMix = 0.5f;
     float mDepthZ = 0.5f, mMixZ = 0.5f, mSmoothK = 0.01f;
     float mManual = 0.3f, mManualZ = 0.3f; // Flanger Manual (static comb position)
+    float mHornDrum = 0.5f, mHornDrumZ = 0.5f; // Rotary horn/drum balance (0.5 = neutral)
     bool mInvert = false;                  // Flanger phase-invert switch
     float mP2Ratio = 1.5f;                 // Bi-Phase Sweep Gen 2 rate ratio
     bool mSeries = false;                  // Bi-Phase series (true) / parallel (false)
@@ -661,6 +798,18 @@ private:
     std::array<float, 2> mCabZ1{}, mCabZ2{};                 // cabinet biquad state
     float mHornLpCoef = 1.0f, mDrumLpCoef = 0.1f;            // per-block driver coeffs
     float mCabB0 = 1.0f, mCabB1 = 0.0f, mCabB2 = 0.0f, mCabA1 = 0.0f, mCabA2 = 0.0f;
+    float mThB0 = 1.0f, mThB1 = 0.0f, mThB2 = 0.0f, mThA1 = 0.0f, mThA2 = 0.0f; // horn-throat EQ
+    std::array<float, 2> mThZ1{}, mThZ2{};                   // throat biquad state
+    std::array<float, 2> mHornTiltLp{};                      // angle-shelf one-pole state
+    float mHornTiltCoef = 1.0f;                              // angle-shelf split corner coef
+    // Tube-amp stages: pre-emphasis biquad, de-emphasis biquad, ADAA saturation
+    // state (prev pre-emphasised input + its antiderivative), transformer shelf.
+    float mApB0 = 1.0f, mApB1 = 0.0f, mApB2 = 0.0f, mApA1 = 0.0f, mApA2 = 0.0f; // amp pre-emphasis
+    float mAqB0 = 1.0f, mAqB1 = 0.0f, mAqB2 = 0.0f, mAqA1 = 0.0f, mAqA2 = 0.0f; // amp de-emphasis
+    std::array<float, 2> mApZ1{}, mApZ2{}, mAqZ1{}, mAqZ2{}; // emphasis biquad state
+    std::array<float, 2> mAmpX1{}, mAmpF1{};                 // ADAA: prev input + prev antiderivative
+    std::array<float, 2> mAmpToneLp{};                       // transformer-rolloff shelf state
+    float mAmpToneCoef = 1.0f;                               // transformer-rolloff corner coef
     float mFreeRateHz = 1.0f;
     double mBpm = 120.0;
     int mSyncIndex = 0;
@@ -714,6 +863,7 @@ public:
     void setWidth(int s, float w) { mVoice[idx(s)].setWidth(w); }
     void setDrive(int s, float d) { mVoice[idx(s)].setDrive(d); }
     void setRotFast(int s, bool f) { mVoice[idx(s)].setRotFast(f); }
+    void setHornDrum(int s, float b) { mVoice[idx(s)].setHornDrum(b); }
     void setManual(int s, float m) { mVoice[idx(s)].setManual(m); }
     void setInvert(int s, bool inv) { mVoice[idx(s)].setInvert(inv); }
     void setP2Ratio(int s, float r) { mVoice[idx(s)].setP2Ratio(r); }

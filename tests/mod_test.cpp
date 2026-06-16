@@ -29,6 +29,12 @@
 //   T25 photocell warp lopsided (slow cool > fast heat) + more so when faster
 //   T26 Uni-Vibe ZDF: bounded across depth/rate extremes; sweep moves the spectrum
 //       (incl. at depth 0, where the depth floor keeps it breathing)
+//   T27 Leslie 2D angle-EQ model: horn-tilt gain law + highs swing with rotor
+//       angle more than mids (CCRMA/Smith-Lee differential-EQ behaviour)
+//   T28 Leslie tube amp: saturation curve bounded + compresses; Drive adds
+//       harmonics; finite/bounded across the drive range
+//   T29 Rotary Horn/Drum balance: neutral at center, solos a rotor at each
+//       extreme (drum-band tone ducks toward horn, horn-band toward drum)
 #include "rig/ModBlock.h"
 #include <cstdio>
 #include <cmath>
@@ -829,6 +835,160 @@ int main()
         };
         CHECK(specMoves(0.9f) > 0.10, "T26 uni-vibe sweeps the spectrum at depth 0.9 (rel diff %.2f)", specMoves(0.9f));
         CHECK(specMoves(0.0f) > 0.02, "T26 depth-floor keeps it breathing at depth 0 (rel diff %.2f)", specMoves(0.0f));
+    }
+
+    // ---- T27: Leslie 2D angle-EQ model — horn brightness tracks rotor angle ----
+    {
+        // (a) the angle-tilt gain LAW (single source of truth used in kRotary):
+        // facing the mic = flat/bright (gain 1); pointing fully away = darkest
+        // (1 - kRotHornTiltDepth); monotonic in facing; depth 0 disables it.
+        const float gFace = ModVoice::hornTiltGain(1.0f, 1.0f);
+        const float gAway = ModVoice::hornTiltGain(0.0f, 1.0f);
+        CHECK(std::abs(gFace - 1.0f) < 1e-6f, "T27 angle-tilt flat when horn faces mic (g %.3f)", gFace);
+        CHECK(std::abs(gAway - (1.0f - ModVoice::kRotHornTiltDepth)) < 1e-6f && gAway < 1.0f,
+              "T27 angle-tilt cuts highs fully away (g %.3f)", gAway);
+        CHECK(ModVoice::hornTiltGain(0.25f, 1.0f) < ModVoice::hornTiltGain(0.75f, 1.0f),
+              "T27 angle-tilt monotonic in facing");
+        CHECK(std::abs(ModVoice::hornTiltGain(0.0f, 0.0f) - 1.0f) < 1e-6f,
+              "T27 angle-tilt off at depth 0");
+
+        // (b) ISOLATE the angle EQ from the common directional "wom". Run a 6 kHz
+        // tone and a 1 kHz tone (both inside the horn band, above the 800 Hz
+        // crossover) through IDENTICAL rotor motion -- deterministic from reset, so
+        // both see the same angle at the same time. The wom multiplies both
+        // equally so it CANCELS in the per-window envelope ratio 6k/1k; what's left
+        // modulates at the rotor rate only because the shelf darkens the 6 kHz
+        // (high band) far more than the 1 kHz as the horn turns away. A static body
+        // EQ would leave the ratio constant. Expected swing ~0.2 (first-order
+        // crossover: 6k shelf 1.0->0.63 vs 1k 1.0->0.96 facing->away); levels cancel.
+        auto env = [](double freq) {
+            ModVoice m;
+            m.setType(ModVoice::kRotary);
+            m.setDepth(1.0f);
+            m.setRotFast(true);
+            m.prepare({SR, BLK});
+            auto l = tone(freq, 0.4, (int)SR * 2), r = l;
+            run(m, l, r);
+            return envelope(l, (int)(SR * 0.005)); // ~5 ms peak windows
+        };
+        auto e6 = env(6000.0), e1 = env(1000.0);
+        double lo = 1e9, hi = 0;
+        for (size_t i = e6.size() / 2; i < e6.size(); ++i) // skip the spin-up half
+        {
+            const double ratio = e1[i] > 1e-9 ? e6[i] / e1[i] : 0.0;
+            lo = std::min(lo, ratio); hi = std::max(hi, ratio);
+        }
+        const double ratioSwing = hi > 0 ? (hi - lo) / (hi + lo) : 0.0;
+        CHECK(ratioSwing > 0.08, "T27 angle EQ modulates the high/mid ratio with rotor angle (swing %.3f, ~0.2 expected)", ratioSwing);
+
+        // (c) the added throat biquad + angle shelf leave kRotary finite + bounded
+        // across slow/fast x depth extremes with a broadband input.
+        bool ok = true; double pk = 0;
+        for (bool fast : {false, true})
+            for (float d : {0.0f, 1.0f})
+            {
+                ModVoice m;
+                m.setType(ModVoice::kRotary);
+                m.setDepth(d);
+                m.setRotFast(fast);
+                m.prepare({SR, BLK});
+                std::vector<float> l((size_t)SR, 0.0f);
+                for (int kk = 0; kk < 30; ++kk)
+                {
+                    const double f = 120.0 * std::pow(60.0, kk / 29.0);
+                    for (size_t i = 0; i < l.size(); ++i)
+                        l[i] += (float)(0.02 * std::sin(2.0 * M_PI * f * (double)i / SR + kk));
+                }
+                auto r = l;
+                run(m, l, r);
+                for (float v : l) { if (!std::isfinite(v)) ok = false; pk = std::max(pk, (double)std::abs(v)); }
+            }
+        CHECK(ok && pk < 4.0, "T27 rotary finite + bounded with throat EQ + angle shelf (peak %.2f)", pk);
+    }
+
+    // ---- T28: Leslie tube-amp realism (always-on voice + ADAA + mid breakup) ----
+    {
+        // (a) the saturation CURVE (memoryless; processSample applies it via ADAA)
+        // is bounded and compresses (sub-linear) at full drive, monotonic.
+        const float c1 = ModVoice::ampShape(1.0f, 1.0f);
+        CHECK(std::abs(c1) < 1.5f && std::abs(ModVoice::ampShape(-1.0f, 1.0f)) < 1.5f,
+              "T28 amp curve bounded at full drive (%.3f)", c1);
+        const float cHi = ModVoice::ampShape(1.0f, 1.0f), cLo = ModVoice::ampShape(0.25f, 1.0f);
+        CHECK(cLo > 0 && cHi / cLo < 4.0f,
+              "T28 amp curve compresses at full drive (4x in -> %.2fx out)", cHi / cLo);
+        CHECK(ModVoice::ampShape(0.5f, 1.0f) > ModVoice::ampShape(0.2f, 1.0f),
+              "T28 amp curve monotonic");
+
+        // (b) Drive engages: a 1 kHz tone picks up far more 3rd-harmonic content at
+        // full drive than clean. Rotor modulation frozen (depth 0) to isolate the
+        // amp; the amp is pre-crossover so the harmonics reach the output.
+        auto h3ratio = [](float drive) {
+            ModVoice m;
+            m.setType(ModVoice::kRotary);
+            m.setDepth(0.0f);
+            m.setDrive(drive);
+            m.prepare({SR, BLK});
+            auto l = tone(1000.0, 0.5, (int)SR), r = l;
+            run(m, l, r);
+            const double f0 = mag(l, (size_t)SR / 2, (size_t)SR / 2, 1000.0);
+            const double f3 = mag(l, (size_t)SR / 2, (size_t)SR / 2, 3000.0);
+            return f0 > 1e-9 ? f3 / f0 : 0.0;
+        };
+        const double clean = h3ratio(0.0f), driven = h3ratio(1.0f);
+        CHECK(driven > clean + 0.02, "T28 Drive adds harmonics (3rd/fund clean %.3f -> driven %.3f)", clean, driven);
+
+        // (c) finite + bounded across the drive range with broadband input.
+        bool ok = true; double pk = 0;
+        for (float d : {0.0f, 0.5f, 1.0f})
+        {
+            ModVoice m;
+            m.setType(ModVoice::kRotary);
+            m.setDrive(d);
+            m.setDepth(1.0f);
+            m.prepare({SR, BLK});
+            std::vector<float> l((size_t)SR, 0.0f);
+            for (int kk = 0; kk < 30; ++kk)
+            {
+                const double f = 120.0 * std::pow(60.0, kk / 29.0);
+                for (size_t i = 0; i < l.size(); ++i)
+                    l[i] += (float)(0.02 * std::sin(2.0 * M_PI * f * (double)i / SR + kk));
+            }
+            auto r = l;
+            run(m, l, r);
+            for (float v : l) { if (!std::isfinite(v)) ok = false; pk = std::max(pk, (double)std::abs(v)); }
+        }
+        CHECK(ok && pk < 4.0, "T28 rotary amp finite + bounded across drive (peak %.2f)", pk);
+    }
+
+    // ---- T29: Rotary Horn/Drum balance — neutral center, fades to solo ----
+    {
+        // (a) the balance LAW (single source of truth): 0.5 = both rotors unity
+        // (neutral, bit-exact to no-knob); full horn mutes the drum and vice versa.
+        CHECK(ModVoice::rotorBalance(0.5f, true) == 1.0f && ModVoice::rotorBalance(0.5f, false) == 1.0f,
+              "T29 balance neutral at center (both unity)");
+        CHECK(ModVoice::rotorBalance(1.0f, true) == 1.0f && ModVoice::rotorBalance(1.0f, false) == 0.0f,
+              "T29 full horn mutes the drum");
+        CHECK(ModVoice::rotorBalance(0.0f, true) == 0.0f && ModVoice::rotorBalance(0.0f, false) == 1.0f,
+              "T29 full drum mutes the horn");
+
+        // (b) audio: a low (drum-band, <800 Hz) tone collapses toward full horn; a
+        // high (horn-band) tone collapses toward full drum. Rotor frozen (depth 0)
+        // so we read steady levels; the crossover/amp/cabinet are common to both
+        // knob settings so they cancel in the ratio.
+        auto level = [](double freq, float knob) {
+            ModVoice m;
+            m.setType(ModVoice::kRotary);
+            m.setDepth(0.0f);
+            m.setHornDrum(knob);
+            m.prepare({SR, BLK});
+            auto l = tone(freq, 0.4, (int)SR), r = l;
+            run(m, l, r);
+            return mag(l, (size_t)SR / 2, (size_t)SR / 2, freq);
+        };
+        CHECK(level(120.0, 1.0f) < 0.6 * level(120.0, 0.5f),
+              "T29 full horn ducks the drum-band tone (%.4f vs center %.4f)", level(120.0, 1.0f), level(120.0, 0.5f));
+        CHECK(level(2000.0, 0.0f) < 0.6 * level(2000.0, 0.5f),
+              "T29 full drum ducks the horn-band tone (%.4f vs center %.4f)", level(2000.0, 0.0f), level(2000.0, 0.5f));
     }
 
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);
