@@ -44,6 +44,10 @@ public:
     // id and falls back to the global accent when it isn't set.
     void setAccent(juce::Colour c) { mSlider.setColour(juce::Slider::rotarySliderFillColourId, c); }
 
+    // Drop the numeric readout (the rotary then fills the freed space -> a bigger
+    // knob). Used for the mod lanes, where the value box reads as clutter.
+    void hideValue() { mSlider.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0); }
+
     // Relabel at runtime (the mod flanger renames Depth->Width to match the M-126).
     void setCaption(const juce::String &caption)
     {
@@ -118,9 +122,11 @@ public:
         auto txt = mTextArea;
         g.setColour(colors::textDim);
         g.setFont(RigLookAndFeel::withHeight(11.0f));
-        g.drawText(mCaption, txt.removeFromTop(txt.getHeight() * 0.5f).toNearestInt(),
-                   juce::Justification::centredLeft);
-        auto vb = txt.reduced(0.0f, 1.0f); // value box
+        auto cap = txt.removeFromTop(txt.getHeight() * 0.5f);
+        g.drawText(mCaption, cap.toNearestInt(), juce::Justification::centred);
+        // Value box: fixed width, centred under the caption.
+        const float vbw = juce::jmin(txt.getWidth(), 48.0f);
+        auto vb = juce::Rectangle<float>(vbw, juce::jmin(txt.getHeight(), 18.0f)).withCentre(txt.getCentre());
         g.setColour(colors::scopeBg);
         g.fillRoundedRectangle(vb, 4.0f);
         g.setColour(colors::outline);
@@ -1061,6 +1067,7 @@ public:
         {
             k->setRotationReadout(10.0);
             k->setAccent(laneCol); // value arc tinted to the lane colour
+            k->hideValue();        // no number box -> a bigger knob
         }
 
         refresh();
@@ -1210,7 +1217,7 @@ public:
         const int nk = (int)vis.size();
         if (mScope) // live scope fills the space between Type/Sync and the knobs
         {
-            const int reserve = nk * 66 + 14;
+            const int reserve = nk * 72 + 14;
             const int scopeW = juce::jlimit(0, 200, area.getWidth() - reserve);
             if (scopeW >= 80)
             {
@@ -1224,10 +1231,10 @@ public:
         }
         if (nk > 0)
         {
-            const int w = juce::jmin(62, area.getWidth() / nk);
-            auto row = area.withSizeKeepingCentre(w * nk, juce::jmin(area.getHeight(), 62));
+            const int w = juce::jmin(74, area.getWidth() / nk);
+            auto row = area.withSizeKeepingCentre(w * nk, juce::jmin(area.getHeight(), 78));
             for (auto *k : vis)
-                k->setBounds(row.removeFromLeft(w).reduced(4, 0));
+                k->setBounds(row.removeFromLeft(w).reduced(3, 0));
         }
     }
 
