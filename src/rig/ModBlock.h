@@ -57,6 +57,7 @@ public:
     struct PhasorCore { float s[kBiPhaseStages] = {0.0f}; };
     static constexpr double kRightLfoOffset = 0.25; // 90 degrees at Width = 1
     static constexpr float kPhaserFixedDepth = 1.0f; // phaser sweep is hardwired
+    static constexpr float kPhaserFbMax = 0.7f;      // musical resonance ceiling (no whistle)
     static constexpr float kUniFeedback = 0.3f;      // uni-vibe resonance is hardwired
 
     // ---- per-effect voicing (public so the tests + UI can read it) ----
@@ -331,7 +332,7 @@ private:
             }
             const float A = alpha * alpha * alpha * alpha; // alpha^4
 
-            const float k = mFeedback;
+            const float k = mFeedback * kPhaserFbMax;     // knob maps to the musical resonance window
             const float u = (x - k * B) / (1.0f + k * A); // zero-delay resolved chain input
 
             // Single evaluation pass: true output per stage + TPT integrator update.
