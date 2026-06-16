@@ -22,6 +22,7 @@
 #include "Lfo.h"
 #include <array>
 #include <algorithm>
+#include <vector>
 
 namespace nam_rig
 {
@@ -926,12 +927,24 @@ public:
         for (auto &v : mVoice)
             v.prepare(ctx);
         mLock.prepare(ctx.sampleRate);
+        mSmoothK = 1.0f - std::exp((float)(-1.0 / (0.010 * ctx.sampleRate))); // 10 ms blend de-zip
+        const size_t cap = (size_t)std::max(1, ctx.maxBlockSize);
+        mDryL.assign(cap, 0.0f);
+        mDryR.assign(cap, 0.0f);
+        for (int s = 0; s < kSlots; ++s)
+        {
+            mBranchL[(size_t)s].assign(cap, 0.0f);
+            mBranchR[(size_t)s].assign(cap, 0.0f);
+        }
+        reset();
     }
     void reset() override
     {
         for (auto &v : mVoice)
             v.reset();
         mLock.reset();
+        for (auto &w : mWz) w = 1.0f / (float)kSlots;
+        mModMixZ = mModMix;
     }
 
     void process(float *left, float *right, int numSamples) override
@@ -941,17 +954,48 @@ public:
             if (!v.isBypassed()) { anyActive = true; break; }
         if (!anyActive) return; // section idle -> fully transparent (no level-lock)
 
-        mLock.observeInput(left, right, numSamples); // dry section input
-        for (auto &v : mVoice)
-            if (!v.isBypassed())
-                v.process(left, right, numSamples);
-        mLock.applyOutput(left, right, numSamples);  // lock to the input level
+        mLock.observeInput(left, right, numSamples); // dry section input (intact at entry)
+        if (mParallel)
+            processParallel(left, right, numSamples);
+        else
+            for (auto &v : mVoice) // SERIES: slots chained in place (unchanged)
+                if (!v.isBypassed())
+                    v.process(left, right, numSamples);
+        mLock.applyOutput(left, right, numSamples);   // lock to the input level
     }
 
     // Section loudness-lock (default on). Disable for raw effect levels or for
     // bit-exact series tests.
     void setLevelLock(bool on) { mLock.setEnabled(on); }
     bool levelLock() const { return mLock.enabled(); }
+
+    // Section routing: false = SERIES (slots chained), true = PARALLEL (each slot
+    // runs on the dry input into its own branch, blended by the pad, then ONE
+    // global Mod Mix vs dry so dry is counted once). NOTE: distinct from the
+    // per-slot Bi-Phase series/parallel (setSeries) -- this is the whole section.
+    void setParallel(bool p) { mParallel = p; }
+    bool parallel() const { return mParallel; }
+    void setPad(float x, float y) { mPadX = x; mPadY = y; } // parallel blend puck (0..1 each)
+    void setModMix(float m) { mModMix = m; }                // parallel: mod-bus vs dry (1 = full bus)
+
+    // Cartesian blend pad -> kSlots normalised slot weights. Barycentric over a
+    // triangle (slot0 top-centre, slot1 bottom-left, slot2 bottom-right): inside
+    // the triangle the weights sum to 1 so the blend is inherently level-
+    // consistent; outside, the puck clamps to the nearest edge. The section Level
+    // Lock then holds the absolute loudness as the puck moves (pad picks the
+    // blend, lock holds the level).
+    static void padWeights(float x, float y, float w[kSlots])
+    {
+        w[0] = y;                   // top-centre node weight = height
+        w[1] = 1.0f - x - 0.5f * y; // bottom-left
+        w[2] = x - 0.5f * y;        // bottom-right
+        float sum = 0.0f;
+        for (int k = 0; k < kSlots; ++k) { if (w[k] < 0.0f) w[k] = 0.0f; sum += w[k]; }
+        if (sum > 1.0e-12f)
+            for (int k = 0; k < kSlots; ++k) w[k] /= sum;
+        else
+            for (int k = 0; k < kSlots; ++k) w[k] = 1.0f / (float)kSlots;
+    }
 
     double latencySamples() const override
     {
@@ -986,8 +1030,81 @@ public:
 
 private:
     static size_t idx(int s) { return (size_t)std::min(std::max(s, 0), kSlots - 1); }
+
+    // PARALLEL routing: each active slot processes a copy of the dry input into
+    // its own branch; the branches are summed by the (bypass-aware, smoothed) pad
+    // weights, then one global Mod Mix blends the mod-bus against the dry input.
+    void processParallel(float *left, float *right, int n)
+    {
+        const bool stereo = (left != right);
+        const size_t N = (size_t)n;
+        // 1) capture the dry section input
+        for (size_t i = 0; i < N; ++i)
+        {
+            mDryL[i] = left[i];
+            mDryR[i] = stereo ? right[i] : left[i];
+        }
+        // 2) each active slot -> its own fully-processed branch from the dry input
+        for (int s = 0; s < kSlots; ++s)
+        {
+            if (mVoice[(size_t)s].isBypassed()) continue;
+            for (size_t i = 0; i < N; ++i)
+            {
+                mBranchL[(size_t)s][i] = mDryL[i];
+                mBranchR[(size_t)s][i] = mDryR[i];
+            }
+            float *bl = mBranchL[(size_t)s].data();
+            float *br = stereo ? mBranchR[(size_t)s].data() : bl;
+            mVoice[(size_t)s].process(bl, br, n);
+        }
+        // 3) target blend weights from the pad, with bypassed nodes removed
+        float wT[kSlots];
+        padWeights(mPadX, mPadY, wT);
+        float sum = 0.0f;
+        for (int s = 0; s < kSlots; ++s)
+        {
+            if (mVoice[(size_t)s].isBypassed()) wT[s] = 0.0f;
+            sum += wT[s];
+        }
+        if (sum > 1.0e-12f)
+        {
+            for (int s = 0; s < kSlots; ++s) wT[s] /= sum;
+        }
+        else // puck sat on bypassed node(s): spread evenly over the active slots
+        {
+            int act = 0;
+            for (int s = 0; s < kSlots; ++s) act += mVoice[(size_t)s].isBypassed() ? 0 : 1;
+            for (int s = 0; s < kSlots; ++s)
+                wT[s] = mVoice[(size_t)s].isBypassed() ? 0.0f : 1.0f / (float)std::max(1, act);
+        }
+        // 4) blend the branches (smoothed weights) + one global mod-mix vs dry
+        for (size_t i = 0; i < N; ++i)
+        {
+            for (int s = 0; s < kSlots; ++s) mWz[(size_t)s] += mSmoothK * (wT[s] - mWz[(size_t)s]);
+            mModMixZ += mSmoothK * (mModMix - mModMixZ);
+            float busL = 0.0f, busR = 0.0f;
+            for (int s = 0; s < kSlots; ++s)
+            {
+                if (mVoice[(size_t)s].isBypassed()) continue;
+                busL += mWz[(size_t)s] * mBranchL[(size_t)s][i];
+                busR += mWz[(size_t)s] * mBranchR[(size_t)s][i];
+            }
+            left[i] = (1.0f - mModMixZ) * mDryL[i] + mModMixZ * busL;
+            if (stereo) right[i] = (1.0f - mModMixZ) * mDryR[i] + mModMixZ * busR;
+        }
+    }
+
     std::array<ModVoice, kSlots> mVoice;
     ModLevelLock mLock; // section-level output loudness match
+    // ---- section routing state ----
+    bool mParallel = false;                  // false = series, true = parallel
+    float mPadX = 0.5f, mPadY = 1.0f / 3.0f; // blend puck (default = centroid = equal blend)
+    float mModMix = 1.0f;                    // parallel: mod-bus vs dry (1 = full bus)
+    float mSmoothK = 1.0f;                   // per-sample de-zip for weights + mod-mix
+    float mWz[kSlots] = {1.0f / 3.0f, 1.0f / 3.0f, 1.0f / 3.0f}; // smoothed weights
+    float mModMixZ = 1.0f;
+    std::vector<float> mDryL, mDryR;                          // dry-input scratch
+    std::array<std::vector<float>, kSlots> mBranchL, mBranchR; // per-slot branch scratch
 };
 
 } // namespace nam_rig

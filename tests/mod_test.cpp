@@ -39,6 +39,10 @@
 //       long-term level of an AM (tremolo) signal while preserving its pulse;
 //       silence-safe (no noise-floor boost / runaway); disabled = bit-exact;
 //       integration: a 50/50 flanger's section level is pulled back to input
+//   T31 section routing: Cartesian pad weights (pure nodes / equal centroid /
+//       sum=1 / clamped outside); parallel single-slot == standalone voice; the
+//       pad blends between nodes; a bypassed node drops out; pad + Level Lock
+//       hold steady loudness as the puck moves
 #include "rig/ModBlock.h"
 #include <cstdio>
 #include <cmath>
@@ -1126,6 +1130,139 @@ int main()
             const double rRaw = rms(runFlanger(false), (size_t)N - w, w);
             CHECK(std::abs(rLocked - rin) < std::abs(rRaw - rin) || std::abs(rLocked / rin - 1.0) < 0.1,
                   "T30 lock tightens section level (locked %.3f raw %.3f vs in %.3f)", rLocked, rRaw, rin);
+        }
+    }
+
+    // ---- T31: section routing — Cartesian blend pad + Series/Parallel ----
+    {
+        auto rms = [](const std::vector<float> &x, size_t from, size_t len) {
+            double s = 0;
+            for (size_t i = 0; i < len; ++i) s += (double)x[from + i] * x[from + i];
+            return std::sqrt(s / (double)len);
+        };
+        const int N = (int)SR * 2;
+
+        // (a) pad weight math: pure at the 3 nodes, equal at the centroid, always
+        // sums to 1, clamps + renormalises outside the triangle.
+        {
+            float w[3];
+            ModBlock::padWeights(0.5f, 1.0f, w);
+            const bool n0 = std::abs(w[0] - 1.0f) < 1e-5f && w[1] < 1e-5f && w[2] < 1e-5f;
+            ModBlock::padWeights(0.0f, 0.0f, w);
+            const bool n1 = std::abs(w[1] - 1.0f) < 1e-5f && w[0] < 1e-5f && w[2] < 1e-5f;
+            ModBlock::padWeights(1.0f, 0.0f, w);
+            const bool n2 = std::abs(w[2] - 1.0f) < 1e-5f && w[0] < 1e-5f && w[1] < 1e-5f;
+            ModBlock::padWeights(0.5f, 1.0f / 3.0f, w);
+            const bool ctr = std::abs(w[0] - 1.0f / 3.0f) < 1e-4f && std::abs(w[1] - 1.0f / 3.0f) < 1e-4f
+                             && std::abs(w[2] - 1.0f / 3.0f) < 1e-4f;
+            ModBlock::padWeights(5.0f, -3.0f, w); // far outside the triangle
+            const bool out = std::abs((w[0] + w[1] + w[2]) - 1.0f) < 1e-5f && w[0] >= 0 && w[1] >= 0 && w[2] >= 0;
+            CHECK(n0 && n1 && n2 && ctr && out, "T31 pad weights: pure nodes, equal centroid, sum=1, clamped outside");
+        }
+
+        // (b) parallel, one active slot, puck on its node, modMix=1, lock off:
+        // the section output matches a standalone ModVoice of that effect.
+        {
+            ModBlock m;
+            m.setLevelLock(false);
+            m.setParallel(true);
+            m.setModMix(1.0f);
+            m.setPad(0.5f, 1.0f); // node 0
+            m.setType(0, ModVoice::kChorus);
+            m.setRateHz(0, 1.0f); m.setDepth(0, 0.7f); m.setMix(0, 1.0f);
+            m.setSlotBypassed(0, false); m.setSlotBypassed(1, true); m.setSlotBypassed(2, true);
+            m.prepare({SR, BLK});
+
+            ModVoice ref;
+            ref.setType(ModVoice::kChorus);
+            ref.setRateHz(1.0f); ref.setDepth(0.7f); ref.setMix(1.0f);
+            ref.prepare({SR, BLK});
+
+            auto x = tone(700.0, 0.5, N);
+            auto la = x, ra = x, lb = x, rb = x;
+            run(m, la, ra);
+            run(ref, lb, rb);
+            double d = 0;
+            for (size_t i = (size_t)SR; i < x.size(); ++i) // skip the weight-ramp settle
+                d = std::max(d, (double)std::abs(la[i] - lb[i]));
+            CHECK(d < 1e-3, "T31 parallel single-slot == standalone voice after settle (max diff %.2e)", d);
+        }
+
+        // (c) the pad actually blends: node0 vs node1 give different outputs, both
+        // finite + non-silent (two distinct effects in parallel).
+        {
+            auto runAt = [&](float px, float py) {
+                ModBlock m;
+                m.setLevelLock(false);
+                m.setParallel(true);
+                m.setModMix(1.0f);
+                m.setPad(px, py);
+                m.setType(0, ModVoice::kTremolo); m.setRateHz(0, 4.0f); m.setDepth(0, 0.8f);
+                m.setType(1, ModVoice::kVibrato);  m.setRateHz(1, 5.0f); m.setDepth(1, 0.7f);
+                m.setSlotBypassed(0, false); m.setSlotBypassed(1, false); m.setSlotBypassed(2, true);
+                m.prepare({SR, BLK});
+                auto l = tone(700.0, 0.5, N), r = l;
+                run(m, l, r);
+                return l;
+            };
+            auto at0 = runAt(0.5f, 1.0f); // node 0 (tremolo)
+            auto at1 = runAt(0.0f, 0.0f); // node 1 (vibrato)
+            double diff = 0, pk0 = 0, pk1 = 0;
+            for (size_t i = (size_t)SR; i < at0.size(); ++i)
+            {
+                diff = std::max(diff, (double)std::abs(at0[i] - at1[i]));
+                pk0 = std::max(pk0, (double)std::abs(at0[i]));
+                pk1 = std::max(pk1, (double)std::abs(at1[i]));
+            }
+            bool finite = true;
+            for (float v : at0) if (!std::isfinite(v)) finite = false;
+            for (float v : at1) if (!std::isfinite(v)) finite = false;
+            CHECK(finite && diff > 0.05 && pk0 > 0.05 && pk1 > 0.05,
+                  "T31 pad blends between nodes (node0 vs node1 diff %.2f, both non-silent)", diff);
+        }
+
+        // (d) bypassed slot drops out: puck aimed at a bypassed node still yields
+        // the active slot's output (weights renormalise; no silence).
+        {
+            ModBlock m;
+            m.setLevelLock(false);
+            m.setParallel(true);
+            m.setModMix(1.0f);
+            m.setPad(1.0f, 0.0f); // node 2 ...
+            m.setType(0, ModVoice::kChorus); m.setRateHz(0, 1.0f); m.setDepth(0, 0.7f); m.setMix(0, 1.0f);
+            m.setSlotBypassed(0, false); m.setSlotBypassed(1, true); m.setSlotBypassed(2, true); // ... slot2 bypassed
+            m.prepare({SR, BLK});
+            auto l = tone(700.0, 0.5, N), r = l;
+            run(m, l, r);
+            double pk = 0; bool finite = true;
+            for (size_t i = (size_t)SR; i < l.size(); ++i) pk = std::max(pk, (double)std::abs(l[i]));
+            for (float v : l) if (!std::isfinite(v)) finite = false;
+            CHECK(finite && pk > 0.1, "T31 puck on a bypassed node still passes the active slot (peak %.2f)", pk);
+        }
+
+        // (e) pad + Level Lock = steady loudness across the puck: two effects with
+        // different inherent levels land at ~the same output level at either node.
+        {
+            auto runAt = [&](float px, float py) {
+                ModBlock m;
+                m.setParallel(true); // Level Lock ON (default)
+                m.setModMix(1.0f);
+                m.setPad(px, py);
+                m.setType(0, ModVoice::kTremolo); m.setRateHz(0, 5.0f); m.setDepth(0, 0.8f); // AM -> quieter raw
+                m.setType(1, ModVoice::kChorus);  m.setRateHz(1, 1.0f); m.setDepth(1, 0.7f); m.setMix(1, 1.0f);
+                m.setSlotBypassed(0, false); m.setSlotBypassed(1, false); m.setSlotBypassed(2, true);
+                m.prepare({SR, BLK});
+                auto l = tone(700.0, 0.5, N), r = l;
+                run(m, l, r);
+                return l;
+            };
+            const size_t w2 = (size_t)SR;
+            auto a = runAt(0.5f, 1.0f); // node 0 (tremolo)
+            auto b = runAt(0.0f, 0.0f); // node 1 (chorus)
+            const double r0 = rms(a, a.size() - w2, w2);
+            const double r1 = rms(b, b.size() - w2, w2);
+            CHECK(std::abs(r0 / r1 - 1.0) < 0.15,
+                  "T31 Level Lock holds loudness across the pad (node0 %.3f vs node1 %.3f)", r0, r1);
         }
     }
 
