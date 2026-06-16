@@ -797,8 +797,14 @@ public:
         const float fb = (type == 1 || type == 2 || type == 8) ? raw("Feedback") : 0.0f;     // flanger/phaser/bi-phase ripple
         const float skew = (type == 6) ? 0.55f : 0.0f;                                       // uni-vibe: lopsided sweep
 
+        // Density tracks rate (fixed time-window scope): a faster rate packs more
+        // cycles across the scope, so turning Rate up visibly tightens the wave --
+        // not just a faster scroll. Capped per effect (chorus stays slow, etc.).
+        const float rateHz = juce::jlimit(0.03f,
+                                          (float)nam_rig::ModVoice::maxRateHz((nam_rig::ModVoice::Type)type),
+                                          raw("Rate"));
         const float W = r.getWidth();
-        const float cycles = 2.4f;
+        const float cycles = juce::jlimit(0.6f, 10.0f, rateHz * 0.9f);
         juce::Path path;
         for (int px = 0; px <= (int)W; ++px)
         {
@@ -848,7 +854,7 @@ private:
             const double cap = (double)nam_rig::ModVoice::maxRateHz((nam_rig::ModVoice::Type)type);
             hz = juce::jlimit(0.03, cap, (double)raw("Rate"));
         }
-        mScroll += hz * dt * 0.5;                 // scroll in cycles (0.5 keeps fast rates legible)
+        mScroll += hz * dt;                       // scroll in cycles, full rate (density carries speed too)
         if (mScroll > 1.0e6) mScroll -= 1.0e6;    // keep the accumulator bounded
         if (isVisible() && getWidth() > 0)
             repaint();
