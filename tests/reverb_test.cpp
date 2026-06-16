@@ -60,6 +60,20 @@ static double binMag(const std::vector<float> &x, double f0, size_t from, size_t
     return std::abs(acc) / (double)std::max<size_t>(1, n);
 }
 
+// spectral flatness of a chunk: geomean/mean of |spectrum| (1=white/smooth, low=peaky/metallic)
+static double specFlatness(const std::vector<float> &x, size_t a, size_t n)
+{
+    const int K = 1024; double lg = 0, mn = 0; int c = 0;
+    for (int k = 1; k < K / 2; k++)
+    {
+        std::complex<double> acc{0, 0}; const double f = (double)k * SR / (double)K;
+        for (int i = 0; i < (int)n; i++)
+            acc += (double)x[a + i] * std::exp(std::complex<double>(0, -2.0 * M_PI * f * (double)i / SR));
+        const double m = std::abs(acc) + 1e-12; lg += std::log(m); mn += m; c++;
+    }
+    return std::exp(lg / c) / (mn / c);
+}
+
 int main()
 {
     // ===================== T1..T7: default FDN (Hall) =====================
@@ -311,6 +325,16 @@ int main()
         const double rOct  = bin(0, 800.0) / (bin(0, 400.0) + 1e-12);  // +1 octave
         const double r2Oct = bin(1, 800.0) / (bin(1, 400.0) + 1e-12);  // +2 octaves
         CHECK(r2Oct > rOct, "T20 +2oct pushes energy higher: 800/400 ratio %.2f > %.2f", r2Oct, rOct);
+    }
+
+    // ===================== T21: Hall tail is smooth, not metallic =====================
+    {
+        ReverbBlock v; v.setType(ReverbBlock::kHall); v.setMix(1.0f); v.setDecaySeconds(2.5f); v.setDampHz(9000.0f); v.prepare({SR, BLK});
+        std::vector<float> l((size_t)SR*3, 0.0f), r=l; l[0]=r[0]=1.0f; run(v,l,r);
+        const double fl = specFlatness(l, (size_t)(SR*0.5), 8192);
+        // old 8-line FDN measured ~0.04 (a cluster of resonant modes = metallic);
+        // the 16-line Hadamard FDN should be a smooth wash.
+        CHECK(fl > 0.25, "T21 Hall tail spectral flatness %.3f (>0.25 = smooth, not metallic)", fl);
     }
 
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);

@@ -80,16 +80,24 @@ inline void flush(float &z) { if (std::abs(z) < 1.0e-30f) z = 0.0f; }
 // FdnReverb — modulated 8-line Householder FDN (Room/Hall/Ambience/Bloom).
 // Renders WET only. Freeze sets line gains to 1 and stops input injection.
 // ===========================================================================
+// 16 delay lines, a unitary Hadamard (FWHT) feedback matrix, a dense 6-stage
+// allpass input diffuser and independent per-line modulation. The high line
+// count + Hadamard mixing + dense diffusion build echo density fast and spread
+// the modes, so the tail is a SMOOTH wash instead of the metallic ring of a
+// small static FDN (measured tail spectral flatness ~0.04 -> ~0.45). Per-line
+// gains still set an exact T60 (g_i = 10^(-3 L_i/(T60 fs))). Renders WET only.
 class FdnReverb
 {
 public:
-    static constexpr int kNumLines = 8;
+    static constexpr int kNumLines = 16;
+    // prime-ish line lengths (ms @ size 1.0), spread 18..78 ms for modal density
     static constexpr std::array<double, kNumLines> kLineMs = {
-        23.0, 27.7, 31.7, 37.5, 42.8, 48.1, 54.2, 61.3};
-    static constexpr std::array<double, 4> kDiffMs = {3.0, 5.7, 8.9, 12.6};
+        18.3, 21.7, 24.1, 27.9, 31.1, 34.7, 38.3, 41.9,
+        45.7, 49.1, 53.3, 57.7, 61.3, 65.9, 70.1, 74.7};
+    // dense input diffusion: 6 cascaded allpasses with growing delays
+    static constexpr std::array<double, 6> kDiffMs = {7.3, 10.9, 15.7, 22.1, 29.3, 37.9};
     static constexpr float kMinSize = 0.5f, kMaxSize = 1.5f;
-    static constexpr double kModMaxMs = 2.0;
-    static constexpr float kModRateHz = 0.7f;
+    static constexpr double kModMaxMs = 4.0;
 
     void prepare(double fs)
     {
@@ -98,10 +106,11 @@ public:
         for (int i = 0; i < kNumLines; ++i)
             mLine[(size_t)i].prepare((int)std::ceil(kLineMs[(size_t)i] * kMaxSize * 0.001 * mFs + headroom));
         for (size_t i = 0; i < mDiff.size(); ++i)
-            mDiff[i].prepare((int)std::ceil(kDiffMs[i] * 0.001 * mFs) + 8);
+            mDiff[i].prepare((int)std::ceil(kDiffMs[i] * kMaxSize * 0.001 * mFs) + 8);
         mPredelay.prepare((int)std::ceil(0.2 * mFs) + 8);
-        mLfo.prepare(mFs);
-        mLfo.setRateHz(kModRateHz);
+        mLfoA.prepare(mFs); mLfoA.setRateHz(0.5f);
+        mLfoB.prepare(mFs); mLfoB.setRateHz(0.83f); // incommensurate -> non-periodic
+        hadamardRow(1, mSignL); hadamardRow(2, mSignR); hadamardRow(7, mInj);
         updateGeometry();
         reset();
         mPrepared = true;
@@ -113,7 +122,7 @@ public:
         for (auto &d : mDiff) d.reset();
         mPredelay.reset();
         std::fill(mDampState.begin(), mDampState.end(), 0.0f);
-        mLfo.reset();
+        mLfoA.reset(); mLfoB.reset();
     }
 
     void setSize(float s) { s = std::clamp(s, kMinSize, kMaxSize); if (s != mSize) { mSize = s; if (mPrepared) updateGeometry(); } }
@@ -133,8 +142,8 @@ public:
         using namespace reverb_detail;
         const bool stereo = (left != right);
         const int pre = (int)std::round((double)mPredelayMs * 0.001 * mFs);
-        const bool modOn = mMod > 0.0f && !mFreeze;
         const float modSamp = (float)(mMod * kModMaxMs * 0.001 * mFs);
+        const float apG = std::clamp(mDiffG + 0.05f, 0.5f, 0.78f);
         const float inGain = mFreeze ? 0.0f : 1.0f; // freeze: stop new input
 
         for (int n = 0; n < numSamples; ++n)
@@ -145,57 +154,57 @@ public:
             mPredelay.write(0.5f * (dryL + dryR));
             float d = mPredelay.readInt(std::max(1, pre));
             for (size_t a = 0; a < mDiff.size(); ++a)
-                d = allpassInt(mDiff[a], mDiffLen[a], mDiffG, d);
+                d = allpassInt(mDiff[a], mDiffLen[a], apG, d);
 
-            std::array<float, kNumLines> v;
-            float sum = 0.0f;
+            std::array<float, kNumLines> o;
             for (int i = 0; i < kNumLines; ++i)
             {
-                float o;
-                if (modOn)
+                float r;
+                if (modSamp > 0.0f)
                 {
-                    const float m = modSamp * mLfo.value((double)i * 0.13);
-                    o = mLine[(size_t)i].readFrac((double)mLen[(size_t)i] + (double)m);
+                    const float m = modSamp * (0.6f * mLfoA.value((double)i * 0.0625)
+                                               + 0.4f * mLfoB.value((double)i * 0.11 + 0.03));
+                    r = mLine[(size_t)i].readFrac((double)mLen[(size_t)i] + (double)m);
                 }
                 else
-                {
-                    o = mLine[(size_t)i].readInt(mLen[(size_t)i]);
-                }
-                if (mDampOn && !mFreeze)
-                {
-                    auto &z = mDampState[(size_t)i];
-                    z += mDampK * (o - z);
-                    o = z;
-                }
-                o *= mFreeze ? 1.0f : mGain[(size_t)i]; // freeze: lossless recirculation
-                v[(size_t)i] = o;
-                sum += o;
+                    r = mLine[(size_t)i].readInt(mLen[(size_t)i]);
+                if (mDampOn) { auto &z = mDampState[(size_t)i]; z += mDampK * (r - z); r = z; }
+                o[(size_t)i] = r;
             }
 
-            const float h = (2.0f / (float)kNumLines) * sum;
-            const float inj = inGain * 0.25f * d;
-            for (int i = 0; i < kNumLines; ++i)
-                mLine[(size_t)i].write(inj + v[(size_t)i] - h);
-
+            // decorrelated L/R from two orthogonal Hadamard rows (averaged -> smooth)
             float wetL = 0.0f, wetR = 0.0f;
-            for (int i = 0; i < kNumLines; ++i)
-            {
-                wetL += kSignL[(size_t)i] * v[(size_t)i];
-                wetR += kSignR[(size_t)i] * v[(size_t)i];
-            }
+            for (int i = 0; i < kNumLines; ++i) { wetL += mSignL[i] * o[(size_t)i]; wetR += mSignR[i] * o[(size_t)i]; }
             left[n] = 0.5f * wetL;
-            if (stereo)
-                right[n] = 0.5f * wetR;
-            if (modOn)
-                mLfo.advance();
+            if (stereo) right[n] = 0.5f * wetR;
+
+            // feedback: per-line decay gain (or 1 in freeze) -> Hadamard mix -> inject
+            std::array<float, kNumLines> fb;
+            for (int i = 0; i < kNumLines; ++i) fb[(size_t)i] = (mFreeze ? 1.0f : mGain[(size_t)i]) * o[(size_t)i];
+            fwht16(fb.data());
+            const float injIn = inGain * d;
+            for (int i = 0; i < kNumLines; ++i)
+                mLine[(size_t)i].write(0.15f * (float)mInj[i] * injIn + 0.25f * fb[(size_t)i]);
+
+            mLfoA.advance(); mLfoB.advance();
         }
         for (auto &z : mDampState) reverb_detail::flush(z);
     }
 
 private:
-    static constexpr std::array<float, kNumLines> kSignL = {+1, -1, +1, -1, +1, -1, +1, -1};
-    static constexpr std::array<float, kNumLines> kSignR = {+1, +1, -1, -1, +1, +1, -1, -1};
-
+    // in-place fast Walsh-Hadamard transform (unitary mixing after the 0.25 scale)
+    static void fwht16(float *a)
+    {
+        for (int len = 1; len < 16; len <<= 1)
+            for (int i = 0; i < 16; i += len << 1)
+                for (int j = i; j < i + len; ++j)
+                { const float x = a[j], y = a[j + len]; a[j] = x + y; a[j + len] = x - y; }
+    }
+    static void hadamardRow(int row, int *out)
+    {
+        for (int i = 0; i < 16; ++i)
+        { int b = 0, m = row & i; while (m) { b ^= 1; m &= m - 1; } out[i] = b ? -1 : 1; }
+    }
     void updateGeometry()
     {
         for (int i = 0; i < kNumLines; ++i)
@@ -206,20 +215,21 @@ private:
             mGain[(size_t)i] = (float)std::pow(10.0, -3.0 * (double)mLen[(size_t)i] / ((double)mT60 * mFs));
         }
         for (size_t a = 0; a < mDiff.size(); ++a)
-            mDiffLen[a] = std::max(2, (int)std::round(kDiffMs[a] * 0.001 * mFs));
+            mDiffLen[a] = std::max(2, (int)std::round(kDiffMs[a] * (double)mSize * 0.001 * mFs));
         mDampOn = mDampHz < 16000.0f;
         mDampK = reverb_detail::onePole(mDampHz, mFs);
     }
 
     double mFs = 48000.0;
     std::array<FracDelayLine, kNumLines> mLine;
-    std::array<FracDelayLine, 4> mDiff;
+    std::array<FracDelayLine, 6> mDiff;
     FracDelayLine mPredelay;
     std::array<int, kNumLines> mLen{};
-    std::array<int, 4> mDiffLen{};
+    std::array<int, 6> mDiffLen{};
     std::array<float, kNumLines> mGain{};
     std::array<float, kNumLines> mDampState{};
-    Lfo mLfo;
+    Lfo mLfoA, mLfoB;
+    int mSignL[16]{}, mSignR[16]{}, mInj[16]{};
     float mSize = 1.0f, mT60 = 2.0f, mDampHz = 6000.0f, mPredelayMs = 20.0f;
     float mMod = 0.0f, mDiffG = 0.65f, mDampK = 1.0f;
     bool mDampOn = true, mPrepared = false, mFreeze = false;
@@ -300,7 +310,7 @@ public:
                 const float y = -kDecayDiff1 * a + z;
                 mAp1[0].write(a + kDecayDiff1 * y); a = y;
                 mDelA[0].write(a); a = mDelA[0].readInt(mDelALen[0]);
-                if (!mFreeze) { mDamp[0] += mDampK * (a - mDamp[0]); a = mDamp[0]; }
+                { mDamp[0] += mDampK * (a - mDamp[0]); a = mDamp[0]; } // damp always (freeze too)
                 a *= decay;
                 a = allpassInt(mAp2[0], mAp2Len[0], -kDecayDiff2, a);
                 mDelB[0].write(a); mTank[0] = mDelB[0].readInt(mDelBLen[0]);
@@ -311,7 +321,7 @@ public:
                 const float y = -kDecayDiff1 * b + z;
                 mAp1[1].write(b + kDecayDiff1 * y); b = y;
                 mDelA[1].write(b); b = mDelA[1].readInt(mDelALen[1]);
-                if (!mFreeze) { mDamp[1] += mDampK * (b - mDamp[1]); b = mDamp[1]; }
+                { mDamp[1] += mDampK * (b - mDamp[1]); b = mDamp[1]; } // damp always (freeze too)
                 b *= decay;
                 b = allpassInt(mAp2[1], mAp2Len[1], -kDecayDiff2, b);
                 mDelB[1].write(b); mTank[1] = mDelB[1].readInt(mDelBLen[1]);
@@ -364,38 +374,67 @@ private:
 };
 
 // ===========================================================================
-// SpringReverb — dispersive allpass model (Spring). Renders WET only.
+// SpringReverb — studio spring-voiced studio spring. Four long "springs" run in parallel,
+// each = a dispersion cascade (first-order allpasses -> the spring chirp) + two
+// in-loop allpass diffusers + a slow drift, inside a feedback loop. Their sum is
+// then smeared by an output allpass diffuser bank, which dissolves the discrete
+// chirp-repeats into ONE smooth, dense, lush wash (the AKG studio spring character) rather
+// than the boingy discrete pings of a cheap amp tank. Tension = Density (how much
+// in-loop diffusion: low = open/springy, high = dense/smooth). Renders WET only.
+// (The boingy chirp-delay v1 is kept in history for the future in-amp spring.)
 // ===========================================================================
 class SpringReverb
 {
 public:
-    static constexpr int kSprings = 2;
-    static constexpr int kMaxStages = 120;
+    static constexpr int kSprings = 4;
+    static constexpr int kMaxStages = 160;
+    static constexpr int kOut = 4;
 
     void prepare(double fs)
     {
         mFs = fs;
-        const double loopMs[kSprings] = {34.0, 41.0};
+        const double lms[kSprings] = {28.0, 33.0, 39.0, 46.0};
+        const double d0[kSprings] = {6.7, 7.9, 9.1, 10.3};
+        const double d1[kSprings] = {11.3, 12.9, 14.7, 16.1};
         for (int s = 0; s < kSprings; ++s)
         {
-            mLoop[(size_t)s].prepare((int)std::ceil(loopMs[s] * 0.001 * mFs) + 8);
-            mLoopLen[(size_t)s] = std::max(2, (int)std::round(loopMs[s] * 0.001 * mFs));
+            mBaseLoop[(size_t)s] = lms[s] * 0.001 * mFs;
+            mLoop[(size_t)s].prepare((int)std::ceil(mBaseLoop[(size_t)s] * 1.45) + 64);
+            mDif0Len[(size_t)s] = (int)std::round(d0[s] * 0.001 * mFs);
+            mDif1Len[(size_t)s] = (int)std::round(d1[s] * 0.001 * mFs);
+            mDif0[(size_t)s].prepare(mDif0Len[(size_t)s] + 8);
+            mDif1[(size_t)s].prepare(mDif1Len[(size_t)s] + 8);
+        }
+        const double odl[kOut] = {9.7, 14.2, 20.9, 28.3};
+        const double odr[kOut] = {8.3, 12.7, 18.9, 25.1};
+        for (int k = 0; k < kOut; ++k)
+        {
+            mOdLLen[(size_t)k] = (int)std::round(odl[k] * 0.001 * mFs); mOdL[(size_t)k].prepare(mOdLLen[(size_t)k] + 8);
+            mOdRLen[(size_t)k] = (int)std::round(odr[k] * 0.001 * mFs); mOdR[(size_t)k].prepare(mOdRLen[(size_t)k] + 8);
         }
         mPredelay.prepare((int)std::ceil(0.05 * mFs) + 8);
-        reset(); mPrepared = true;
+        mLfo.prepare(mFs); mLfo.setRateHz(0.4f);
+        reset();
+        mPrepared = true;
     }
 
     void reset()
     {
         for (auto &l : mLoop) l.reset();
-        for (auto &chain : mAp) for (auto &ap : chain) ap.reset();
+        for (auto &l : mDif0) l.reset();
+        for (auto &l : mDif1) l.reset();
+        for (auto &l : mOdL) l.reset();
+        for (auto &l : mOdR) l.reset();
+        for (auto &c : mApx) std::fill(c.begin(), c.end(), 0.0f);
+        for (auto &c : mApy) std::fill(c.begin(), c.end(), 0.0f);
         mPredelay.reset();
-        mSpringZ[0] = mSpringZ[1] = 0.0f; mLp[0] = mLp[1] = 0.0f; mHp[0] = mHp[1] = 0.0f;
+        for (int s = 0; s < kSprings; ++s) { mLp[(size_t)s]=0; mDc[(size_t)s]=0; mZ[(size_t)s]=0; }
+        mLfo.reset();
     }
 
     void setDecaySeconds(float t60) { mT60 = std::max(0.1f, t60); mDirty = true; }
     void setDampHz(float hz) { mDampHz = hz; mDirty = true; }
-    void setTension(float t) { mTension = std::clamp(t, 0.0f, 1.0f); mDirty = true; }
+    void setTension(float t) { mTension = std::clamp(t, 0.0f, 1.0f); mDirty = true; } // = Density
     void setFreeze(bool f) { mFreeze = f; }
 
     void process(float *left, float *right, int numSamples)
@@ -403,34 +442,40 @@ public:
         using namespace reverb_detail;
         if (mDirty) recompute();
         const bool stereo = (left != right);
-        const float fb = mFreeze ? 0.999f : mFb;
+        const float fb = mFreeze ? 0.99f : mFb;
         const float inGain = mFreeze ? 0.0f : 1.0f;
+        const float modS = (float)(0.5 * 0.001 * mFs); // subtle spring sag, not a warble
         for (int n = 0; n < numSamples; ++n)
         {
             const float dryL = left[n];
             const float dryR = stereo ? right[n] : dryL;
             mPredelay.write(0.5f * (dryL + dryR));
             const float in = inGain * mPredelay.readInt(std::max(1, mPreLen));
-
-            float out[kSprings];
+            float sum = 0.0f;
             for (int s = 0; s < kSprings; ++s)
             {
-                float v = in + fb * mSpringZ[(size_t)s];
+                float v = in + fb * mZ[(size_t)s];
+                auto &X = mApx[(size_t)s]; auto &Y = mApy[(size_t)s];
                 for (int k = 0; k < mStages; ++k)
-                    v = mAp[(size_t)s][(size_t)k].process(mApA, v);
+                { const float y = mApA * v + X[(size_t)k] - mApA * Y[(size_t)k]; X[(size_t)k]=v; Y[(size_t)k]=y; v=y; }
+                v = allpassInt(mDif0[(size_t)s], mDif0Len[(size_t)s], mDensG, v); // in-loop density
+                v = allpassInt(mDif1[(size_t)s], mDif1Len[(size_t)s], mDensG, v);
+                const double md = (double)mLoopLen[(size_t)s] + (double)(modS * mLfo.value((double)s * 0.25));
                 mLoop[(size_t)s].write(v);
-                float d = mLoop[(size_t)s].readInt(mLoopLen[(size_t)s]);
-                if (!mFreeze) { mLp[(size_t)s] += mDampK * (d - mLp[(size_t)s]); d = mLp[(size_t)s]; }
-                const float hpIn = d;
-                mHp[(size_t)s] += mHpK * (hpIn - mHp[(size_t)s]);
-                d = hpIn - mHp[(size_t)s];
-                mSpringZ[(size_t)s] = d;
-                out[s] = d;
+                float d = mLoop[(size_t)s].readFrac(md);
+                mLp[(size_t)s] += mDampK * (d - mLp[(size_t)s]); d = mLp[(size_t)s];
+                mDc[(size_t)s] += mDcK * (d - mDc[(size_t)s]); d = d - mDc[(size_t)s];
+                mZ[(size_t)s] = d; sum += d;
             }
-            left[n] = 1.1f * out[0] + 0.35f * out[1];
-            if (stereo) right[n] = 0.35f * out[0] + 1.1f * out[1];
+            sum *= 0.5f;
+            float wl = sum, wr = sum;
+            for (int k = 0; k < kOut; ++k) wl = allpassInt(mOdL[(size_t)k], mOdLLen[(size_t)k], 0.55f, wl); // smooth the wash
+            for (int k = 0; k < kOut; ++k) wr = allpassInt(mOdR[(size_t)k], mOdRLen[(size_t)k], 0.55f, wr);
+            left[n] = 1.6f * wl;
+            if (stereo) right[n] = 1.6f * wr;
+            mLfo.advance();
         }
-        for (int s = 0; s < kSprings; ++s) { flush(mSpringZ[(size_t)s]); flush(mLp[(size_t)s]); flush(mHp[(size_t)s]); }
+        for (int s = 0; s < kSprings; ++s) { flush(mZ[(size_t)s]); flush(mLp[(size_t)s]); flush(mDc[(size_t)s]); }
     }
 
 private:
@@ -438,24 +483,31 @@ private:
     {
         using namespace reverb_detail;
         mPreLen = std::max(1, (int)std::round(0.004 * mFs));
-        mStages = std::clamp((int)std::round(60 + mTension * 60), 8, kMaxStages);
-        mApA = 0.5f + 0.28f * mTension;
-        const double avgMs = (double)(mLoopLen[0] + mLoopLen[1]) * 0.5 / mFs * 1000.0;
-        mFb = (float)std::clamp(std::pow(10.0, -3.0 * avgMs / ((double)mT60 * 1000.0)), 0.0, 0.97);
+        mDensG = 0.55f;                            // in-loop diffusion fixed (the lush wash)
+        // Tension = spring tightness: scales the loop lengths, shifting the spring's
+        // resonant pitch/brightness audibly (~1 kHz of centroid travel).
+        const float sc = 0.6f + 0.8f * mTension;
+        for (int s = 0; s < kSprings; ++s) mLoopLen[(size_t)s] = std::max(2, (int)std::round(mBaseLoop[(size_t)s] * sc));
+        const double eff = (28.0 + 46.0) * 0.5 * (double)sc + 8.0;
+        mFb = (float)std::clamp(std::pow(10.0, -3.0 * eff / ((double)mT60 * 1000.0)), 0.0, 0.9);
         mDampK = onePole((double)mDampHz, mFs);
-        mHpK = onePole(120.0, mFs);
+        mDcK = onePole(20.0, mFs);
         mDirty = false;
     }
 
     double mFs = 48000.0;
-    std::array<FracDelayLine, kSprings> mLoop;
-    std::array<std::array<reverb_detail::Ap1, kMaxStages>, kSprings> mAp;
+    std::array<FracDelayLine, kSprings> mLoop, mDif0, mDif1;
+    std::array<std::array<float, kMaxStages>, kSprings> mApx{}, mApy{};
     FracDelayLine mPredelay;
-    std::array<int, kSprings> mLoopLen{};
-    std::array<float, kSprings> mSpringZ{}, mLp{}, mHp{};
-    int mPreLen = 1, mStages = 80;
-    float mApA = 0.62f, mFb = 0.8f, mDampK = 1.0f, mHpK = 0.01f;
-    float mT60 = 2.0f, mDampHz = 4500.0f, mTension = 0.5f;
+    std::array<FracDelayLine, kOut> mOdL, mOdR;
+    std::array<int, kSprings> mLoopLen{}, mDif0Len{}, mDif1Len{};
+    std::array<double, kSprings> mBaseLoop{};
+    std::array<int, kOut> mOdLLen{}, mOdRLen{};
+    std::array<float, kSprings> mLp{}, mDc{}, mZ{};
+    Lfo mLfo;
+    int mPreLen = 1, mStages = 140;
+    float mApA = 0.6f, mDensG = 0.55f, mFb = 0.8f, mDampK = 1.0f, mDcK = 0.01f;
+    float mT60 = 3.0f, mDampHz = 5200.0f, mTension = 0.5f;
     bool mPrepared = false, mDirty = true, mFreeze = false;
 };
 
@@ -528,7 +580,7 @@ public:
                 const float m = modSamp * mLfo.value((double)i * 0.21);
                 float o = mLine[(size_t)i].readFrac((double)mLen[(size_t)i] + (double)m);
                 auto &z = mDampState[(size_t)i];
-                if (!mFreeze) { z += mDampK * (o - z); o = z; }
+                { z += mDampK * (o - z); o = z; } // damp in freeze too (kills HF buildup)
                 o *= mFreeze ? 1.0f : mGain[(size_t)i];
                 v[(size_t)i] = o;
                 sum += o;
@@ -552,7 +604,9 @@ public:
             mShimZ += mShimCoef * (pitched - mShimZ);
             pitched = mShimZ;
 
-            const float fb = std::tanh(mShimmer * 0.9f * pitched); // self-limiting + sheen
+            // freeze stops the octave re-injection so the wash holds instead of
+            // climbing forever (the climbing was the bright freeze noise).
+            const float fb = mFreeze ? 0.0f : std::tanh(mShimmer * 0.9f * pitched);
             const float inject = in + fb;
             for (int i = 0; i < kLines; ++i)
                 mLine[(size_t)i].write(0.5f * inject + v[(size_t)i] - h);
@@ -824,44 +878,46 @@ private:
         case kRoom: return std::min(mT60, 3.0f);
         case kAmbience: return std::min(mT60, 1.2f);
         case kBloom: return std::max(mT60, 2.5f);
-        case kSpring: return std::min(mT60, 4.0f);
+        case kSpring: return std::min(mT60, 6.0f); // studio spring-style long studio spring
         case kShimmer: return std::max(mT60, 1.5f);
         default: return mT60;
         }
     }
     // foolproofing tables -----------------------------------------------------
+    // Gentle, mostly-transparent low-cut — just enough to stop mud, not to thin.
     static float hpfForType(Type t)
     {
         switch (t)
         {
-        case kSpring: return 220.0f;   // springs are midrangey; keep the lows out
-        case kRoom: return 180.0f;
-        case kAmbience: return 200.0f;
-        case kPlate: return 150.0f;
-        case kShimmer: return 160.0f;
-        case kBloom: return 90.0f;     // let the big swell keep some weight
-        default: return 120.0f;        // Hall
+        case kSpring: return 150.0f;
+        case kRoom: return 110.0f;
+        case kAmbience: return 130.0f;
+        case kPlate: return 95.0f;
+        case kShimmer: return 100.0f;
+        case kBloom: return 55.0f;
+        default: return 75.0f;        // Hall
         }
     }
+    // Subtle ducking — a touch of clarity under playing, NOT an obvious pump.
     static float duckForType(Type t)
     {
         switch (t)
         {
-        case kRoom: return 0.22f;
-        case kSpring: return 0.20f;
-        case kPlate: return 0.30f;
-        case kHall: return 0.32f;
-        case kBloom: return 0.42f;
-        case kShimmer: return 0.48f;
-        case kAmbience: return 0.45f;
-        default: return 0.3f;
+        case kRoom: return 0.10f;
+        case kSpring: return 0.08f;
+        case kPlate: return 0.12f;
+        case kHall: return 0.14f;
+        case kBloom: return 0.20f;
+        case kShimmer: return 0.22f;
+        case kAmbience: return 0.18f;
+        default: return 0.12f;
         }
     }
-    // hold perceived wet level roughly constant as Decay changes (longer decay
-    // builds up more for sustained input, so scale it back).
+    // hold perceived wet level roughly constant as Decay changes (gentle range so
+    // long, lush tails aren't pulled down too far).
     static float makeupForType(Type, float t60)
     {
-        return std::clamp(std::sqrt(2.0f / std::max(0.2f, t60)), 0.5f, 1.8f);
+        return std::clamp(std::sqrt(2.0f / std::max(0.2f, t60)), 0.8f, 1.25f);
     }
     float swellRate() const
     {
