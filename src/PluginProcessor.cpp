@@ -342,9 +342,54 @@ NamRigProcessor::NamRigProcessor()
       apvts(*this, nullptr, "Parameters", createParameterLayout())
 {
     mPresets = std::make_unique<nam_rig::PresetManager>(*this);
+    // Listen for mod-slot type changes so a USER type switch resets that slot's
+    // knobs to the new type's defaults (suppressed during state/preset loads).
+    for (int s = 1; s <= nam_rig::ModBlock::kSlots; ++s)
+        apvts.addParameterListener("mod" + juce::String(s) + "Type", this);
 }
 
-NamRigProcessor::~NamRigProcessor() = default;
+NamRigProcessor::~NamRigProcessor()
+{
+    for (int s = 1; s <= nam_rig::ModBlock::kSlots; ++s)
+        apvts.removeParameterListener("mod" + juce::String(s) + "Type", this);
+}
+
+void NamRigProcessor::parameterChanged(const juce::String &paramID, float)
+{
+    if (mSuppressTypeReset.load())
+        return; // a state/preset load is in progress -> keep the saved knobs
+    if (paramID.startsWith("mod") && paramID.endsWith("Type"))
+    {
+        const int slot = paramID[3] - '1'; // "mod1Type".."mod3Type" -> 0..2
+        if (slot >= 0 && slot < nam_rig::ModBlock::kSlots)
+        {
+            mPendingTypeReset.fetch_or(1 << slot);
+            triggerAsyncUpdate(); // do the actual param writes on the message thread
+        }
+    }
+}
+
+void NamRigProcessor::handleAsyncUpdate()
+{
+    const int mask = mPendingTypeReset.exchange(0);
+    // Reset everything on the slot EXCEPT its Type and On (enable) to defaults.
+    static const char *const suffix[] = {"Wave", "Sync", "Rate", "Depth", "Feedback",
+                                         "Mix", "Width", "Drive", "RotFast", "Manual",
+                                         "Invert", "P2Ratio", "Series", "HornDrum"};
+    for (int s = 0; s < nam_rig::ModBlock::kSlots; ++s)
+    {
+        if (!(mask & (1 << s)))
+            continue;
+        const juce::String p = "mod" + juce::String(s + 1);
+        for (auto *sfx : suffix)
+            if (auto *prm = apvts.getParameter(p + sfx))
+            {
+                prm->beginChangeGesture();
+                prm->setValueNotifyingHost(prm->getDefaultValue());
+                prm->endChangeGesture();
+            }
+    }
+}
 
 float NamRigProcessor::calibrationGainDb(int rig) const
 {
@@ -718,7 +763,9 @@ void NamRigProcessor::setStateInformation(const void *data, int sizeInBytes)
         return;
 
     auto state = juce::ValueTree::fromXml(*xml);
+    beginStateLoad(); // don't let the type-change reset wipe the restored knobs
     apvts.replaceState(state);
+    endStateLoadDeferred();
 
     const juce::String modelPath = state.getProperty("modelPath", "");
     if (modelPath.isNotEmpty())
