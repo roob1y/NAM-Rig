@@ -21,6 +21,21 @@ namespace colors
     inline const juce::Colour meterLo     {0xff5fcf6e};
     inline const juce::Colour meterMid    {0xffffb13d};
     inline const juce::Colour meterHi     {0xffe85d4a};
+    inline const juce::Colour scopeBg     {0xff13161f}; // mod-lane scope canvas
+    inline const juce::Colour post        {0xffc79be6}; // post-lane (OUT) accent (violet)
+
+    // Per-slot accent for the 3 front mod slots: ties each lane's scope trace to
+    // its node on the Cartesian blend pad. slot 0 = amber, 1 = teal, 2 = violet.
+    inline juce::Colour laneColour(int slot)
+    {
+        switch (slot)
+        {
+        case 0: return juce::Colour(0xffeb9b43);
+        case 1: return juce::Colour(0xff45c4b0);
+        case 2: return juce::Colour(0xff9a6fd0);
+        default: return post; // post lane / fallback
+        }
+    }
 }
 
 class RigLookAndFeel : public juce::LookAndFeel_V4

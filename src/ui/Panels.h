@@ -739,13 +739,135 @@ private:
 };
 
 //==============================================================================
+// Live per-lane modulation scope. Reads the slot's params on a 30 Hz timer and
+// animates the LFO/effect motion so the visual shows WHAT THE KNOBS DO: Rate ->
+// scroll speed, Depth -> height, Wave/Type -> shape, Feedback -> resonant
+// ripple. It calls the same voicing rules as the DSP (authenticWave/depthMax/
+// maxRateHz) so the picture matches the sound (chorus can't show flanger speed,
+// only tremolo honours Shape, etc.). In Parallel the owner scales mBright by the
+// blend-pad weight so dragging the puck visibly turns lanes up and down.
+class LaneScope : public juce::Component, private juce::Timer
+{
+public:
+    LaneScope(juce::AudioProcessorValueTreeState &apvts, juce::String prefix, juce::Colour colour)
+        : mApvts(apvts), mPrefix(std::move(prefix)), mColour(colour)
+    {
+        mLastMs = juce::Time::getMillisecondCounterHiRes();
+        startTimerHz(30);
+    }
+    void setBrightness(float b) { mBright = juce::jlimit(0.0f, 1.0f, b); }
+
+    void paint(juce::Graphics &g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        g.setColour(colors::scopeBg);
+        g.fillRoundedRectangle(b, 5.0f);
+        g.setColour(colors::outline.withAlpha(0.6f));
+        g.drawRoundedRectangle(b, 5.0f, 1.0f);
+        auto r = b.reduced(4.0f, 3.0f);
+        const float midY = r.getCentreY();
+        g.setColour(colors::outline.withAlpha(0.5f));
+        g.drawHorizontalLine((int)midY, r.getX(), r.getRight());
+
+        const int type = (int)raw("Type");
+        const bool on = raw("On") >= 0.5f;
+        juce::Colour col = mColour.withMultipliedAlpha(0.30f + 0.70f * mBright);
+        if (!on) col = col.withMultipliedAlpha(0.35f); // bypassed -> faint
+
+        if (type == 5) // Rotary: two orbiting rotors (horn + drum), not an LFO line
+        {
+            const float cx = r.getCentreX(), cy = midY, rad = juce::jmin(r.getWidth(), r.getHeight()) * 0.5f - 2.0f;
+            g.setColour(colors::outline.withAlpha(0.6f));
+            g.drawEllipse(cx - rad, cy - rad, rad * 2.0f, rad * 2.0f, 1.0f);
+            const float aH = (float)(mScroll * 2.0 * 3.14159265);          // horn (outer, faster)
+            const float aD = (float)(mScroll * 2.0 * 3.14159265 * 0.5);    // drum (inner, slower)
+            g.setColour(col);
+            g.fillEllipse(cx + std::cos(aH) * rad - 3.0f, cy + std::sin(aH) * rad - 3.0f, 6.0f, 6.0f);
+            g.setColour(colors::post.withMultipliedAlpha(0.30f + 0.70f * mBright));
+            const float ri = rad * 0.55f;
+            g.fillEllipse(cx + std::cos(aD) * ri - 2.5f, cy + std::sin(aD) * ri - 2.5f, 5.0f, 5.0f);
+            return;
+        }
+
+        const int wave = (type == 3) ? (int)raw("Wave")                                    // tremolo honours Shape
+                                     : nam_rig::ModVoice::authenticWave((nam_rig::ModVoice::Type)type);
+        float amp = (type == 2) ? 0.7f                                                       // phaser: fixed sweep
+                                : raw("Depth") * nam_rig::ModVoice::depthMax((nam_rig::ModVoice::Type)type);
+        amp = juce::jlimit(0.05f, 1.0f, amp) * (r.getHeight() * 0.5f - 2.0f);
+        const float fb = (type == 1 || type == 2 || type == 8) ? raw("Feedback") : 0.0f;     // flanger/phaser/bi-phase ripple
+        const float skew = (type == 6) ? 0.55f : 0.0f;                                       // uni-vibe: lopsided sweep
+
+        const float W = r.getWidth();
+        const float cycles = 2.4f;
+        juce::Path path;
+        for (int px = 0; px <= (int)W; ++px)
+        {
+            float xc = (px / W) * cycles + (float)mScroll;
+            float v = shape(wave, xc, skew) + fb * 0.30f * std::sin(2.0f * 3.14159265f * 3.0f * xc);
+            v = juce::jlimit(-1.2f, 1.2f, v);
+            const float y = midY - v * amp;
+            if (px == 0) path.startNewSubPath(r.getX() + px, y);
+            else path.lineTo(r.getX() + px, y);
+        }
+        g.setColour(col);
+        g.strokePath(path, juce::PathStrokeType(1.8f));
+    }
+
+private:
+    float raw(const char *suffix) const
+    {
+        auto *p = mApvts.getRawParameterValue(mPrefix + suffix);
+        return p ? p->load() : 0.0f;
+    }
+    static float hashStep(int n) // deterministic -1..1 per integer step (Sample & Hold)
+    {
+        unsigned h = (unsigned)n * 2654435761u + 1013904223u;
+        return ((float)((h >> 8) & 0xffffu) / 32768.0f) - 1.0f;
+    }
+    static float shape(int wave, float x, float skew) // -1..1 at cycle position x
+    {
+        if (wave == 2) { float f = x - std::floor(x); return f < 0.5f ? 1.0f : -1.0f; }   // Square
+        if (wave == 3) return hashStep((int)std::floor(x));                               // Sample & Hold
+        if (wave == 1) { float f = x - std::floor(x); return 1.0f - 4.0f * std::abs(f - 0.5f); } // Triangle
+        float f = x - std::floor(x);
+        if (skew > 0.0f) // warp the phase for the uni-vibe's asymmetric swell
+            f = (f < skew) ? 0.5f * f / skew : 0.5f + 0.5f * (f - skew) / (1.0f - skew);
+        return std::sin(2.0f * 3.14159265f * f);
+    }
+    void timerCallback() override
+    {
+        const double now = juce::Time::getMillisecondCounterHiRes();
+        const double dt = juce::jlimit(0.0, 0.1, (now - mLastMs) / 1000.0);
+        mLastMs = now;
+        const int type = (int)raw("Type");
+        double hz;
+        if (type == 5) // rotary: slow/fast toggle drives the orbit speed
+            hz = raw("RotFast") >= 0.5f ? 6.6 : 0.72;
+        else
+        {
+            const double cap = (double)nam_rig::ModVoice::maxRateHz((nam_rig::ModVoice::Type)type);
+            hz = juce::jlimit(0.03, cap, (double)raw("Rate"));
+        }
+        mScroll += hz * dt * 0.5;                 // scroll in cycles (0.5 keeps fast rates legible)
+        if (mScroll > 1.0e6) mScroll -= 1.0e6;    // keep the accumulator bounded
+        if (isVisible() && getWidth() > 0)
+            repaint();
+    }
+
+    juce::AudioProcessorValueTreeState &mApvts;
+    juce::String mPrefix;
+    juce::Colour mColour;
+    double mScroll = 0.0, mLastMs = 0.0;
+    float mBright = 1.0f;
+};
+
 // One slot's controls. Shows only the controls the selected effect actually
 // has: universal Rate/Sync/Mix/Width/On always; Depth (all but Phaser);
 // Feedback (Flanger/Phaser); Shape waveform (Tremolo). Everything else is
 // hardwired in ModVoice, so there are no bad-sound knobs.
 // One slot as a horizontal lane: number+LED, animated effect icon, Type/Sync,
-// only the effect's real knobs, Shape (tremolo), and an On toggle. All three
-// lanes are shown at once (no tabs) so the whole section reads at a glance.
+// a live scope, only the effect's real knobs, Shape (tremolo), and an On toggle.
+// All three lanes are shown at once (no tabs) so the section reads at a glance.
 class ModSlotLane : public juce::Component
 {
 public:
@@ -764,6 +886,9 @@ public:
         mNum.setColour(juce::Label::textColourId, colors::textDim);
         addAndMakeVisible(mNum);
         addAndMakeVisible(mIcon);
+
+        mScope = std::make_unique<LaneScope>(apvts, p, colors::laneColour(soloSlot));
+        addAndMakeVisible(*mScope); // live LFO/effect motion for this slot
 
         // Only the effects valid for this position appear in the list (item id =
         // enum + 1, so the id carries the ModVoice::Type). Front = the 6 front
@@ -864,6 +989,10 @@ public:
     // back so the button reflects it after an editor reopen / external change.
     std::function<void(int, bool)> onSolo;
     void setSoloState(bool on) { mSolo.setToggleState(on, juce::dontSendNotification); }
+
+    // Parallel blend feedback: scale this lane's scope by its pad weight (1 in
+    // series). The owner (ModPanel) pushes this from the live pad position.
+    void setScopeBrightness(float b) { if (mScope) mScope->setBrightness(b); }
 
     // Write the filtered type combo's selection (item id = enum + 1) back to the
     // full 9-choice Type parameter.
@@ -1002,6 +1131,20 @@ public:
             if (k->isVisible())
                 vis.push_back(k);
         const int nk = (int)vis.size();
+        if (mScope) // live scope fills the space between Type/Sync and the knobs
+        {
+            const int reserve = nk * 66 + 14;
+            const int scopeW = juce::jlimit(0, 200, area.getWidth() - reserve);
+            if (scopeW >= 80)
+            {
+                mScope->setVisible(true);
+                mScope->setBounds(area.removeFromLeft(scopeW)
+                                      .withSizeKeepingCentre(scopeW, juce::jmin(area.getHeight(), 40)));
+                area.removeFromLeft(12);
+            }
+            else
+                mScope->setVisible(false);
+        }
         if (nk > 0)
         {
             const int w = juce::jmin(62, area.getWidth() / nk);
@@ -1020,6 +1163,7 @@ private:
     float mLedX = 0.0f, mLedY = 0.0f;
     juce::Label mNum;
     ModFxIcon mIcon;
+    std::unique_ptr<LaneScope> mScope;
     juce::ComboBox mType, mWave, mSync;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mWaveAtt, mSyncAtt; // (Type combo synced by hand)
     juce::ToggleButton mOn;
@@ -1091,6 +1235,11 @@ public:
         for (int i = 0; i < 3; ++i)
             if (mActive[i]) act[n++] = i;
 
+        // Current blend weights for node size + the puck's blended colour.
+        float w[3];
+        nam_rig::ModBlock::padWeights((float)mX.getValue(), (float)mY.getValue(), w);
+        const auto pk = scr(r, (float)mX.getValue(), (float)mY.getValue());
+
         if (n >= 3 || n == 0) // triangle (n==0 shouldn't happen; show the full shape)
         {
             juce::Path tri;
@@ -1098,7 +1247,7 @@ public:
             tri.lineTo(scr(r, 1));
             tri.lineTo(scr(r, 2));
             tri.closeSubPath();
-            g.setColour(colors::panel.brighter(0.06f));
+            g.setColour(colors::scopeBg);
             g.fillPath(tri);
             g.setColour(colors::outline);
             g.strokePath(tri, juce::PathStrokeType(1.2f));
@@ -1109,22 +1258,41 @@ public:
             g.drawLine(juce::Line<float>(scr(r, act[0]), scr(r, act[1])), 1.4f);
         }
 
+        for (int i = 0; i < 3; ++i) // puck->node tethers, coloured + weighted by blend
+            if (mActive[i])
+            {
+                const auto p = scr(r, i);
+                g.setColour(colors::laneColour(i).withAlpha(0.20f + 0.55f * w[i]));
+                g.drawLine(juce::Line<float>(pk, p), 1.0f);
+            }
+
         g.setFont(RigLookAndFeel::withHeight(10.0f));
         for (int i = 0; i < 3; ++i)
         {
             const auto p = scr(r, i);
-            g.setColour(mActive[i] ? colors::accentDim : colors::outline);
-            g.fillEllipse(p.x - 3.0f, p.y - 3.0f, 6.0f, 6.0f);
-            g.setColour(mActive[i] ? colors::textDim : colors::outline);
-            const float ly = (i == 0) ? p.y - 14.0f : p.y + 3.0f;
+            const float rad = 3.0f + 4.0f * (mActive[i] ? w[i] : 0.0f);
+            g.setColour(mActive[i] ? colors::laneColour(i) : colors::outline);
+            g.fillEllipse(p.x - rad, p.y - rad, rad * 2.0f, rad * 2.0f);
+            g.setColour(mActive[i] ? colors::laneColour(i) : colors::outline);
+            const float ly = (i == 0) ? p.y - 14.0f : p.y + 4.0f;
             g.drawText(juce::String(i + 1), (int)(p.x - 8.0f), (int)ly, 16, 11, juce::Justification::centred);
         }
 
-        const auto pk = scr(r, (float)mX.getValue(), (float)mY.getValue());
-        g.setColour(colors::accent);
-        g.fillEllipse(pk.x - 5.0f, pk.y - 5.0f, 10.0f, 10.0f);
-        g.setColour(colors::panel);
-        g.drawEllipse(pk.x - 5.0f, pk.y - 5.0f, 10.0f, 10.0f, 1.5f);
+        // Puck takes the blended colour of the three lane accents by weight.
+        float rr = 0, gg = 0, bb = 0;
+        for (int i = 0; i < 3; ++i)
+        {
+            const auto c = colors::laneColour(i);
+            rr += w[i] * c.getFloatRed();
+            gg += w[i] * c.getFloatGreen();
+            bb += w[i] * c.getFloatBlue();
+        }
+        g.setColour(juce::Colour::fromFloatRGBA(juce::jlimit(0.0f, 1.0f, rr),
+                                                juce::jlimit(0.0f, 1.0f, gg),
+                                                juce::jlimit(0.0f, 1.0f, bb), 1.0f));
+        g.fillEllipse(pk.x - 6.0f, pk.y - 6.0f, 12.0f, 12.0f);
+        g.setColour(colors::scopeBg);
+        g.drawEllipse(pk.x - 6.0f, pk.y - 6.0f, 12.0f, 12.0f, 1.5f);
     }
 
     void mouseDown(const juce::MouseEvent &e) override { drag(e); }
@@ -1463,6 +1631,7 @@ public:
         if (mPostLane) mPostLane->refresh();
         if (mRack) mRack->refresh();
         updatePadActive();
+        updateScopeBrightness();
         refreshRouting();
     }
 
@@ -1475,6 +1644,28 @@ public:
             return mApvts.getRawParameterValue("mod" + juce::String(s + 1) + "On")->load() >= 0.5f;
         };
         mPad->setActiveSlots(enabled(0), enabled(1), enabled(2));
+    }
+
+    // In Parallel, dim each lane's scope by its blend weight (normalised so the
+    // strongest lane is full), so the puck visibly turns lanes up and down. In
+    // Series every lane is fully in the chain -> full brightness.
+    void updateScopeBrightness()
+    {
+        if (!mParallel)
+        {
+            for (int s = 0; s < nam_rig::ModBlock::kSlots; ++s)
+                if (mLanes[(size_t)s]) mLanes[(size_t)s]->setScopeBrightness(1.0f);
+            return;
+        }
+        float w[3];
+        nam_rig::ModBlock::padWeights(mApvts.getRawParameterValue("modPadX")->load(),
+                                      mApvts.getRawParameterValue("modPadY")->load(), w);
+        for (int s = 0; s < nam_rig::ModBlock::kSlots; ++s) // zero bypassed slots, then normalise to the max
+            if (mApvts.getRawParameterValue("mod" + juce::String(s + 1) + "On")->load() < 0.5f)
+                w[s] = 0.0f;
+        const float mx = juce::jmax(1.0e-4f, w[0], w[1], w[2]);
+        for (int s = 0; s < nam_rig::ModBlock::kSlots; ++s)
+            if (mLanes[(size_t)s]) mLanes[(size_t)s]->setScopeBrightness(w[s] / mx);
     }
 
     // Show/hide the routing-dependent right-strip controls and relayout when the
