@@ -87,6 +87,66 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mAtt;
 };
 
+// Horizontal knob in a rounded bordered box: knob on the left, caption + value
+// readout (0..10 rotation, pedal-style) stacked on the right. Used for the
+// section Dry/Wet so it reads as one tidy control beside the blend pad.
+class HKnob : public juce::Component, private juce::Slider::Listener
+{
+public:
+    HKnob(juce::AudioProcessorValueTreeState &apvts, const juce::String &paramId,
+          const juce::String &caption, juce::Colour accent = colors::accent)
+        : mCaption(caption)
+    {
+        mSlider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+        mSlider.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+        mSlider.setColour(juce::Slider::rotarySliderFillColourId, accent);
+        addAndMakeVisible(mSlider);
+        mAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, paramId, mSlider);
+        if (auto *p = apvts.getParameter(paramId))
+            mSlider.setDoubleClickReturnValue(true, p->convertFrom0to1(p->getDefaultValue()));
+        mSlider.addListener(this);
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        auto box = getLocalBounds().toFloat().reduced(0.5f);
+        g.setColour(colors::tile);
+        g.fillRoundedRectangle(box, 8.0f);
+        g.setColour(colors::outline);
+        g.drawRoundedRectangle(box, 8.0f, 1.0f);
+
+        auto txt = mTextArea;
+        g.setColour(colors::textDim);
+        g.setFont(RigLookAndFeel::withHeight(11.0f));
+        g.drawText(mCaption, txt.removeFromTop(txt.getHeight() * 0.5f).toNearestInt(),
+                   juce::Justification::centredLeft);
+        auto vb = txt.reduced(0.0f, 1.0f); // value box
+        g.setColour(colors::scopeBg);
+        g.fillRoundedRectangle(vb, 4.0f);
+        g.setColour(colors::outline);
+        g.drawRoundedRectangle(vb, 4.0f, 1.0f);
+        g.setColour(colors::text);
+        const double v = mSlider.valueToProportionOfLength(mSlider.getValue()) * 10.0;
+        g.drawText(juce::String(v, 1), vb.toNearestInt(), juce::Justification::centred);
+    }
+
+    void resized() override
+    {
+        auto inner = getLocalBounds().reduced(8, 6);
+        const int kw = juce::jmin(inner.getHeight(), inner.getWidth() / 2);
+        mSlider.setBounds(inner.removeFromLeft(kw));
+        inner.removeFromLeft(8);
+        mTextArea = inner.toFloat();
+    }
+
+private:
+    void sliderValueChanged(juce::Slider *) override { repaint(); }
+    juce::String mCaption;
+    juce::Slider mSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mAtt;
+    juce::Rectangle<float> mTextArea;
+};
+
 // Common panel chrome: rounded body + title strip; content laid out by subclass.
 class BlockPanel : public juce::Component
 {
@@ -1710,8 +1770,7 @@ public:
         mPad = std::make_unique<BlendPad>(apvts);
         addChildComponent(*mPad); // parallel only
 
-        mModMix = std::make_unique<LabeledKnob>(apvts, "modMix", "Dry / Wet");
-        mModMix->setRotationReadout(10.0);
+        mModMix = std::make_unique<HKnob>(apvts, "modMix", "Dry / Wet");
         addChildComponent(*mModMix); // parallel only
 
         mRack = std::make_unique<ChainRack>(apvts);
@@ -1857,9 +1916,9 @@ public:
         area.removeFromRight(10);
         if (mParallel)
         {
-            mModMix->setBounds(strip.removeFromBottom(58).reduced(26, 0));
-            strip.removeFromBottom(6);
-            mPad->setBounds(strip); // fill the strip -> a taller blend triangle
+            mModMix->setBounds(strip.removeFromBottom(52).reduced(4, 0)); // horizontal Dry/Wet
+            strip.removeFromBottom(8);
+            mPad->setBounds(strip); // fill the strip -> a taller blend box
         }
         else
         {
@@ -1890,7 +1949,7 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mRoutingAtt;
     std::unique_ptr<BlendPad> mPad;
     std::unique_ptr<ChainRack> mRack;
-    std::unique_ptr<LabeledKnob> mModMix;
+    std::unique_ptr<HKnob> mModMix;
     juce::AudioProcessorValueTreeState &mApvts;
     bool mParallel = false;
 };
