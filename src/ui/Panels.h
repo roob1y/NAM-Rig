@@ -1056,16 +1056,31 @@ public:
 
     // Which slots are enabled -> drives triangle/line/point geometry. Re-projects
     // the puck onto the new shape when the set changes (so it never sits off it).
+    // When a slot is DISABLED the puck position is remembered; if the slot comes
+    // back before the puck is dragged, that original position is restored.
     void setActiveSlots(bool a0, bool a1, bool a2)
     {
         if (a0 == mActive[0] && a1 == mActive[1] && a2 == mActive[2])
             return;
+        const int oldN = (mActive[0] ? 1 : 0) + (mActive[1] ? 1 : 0) + (mActive[2] ? 1 : 0);
+        const int newN = (a0 ? 1 : 0) + (a1 ? 1 : 0) + (a2 ? 1 : 0);
         mActive[0] = a0;
         mActive[1] = a1;
         mActive[2] = a2;
-        const auto p = constrain((float)mX.getValue(), (float)mY.getValue());
-        mX.setValue(p.x, juce::sendNotificationSync);
-        mY.setValue(p.y, juce::sendNotificationSync);
+
+        float px = (float)mX.getValue(), py = (float)mY.getValue();
+        if (newN < oldN) // a slot was disabled -> remember the puck to restore later
+        {
+            if (!mHasSaved) { mSavedX = px; mSavedY = py; mSavedCount = oldN; mHasSaved = true; }
+        }
+        else if (newN > oldN && mHasSaved && newN >= mSavedCount) // back, puck not moved -> restore
+        {
+            px = mSavedX;
+            py = mSavedY;
+            mHasSaved = false;
+        }
+        const auto p = constrain(px, py); // clamp onto the (new) shape
+        setPuck(p.x, p.y);
         repaint();
     }
 
@@ -1116,7 +1131,21 @@ public:
     void mouseDrag(const juce::MouseEvent &e) override { drag(e); }
 
 private:
-    void sliderValueChanged(juce::Slider *) override { repaint(); }
+    void sliderValueChanged(juce::Slider *) override
+    {
+        // An EXTERNAL move (host automation / preset load) invalidates the saved
+        // restore position; our own moves set mInternalSet and are exempt.
+        if (!mInternalSet)
+            mHasSaved = false;
+        repaint();
+    }
+    void setPuck(float x, float y) // write both params as an internal move
+    {
+        mInternalSet = true;
+        mX.setValue(x, juce::sendNotificationSync);
+        mY.setValue(y, juce::sendNotificationSync);
+        mInternalSet = false;
+    }
 
     // Node positions in (padX, padY) parameter space (matches ModBlock::padWeights).
     static juce::Point<float> node(int i)
@@ -1167,13 +1196,19 @@ private:
         const float rx = juce::jlimit(0.0f, 1.0f, (e.position.x - r.getX()) / r.getWidth());
         const float ry = juce::jlimit(0.0f, 1.0f, 1.0f - (e.position.y - r.getY()) / r.getHeight());
         const auto p = constrain(rx, ry);
-        mX.setValue(p.x, juce::sendNotificationSync);
-        mY.setValue(p.y, juce::sendNotificationSync);
+        mHasSaved = false; // user moved the puck -> don't restore an old position
+        setPuck(p.x, p.y);
     }
 
     juce::Slider mX, mY;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mXAtt, mYAtt;
     bool mActive[3] = {true, true, true};
+    // Remember the puck when a slot is disabled, to restore it if the slot comes
+    // back before the puck is moved.
+    float mSavedX = 0.5f, mSavedY = 1.0f / 3.0f;
+    int mSavedCount = 0;
+    bool mHasSaved = false;
+    bool mInternalSet = false; // true while WE move the puck (vs host/preset)
 };
 
 class ModPanel : public BlockPanel
