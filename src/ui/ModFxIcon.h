@@ -14,7 +14,7 @@ namespace nam_rig::ui
 class ModFxIcon : public juce::Component, private juce::Timer
 {
 public:
-    ModFxIcon() { startTimerHz(30); }
+    ModFxIcon() {} // static glyphs (the lane scope carries the live motion now)
 
     void setType(int t)
     {
@@ -38,21 +38,21 @@ public:
         g.setColour(mActive ? mAccent.withAlpha(0.7f) : colors::outline);
         g.drawRoundedRectangle(b.reduced(0.5f), 6.0f, 1.0f);
 
-        auto a = b.reduced(8.0f, 9.0f);
+        auto a = b.reduced(9.0f, 10.0f);
         const juce::Colour c = mActive ? mAccent : colors::textDim;
-        const float ph = mPhase;          // 0..1 animation phase
-        const float L = a.getX(), R = a.getRight(), T = a.getY(), B = a.getBottom();
-        const float W = a.getWidth(), H = a.getHeight(), cy = a.getCentreY(), cx = a.getCentreX();
+        const float L = a.getX(), W = a.getWidth(), H = a.getHeight();
+        const float cy = a.getCentreY(), cx = a.getCentreX();
         const float k2pi = 6.2831853f;
 
+        // Clean single-stroke sine (static), matching the HTML lane icons.
         auto sinePath = [&](float yc, float amp, float cycles, float phase) {
             juce::Path p;
-            const int N = 48;
+            const int N = 44;
             for (int i = 0; i <= N; ++i)
             {
                 const float t = (float)i / (float)N;
                 const float x = L + t * W;
-                const float y = yc + amp * std::sin(t * k2pi * cycles + phase * k2pi);
+                const float y = yc - amp * std::sin(t * k2pi * cycles + phase * k2pi);
                 if (i == 0) p.startNewSubPath(x, y);
                 else p.lineTo(x, y);
             }
@@ -66,98 +66,60 @@ public:
 
         switch (mType)
         {
-        case 0: // Chorus — layered shimmering sines
-            stroke(sinePath(cy, H * 0.22f, 1.5f, ph), 1.8f, 1.0f);
-            stroke(sinePath(cy + 3.0f, H * 0.18f, 1.5f, ph + 0.18f), 1.4f, 0.5f);
-            stroke(sinePath(cy - 3.0f, H * 0.18f, 1.5f, ph + 0.36f), 1.4f, 0.5f);
+        case 0: // Chorus — ripple: two stacked wavy lines
+            stroke(sinePath(cy - 3.2f, H * 0.15f, 1.6f, 0.0f), 1.8f, 1.0f);
+            stroke(sinePath(cy + 3.2f, H * 0.15f, 1.6f, 0.30f), 1.8f, 0.6f);
             break;
-        case 1: // Flanger — jet: a sine and its mirror, sweeping
-        {
-            const float s = 0.5f + 0.5f * std::sin(ph * k2pi);
-            stroke(sinePath(cy, H * (0.12f + 0.20f * s), 2.0f + 2.0f * s, ph), 1.8f, 1.0f);
-            stroke(sinePath(cy, H * (0.12f + 0.20f * s), 2.0f + 2.0f * s, ph + 0.5f), 1.4f, 0.45f);
+        case 1: // Flanger — a sine with a tighter echo (sweep)
+            stroke(sinePath(cy, H * 0.20f, 1.6f, 0.0f), 1.9f, 1.0f);
+            stroke(sinePath(cy, H * 0.12f, 3.0f, 0.0f), 1.3f, 0.4f);
             break;
-        }
-        case 2: // Phaser — notch response curve sweeping horizontally
-        {
-            const float sweep = (std::sin(ph * k2pi)) * (W * 0.16f);
-            juce::Path p;
-            const int N = 60;
-            for (int i = 0; i <= N; ++i)
-            {
-                const float t = (float)i / (float)N, x = L + t * W;
-                float dip = 0.0f;
-                for (float nc : {0.34f, 0.66f})
-                {
-                    const float d = (x - (L + nc * W + sweep)) / (W * 0.07f);
-                    dip += std::exp(-d * d);
-                }
-                const float y = T + H * 0.30f + std::min(1.0f, dip) * H * 0.55f;
-                if (i == 0) p.startNewSubPath(x, y);
-                else p.lineTo(x, y);
-            }
-            stroke(p, 1.8f, 1.0f);
+        case 2: // Phaser — single clean sine
+            stroke(sinePath(cy, H * 0.26f, 1.6f, 0.0f), 2.0f, 1.0f);
             break;
-        }
-        case 3: // Tremolo — pulsing bars
+        case 3: // Tremolo — amplitude bars
         {
-            const int n = 5;
-            const float bw = W / (float)n * 0.5f;
+            const int n = 4;
+            const float bw = 2.4f, step = W / (float)n;
+            const float frac[4] = {0.45f, 0.85f, 0.6f, 1.0f};
             for (int i = 0; i < n; ++i)
             {
-                const float frac = 0.32f + 0.68f * (0.5f + 0.5f * std::sin((ph + (float)i * 0.12f) * k2pi));
-                const float bx = L + ((float)i + 0.25f) * (W / (float)n);
-                const float bh = H * frac;
+                const float bx = L + ((float)i + 0.5f) * step - bw * 0.5f;
+                const float bh = H * frac[i];
                 g.setColour(c);
-                g.fillRoundedRectangle(bx, B - bh, bw, bh, 1.5f);
+                g.fillRoundedRectangle(bx, cy - bh * 0.5f, bw, bh, 1.2f);
             }
             break;
         }
-        case 4: // Vibrato — single bold sine wobbling (pitch)
-            stroke(sinePath(cy, H * 0.30f, 1.25f, ph), 2.2f, 1.0f);
+        case 4: // Vibrato — single bold deep sine (pitch)
+            stroke(sinePath(cy, H * 0.32f, 1.4f, 0.0f), 2.2f, 1.0f);
             break;
-        case 5: // Rotary — a blade spinning (Leslie)
+        case 5: // Rotary — a disc (record): outer ring + hub
+        {
+            const float r = std::min(W, H) * 0.46f;
+            g.setColour(c);
+            g.drawEllipse(cx - r, cy - r, 2 * r, 2 * r, 1.8f);
+            g.drawEllipse(cx - r * 0.34f, cy - r * 0.34f, r * 0.68f, r * 0.68f, 1.4f);
+            g.fillEllipse(cx - 1.4f, cy - 1.4f, 2.8f, 2.8f);
+            break;
+        }
+        case 6: // Uni-Vibe — circle with a centre dot
         {
             const float r = std::min(W, H) * 0.42f;
-            g.setColour(c.withAlpha(0.35f));
-            g.drawEllipse(cx - r, cy - r, 2 * r, 2 * r, 1.4f);
-            const float ang = ph * k2pi;
-            for (int s = 0; s < 2; ++s)
-            {
-                const float aa = ang + (float)s * 3.14159f;
-                juce::Path blade;
-                blade.startNewSubPath(cx, cy);
-                blade.lineTo(cx + r * std::cos(aa), cy + r * std::sin(aa) * 0.55f);
-                stroke(blade, 2.2f, s == 0 ? 1.0f : 0.5f);
-            }
             g.setColour(c);
-            g.fillEllipse(cx - 2.0f, cy - 2.0f, 4.0f, 4.0f);
+            g.drawEllipse(cx - r, cy - r, 2 * r, 2 * r, 1.8f);
+            g.fillEllipse(cx - 2.6f, cy - 2.6f, 5.2f, 5.2f);
             break;
         }
-        case 6: // Uni-Vibe — concentric pulsing rings (photocell glow)
-        {
-            for (int r = 0; r < 3; ++r)
-            {
-                const float pr = ((float)r + 0.5f + ph) ;
-                const float frac = pr - std::floor(pr); // 0..1 expanding
-                const float rad = frac * std::min(W, H) * 0.5f;
-                g.setColour(c.withAlpha((1.0f - frac) * 0.9f));
-                g.drawEllipse(cx - rad, cy - rad, 2 * rad, 2 * rad, 1.6f);
-            }
+        case 7: // Harmonic Tremolo — two stacked bands
+            g.setColour(c);
+            g.fillRoundedRectangle(L, cy - H * 0.30f, W, H * 0.22f, 2.0f);
+            g.setColour(c.withAlpha(0.5f));
+            g.fillRoundedRectangle(L, cy + H * 0.08f, W, H * 0.22f, 2.0f);
             break;
-        }
-        case 7: // Harmonic Tremolo — two bands trading brightness (opposite phase)
-        {
-            const float s = 0.5f + 0.5f * std::sin(ph * k2pi);
-            g.setColour(c.withAlpha(0.25f + 0.75f * s));
-            g.fillRoundedRectangle(L, T, W, H * 0.42f, 2.0f);          // high band
-            g.setColour(c.withAlpha(0.25f + 0.75f * (1.0f - s)));
-            g.fillRoundedRectangle(L, B - H * 0.42f, W, H * 0.42f, 2.0f); // low band
-            break;
-        }
-        case 8: // Bi-Phase — two phasers sweeping at offset phases (dual notch)
-            stroke(sinePath(cy - H * 0.12f, H * 0.20f, 1.5f, ph), 1.8f, 1.0f);
-            stroke(sinePath(cy + H * 0.12f, H * 0.20f, 1.5f, ph + 0.4f), 1.8f, 0.55f);
+        case 8: // Bi-Phase — two offset sines
+            stroke(sinePath(cy - 3.2f, H * 0.15f, 1.6f, 0.0f), 1.8f, 1.0f);
+            stroke(sinePath(cy + 3.2f, H * 0.15f, 1.6f, 0.5f), 1.8f, 0.6f);
             break;
         default:
             break;
@@ -165,17 +127,10 @@ public:
     }
 
 private:
-    void timerCallback() override
-    {
-        mPhase += 0.018f;
-        if (mPhase >= 1.0f) mPhase -= 1.0f;
-        if (isShowing())
-            repaint();
-    }
+    void timerCallback() override {} // static glyphs: no animation
 
     int mType = 0;
     bool mActive = true;
-    float mPhase = 0.0f;
     juce::Colour mAccent = colors::accent;
 };
 
