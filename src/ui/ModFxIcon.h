@@ -64,35 +64,53 @@ public:
                                                  juce::PathStrokeType::rounded));
         };
 
+        // A curve drawn from a per-x function (for the chirp / notch shapes).
+        auto curve = [&](auto fy, float w, float alpha) {
+            juce::Path p;
+            const int N = 60;
+            for (int i = 0; i <= N; ++i)
+            {
+                const float t = (float)i / (float)N;
+                const float x = L + t * W, y = fy(t);
+                if (i == 0) p.startNewSubPath(x, y);
+                else p.lineTo(x, y);
+            }
+            stroke(p, w, alpha);
+        };
+
         switch (mType)
         {
-        case 0: // Chorus — ripple: two stacked wavy lines
-            stroke(sinePath(cy - 3.2f, H * 0.15f, 1.6f, 0.0f), 1.8f, 1.0f);
-            stroke(sinePath(cy + 3.2f, H * 0.15f, 1.6f, 0.30f), 1.8f, 0.6f);
+        case 0: // Chorus — two parallel even ripples (whole cycles -> balanced)
+            stroke(sinePath(cy - 3.4f, H * 0.13f, 2.0f, 0.0f), 1.8f, 1.0f);
+            stroke(sinePath(cy + 3.4f, H * 0.13f, 2.0f, 0.0f), 1.8f, 0.6f);
             break;
-        case 1: // Flanger — a sine with a tighter echo (sweep)
-            stroke(sinePath(cy, H * 0.20f, 1.6f, 0.0f), 1.9f, 1.0f);
-            stroke(sinePath(cy, H * 0.12f, 3.0f, 0.0f), 1.3f, 0.4f);
+        case 1: // Flanger — a frequency sweep (chirp): waves tighten left->right
+            curve([&](float t) { return cy - H * 0.24f * std::sin(k2pi * (0.8f * t + 1.7f * t * t)); },
+                  1.9f, 1.0f);
             break;
-        case 2: // Phaser — single clean sine
-            stroke(sinePath(cy, H * 0.26f, 1.6f, 0.0f), 2.0f, 1.0f);
+        case 2: // Phaser — swept notches: a high line dipping at two points (comb)
+            curve([&](float t) {
+                float y = cy - H * 0.20f;
+                for (float nc : {0.32f, 0.70f}) { const float d = (t - nc) / 0.10f; y += H * 0.46f * std::exp(-d * d); }
+                return y;
+            }, 1.9f, 1.0f);
             break;
         case 3: // Tremolo — amplitude bars
         {
             const int n = 4;
-            const float bw = 2.4f, step = W / (float)n;
-            const float frac[4] = {0.45f, 0.85f, 0.6f, 1.0f};
+            const float bw = 2.6f, step = W / (float)n;
+            const float frac[4] = {0.5f, 1.0f, 0.55f, 0.85f};
             for (int i = 0; i < n; ++i)
             {
                 const float bx = L + ((float)i + 0.5f) * step - bw * 0.5f;
                 const float bh = H * frac[i];
                 g.setColour(c);
-                g.fillRoundedRectangle(bx, cy - bh * 0.5f, bw, bh, 1.2f);
+                g.fillRoundedRectangle(bx, cy - bh * 0.5f, bw, bh, 1.3f);
             }
             break;
         }
-        case 4: // Vibrato — single bold deep sine (pitch)
-            stroke(sinePath(cy, H * 0.32f, 1.4f, 0.0f), 2.2f, 1.0f);
+        case 4: // Vibrato — one deep even sine (pitch)
+            stroke(sinePath(cy, H * 0.30f, 2.0f, 0.0f), 2.2f, 1.0f);
             break;
         case 5: // Rotary — a disc (record): outer ring + hub
         {
@@ -100,26 +118,26 @@ public:
             g.setColour(c);
             g.drawEllipse(cx - r, cy - r, 2 * r, 2 * r, 1.8f);
             g.drawEllipse(cx - r * 0.34f, cy - r * 0.34f, r * 0.68f, r * 0.68f, 1.4f);
-            g.fillEllipse(cx - 1.4f, cy - 1.4f, 2.8f, 2.8f);
+            g.fillEllipse(cx - 1.5f, cy - 1.5f, 3.0f, 3.0f);
             break;
         }
-        case 6: // Uni-Vibe — circle with a centre dot
+        case 6: // Uni-Vibe — circle with a centre dot (photocell eye)
         {
             const float r = std::min(W, H) * 0.42f;
             g.setColour(c);
             g.drawEllipse(cx - r, cy - r, 2 * r, 2 * r, 1.8f);
-            g.fillEllipse(cx - 2.6f, cy - 2.6f, 5.2f, 5.2f);
+            g.fillEllipse(cx - 2.8f, cy - 2.8f, 5.6f, 5.6f);
             break;
         }
-        case 7: // Harmonic Tremolo — two stacked bands
+        case 7: // Harmonic Tremolo — two stacked bands (high / low)
             g.setColour(c);
             g.fillRoundedRectangle(L, cy - H * 0.30f, W, H * 0.22f, 2.0f);
             g.setColour(c.withAlpha(0.5f));
             g.fillRoundedRectangle(L, cy + H * 0.08f, W, H * 0.22f, 2.0f);
             break;
-        case 8: // Bi-Phase — two offset sines
-            stroke(sinePath(cy - 3.2f, H * 0.15f, 1.6f, 0.0f), 1.8f, 1.0f);
-            stroke(sinePath(cy + 3.2f, H * 0.15f, 1.6f, 0.5f), 1.8f, 0.6f);
+        case 8: // Bi-Phase — two even sines in opposite phase (crossing)
+            stroke(sinePath(cy, H * 0.18f, 2.0f, 0.0f), 1.8f, 1.0f);
+            stroke(sinePath(cy, H * 0.18f, 2.0f, 0.5f), 1.8f, 0.6f);
             break;
         default:
             break;
