@@ -128,6 +128,7 @@ void NamRigEditor::timerCallback()
     mMixPanel.refresh();
     mModPanel.refresh();
     mDelayPanel.refresh();
+    mReverbPanel.refresh();
     mGatePanel.grMeter().push(-mProc.gateGainDb(), dt);
     mCompPanel.grMeter().push(mProc.compGrDb(), dt);
     mCompPanel.grMeter().pushIn(mProc.compInDb(), dt);

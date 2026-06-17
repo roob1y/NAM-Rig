@@ -432,6 +432,38 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::ParameterID("compCharacter", 1), "Comp Character",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.35f));
 
+    // Reverb character + per-character voicing knobs (see rig/ReverbBlock.h).
+    // Appended last for automation stability; default Hall + mod 0 reproduces the
+    // original 8-line FDN reverb. revSize/revDecay/revDamp/revPredelay/revMix are
+    // shared across characters and reinterpreted per type by ReverbBlock.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("revType", 1), "Reverb Character",
+        juce::StringArray{"Room", "Hall", "Plate", "Spring", "Shimmer", "Ambience", "Bloom"},
+        nam_rig::ReverbBlock::kHall));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("revMod", 1), "Reverb Modulation",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.3f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("revShimmer", 1), "Reverb Shimmer",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("revTension", 1), "Reverb Tension",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+
+    // Reverb guardrail + extra controls (see rig/ReverbBlock.h). Width and Freeze
+    // are global; Swell is Bloom-only; Pitch is Shimmer-only. Appended last.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("revWidth", 1), "Reverb Width",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("revSwell", 1), "Reverb Swell",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.4f));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("revPitch", 1), "Reverb Shimmer Pitch",
+        juce::StringArray{"Octave", "+2 Oct", "Fifth+Oct"}, 0));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("revFreeze", 1), "Reverb Freeze", false));
+
     return {params.begin(), params.end()};
 }
 
@@ -843,11 +875,19 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.delay.setMix(apvts.getRawParameterValue("delayMix")->load());
     mChain.delay.setBypassed(apvts.getRawParameterValue("delayOn")->load() < 0.5f);
 
+    mChain.reverb.setType((int)apvts.getRawParameterValue("revType")->load());
     mChain.reverb.setSize(apvts.getRawParameterValue("revSize")->load());
     mChain.reverb.setDecaySeconds(apvts.getRawParameterValue("revDecay")->load());
     mChain.reverb.setDampHz(apvts.getRawParameterValue("revDamp")->load());
     mChain.reverb.setPredelayMs(apvts.getRawParameterValue("revPredelay")->load());
     mChain.reverb.setMix(apvts.getRawParameterValue("revMix")->load());
+    mChain.reverb.setMod(apvts.getRawParameterValue("revMod")->load());
+    mChain.reverb.setShimmer(apvts.getRawParameterValue("revShimmer")->load());
+    mChain.reverb.setTension(apvts.getRawParameterValue("revTension")->load());
+    mChain.reverb.setWidth(apvts.getRawParameterValue("revWidth")->load());
+    mChain.reverb.setSwell(apvts.getRawParameterValue("revSwell")->load());
+    mChain.reverb.setPitch((int)apvts.getRawParameterValue("revPitch")->load());
+    mChain.reverb.setFreeze(apvts.getRawParameterValue("revFreeze")->load() >= 0.5f);
     mChain.reverb.setBypassed(apvts.getRawParameterValue("reverbOn")->load() < 0.5f);
 
     mChain.process(buffer);
