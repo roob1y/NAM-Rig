@@ -67,6 +67,12 @@
 //       phaser stays bounded driven fast
 //   T42 Extreme switch reassigns controls to their wild range (Normal untouched):
 //       phaser/bi-phase ring harder at same fb knob; bi-phase ratio -> strong detune
+//   T43 chorus Extreme: rate knob remaps into the disjoint fast band [3.5,10] Hz
+//       (always fast, never overlaps Normal) + sweep excursion widens (deeper tap);
+//       stays finite/bounded
+//   T44 vibrato Extreme: rate knob remaps into the disjoint fast band [10,16] Hz
+//       + pitch sweep deepens (single tap lands later at a matched 10 Hz rate);
+//       stays finite/bounded
 #include "rig/ModBlock.h"
 #include <cstdio>
 #include <cmath>
@@ -1837,6 +1843,113 @@ int main()
         double d = 0.0;
         for (size_t i = 4800; i < rn.size(); ++i) d = std::max(d, (double)std::abs(rn[i] - re[i]));
         CHECK(d > 0.02, "T42 bi-phase Extreme reassigns Sweep-2 ratio to strong detune (motion differs, max diff %.3f)", d);
+    }
+
+    // ---- T43: Chorus Extreme. (a) The rate knob remaps into the DISJOINT fast
+    //      band [3.5,10] Hz only: at the knob top Extreme reaches ~10 Hz vs
+    //      Normal's 3.5 cap, and even at the knob bottom Extreme is still >=3.5 Hz
+    //      (always fast -- never overlaps Normal's slow range, matching the
+    //      phaser/bi-phase feedback reassignment idiom). (b) The sweep excursion
+    //      widens by kExtremeSweepWiden: at a MATCHED 3.5 Hz rate + same depth, an
+    //      impulse's latest wet tap lands later in Extreme (deeper pitch sweep).
+    //      (c) Stays finite + bounded. Normal path is bit-identical (T1-T42). ----
+    {
+        // (a) rate-remap law -- deterministic, no audio needed.
+        auto rateOf = [](float knob, bool extreme) {
+            ModVoice m;
+            m.setType(ModVoice::kChorus);
+            m.setRateHz(knob);
+            m.setExtreme(extreme);
+            return m.effectiveRateHz();
+        };
+        const float rnTop = rateOf(3.5f, false); // Normal: capped at 3.5
+        const float reTop = rateOf(3.5f, true);   // Extreme top -> ~10
+        const float reLow = rateOf(0.0f, true);   // Extreme bottom -> floor of the band
+        CHECK(reTop > rnTop + 0.5f && std::abs(reTop - 10.0f) < 0.01f,
+              "T43 chorus Extreme lifts the rate to the fast band (top %.2f Hz vs Normal %.2f Hz)", reTop, rnTop);
+        CHECK(reLow >= 3.5f - 1e-3f,
+              "T43 chorus Extreme rate band is disjoint (bottom %.2f Hz >= Normal cap 3.50 Hz)", reLow);
+
+        // (b) depth-widen -- matched 3.5 Hz so only the excursion differs. Full wet
+        //     (Mix=1) so the impulse response is purely the 3 swept taps.
+        auto lastTap = [](bool extreme, double &peakOut) {
+            ModVoice m;
+            m.setType(ModVoice::kChorus);
+            m.setRateHz(extreme ? 0.0f : 3.5f); // both -> 3.5 Hz effective (Extreme floor == Normal cap)
+            m.setDepth(0.9f);
+            m.setMix(1.0f);
+            m.setExtreme(extreme);
+            m.prepare({SR, BLK});
+            std::vector<float> l((size_t)(SR * 0.06), 0.0f);
+            l[0] = 1.0f; // impulse
+            auto r = l;
+            run(m, l, r);
+            double peak = 0.0;
+            for (float v : l) peak = std::max(peak, (double)std::abs(v));
+            peakOut = peak;
+            int last = 0;
+            for (size_t i = 0; i < l.size(); ++i)
+                if ((double)std::abs(l[i]) > 0.15 * peak) last = (int)i;
+            return last;
+        };
+        double pkN = 0.0, pkE = 0.0;
+        const int nLast = lastTap(false, pkN), eLast = lastTap(true, pkE);
+        CHECK(eLast > nLast + 30,
+              "T43 chorus Extreme deepens the sweep (latest tap %d vs Normal %d samples)", eLast, nLast);
+        CHECK(std::isfinite(pkE) && pkE > 0.0 && pkE < 2.0,
+              "T43 chorus Extreme stays finite + bounded (peak %.3f)", pkE);
+    }
+
+    // ---- T44: Vibrato Extreme. (a) Rate knob remaps into the DISJOINT fast band
+    //      [10,16] Hz only -- Extreme top ~16 Hz vs Normal's 10 cap, floor >=10 Hz
+    //      (always fast). (b) The single-tap pitch sweep deepens by kExtremeSweepWiden:
+    //      at a MATCHED 10 Hz rate + same depth, an impulse's wet tap (vibrato is
+    //      full wet, single tap) peaks later in Extreme. (c) Stays finite + bounded.
+    //      Normal path is bit-identical (T1-T43). ----
+    {
+        // (a) rate-remap law.
+        auto rateOf = [](float knob, bool extreme) {
+            ModVoice m;
+            m.setType(ModVoice::kVibrato);
+            m.setRateHz(knob);
+            m.setExtreme(extreme);
+            return m.effectiveRateHz();
+        };
+        const float rnTop = rateOf(10.0f, false); // Normal: capped at 10
+        const float reTop = rateOf(10.0f, true);   // Extreme top -> ~16
+        const float reLow = rateOf(0.0f, true);    // Extreme bottom -> band floor
+        CHECK(reTop > rnTop + 0.5f && std::abs(reTop - 16.0f) < 0.01f,
+              "T44 vibrato Extreme lifts the rate to the fast band (top %.2f Hz vs Normal %.2f Hz)", reTop, rnTop);
+        CHECK(reLow >= 10.0f - 1e-3f,
+              "T44 vibrato Extreme rate band is disjoint (bottom %.2f Hz >= Normal cap 10.00 Hz)", reLow);
+
+        // (b) depth-widen -- matched 10 Hz (Extreme knob 0 floor == Normal cap) so
+        //     only the excursion differs. Vibrato is full wet + single tap -> the
+        //     impulse response is one swept echo; its peak position is the tap delay.
+        auto peakAt = [](bool extreme, double &peakOut) {
+            ModVoice m;
+            m.setType(ModVoice::kVibrato);
+            m.setRateHz(extreme ? 0.0f : 10.0f); // both -> 10 Hz effective
+            m.setDepth(0.9f);
+            m.setExtreme(extreme);
+            m.prepare({SR, BLK});
+            std::vector<float> l((size_t)(SR * 0.04), 0.0f);
+            l[0] = 1.0f; // impulse
+            auto r = l;
+            run(m, l, r);
+            double peak = 0.0;
+            int at = 0;
+            for (size_t i = 0; i < l.size(); ++i)
+                if ((double)std::abs(l[i]) > peak) { peak = (double)std::abs(l[i]); at = (int)i; }
+            peakOut = peak;
+            return at;
+        };
+        double pkN = 0.0, pkE = 0.0;
+        const int nAt = peakAt(false, pkN), eAt = peakAt(true, pkE);
+        CHECK(eAt > nAt + 20,
+              "T44 vibrato Extreme deepens the sweep (tap peak %d vs Normal %d samples)", eAt, nAt);
+        CHECK(std::isfinite(pkE) && pkE > 0.0 && pkE < 2.0,
+              "T44 vibrato Extreme stays finite + bounded (peak %.3f)", pkE);
     }
 
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);

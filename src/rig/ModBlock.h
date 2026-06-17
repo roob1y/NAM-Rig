@@ -41,9 +41,11 @@ public:
     // Voicing constants (fixed; knobs scale within these)
     static constexpr double kChorusBaseMs = 7.0, kChorusSpreadMs = 10.0;
     static constexpr float kChorusMaxRateHz = 3.5f; // keep chorus a chorus (faster -> vibrato/warble); tunable
+    static constexpr float kChorusMaxRateHzExtreme = 10.0f; // Extreme: the withheld fast/seasick zone (disjoint band [3.5,10]); tunable
     // M-126-style wide flanger: Manual sets a static base delay, Width sweeps above it.
     static constexpr double kFlMinMs = 0.5, kFlManualMaxMs = 8.0, kFlSweepMs = 6.0, kFlMaxMs = 14.0;
     static constexpr double kVibBaseMs = 2.0, kVibSpreadMs = 8.0;
+    static constexpr float kVibratoMaxRateHzExtreme = 16.0f; // Extreme: wild seasick warble (disjoint band [10,16]); tunable
     static constexpr double kRotBaseMs = 3.0, kRotSpreadMs = 4.0;
     static constexpr float kRotSlowHz = 0.72f, kRotFastHz = 6.6f; // chorale / tremolo
     // Leslie angle-dependent EQ (CCRMA / Smith-Lee model, DAFx-02): as the horn
@@ -264,8 +266,11 @@ public:
                     : (float)(u < 0.0 ? -std::pow(-u, (double)kTremTaper)
                                       : std::pow(u, (double)kTremTaper));
         }
+        // Size for the deepest tap the CHORUS can request -- including Extreme,
+        // which widens the sweep excursion by kExtremeSweepWiden (so the buffer
+        // must fit base + spread*widen, not just base + spread).
         const int maxDelay =
-            (int)std::ceil((kChorusBaseMs + kChorusSpreadMs + 2.0) * 0.001 * mFs);
+            (int)std::ceil((kChorusBaseMs + kChorusSpreadMs * (double)kExtremeSweepWiden + 2.0) * 0.001 * mFs);
         for (auto &d : mLine)
             d.prepare(maxDelay);
         mLfo.prepare(mFs);
@@ -370,12 +375,37 @@ public:
         if (t == kChorus) return kChorusMaxRateHz;
         return 10.0f;
     }
+    // Extreme free-rate ceiling per effect (the top of the wild fast band). Effects
+    // not listed return their Normal cap, so Extreme leaves their rate unchanged
+    // (their wild range lives elsewhere -- feedback, sweep width, etc.).
+    static float extremeMaxRateHz(Type t)
+    {
+        if (t == kChorus) return kChorusMaxRateHzExtreme;
+        if (t == kVibrato) return kVibratoMaxRateHzExtreme;
+        return maxRateHz(t);
+    }
     float effectiveRateHz() const
     {
         const double beats = syncBeats(mSyncIndex);
         if (beats > 0.0)
             return (float)((mBpm / 60.0) / beats); // synced: honour the division
-        return std::min(mFreeRateHz, maxRateHz(mType)); // free: cap per effect
+        float r = std::min(mFreeRateHz, maxRateHz(mType)); // free: cap per effect
+        // Extreme (chorus + vibrato): remap the Normal-capped knob into the withheld
+        // fast band [maxRateHz, extremeMaxRateHz] ONLY -- disjoint from Normal, so the
+        // effect is always in the fast/seasick zone. Same idiom as the phaser/bi-phase
+        // feedback + Sweep-2 ratio reassignment (unlock a knob's wild range, don't
+        // extend it). Effects whose extreme ceiling == normal cap are left unchanged.
+        if (mExtreme)
+        {
+            const float norm = maxRateHz(mType);
+            const float ext = extremeMaxRateHz(mType);
+            if (ext > norm)
+            {
+                const float q = r / norm; // knob proportion over its normal range
+                r = norm + q * (ext - norm);
+            }
+        }
+        return r;
     }
 
     void process(float *left, float *right, int numSamples) override
@@ -471,12 +501,16 @@ private:
             // 6-point Lagrange interpolation (flatter than the 4-point Hermite,
             // FIR so the swept taps never click at integer crossings).
             mLine[(size_t)ch].write(x);
+            // Extreme widens the pitch excursion (deeper sweep) by kExtremeSweepWiden
+            // so even a slow Extreme chorus is distinctly bigger than Normal. Normal
+            // = 1.0 -> bit-identical. (Same idiom as the Uni-Vibe Extreme widen.)
+            const double widen = mExtreme ? (double)kExtremeSweepWiden : 1.0;
             float wet = 0.0f;
             for (int v = 0; v < 3; ++v)
             {
                 const float lv = mLfo.value(off + (double)v * 0.3333);
                 const double sweepMs =
-                    kChorusBaseMs + (double)depth * kChorusSpreadMs * (0.5 + 0.5 * (double)lv);
+                    kChorusBaseMs + (double)depth * kChorusSpreadMs * widen * (0.5 + 0.5 * (double)lv);
                 wet += mLine[(size_t)ch].readFrac6(sweepMs * 0.001 * mFs);
             }
             wet = bbdColor(ch, wet * 0.45f);
@@ -588,8 +622,12 @@ private:
             // interpolator, whose state re-settles at each crossing and rings on
             // fast/deep sweeps. Its 5th-order flatness keeps the magnitude steady
             // enough that there's no audible Hermite-style brightness shimmer either.
+            // Extreme deepens the pitch sweep (wild seasick detune) by the shared
+            // kExtremeSweepWiden. Combined with the disjoint fast rate band above,
+            // Extreme vibrato is a fast, deep warble. Normal = 1.0 -> bit-identical.
+            const double widen = mExtreme ? (double)kExtremeSweepWiden : 1.0;
             const double sweepMs =
-                kVibBaseMs + (double)depth * kVibSpreadMs * (0.5 + 0.5 * (double)lfo);
+                kVibBaseMs + (double)depth * kVibSpreadMs * widen * (0.5 + 0.5 * (double)lfo);
             mLine[(size_t)ch].write(x);
             float wet = mLine[(size_t)ch].readFrac6(std::max(3.0, sweepMs * 0.001 * mFs));
             wet = bbdColor(ch, wet);
