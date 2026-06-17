@@ -322,7 +322,13 @@ public:
         mDrumInc = (double)mRotDrumSpeed / mFs;
         mHornLpCoef = coefForHz(5000.0, mFs); // horn driver: rolls off the extreme top
         mDrumLpCoef = coefForHz(70.0, mFs);   // bass rotor: rolls off the deep lows
-        const double rOff = (double)mWidth * kRightLfoOffset;
+        double rOff = (double)mWidth * kRightLfoOffset;
+        // Hard-edged tremolo shapes (Square / S&H) read the LFO IN PHASE across L/R
+        // (no quadrature offset, which would make a chop lurch); their stereo Width
+        // is an amplitude AUTO-PAN applied per-channel in processSample instead.
+        // Sine/triangle keep the quadrature phase offset (the smooth throb).
+        if (ty == kTremolo && (mUserWave == Lfo::Square || mUserWave == Lfo::SampleHold))
+            rOff = 0.0;
         const float mixTarget = mixFor(ty, mMix); // only Chorus uses the knob
 
         for (int i = 0; i < numSamples; ++i)
@@ -443,7 +449,16 @@ private:
         }
         case kTremolo:
         {
-            const float target = 1.0f - depth * (0.5f + 0.5f * lfo);
+            // Stereo width, per shape: sine/triangle use the LFO phase offset (the
+            // quadrature throb -- already baked into `lfo` via `off`). Square/S&H
+            // read the LFO IN PHASE (off forced to 0 in process()) and instead get
+            // an amplitude AUTO-PAN: the R channel crossfades to anti-phase as Width
+            // rises (0 = mono, 1 = full L/R ping-pong), so a chop pans cleanly
+            // instead of lurching.
+            float useLfo = lfo;
+            if ((mUserWave == Lfo::Square || mUserWave == Lfo::SampleHold) && ch == 1)
+                useLfo = lfo * (1.0f - 2.0f * mWidth);
+            const float target = 1.0f - depth * (0.5f + 0.5f * useLfo);
             float &gn = mTremG[(size_t)ch];
             gn += mTremCoef * (target - gn); // smoothing de-clicks square/S&H edges
             return (1.0f - mMixZ) * x + mMixZ * (x * gn);

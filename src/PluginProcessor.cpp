@@ -444,20 +444,27 @@ void NamRigProcessor::handleAsyncUpdate()
     static const char *const suffix[] = {"Wave", "Sync", "Rate", "Depth", "Feedback",
                                          "Mix", "Width", "Drive", "RotFast", "Manual",
                                          "Invert", "P2Ratio", "Series", "HornDrum"};
-    auto resetPrefix = [&](const juce::String &p) {
+    auto resetPrefix = [&](const juce::String &p, int newType) {
+        // Tremolo (3) / Harm Trem (7) are amp-style effects -> default to MONO width
+        // (Width is one shared per-slot param, so the per-type default lives here).
+        const bool monoWidth = (newType == 3 || newType == 7);
         for (auto *sfx : suffix)
             if (auto *prm = apvts.getParameter(p + sfx))
             {
+                const float v = (monoWidth && juce::String(sfx) == "Width")
+                                    ? prm->convertTo0to1(0.0f)
+                                    : prm->getDefaultValue();
                 prm->beginChangeGesture();
-                prm->setValueNotifyingHost(prm->getDefaultValue());
+                prm->setValueNotifyingHost(v);
                 prm->endChangeGesture();
             }
     };
     for (int s = 0; s < nam_rig::ModBlock::kSlots; ++s)
         if (mask & (1 << s))
-            resetPrefix("mod" + juce::String(s + 1));
+            resetPrefix("mod" + juce::String(s + 1),
+                        (int)apvts.getRawParameterValue("mod" + juce::String(s + 1) + "Type")->load());
     if (mask & (1 << nam_rig::ModBlock::kSlots))
-        resetPrefix("post");
+        resetPrefix("post", (int)apvts.getRawParameterValue("postType")->load());
 }
 
 float NamRigProcessor::calibrationGainDb(int rig) const

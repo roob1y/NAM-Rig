@@ -49,6 +49,8 @@
 //       == hand-chained after a front slot); its bypass works
 //   T34 series chain order: default {0,1,2} == fixed-order series (bit-exact);
 //       reordering two effects changes the sound; a malformed order is rejected
+//   T35 tremolo Width per shape: Square/S&H mono at 0, amplitude auto-pan at 1;
+//       sine spreads via quadrature
 #include "rig/ModBlock.h"
 #include <cstdio>
 #include <cmath>
@@ -1516,6 +1518,35 @@ int main()
             const bool ok = (bad.chainOrder(0) == 0 && bad.chainOrder(1) == 1 && bad.chainOrder(2) == 2);
             CHECK(ok, "T34 malformed chain order rejected (keeps a valid permutation)");
         }
+    }
+
+    // ---- T35: per-shape tremolo Width. Square/S&H are MONO at Width 0 (L==R) and
+    //      amplitude AUTO-PAN at Width 1 (L!=R, in-phase base -> no quadrature
+    //      lurch); sine spreads via the quadrature offset (also covered by T6) ----
+    {
+        auto lrDiff = [](int wave, float width) {
+            ModVoice m;
+            m.setType(ModVoice::kTremolo);
+            m.setWaveform(wave);
+            m.setRateHz(3.0f);
+            m.setDepth(0.9f);
+            m.setMix(1.0f);
+            m.setWidth(width);
+            m.prepare({SR, BLK});
+            auto l = tone(1000.0, 0.5, (int)SR), r = l;
+            run(m, l, r);
+            double d = 0;
+            for (size_t i = 0; i < l.size(); ++i) d = std::max(d, (double)std::abs(l[i] - r[i]));
+            return d;
+        };
+        const double sq0 = lrDiff(Lfo::Square, 0.0f), sq1 = lrDiff(Lfo::Square, 1.0f);
+        const double sh0 = lrDiff(Lfo::SampleHold, 0.0f), sh1 = lrDiff(Lfo::SampleHold, 1.0f);
+        const double si1 = lrDiff(Lfo::Sine, 1.0f);
+        CHECK(sq0 < 1e-6, "T35 Square Width 0 = mono (L==R, diff %.2e)", sq0);
+        CHECK(sq1 > 0.05, "T35 Square Width 1 = auto-pan (L!=R, diff %.3f)", sq1);
+        CHECK(sh0 < 1e-6, "T35 S&H Width 0 = mono (L==R, diff %.2e)", sh0);
+        CHECK(sh1 > 0.02, "T35 S&H Width 1 = auto-pan (L!=R, diff %.3f)", sh1);
+        CHECK(si1 > 0.02, "T35 sine tremolo still spreads L/R (diff %.3f)", si1);
     }
 
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);
