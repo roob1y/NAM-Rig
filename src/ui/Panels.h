@@ -1051,10 +1051,6 @@ public:
 
         mManual = std::make_unique<LabeledKnob>(apvts, p + "Manual", "Manual");
         addChildComponent(*mManual); // flanger only (M-126 static comb position)
-        mInvert.setButtonText("Inv");
-        addChildComponent(mInvert); // flanger only (phase invert)
-        mInvertAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            apvts, p + "Invert", mInvert);
 
         mP2Ratio = std::make_unique<LabeledKnob>(apvts, p + "P2Ratio", "Sweep 2");
         addChildComponent(*mP2Ratio); // bi-phase only (Sweep Gen 2 rate ratio)
@@ -1153,7 +1149,6 @@ public:
         mHornDrum->setVisible(rotary);                 // rotary: horn<->drum balance
         mRotFast.setVisible(rotary);
         mManual->setVisible(type == 1);                // flanger: static comb position
-        mInvert.setVisible(type == 1);                 // flanger: phase invert
         // Per-effect knob naming. M-126 flanger: the sweep-amount knob is "Sweep"
         // (the M-126 "Width" term reads as the stereo control here, so call the
         // sweep "Sweep") and the stereo knob is "Spread" (so there aren't two
@@ -1204,11 +1199,6 @@ public:
         if (mSoloSlot >= 0) // front slots only
         {
             mSolo.setBounds(area.removeFromRight(30).withSizeKeepingCentre(30, 22));
-            area.removeFromRight(8);
-        }
-        if (mInvert.isVisible())
-        {
-            mInvert.setBounds(area.removeFromRight(50).withSizeKeepingCentre(50, 22));
             area.removeFromRight(8);
         }
         if (mSeries.isVisible())
@@ -1268,8 +1258,8 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mWaveAtt, mSyncAtt; // (Type combo synced by hand)
     juce::ToggleButton mSolo; // momentary dial-in (not APVTS-attached)
     std::unique_ptr<LabeledKnob> mRate, mDepth, mFeedback, mMix, mWidth, mDrive, mManual, mP2Ratio, mHornDrum;
-    juce::ToggleButton mRotFast, mInvert, mSeries;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mRotFastAtt, mInvertAtt, mSeriesAtt;
+    juce::ToggleButton mRotFast, mSeries;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mRotFastAtt, mSeriesAtt;
 };
 
 // Draggable blend pad for PARALLEL routing. The puck sets the slot weights
