@@ -65,6 +65,8 @@
 //   T41 rate-dependent sweep-width guardrail (phaser + uni-vibe + bi-phase):
 //       full width <=2 Hz, narrows monotonically to the floor at the rate cap;
 //       phaser stays bounded driven fast
+//   T42 Extreme switch reassigns controls to their wild range (Normal untouched):
+//       phaser/bi-phase ring harder at the same fb knob; bi-phase ratio squared
 #include "rig/ModBlock.h"
 #include <cstdio>
 #include <cmath>
@@ -1759,6 +1761,15 @@ int main()
         CHECK(law && mono,
               "T41 sweep-width guardrail: full <=2 Hz, narrows monotonically to the floor at the cap");
 
+        // per-effect floor: the narrow-sweep Uni-Vibe tames far less than the wide
+        // phaser/bi-phase, so it stays lively when driven fast.
+        const bool floors =
+            ModVoice::sweepFloor(ModVoice::kUniVibe) > ModVoice::sweepFloor(ModVoice::kPhaser) &&
+            ModVoice::sweepFloor(ModVoice::kBiPhase) == ModVoice::sweepFloor(ModVoice::kPhaser) &&
+            ModVoice::sweepWidthScale(mx, mx, ModVoice::sweepFloor(ModVoice::kUniVibe))
+                > ModVoice::sweepWidthScale(mx, mx, ModVoice::sweepFloor(ModVoice::kPhaser));
+        CHECK(floors, "T41 Uni-Vibe keeps a higher sweep-width floor than phaser/bi-phase");
+
         // (b) phaser at the rate cap (with the narrowed sweep) stays well-behaved
         ModVoice m;
         m.setType(ModVoice::kPhaser);
@@ -1772,6 +1783,59 @@ int main()
         double pk = 0.0, energy = 0.0;
         for (float v : l) { if (!std::isfinite(v)) fin = false; pk = std::max(pk, (double)std::abs(v)); energy += (double)v * v; }
         CHECK(fin && pk < 4.0 && energy > 0.0, "T41 phaser at the rate cap stays finite + bounded (peak %.2f)", pk);
+    }
+
+    // ---- T42: Extreme switch reassigns controls to their WILD range (Normal
+    //      untouched). At the SAME feedback knob, Extreme maps into the high-
+    //      resonance band so the phaser/bi-phase ring markedly harder; and the
+    //      Bi-Phase Sweep-2 ratio is squared, changing the motion. Frozen sweep +
+    //      impulse tail energy isolates the resonance. ----
+    {
+        auto tail = [](int type, bool extreme) {
+            ModVoice m;
+            m.setType(type);
+            m.setRateHz(0.0f);   // frozen sweep -> stationary resonance
+            m.setDepth(0.7f);
+            m.setFeedback(0.5f); // SAME knob in both modes
+            m.setMix(0.5f);
+            m.setSeries(false);
+            m.setExtreme(extreme);
+            m.prepare({SR, BLK});
+            std::vector<float> l((size_t)SR / 4, 0.0f);
+            l[0] = 1.0f; // impulse
+            auto r = l;
+            run(m, l, r);
+            double e = 0.0;
+            for (size_t i = 400; i < l.size(); ++i) e += (double)l[i] * (double)l[i];
+            return e;
+        };
+        const double pn = tail(ModVoice::kPhaser, false), pe = tail(ModVoice::kPhaser, true);
+        const double bn = tail(ModVoice::kBiPhase, false), be = tail(ModVoice::kBiPhase, true);
+        CHECK(std::isfinite(pe) && pe > pn * 1.5,
+              "T42 phaser Extreme rings harder at the same knob (tail %.2e vs Normal %.2e)", pe, pn);
+        CHECK(std::isfinite(be) && be > bn * 1.3,
+              "T42 bi-phase Extreme rings harder at the same knob (tail %.2e vs Normal %.2e)", be, bn);
+
+        // Bi-Phase Sweep-2 ratio squared in Extreme -> motion differs at the same
+        // ratio knob (feedback left at 0 so this isolates the ratio change).
+        auto biRun = [](bool extreme) {
+            ModVoice m;
+            m.setType(ModVoice::kBiPhase);
+            m.setRateHz(2.0f);
+            m.setDepth(0.7f);
+            m.setP2Ratio(1.5f);
+            m.setSeries(false);
+            m.setWidth(0.0f);
+            m.setExtreme(extreme);
+            m.prepare({SR, BLK});
+            auto l = tone(1000.0, 0.5, (int)SR), r = l;
+            run(m, l, r);
+            return l;
+        };
+        auto rn = biRun(false), re = biRun(true);
+        double d = 0.0;
+        for (size_t i = 4800; i < rn.size(); ++i) d = std::max(d, (double)std::abs(rn[i] - re[i]));
+        CHECK(d > 0.02, "T42 bi-phase Extreme squares the Sweep-2 ratio (motion differs, max diff %.3f)", d);
     }
 
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);

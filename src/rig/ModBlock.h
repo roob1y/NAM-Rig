@@ -83,7 +83,19 @@ public:
     // the rate climbs to the cap -- so fast settings SHIMMER instead of wobbling.
     // Shared/reusable (phaser now; uni-vibe / bi-phase can adopt it later).
     static constexpr float kSweepFullRateHz = 2.0f;   // full width at/below this rate
-    static constexpr float kSweepNarrowFloor = 0.35f; // min width fraction at the rate cap
+    static constexpr float kSweepNarrowFloor = 0.35f; // min width fraction at the cap (wide effects: phaser/bi-phase)
+    // The Uni-Vibe's base sweep is only ~+-1 octave (vs the phaser's ~+-2.6), so the
+    // standard floor would shrink it to a tiny wiggle. It barely wobbles when fast
+    // anyway, so give it a much higher floor -> stays lively. Tunable by ear.
+    static constexpr float kUniVibeSweepFloor = 0.85f;
+    // EXTREME mode (per-slot switch): reassigns each guardrailed control to its
+    // WILD range only (Normal is untouched/identical). Knob-ranged controls get a
+    // disjoint upper band; behaviours (fast-rate sweep) go full-wild. Tunable.
+    static constexpr float kModFbParamMax = 0.95f;     // mirrors the mod{N}Feedback APVTS range
+    static constexpr float kPhaserFbExtMax = 0.95f;    // phaser fb Extreme top (toward self-oscillation)
+    static constexpr float kBiPhaseFbExtMax = 0.92f;   // bi-phase fb Extreme top (toward whistle)
+    static constexpr float kUniFeedbackExtreme = 0.5f; // uni-vibe Extreme: more resonant vibe
+    static constexpr float kUniExtremeWiden = 1.8f;    // uni-vibe Extreme: wider sweep (octave mult)
     static constexpr float kUniFeedback = 0.3f;      // uni-vibe resonance is hardwired (positive fb)
     // Photocell warp (replaces the old pow-skew): the incandescent lamp heats
     // faster than it cools (asymmetric one-pole), and the LDR maps light to stage
@@ -196,13 +208,16 @@ public:
     // narrows linearly to kSweepNarrowFloor as rateHz climbs to maxRateHz, so an
     // LFO-swept filter stays musical (shimmer, not wobble) when driven fast. A
     // multiplier on the effect's sweep depth/octaves; reusable across effects.
-    static float sweepWidthScale(float rateHz, float maxRateHz)
+    static float sweepWidthScale(float rateHz, float maxRateHz, float floor = kSweepNarrowFloor)
     {
         if (rateHz <= kSweepFullRateHz) return 1.0f;
         const float span = std::max(0.001f, maxRateHz - kSweepFullRateHz);
         const float t = std::min(1.0f, (rateHz - kSweepFullRateHz) / span); // 0..1 above the knee
-        return 1.0f - (1.0f - kSweepNarrowFloor) * t;                       // 1.0 -> floor
+        return 1.0f - (1.0f - floor) * t;                                   // 1.0 -> floor
     }
+    // Per-effect sweep-width floor: wide effects tame hard, the narrow-sweep
+    // Uni-Vibe stays lively (see kUniVibeSweepFloor).
+    static float sweepFloor(Type t) { return (t == kUniVibe) ? kUniVibeSweepFloor : kSweepNarrowFloor; }
 
     float uniVibeWarp(int ch, float lfo)
     {
@@ -333,6 +348,7 @@ public:
     void setDrive(float d) { mRotDrive = d; }      // Rotary: Leslie tube-amp drive
     void setRotFast(bool f) { mRotFast = f; }      // Rotary: slow (chorale) / fast (tremolo)
     void setHornDrum(float b) { mHornDrum = b; }   // Rotary: horn<->drum balance (0.5 = both full)
+    void setExtreme(bool e) { mExtreme = e; }      // per-slot: reassign controls to their wild range
 
     // LFO period in beats for each modSync choice (index 0 = Off = free rate).
     static constexpr int kNumSync = 10;
@@ -368,11 +384,16 @@ public:
         mLfo.setRateHz((float)rate);
         // Rate-dependent sweep-width guardrail (per block; sync + free rate both
         // honour it). Used by the phaser now; vibe/bi-phase can adopt it later.
-        mSweepWidth = sweepWidthScale((float)rate, maxRateHz(ty));
+        // Extreme bypasses the guardrail (full width at all rates = the warble);
+        // Normal narrows the fast end per the per-effect floor.
+        mSweepWidth = mExtreme ? 1.0f : sweepWidthScale((float)rate, maxRateHz(ty), sweepFloor(ty));
         mLfo.setWaveform(ty == kTremolo ? mUserWave : authenticWave(ty)); // shape hardwired per type
         // Bi-Phase Sweep Gen 2 = Gen 1 x ratio, but clamped to the same musical
-        // ceiling so the detune can't push one core into the buzzy zone.
-        mLfo2.setRateHz((float)std::min((double)maxRateHz(ty), rate * (double)mP2Ratio));
+        // ceiling so the detune can't push one core into the buzzy zone. Extreme
+        // SQUARES the ratio (the +-1-octave Normal detune becomes the +-2-octave
+        // seasick wild span: 0.5..2.0 -> 0.25..4.0).
+        const double p2 = mExtreme ? (double)mP2Ratio * (double)mP2Ratio : (double)mP2Ratio;
+        mLfo2.setRateHz((float)std::min((double)maxRateHz(ty), rate * p2));
         mLfo2.setWaveform(Lfo::Sine);
         const float dMax = depthMax(ty);
         mBakedBbd = bakedBbd(ty);
@@ -508,7 +529,11 @@ private:
             }
             const float A = alpha * alpha * alpha * alpha; // alpha^4
 
-            const float k = mFeedback * kPhaserFbMax;     // knob maps to the musical resonance window
+            // Feedback range select: Normal maps the knob to the safe resonance
+            // window [0, normCeil]; Extreme reassigns the WHOLE knob to the wild
+            // band [normCeil, kPhaserFbExtMax] (toward self-oscillation). Normal is
+            // unchanged; the bands are disjoint (you pick safe vs wild with the switch).
+            const float k = extremeFb(kPhaserFbMax, kPhaserFbExtMax);
             const float u = (x - k * B) / (1.0f + k * A); // zero-delay resolved chain input
 
             // Single evaluation pass: true output per stage + TPT integrator update.
@@ -700,10 +725,12 @@ private:
             float A = 1.0f, B = 0.0f;
             for (int s = 0; s < kPhaserStages; ++s)
             {
+                // Extreme widens the (otherwise ~+-1 octave) sweep for a deeper throb.
+                const double widen = mExtreme ? (double)kUniExtremeWiden : 1.0;
                 const double fc = std::min(
                     0.45 * mFs,
                     std::max(20.0, mult[s] * kUniCenterHz
-                                       * std::pow(2.0, (double)w * (double)uDepth * (double)mSweepWidth)));
+                                       * std::pow(2.0, (double)w * (double)uDepth * (double)mSweepWidth * widen)));
                 const double g = std::tan(3.14159265358979323846 * fc / mFs);
                 G[s] = (float)(g / (1.0 + g));
                 alpha[s] = 2.0f * G[s] - 1.0f;
@@ -712,7 +739,7 @@ private:
                 B = alpha[s] * B + beta[s]; // B = nested products (forward accumulation)
             }
 
-            const float fb = kUniFeedback;                  // hardwired resonance
+            const float fb = mExtreme ? kUniFeedbackExtreme : kUniFeedback; // Extreme = more resonant vibe
             const float u = (x + fb * B) / (1.0f - fb * A); // positive feedback, zero-delay
 
             // single pass: true stage outputs + TPT integrator updates
@@ -758,7 +785,7 @@ private:
             // the output combine, so toggling the routing never steps the states ->
             // no click. In parallel the two cores pan opposite (A/B stereo split)
             // by Width; mono at Width 0. Shared Feedback, 50/50 mix (notch effect).
-            const float fb = mFeedback * kBiPhaseFbMax; // knob maps to the musical resonance window
+            const float fb = extremeFb(kBiPhaseFbMax, kBiPhaseFbExtMax); // Normal safe band / Extreme wild band
             // Depth knob remapped to [min..1] so the sweep never sits dead-static,
             // then scaled by the rate-dependent width guardrail (shimmer not wobble
             // when driven fast; bit-identical at slow rates where mSweepWidth = 1).
@@ -823,6 +850,19 @@ private:
         z += mBbdCoef * (wet - z);
         const float soft = std::tanh(z * (1.0f + mBakedBbd * 0.5f));
         return wet + mBakedBbd * (soft - wet);
+    }
+
+    // Feedback range select for the Extreme switch. Normal scales the knob into
+    // the safe window [0, kModFbParamMax*normMul] (the existing behaviour);
+    // Extreme reassigns the WHOLE knob to the disjoint wild band [normCeil, extMax]
+    // (toward self-oscillation/whistle). normMul is the effect's Normal ceiling
+    // multiplier (kPhaserFbMax / kBiPhaseFbMax).
+    float extremeFb(float normMul, float extMax) const
+    {
+        if (!mExtreme) return mFeedback * normMul;
+        const float p = mFeedback / kModFbParamMax;     // knob proportion 0..1
+        const float normCeil = kModFbParamMax * normMul; // where Normal tops out
+        return normCeil + p * (extMax - normCeil);
     }
 
     // Linear-interpolated read of the tremolo gain-shape LUT for a bipolar
@@ -966,6 +1006,7 @@ private:
     bool mInvert = false;                  // Flanger phase-invert switch
     float mP2Ratio = 1.5f;                 // Bi-Phase Sweep Gen 2 rate ratio
     bool mSeries = false;                  // Bi-Phase series (true) / parallel (false)
+    bool mExtreme = false;                 // per-slot Extreme switch (wild ranges unlocked)
     float mSeriesZ = 0.0f;                 // smoothed routing crossfade (de-click)
     float mWidth = 1.0f;
     int mUserWave = 0;                          // Tremolo's Shape choice
@@ -1230,6 +1271,7 @@ public:
     void setInvert(int s, bool inv) { mVoice[idx(s)].setInvert(inv); }
     void setP2Ratio(int s, float r) { mVoice[idx(s)].setP2Ratio(r); }
     void setSeries(int s, bool ser) { mVoice[idx(s)].setSeries(ser); }
+    void setExtreme(int s, bool e) { mVoice[idx(s)].setExtreme(e); }
     void setSlotBypassed(int s, bool b) { mVoice[idx(s)].setBypassed(b); }
     // Momentary solo (dial-in): if ANY slot is soloed, only soloed slots are
     // audible (solo overrides bypass); otherwise the normal per-slot bypass

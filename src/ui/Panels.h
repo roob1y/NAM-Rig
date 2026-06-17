@@ -1080,6 +1080,15 @@ public:
         mSeriesLabel.setColour(juce::Label::textColourId, colors::textDim);
         addChildComponent(mSeriesLabel); // bi-phase only (font sized by row height, like knob captions)
 
+        mExtreme.setButtonText(""); // checkbox only; "Extreme" caption sits beneath
+        addChildComponent(mExtreme); // phaser/uni-vibe/bi-phase only (unlocks the wild ranges)
+        mExtremeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            apvts, p + "Extreme", mExtreme);
+        mExtremeLabel.setText("Extreme", juce::dontSendNotification);
+        mExtremeLabel.setJustificationType(juce::Justification::centred);
+        mExtremeLabel.setColour(juce::Label::textColourId, colors::textDim);
+        addChildComponent(mExtremeLabel);
+
         // Every knob in the lane reads 0..10 by rotation (pedal-style), so the
         // mixed underlying params (Speed in Hz, the rest 0..1, Sweep 2 a ratio)
         // all show on one consistent scale instead of exposing raw units.
@@ -1166,6 +1175,9 @@ public:
             mP2Ratio->setVisible(type == 8);               // bi-phase: Sweep Gen 2 ratio
             mSeries.setVisible(type == 8);                  // bi-phase: series/parallel
             mSeriesLabel.setVisible(type == 8);
+            const bool extremeable = (type == 2 || type == 6 || type == 8); // phaser/uni-vibe/bi-phase
+            mExtreme.setVisible(extremeable);               // unlock the wild ranges
+            mExtremeLabel.setVisible(extremeable);
         }
         mRate->setEnabled(sync == 0); // rate greyed when synced (no relayout needed)
         repaint();
@@ -1215,6 +1227,16 @@ public:
             mSeriesLabel.setBounds(stack.removeFromTop(14));
             stack.removeFromTop(3);
             mSeries.setBounds(stack.withSizeKeepingCentre(13, 13));
+        }
+        if (mExtreme.isVisible()) // "Extreme" caption above a small checkbox, same idiom as Series
+        {
+            auto col = area.removeFromRight(52);
+            area.removeFromRight(6);
+            const int groupH = 14 + 3 + 13;
+            auto stack = col.withSizeKeepingCentre(52, groupH);
+            mExtremeLabel.setBounds(stack.removeFromTop(14));
+            stack.removeFromTop(3);
+            mExtreme.setBounds(stack.withSizeKeepingCentre(13, 13));
         }
         if (mWave.isVisible())
         {
@@ -1273,9 +1295,9 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mWaveAtt, mSyncAtt;
     juce::ToggleButton mSolo; // momentary dial-in (not APVTS-attached)
     std::unique_ptr<LabeledKnob> mRate, mDepth, mFeedback, mMix, mWidth, mDrive, mManual, mP2Ratio, mHornDrum;
-    juce::ToggleButton mRotFast, mSeries;
-    juce::Label mSeriesLabel; // "Series" caption beneath the bi-phase checkbox
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mRotFastAtt, mSeriesAtt;
+    juce::ToggleButton mRotFast, mSeries, mExtreme;
+    juce::Label mSeriesLabel, mExtremeLabel; // captions beneath the small checkboxes
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mRotFastAtt, mSeriesAtt, mExtremeAtt;
 };
 
 // Draggable blend pad for PARALLEL routing. The puck sets the slot weights
