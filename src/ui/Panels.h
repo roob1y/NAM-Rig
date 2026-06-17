@@ -986,28 +986,40 @@ public:
         mScope = std::make_unique<LaneScope>(apvts, p, laneCol);
         addAndMakeVisible(*mScope); // live LFO/effect motion for this slot
 
-        // Only the effects valid for this position appear in the list (item id =
-        // enum + 1, so the id carries the ModVoice::Type). Front = the 6 front
-        // effects; post = the 3 amp/speaker effects. The param stays the full
-        // 9-choice enum (presets unaffected), so the combo is synced by hand --
-        // a filtered list can't use a ComboBoxAttachment.
+        // Filtered list: front lanes show only the 6 front effects, the post lane
+        // only the 3 amp/speaker effects (item id = enum + 1, carrying the
+        // ModVoice::Type). Bound to the full 9-choice Type param via a
+        // juce::ParameterAttachment -- event-driven and message-thread-marshalled,
+        // so it's robust (the old timer-polled hand-sync caused the intermittent
+        // "won't select" bug). The 9-choice param is unchanged, so presets are safe.
         if (isFront)
         {
-            mType.addItem("Chorus", 1);
-            mType.addItem("Flanger", 2);
-            mType.addItem("Phaser", 3);
-            mType.addItem("Vibrato", 5);
-            mType.addItem("Uni-Vibe", 7);
-            mType.addItem("Bi-Phase", 9);
+            mType.addItem("Chorus", 1); mType.addItem("Flanger", 2); mType.addItem("Phaser", 3);
+            mType.addItem("Vibrato", 5); mType.addItem("Uni-Vibe", 7); mType.addItem("Bi-Phase", 9);
         }
         else
         {
-            mType.addItem("Tremolo", 4);
-            mType.addItem("Rotary", 6);
-            mType.addItem("Harm Trem", 8);
+            mType.addItem("Tremolo", 4); mType.addItem("Rotary", 6); mType.addItem("Harm Trem", 8);
         }
         addAndMakeVisible(mType);
-        mType.onChange = [this] { syncTypeParam(); };
+        if (auto *prm = apvts.getParameter(p + "Type"))
+        {
+            mTypeParamAtt = std::make_unique<juce::ParameterAttachment>(
+                *prm,
+                [this](float v) { // param -> combo (delivered on the message thread)
+                    const int id = (int)std::lround(v) + 1;
+                    if (mType.getSelectedId() != id)
+                        mType.setSelectedId(id, juce::dontSendNotification);
+                    applyType();
+                });
+            mType.onChange = [this] { // combo -> param (full gesture)
+                const int id = mType.getSelectedId();
+                if (id > 0 && mTypeParamAtt)
+                    mTypeParamAtt->setValueAsCompleteGesture((float)(id - 1));
+            };
+            // NOTE: sendInitialUpdate() is deferred to the END of the ctor -- its
+            // callback runs applyType(), which touches the knobs created below.
+        }
 
         mSync.addItemList({"Off", "1/1", "1/2", "1/4", "1/4.", "1/4T",
                            "1/8", "1/8.", "1/8T", "1/16"}, 1);
@@ -1081,6 +1093,10 @@ public:
             k->setCaptionHeight(14);  // smaller caption so longer names don't truncate
         }
 
+        // Now that every control exists, sync the combo to the current param value
+        // (its callback runs applyType(), which touches the knobs above).
+        if (mTypeParamAtt)
+            mTypeParamAtt->sendInitialUpdate();
         refresh();
     }
 
@@ -1093,39 +1109,9 @@ public:
     // series). The owner (ModPanel) pushes this from the live pad position.
     void setScopeBrightness(float b) { if (mScope) mScope->setBrightness(b); }
 
-    // Write the filtered type combo's selection (item id = enum + 1) back to the
-    // full 9-choice Type parameter. The combo is authoritative here -- we apply the
-    // layout from it directly and do NOT re-read/re-sync the combo (which could
-    // fight the user's fresh pick).
-    void syncTypeParam()
-    {
-        const int id = mType.getSelectedId();
-        if (id <= 0)
-            return;
-        if (auto *prm = mApvts.getParameter(mPrefix + "Type"))
-        {
-            const float norm = prm->convertTo0to1((float)(id - 1));
-            if (std::abs(prm->getValue() - norm) > 1.0e-6f)
-            {
-                prm->beginChangeGesture();
-                prm->setValueNotifyingHost(norm);
-                prm->endChangeGesture();
-            }
-        }
-        applyType();
-    }
-
-    void refresh()
-    {
-        const int type = (int)mApvts.getRawParameterValue(mPrefix + "Type")->load();
-        // Re-sync the filtered combo to the param for EXTERNAL changes (preset /
-        // automation) -- but never while the dropdown is open, or the editor's
-        // periodic refresh would fight the user's selection (the "needs a second
-        // click" bug).
-        if (!mType.isPopupActive() && mType.getSelectedId() != type + 1)
-            mType.setSelectedId(type + 1, juce::dontSendNotification);
-        applyType();
-    }
+    // The Type combo is driven by a standard ComboBoxAttachment now, so refresh()
+    // just re-applies the layout for the current params (no combo hand-sync).
+    void refresh() { applyType(); }
 
     // Show/relayout the controls for the current Type/Sync/On (reads the params;
     // never touches the combo, so it's safe to call from a fresh user selection).
@@ -1279,7 +1265,8 @@ private:
     ModFxIcon mIcon;
     std::unique_ptr<LaneScope> mScope;
     juce::ComboBox mType, mWave, mSync;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mWaveAtt, mSyncAtt; // (Type combo synced by hand)
+    std::unique_ptr<juce::ParameterAttachment> mTypeParamAtt; // robust binding for the filtered Type list
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mWaveAtt, mSyncAtt;
     juce::ToggleButton mSolo; // momentary dial-in (not APVTS-attached)
     std::unique_ptr<LabeledKnob> mRate, mDepth, mFeedback, mMix, mWidth, mDrive, mManual, mP2Ratio, mHornDrum;
     juce::ToggleButton mRotFast, mSeries;
