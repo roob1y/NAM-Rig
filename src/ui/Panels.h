@@ -1175,7 +1175,7 @@ public:
             mP2Ratio->setVisible(type == 8);               // bi-phase: Sweep Gen 2 ratio
             mSeries.setVisible(type == 8);                  // bi-phase: series/parallel
             mSeriesLabel.setVisible(type == 8);
-            const bool extremeable = (type == 0 || type == 2 || type == 4 || type == 6 || type == 8); // chorus/phaser/vibrato/uni-vibe/bi-phase
+            const bool extremeable = (type == 0 || type == 1 || type == 2 || type == 4 || type == 6 || type == 8); // chorus/flanger/phaser/vibrato/uni-vibe/bi-phase
             mExtreme.setVisible(extremeable);               // unlock the wild ranges
             mExtremeLabel.setVisible(extremeable);
         }

@@ -44,6 +44,10 @@ public:
     static constexpr float kChorusMaxRateHzExtreme = 10.0f; // Extreme: the withheld fast/seasick zone (disjoint band [3.5,10]); tunable
     // M-126-style wide flanger: Manual sets a static base delay, Width sweeps above it.
     static constexpr double kFlMinMs = 0.5, kFlManualMaxMs = 8.0, kFlSweepMs = 6.0, kFlMaxMs = 14.0;
+    // Extreme through-zero flanger: a reference tap at the Manual center + a swept
+    // tap crossing it, so the comb difference passes through 0 ms and inverts sign.
+    static constexpr double kFlTzfRangeMs = 8.0; // max symmetric sweep half-range (tunable)
+    static constexpr double kFlTzfGuardMs = 0.2; // keep both taps readable (>0; tunable)
     static constexpr double kVibBaseMs = 2.0, kVibSpreadMs = 8.0;
     static constexpr float kVibratoMaxRateHzExtreme = 16.0f; // Extreme: wild seasick warble (disjoint band [10,16]); tunable
     static constexpr double kRotBaseMs = 3.0, kRotSpreadMs = 4.0;
@@ -384,6 +388,23 @@ public:
         if (t == kVibrato) return kVibratoMaxRateHzExtreme;
         return maxRateHz(t);
     }
+    // Extreme through-zero flanger tap delays (single source of truth; public for
+    // the test). The reference tap sits at the Manual-set center D0; the swept tap
+    // crosses it at D0 + delta, delta = depth*range*lfo (lfo bipolar). So the comb
+    // difference (delta) sweeps through 0 ms and inverts sign -- the tape-flanger
+    // jet. range is clamped so BOTH taps stay readable (>= guard) and inside the
+    // line (<= kFlMaxMs); it's widest with Manual near the middle.
+    struct TzfTaps { double refMs, sweptMs; };
+    static TzfTaps tzfTaps(float manualZ, float depth, float lfo)
+    {
+        const double d0 = kFlMinMs + (double)manualZ * (kFlManualMaxMs - kFlMinMs);
+        double range = kFlTzfRangeMs;
+        range = std::min(range, d0 - kFlTzfGuardMs); // keep swept >= guard
+        range = std::min(range, kFlMaxMs - d0);      // keep swept <= line max
+        range = std::max(0.0, range);
+        const double delta = (double)depth * range * (double)lfo;
+        return TzfTaps{d0, d0 + delta};
+    }
     float effectiveRateHz() const
     {
         const double beats = syncBeats(mSyncIndex);
@@ -462,7 +483,9 @@ public:
         // Sine/triangle keep the quadrature phase offset (the smooth throb).
         if (ty == kTremolo && (mUserWave == Lfo::Square || mUserWave == Lfo::SampleHold))
             rOff = 0.0;
-        const float mixTarget = mixFor(ty, mMix); // only Chorus uses the knob
+        float mixTarget = mixFor(ty, mMix); // only Chorus (+ Extreme flanger) use the knob
+        if (ty == kFlanger && mExtreme)
+            mixTarget = mMix; // Extreme TZF: uncap the flanger mix so the pure two-tape pair (deepest null) is reachable
 
         for (int i = 0; i < numSamples; ++i)
         {
@@ -518,6 +541,31 @@ private:
         }
         case kFlanger:
         {
+            if (mExtreme)
+            {
+                // TRUE THROUGH-ZERO (Extreme only). Two taps from one line: a
+                // reference at the Manual-set centre D0 and a swept tap crossing it.
+                // The comb sits at the difference, which sweeps through 0 ms and
+                // inverts sign (the tape/jet null). Invert selects the crossing
+                // character: OFF = the taps REINFORCE (sum -> flat/doubled moment,
+                // notches sweep out), ON = the taps CANCEL (difference -> broadband
+                // null, the jet drops to nothing). BBD warmth is applied ONCE to the
+                // pair (state-correct), and crucially AFTER the sum/difference so the
+                // cancel-mode null stays clean (bbdColor(0)=0). Regen kept as Normal.
+                const TzfTaps t = tzfTaps(mManualZ, depth, lfo);
+                mLine[(size_t)ch].write(x + mFeedback * mFbState[(size_t)ch]);
+                const float ref = mLine[(size_t)ch].readFrac6(std::max(3.0, t.refMs * 0.001 * mFs));
+                const float swp = mLine[(size_t)ch].readFrac6(std::max(3.0, t.sweptMs * 0.001 * mFs));
+                float wet = mInvert ? 0.5f * (ref - swp)  // cancel: broadband null at delta=0
+                                    : 0.5f * (ref + swp); // reinforce: flat/doubled at delta=0
+                wet = bbdColor(ch, wet);
+                float &flp = mFbLp[(size_t)ch];
+                flp += mFbLpCoef * (wet - flp); // tone-shape the regen
+                mFbState[(size_t)ch] = flp;
+                // Mix is uncapped for Extreme (set in process()) so the pure two-tape
+                // pair (deepest null) is reachable; the knob still blends dry down.
+                return (1.0f - mMixZ) * x + mMixZ * wet;
+            }
             // M-126-style: Manual sets the static comb position, Width (depth)
             // sweeps a wide range above it, and Invert phase-flips the delayed
             // path -- which moves the comb (notch<->peak) AND flips the regen

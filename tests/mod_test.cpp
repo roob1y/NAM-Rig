@@ -73,9 +73,14 @@
 //   T44 vibrato Extreme: rate knob remaps into the disjoint fast band [10,16] Hz
 //       + pitch sweep deepens (single tap lands later at a matched 10 Hz rate);
 //       stays finite/bounded
+//   T45 flanger Extreme = true through-zero: tap-delay law (swept tap crosses the
+//       reference at lfo=0 and inverts sign, both taps stay in [guard,kFlMaxMs]);
+//       Invert=cancel mode produces a deep broadband null the Normal flanger can't;
+//       stays finite/bounded with feedback
 #include "rig/ModBlock.h"
 #include <cstdio>
 #include <cmath>
+#include <cstdint>
 #include <vector>
 #include <complex>
 
@@ -1950,6 +1955,104 @@ int main()
               "T44 vibrato Extreme deepens the sweep (tap peak %d vs Normal %d samples)", eAt, nAt);
         CHECK(std::isfinite(pkE) && pkE > 0.0 && pkE < 2.0,
               "T44 vibrato Extreme stays finite + bounded (peak %.3f)", pkE);
+    }
+
+    // ---- T45: Flanger Extreme = TRUE THROUGH-ZERO. (a) Tap-delay law via the
+    //      public tzfTaps(): at lfo=0 the swept tap meets the reference (through-zero
+    //      point); at lfo=+/-1 it sits symmetric about the reference and the comb
+    //      difference INVERTS sign; both taps stay in [guard, kFlMaxMs]. (b) In
+    //      cancel mode (Invert ON) the two taps subtract, so as the sweep passes
+    //      through 0 ms the whole signal nulls broadband -- a deep envelope dip the
+    //      Normal flanger (a moving spectral notch) cannot produce. (c) Finite +
+    //      bounded with heavy feedback. Normal path bit-identical (T1-T44).
+    //      [thresholds first-run estimates -- sandbox down, not yet run on hardware] ----
+    {
+        // (a) tap-delay law -- deterministic, exact.
+        bool tzAtZero = true, tzBounds = true;
+        for (float mz : {0.0f, 0.5f, 1.0f})
+        {
+            const auto z = ModVoice::tzfTaps(mz, 1.0f, 0.0f);
+            if (std::abs(z.sweptMs - z.refMs) > 1e-9) tzAtZero = false; // lfo=0 -> taps coincide
+            for (float lf : {-1.0f, 1.0f})
+            {
+                const auto t = ModVoice::tzfTaps(mz, 1.0f, lf);
+                if (t.sweptMs < 0.2 - 1e-6 || t.sweptMs > 14.0 + 1e-6) tzBounds = false; // [guard, kFlMaxMs]
+                if (t.refMs < 0.5 - 1e-6 || t.refMs > 8.0 + 1e-6) tzBounds = false;        // [kFlMin, kFlManualMax]
+            }
+        }
+        const auto tp = ModVoice::tzfTaps(0.5f, 1.0f, 1.0f);
+        const auto tm = ModVoice::tzfTaps(0.5f, 1.0f, -1.0f);
+        const double dp = tp.sweptMs - tp.refMs, dm = tm.sweptMs - tm.refMs;
+        CHECK(tzAtZero, "T45 TZF through-zero: swept tap meets the reference at lfo=0");
+        CHECK(dp > 0.0 && dm < 0.0 && std::abs(dp + dm) < 1e-9,
+              "T45 TZF comb difference inverts sign + is symmetric about zero (+%.3f / %.3f ms)", dp, dm);
+        CHECK(tzBounds, "T45 TZF both taps stay readable + within the line across Manual/sweep");
+
+        // The defining TZF property is BROADBAND-SIMULTANEOUS cancellation: at
+        // delta=0 the two taps are identical, so the WHOLE signal nulls at one
+        // instant. White noise can't show this (the taps decorrelate within a sample
+        // -> ref-swp never nulls except sub-sample). Two well-separated tones do: in
+        // cancel mode both vanish together at delta=0; the Normal flanger (a single
+        // moving notch, plus its 0.5 dry floor) can never silence both at once.
+        auto twoTone = [](int n) {
+            auto a = tone(250.0, 0.4, n);
+            auto b = tone(1800.0, 0.4, n);
+            for (size_t i = 0; i < a.size(); ++i) a[i] += b[i];
+            return a;
+        };
+        // min/mean of the short-time RMS envelope -> how deep the deepest dip is
+        // relative to the average level. A broadband null drives this toward 0.
+        auto nullRatio = [](std::vector<float> &l) {
+            const int W = 256;
+            double sumMean = 0.0, minR = 1e30; int nb = 0;
+            for (size_t b = 0; b + (size_t)W <= l.size(); b += (size_t)W, ++nb)
+            {
+                double e = 0.0;
+                for (int i = 0; i < W; ++i) e += (double)l[b + (size_t)i] * (double)l[b + (size_t)i];
+                const double rms = std::sqrt(e / W);
+                sumMean += rms;
+                if (nb >= 4 && rms < minR) minR = rms; // skip warmup blocks
+            }
+            const double mean = sumMean / std::max(1, nb);
+            return mean > 0.0 ? minR / mean : 1.0;
+        };
+        auto runFlanger = [&](bool extreme, bool invert) {
+            ModVoice m;
+            m.setType(ModVoice::kFlanger);
+            m.setRateHz(0.5f);   // slow -> a window sits inside the through-zero null
+            m.setDepth(1.0f);
+            m.setManual(0.5f);   // mid Manual -> a wide symmetric sweep through zero
+            m.setInvert(invert);
+            m.setFeedback(0.0f); // isolate the null (no regen)
+            m.setMix(1.0f);      // Extreme: full two-tape pair; Normal: caps to 0.5 internally
+            m.setExtreme(extreme);
+            m.prepare({SR, BLK});
+            auto l = twoTone((int)(SR * 4.0)); auto r = l; // 4 s -> 4 zero crossings
+            run(m, l, r);
+            return l;
+        };
+        auto extL = runFlanger(true, true);   // through-zero cancel: both tones null together
+        auto norL = runFlanger(false, true);  // Normal M-126: never silences both
+        const double extNull = nullRatio(extL), norNull = nullRatio(norL);
+        CHECK(extNull < 0.4 && extNull < norNull * 0.6,
+              "T45 TZF cancel mode nulls both tones together (dip ratio %.3f vs Normal %.3f)", extNull, norNull);
+
+        // (c) bounded with heavy feedback.
+        ModVoice mb;
+        mb.setType(ModVoice::kFlanger);
+        mb.setRateHz(2.0f);
+        mb.setDepth(0.8f);
+        mb.setManual(0.5f);
+        mb.setInvert(true);
+        mb.setFeedback(0.9f);
+        mb.setMix(0.5f);
+        mb.setExtreme(true);
+        mb.prepare({SR, BLK});
+        auto bl = tone(440.0, 0.7, (int)(SR / 2)); auto br = bl;
+        run(mb, bl, br);
+        double pk = 0.0; bool fin = true;
+        for (float v : bl) { pk = std::max(pk, (double)std::abs(v)); if (!std::isfinite(v)) fin = false; }
+        CHECK(fin && pk < 4.0, "T45 TZF stays finite + bounded with heavy feedback (peak %.2f)", pk);
     }
 
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);
