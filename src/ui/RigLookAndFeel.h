@@ -117,26 +117,16 @@ public:
         const bool pill = b.getProperties()["pill"].equals(true);
         if (!pill && b.getButtonText().isEmpty())
         {
-            // Caption-less checkbox (bi-phase Series, label drawn beneath): a
-            // CENTRED tick box rather than JUCE's left-aligned default.
+            // Caption-less checkbox (bi-phase Series, label drawn above): a small
+            // CENTRED box -- filled accent when on, outlined when off (no tick).
             auto a = b.getLocalBounds().toFloat();
-            const float sz = juce::jmin(18.0f, a.getWidth() - 2.0f, a.getHeight() - 2.0f);
+            const float sz = juce::jmin(15.0f, a.getWidth() - 2.0f, a.getHeight() - 2.0f);
             auto box = juce::Rectangle<float>(sz, sz).withCentre(a.getCentre());
             const bool on = b.getToggleState();
             g.setColour(on ? colors::accent : colors::tile);
-            g.fillRoundedRectangle(box, 4.0f);
+            g.fillRoundedRectangle(box, 3.0f);
             g.setColour(on ? colors::accent : colors::outline);
-            g.drawRoundedRectangle(box, 4.0f, 1.0f);
-            if (on)
-            {
-                juce::Path tick;
-                tick.startNewSubPath(box.getX() + sz * 0.24f, box.getCentreY() + sz * 0.02f);
-                tick.lineTo(box.getCentreX() - sz * 0.04f, box.getBottom() - sz * 0.26f);
-                tick.lineTo(box.getRight() - sz * 0.20f, box.getY() + sz * 0.26f);
-                g.setColour(colors::bg);
-                g.strokePath(tick, juce::PathStrokeType(2.0f, juce::PathStrokeType::curved,
-                                                        juce::PathStrokeType::rounded));
-            }
+            g.drawRoundedRectangle(box, 3.0f, 1.0f);
             return;
         }
         if (!pill)

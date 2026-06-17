@@ -1207,13 +1207,15 @@ public:
             mSolo.setBounds(area.removeFromRight(30).withSizeKeepingCentre(30, 22));
             area.removeFromRight(8);
         }
-        if (mSeries.isVisible()) // checkbox stacked over its "Series" caption
+        if (mSeries.isVisible()) // "Series" caption above a small checkbox, centred as one unit
         {
-            auto col = area.removeFromRight(38);
+            auto col = area.removeFromRight(44);
             area.removeFromRight(6);
-            auto stack = col.withSizeKeepingCentre(38, 42);
-            mSeries.setBounds(stack.removeFromTop(24).withSizeKeepingCentre(26, 24));
-            mSeriesLabel.setBounds(stack.removeFromTop(13));
+            const int groupH = 12 + 3 + 16; // label + gap + box
+            auto stack = col.withSizeKeepingCentre(44, groupH);
+            mSeriesLabel.setBounds(stack.removeFromTop(12));
+            stack.removeFromTop(3);
+            mSeries.setBounds(stack.withSizeKeepingCentre(16, 16));
         }
         if (mWave.isVisible())
         {
