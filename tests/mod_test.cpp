@@ -66,7 +66,7 @@
 //       full width <=2 Hz, narrows monotonically to the floor at the rate cap;
 //       phaser stays bounded driven fast
 //   T42 Extreme switch reassigns controls to their wild range (Normal untouched):
-//       phaser/bi-phase ring harder at the same fb knob; bi-phase ratio squared
+//       phaser/bi-phase ring harder at same fb knob; bi-phase ratio -> strong detune
 #include "rig/ModBlock.h"
 #include <cstdio>
 #include <cmath>
@@ -1816,8 +1816,9 @@ int main()
         CHECK(std::isfinite(be) && be > bn * 1.3,
               "T42 bi-phase Extreme rings harder at the same knob (tail %.2e vs Normal %.2e)", be, bn);
 
-        // Bi-Phase Sweep-2 ratio squared in Extreme -> motion differs at the same
-        // ratio knob (feedback left at 0 so this isolates the ratio change).
+        // Bi-Phase Sweep-2 ratio reassigned to the wild strong-detune band in
+        // Extreme -> motion differs at the same ratio knob (feedback left at 0 so
+        // this isolates the ratio change).
         auto biRun = [](bool extreme) {
             ModVoice m;
             m.setType(ModVoice::kBiPhase);
@@ -1835,7 +1836,7 @@ int main()
         auto rn = biRun(false), re = biRun(true);
         double d = 0.0;
         for (size_t i = 4800; i < rn.size(); ++i) d = std::max(d, (double)std::abs(rn[i] - re[i]));
-        CHECK(d > 0.02, "T42 bi-phase Extreme squares the Sweep-2 ratio (motion differs, max diff %.3f)", d);
+        CHECK(d > 0.02, "T42 bi-phase Extreme reassigns Sweep-2 ratio to strong detune (motion differs, max diff %.3f)", d);
     }
 
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);

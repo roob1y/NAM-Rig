@@ -96,6 +96,8 @@ public:
     static constexpr float kBiPhaseFbExtMax = 0.92f;   // bi-phase fb Extreme top (toward whistle)
     static constexpr float kUniFeedbackExtreme = 0.5f; // uni-vibe Extreme: more resonant vibe
     static constexpr float kUniExtremeWiden = 1.8f;    // uni-vibe Extreme: wider sweep (octave mult)
+    static constexpr float kExtremeSweepWiden = 1.3f;  // Extreme: sweep WIDER than Normal at every rate (not just fast)
+    static constexpr float kUniDepthMinExtreme = 0.6f; // uni-vibe Extreme: high depth floor (never subtle)
     static constexpr float kUniFeedback = 0.3f;      // uni-vibe resonance is hardwired (positive fb)
     // Photocell warp (replaces the old pow-skew): the incandescent lamp heats
     // faster than it cools (asymmetric one-pole), and the LDR maps light to stage
@@ -384,16 +386,27 @@ public:
         mLfo.setRateHz((float)rate);
         // Rate-dependent sweep-width guardrail (per block; sync + free rate both
         // honour it). Used by the phaser now; vibe/bi-phase can adopt it later.
-        // Extreme bypasses the guardrail (full width at all rates = the warble);
-        // Normal narrows the fast end per the per-effect floor.
-        mSweepWidth = mExtreme ? 1.0f : sweepWidthScale((float)rate, maxRateHz(ty), sweepFloor(ty));
+        // Extreme widens the sweep BEYOND Normal at every rate (kExtremeSweepWiden
+        // > 1) so even a slow Extreme sweep is bigger than Normal, plus no fast-end
+        // narrowing (full warble). Normal narrows the fast end per the per-effect floor.
+        mSweepWidth = mExtreme ? kExtremeSweepWiden : sweepWidthScale((float)rate, maxRateHz(ty), sweepFloor(ty));
         mLfo.setWaveform(ty == kTremolo ? mUserWave : authenticWave(ty)); // shape hardwired per type
-        // Bi-Phase Sweep Gen 2 = Gen 1 x ratio, but clamped to the same musical
-        // ceiling so the detune can't push one core into the buzzy zone. Extreme
-        // SQUARES the ratio (the +-1-octave Normal detune becomes the +-2-octave
-        // seasick wild span: 0.5..2.0 -> 0.25..4.0).
-        const double p2 = mExtreme ? (double)mP2Ratio * (double)mP2Ratio : (double)mP2Ratio;
-        mLfo2.setRateHz((float)std::min((double)maxRateHz(ty), rate * p2));
+        // Bi-Phase Sweep Gen 2 = Gen 1 x ratio. Normal: the musical 0.5..2.0 detune
+        // (knob spans it). Extreme reassigns the knob to the WILD band ONLY -- a
+        // strong 2x..4x detune (never the gentle middle), so it's disjoint from
+        // Normal rather than a superset. (mod{N}P2Ratio APVTS range is 0.5..2.0.)
+        double p2 = (double)mP2Ratio;
+        if (mExtreme)
+        {
+            const double q = ((double)mP2Ratio - 0.5) / 1.5; // knob proportion over its 0.5..2.0 range
+            p2 = 2.0 + q * 2.0;                              // wild band [2.0, 4.0] only
+        }
+        const double rate2 = std::min((double)maxRateHz(ty), rate * p2);
+        mLfo2.setRateHz((float)rate2);
+        // Bi-Phase Core B gets its OWN sweep-width guardrail from Gen 2's (faster)
+        // rate, so a high ratio that pushes Gen 2 past the wobble knee narrows Core
+        // B even when Gen 1 (the base rate) is slow. Extreme widens both alike.
+        mSweepWidthB = mExtreme ? kExtremeSweepWiden : sweepWidthScale((float)rate2, maxRateHz(ty), sweepFloor(ty));
         mLfo2.setWaveform(Lfo::Sine);
         const float dMax = depthMax(ty);
         mBakedBbd = bakedBbd(ty);
@@ -716,8 +729,10 @@ private:
             // lamp + photocell: asymmetric thermal envelope -> power-law transfer
             const float w = uniVibeWarp(ch, lfo);    // warped sweep control [-1,1]
             const float cell = 0.5f * (w + 1.0f);    // back to [0,1] for the AM term
-            // depth floored so the knob-down position still breathes (no dead-static)
-            const float uDepth = kUniDepthMin + depth * (1.0f - kUniDepthMin);
+            // depth floored so the knob-down position still breathes (no dead-static);
+            // Extreme uses a HIGH floor so it can never sound subtle/tame.
+            const float uFloor = mExtreme ? kUniDepthMinExtreme : kUniDepthMin;
+            const float uDepth = uFloor + depth * (1.0f - uFloor);
 
             // per-stage ZDF/TPT all-pass: gather alpha_i/G_i/beta_i, build A and B
             ApState *ap = &mAllpass[(size_t)(ch * kPhaserStages)];
@@ -787,12 +802,15 @@ private:
             // by Width; mono at Width 0. Shared Feedback, 50/50 mix (notch effect).
             const float fb = extremeFb(kBiPhaseFbMax, kBiPhaseFbExtMax); // Normal safe band / Extreme wild band
             // Depth knob remapped to [min..1] so the sweep never sits dead-static,
-            // then scaled by the rate-dependent width guardrail (shimmer not wobble
-            // when driven fast; bit-identical at slow rates where mSweepWidth = 1).
-            const float bpDepth = (kBiPhaseDepthMin + depth * (1.0f - kBiPhaseDepthMin)) * mSweepWidth;
-            const float a = phasor6(mBiA[(size_t)ch], x, mLfo.value(off), bpDepth, fb);
+            // then scaled by the rate-dependent width guardrail. Core A uses Gen 1's
+            // width (mSweepWidth); Core B uses Gen 2's own width (mSweepWidthB), so
+            // each core is guardrailed against its own sweep rate.
+            const float bpBase = kBiPhaseDepthMin + depth * (1.0f - kBiPhaseDepthMin);
+            const float bpDepthA = bpBase * mSweepWidth;
+            const float bpDepthB = bpBase * mSweepWidthB;
+            const float a = phasor6(mBiA[(size_t)ch], x, mLfo.value(off), bpDepthA, fb);
             const float bIn = (1.0f - mSeriesZ) * x + mSeriesZ * a; // parallel(x) -> series(A(x))
-            const float b = phasor6(mBiB[(size_t)ch], bIn, mLfo2.value(off), bpDepth, fb);
+            const float b = phasor6(mBiB[(size_t)ch], bIn, mLfo2.value(off), bpDepthB, fb);
             const float w = mWidth;
             const float panA = (ch == 0) ? 0.5f + 0.5f * w : 0.5f - 0.5f * w;
             const float panB = (ch == 0) ? 0.5f - 0.5f * w : 0.5f + 0.5f * w;
@@ -1037,7 +1055,8 @@ private:
     std::array<float, 2> mAmpToneLp{};                       // transformer-rolloff shelf state
     float mAmpToneCoef = 1.0f;                               // transformer-rolloff corner coef
     float mFreeRateHz = 1.0f;
-    float mSweepWidth = 1.0f; // per-block rate-dependent sweep-width scale (phaser)
+    float mSweepWidth = 1.0f;  // per-block rate-dependent sweep-width scale (Gen 1 / Core A / phaser / uni-vibe)
+    float mSweepWidthB = 1.0f; // per-block sweep-width scale for Bi-Phase Core B (Gen 2's rate)
     double mBpm = 120.0;
     int mSyncIndex = 0;
     bool mPrepared = false;
