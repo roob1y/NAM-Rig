@@ -199,6 +199,18 @@ public:
         return (std::tanh(x * pre + bias) - std::tanh(bias)) * (2.6f / pre);
     }
 
+    // BBD soft-clip CURVE (memoryless; bbdColor applies it via first-order ADAA to
+    // anti-alias). baked = the per-type BBD amount; gain rises gently with it.
+    // Public so the test can check the curve + alias reduction.
+    static float bbdGain(float baked) { return 1.0f + baked * 0.5f; }
+    static float bbdShape(float u, float baked) { return std::tanh(u * bbdGain(baked)); }
+    // Antiderivative of bbdShape w.r.t. u: F(u) = ln(cosh(g*u))/g, g = bbdGain.
+    static float bbdAntideriv(float u, float baked)
+    {
+        const float g = bbdGain(baked);
+        return std::log(std::cosh(u * g)) / g;
+    }
+
     // Tremolo gain law (single source of truth, public so the test verifies the
     // DC-offset compensation directly). mod = shaped bipolar modulator in [-1,1];
     // center 0 = cut-only (gain in [1-depth, 1], original voicing), center 1 =
@@ -306,6 +318,8 @@ public:
         mHtHp1Z1[0] = mHtHp1Z1[1] = mHtHp1Z2[0] = mHtHp1Z2[1] = 0.0f;
         mHtHp2Z1[0] = mHtHp2Z1[1] = mHtHp2Z2[0] = mHtHp2Z2[1] = 0.0f;
         mBbdLp[0] = mBbdLp[1] = 0.0f;
+        mBbdX1[0] = mBbdX1[1] = 0.0f;
+        mBbdF1[0] = mBbdF1[1] = 0.0f;
         mUniLamp[0] = mUniLamp[1] = 0.5f; // lamp at mid brightness (no startup snap)
         mTremG[0] = mTremG[1] = 1.0f; // unity gain (no mute on start)
         mHornLp[0] = mHornLp[1] = 0.0f;
@@ -952,7 +966,18 @@ private:
             return wet;
         float &z = mBbdLp[(size_t)ch];
         z += mBbdCoef * (wet - z);
-        const float soft = std::tanh(z * (1.0f + mBakedBbd * 0.5f));
+        // ADAA(tanh): the memoryless soft-clip bbdShape(z) aliases on bright/fast
+        // content. First-order antiderivative anti-aliasing: soft = (F(z)-F(z1))/(z-z1)
+        // with F = bbdAntideriv; fall back to the direct curve when the step is tiny
+        // (z barely moving). At steady state this is bit-identical to the old tanh.
+        float &z1 = mBbdX1[(size_t)ch];
+        float &F1 = mBbdF1[(size_t)ch];
+        const float Fc = bbdAntideriv(z, mBakedBbd);
+        const float dz = z - z1;
+        const float soft = (std::abs(dz) > 1e-4f) ? (Fc - F1) / dz
+                                                   : bbdShape(z, mBakedBbd);
+        z1 = z;
+        F1 = Fc;
         return wet + mBakedBbd * (soft - wet);
     }
 
@@ -1100,6 +1125,7 @@ private:
     std::array<float, 2> mHtLp1Z1{}, mHtLp1Z2{}, mHtLp2Z1{}, mHtLp2Z2{}; // LP cascade state
     std::array<float, 2> mHtHp1Z1{}, mHtHp1Z2{}, mHtHp2Z1{}, mHtHp2Z2{}; // HP cascade state
     std::array<float, 2> mBbdLp{};           // BBD HF-rolloff state
+    std::array<float, 2> mBbdX1{}, mBbdF1{}; // BBD soft-clip ADAA: prev input + prev antiderivative (non-recursive)
     std::array<float, 2> mUniLamp{};         // uni-vibe lamp thermal envelope (per ch)
     std::array<float, 2> mTremG{1.0f, 1.0f}; // smoothed tremolo gain (de-click)
     std::array<float, kTremLutN> mTremLut{}; // tremolo gain-shape LUT (built in prepare)

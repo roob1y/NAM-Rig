@@ -77,6 +77,9 @@
 //       reference at lfo=0 and inverts sign, both taps stay in [guard,kFlMaxMs]);
 //       Invert=cancel mode produces a deep broadband null the Normal flanger can't;
 //       stays finite/bounded with feedback
+//   T46 BBD soft-clip ADAA (chorus/flanger/vibrato/rotary all share bbdColor):
+//       curve bounded + monotonic; first-order ADAA cuts the aliased foldback of a
+//       high tone vs the naive tanh; matches the naive curve on slow signals
 #include "rig/ModBlock.h"
 #include <cstdio>
 #include <cmath>
@@ -2053,6 +2056,68 @@ int main()
         double pk = 0.0; bool fin = true;
         for (float v : bl) { pk = std::max(pk, (double)std::abs(v)); if (!std::isfinite(v)) fin = false; }
         CHECK(fin && pk < 4.0, "T45 TZF stays finite + bounded with heavy feedback (peak %.2f)", pk);
+    }
+
+    // ---- T46: BBD soft-clip ADAA. bbdColor() (shared by chorus/flanger/vibrato/
+    //      rotary BBD warmth) used a memoryless tanh that aliases on bright/fast
+    //      content; it now applies first-order antiderivative anti-aliasing.
+    //      (a) the curve bbdShape() is bounded + monotonic. (b) feeding a high tone,
+    //      the ADAA path puts LESS energy in the aliased foldback bin than the naive
+    //      tanh. (c) on a slow signal ADAA matches the naive curve (no voicing shift).
+    //      [thresholds first-run estimates -- sandbox down] ----
+    {
+        const float baked = 0.45f; // rotary's amount = the strongest BBD clip
+        // (a) curve bounded + monotonic.
+        bool bounded = true, mono = true;
+        float prev = -2.0f;
+        for (float u = -5.0f; u <= 5.0f; u += 0.1f)
+        {
+            const float s = ModVoice::bbdShape(u, baked);
+            if (std::abs(s) >= 1.0f) bounded = false;
+            if (s <= prev) mono = false;
+            prev = s;
+        }
+        CHECK(bounded && mono, "T46 bbdShape bounded (|.|<1) + monotonic");
+
+        // ADAA replicated from the same static helpers (isolates the nonlinearity --
+        // the LP ahead of it is linear and doesn't alias).
+        auto adaa = [](const std::vector<float> &in, float bk) {
+            std::vector<float> out(in.size());
+            float u1 = 0.0f, F1 = 0.0f;
+            for (size_t i = 0; i < in.size(); ++i)
+            {
+                const float u = in[i];
+                const float Fc = ModVoice::bbdAntideriv(u, bk);
+                const float du = u - u1;
+                out[i] = (std::abs(du) > 1e-4f) ? (Fc - F1) / du : ModVoice::bbdShape(u, bk);
+                u1 = u; F1 = Fc;
+            }
+            return out;
+        };
+        auto naive = [](const std::vector<float> &in, float bk) {
+            std::vector<float> out(in.size());
+            for (size_t i = 0; i < in.size(); ++i) out[i] = ModVoice::bbdShape(in[i], bk);
+            return out;
+        };
+
+        // (b) high tone -> odd harmonics fold back. f0 = 0.2*SR: the 3rd (0.6*SR)
+        // and 7th (1.4*SR) both alias to 0.4*SR, an inharmonic bin the naive tanh
+        // fills with foldback. (Amp 1.0 -> a solid tanh argument for clear harmonics.)
+        const int N = 16384;
+        auto hi = tone(0.2 * SR, 1.0, N);
+        auto aN = naive(hi, baked), aA = adaa(hi, baked);
+        const double aliasF = 0.4 * SR;
+        const double magNaive = mag(aN, 2048, 8192, aliasF);
+        const double magAdaa = mag(aA, 2048, 8192, aliasF);
+        CHECK(magAdaa < magNaive * 0.8 && magNaive > 0.0,
+              "T46 ADAA cuts the aliased foldback (alias mag %.4e vs naive %.4e)", magAdaa, magNaive);
+
+        // (c) slow signal -> ADAA tracks the instantaneous curve (no voicing shift).
+        auto lo = tone(50.0, 0.8, 4096);
+        auto sN = naive(lo, baked), sA = adaa(lo, baked);
+        double dmax = 0.0;
+        for (size_t i = 64; i < sN.size(); ++i) dmax = std::max(dmax, (double)std::abs(sN[i] - sA[i]));
+        CHECK(dmax < 0.02, "T46 ADAA matches the naive curve on slow signals (max diff %.4f)", dmax);
     }
 
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);
