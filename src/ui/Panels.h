@@ -1054,10 +1054,15 @@ public:
 
         mP2Ratio = std::make_unique<LabeledKnob>(apvts, p + "P2Ratio", "Sweep 2");
         addChildComponent(*mP2Ratio); // bi-phase only (Sweep Gen 2 rate ratio)
-        mSeries.setButtonText("Series");
+        mSeries.setButtonText(""); // checkbox only; caption sits beneath (saves width)
         addChildComponent(mSeries); // bi-phase only (series/parallel routing)
         mSeriesAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             apvts, p + "Series", mSeries);
+        mSeriesLabel.setText("Series", juce::dontSendNotification);
+        mSeriesLabel.setJustificationType(juce::Justification::centred);
+        mSeriesLabel.setColour(juce::Label::textColourId, colors::textDim);
+        mSeriesLabel.setFont(RigLookAndFeel::withHeight(9.0f));
+        addChildComponent(mSeriesLabel); // bi-phase only
 
         // Every knob in the lane reads 0..10 by rotation (pedal-style), so the
         // mixed underlying params (Speed in Hz, the rest 0..1, Sweep 2 a ratio)
@@ -1163,6 +1168,7 @@ public:
         mWidth->setCaption(flanger ? "Spread" : "Width");
         mP2Ratio->setVisible(type == 8);               // bi-phase: Sweep Gen 2 ratio
         mSeries.setVisible(type == 8);                  // bi-phase: series/parallel
+        mSeriesLabel.setVisible(type == 8);
         mRate->setEnabled(sync == 0);                  // rate greyed when synced
         repaint();                                     // LED
         resized();
@@ -1201,10 +1207,13 @@ public:
             mSolo.setBounds(area.removeFromRight(30).withSizeKeepingCentre(30, 22));
             area.removeFromRight(8);
         }
-        if (mSeries.isVisible())
+        if (mSeries.isVisible()) // checkbox stacked over its "Series" caption
         {
-            mSeries.setBounds(area.removeFromRight(64).withSizeKeepingCentre(64, 22));
-            area.removeFromRight(8);
+            auto col = area.removeFromRight(38);
+            area.removeFromRight(6);
+            auto stack = col.withSizeKeepingCentre(38, 42);
+            mSeries.setBounds(stack.removeFromTop(24).withSizeKeepingCentre(26, 24));
+            mSeriesLabel.setBounds(stack.removeFromTop(13));
         }
         if (mWave.isVisible())
         {
@@ -1259,6 +1268,7 @@ private:
     juce::ToggleButton mSolo; // momentary dial-in (not APVTS-attached)
     std::unique_ptr<LabeledKnob> mRate, mDepth, mFeedback, mMix, mWidth, mDrive, mManual, mP2Ratio, mHornDrum;
     juce::ToggleButton mRotFast, mSeries;
+    juce::Label mSeriesLabel; // "Series" caption beneath the bi-phase checkbox
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mRotFastAtt, mSeriesAtt;
 };
 
