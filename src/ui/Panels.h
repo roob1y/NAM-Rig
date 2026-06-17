@@ -1066,8 +1066,7 @@ public:
         mSeriesLabel.setText("Series", juce::dontSendNotification);
         mSeriesLabel.setJustificationType(juce::Justification::centred);
         mSeriesLabel.setColour(juce::Label::textColourId, colors::textDim);
-        mSeriesLabel.setFont(RigLookAndFeel::withHeight(9.0f));
-        addChildComponent(mSeriesLabel); // bi-phase only
+        addChildComponent(mSeriesLabel); // bi-phase only (font sized by row height, like knob captions)
 
         // Every knob in the lane reads 0..10 by rotation (pedal-style), so the
         // mixed underlying params (Speed in Hz, the rest 0..1, Sweep 2 a ratio)
@@ -1225,11 +1224,11 @@ public:
         {
             auto col = area.removeFromRight(44);
             area.removeFromRight(6);
-            const int groupH = 12 + 3 + 16; // label + gap + box
+            const int groupH = 14 + 3 + 13; // caption (knob-size) + gap + small box
             auto stack = col.withSizeKeepingCentre(44, groupH);
-            mSeriesLabel.setBounds(stack.removeFromTop(12));
+            mSeriesLabel.setBounds(stack.removeFromTop(14));
             stack.removeFromTop(3);
-            mSeries.setBounds(stack.withSizeKeepingCentre(16, 16));
+            mSeries.setBounds(stack.withSizeKeepingCentre(13, 13));
         }
         if (mWave.isVisible())
         {
