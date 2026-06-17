@@ -784,6 +784,7 @@ public:
     static bool pitchExposed(Type t) { return t == kShimmer; }
     static bool tensionExposed(Type t) { return t == kSpring; }
     static bool swellExposed(Type t) { return t == kBloom; }
+    static bool inputFilterExposed(Type t) { return t == kPlate; } // vintage plate/studio-style wet low-cut on the plate amp
     static const char *toneCaption(Type t) { return t == kSpring ? "Tone" : "Damping"; }
 
     const char *name() const override { return "Reverb"; }
@@ -825,6 +826,7 @@ public:
     void setShimmer(float s) { mShimmerAmt = std::clamp(s, 0.0f, 1.0f); if (mPrepared) pushParams(); }
     void setTension(float t) { mTension = std::clamp(t, 0.0f, 1.0f); if (mPrepared) pushParams(); }
     void setWidth(float w) { mWidth = std::clamp(w, 0.0f, 1.0f); }
+    void setInputFilterHz(float hz) { mInputFilterHz = std::clamp(hz, 20.0f, 400.0f); } // Plate Input Filter (wet low-cut corner)
     void setSwell(float s) { mSwell = std::clamp(s, 0.0f, 1.0f); }
     void setPitch(int p) { mPitch = std::clamp(p, 0, 2); if (mPrepared) pushParams(); }
     void setFreeze(bool f) { mFreeze = f; if (mPrepared) pushParams(); }
@@ -854,7 +856,7 @@ public:
 
         GuardMixer::Config c;
         c.mix = effMix();
-        c.hpfHz = hpfForType(mType);
+        c.hpfHz = inputFilterExposed(mType) ? mInputFilterHz : hpfForType(mType);
         c.makeup = makeupForType(mType, effT60());
         c.duckAmt = duckForType(mType);
         c.width = mWidth;
@@ -981,6 +983,7 @@ private:
     Type mType = kHall;
     float mSize = 1.0f, mT60 = 2.0f, mDampHz = 6000.0f, mPredelayMs = 20.0f, mMix = 0.25f;
     float mMod = 0.3f, mShimmerAmt = 0.5f, mTension = 0.5f, mWidth = 1.0f, mSwell = 0.4f;
+    float mInputFilterHz = 95.0f; // Plate Input Filter corner (20-400 Hz); 95 = prior hardwired Plate low-cut
     int mPitch = 0;
     bool mFreeze = false, mPrepared = false;
 };

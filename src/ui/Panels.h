@@ -1277,6 +1277,7 @@ public:
         mDecay = std::make_unique<LabeledKnob>(apvts, "revDecay", "Decay");
         mSize = std::make_unique<LabeledKnob>(apvts, "revSize", "Size");
         mPredelay = std::make_unique<LabeledKnob>(apvts, "revPredelay", "Pre-Delay");
+        mInputFilter = std::make_unique<LabeledKnob>(apvts, "revInputFilter", "Input Filter"); // Plate only
         mTone = std::make_unique<LabeledKnob>(apvts, "revDamp", "Damping");
         mMod = std::make_unique<LabeledKnob>(apvts, "revMod", "Mod");
         mShimmer = std::make_unique<LabeledKnob>(apvts, "revShimmer", "Shimmer");
@@ -1291,6 +1292,7 @@ public:
         addAndMakeVisible(*mMix);
         addChildComponent(*mSize);
         addChildComponent(*mPredelay);
+        addChildComponent(*mInputFilter);
         addChildComponent(*mMod);
         addChildComponent(*mShimmer);
         addChildComponent(*mTension);
@@ -1313,6 +1315,7 @@ public:
         const auto t = (RB::Type)type;
         mSize->setVisible(RB::sizeExposed(t));
         mPredelay->setVisible(RB::predelayExposed(t));
+        mInputFilter->setVisible(RB::inputFilterExposed(t));
         mMod->setVisible(RB::modExposed(t));
         mShimmer->setVisible(RB::shimmerExposed(t));
         mTension->setVisible(RB::tensionExposed(t));
@@ -1343,7 +1346,8 @@ public:
         // character so the panel never shows a control that does nothing.
         std::vector<juce::Component *> vis;
         for (juce::Component *k : {(juce::Component *)mDecay.get(), (juce::Component *)mSize.get(),
-                                   (juce::Component *)mPredelay.get(), (juce::Component *)mTone.get(),
+                                   (juce::Component *)mPredelay.get(), (juce::Component *)mInputFilter.get(),
+                                   (juce::Component *)mTone.get(),
                                    (juce::Component *)mMod.get(), (juce::Component *)mTension.get(),
                                    (juce::Component *)mShimmer.get(), (juce::Component *)mSwell.get(),
                                    (juce::Component *)mWidth.get(), (juce::Component *)mMix.get()})
@@ -1368,7 +1372,7 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt, mPitchAtt;
     juce::ToggleButton mFreeze;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mFreezeAtt;
-    std::unique_ptr<LabeledKnob> mDecay, mSize, mPredelay, mTone, mMod, mShimmer, mTension, mSwell, mWidth, mMix;
+    std::unique_ptr<LabeledKnob> mDecay, mSize, mPredelay, mTone, mMod, mShimmer, mTension, mSwell, mWidth, mMix, mInputFilter;
 };
 
 //==============================================================================

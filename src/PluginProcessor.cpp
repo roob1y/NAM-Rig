@@ -369,6 +369,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::StringArray{"Octave", "+2 Oct", "Fifth+Oct"}, 0));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID("revFreeze", 1), "Reverb Freeze", false));
+    // Plate Input Filter (vintage plate/studio-style wet low-cut at the plate amp). Plate-only
+    // in the UI via ReverbBlock::inputFilterExposed; default 95 Hz = prior hardwired
+    // Plate low-cut, so existing Plate sessions are unchanged. Appended last.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("revInputFilter", 1), "Reverb Input Filter",
+        juce::NormalisableRange<float>(20.0f, 400.0f, 1.0f, 0.5f), 95.0f,
+        juce::AudioParameterFloatAttributes().withLabel("Hz")));
 
     return {params.begin(), params.end()};
 }
@@ -698,6 +705,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.reverb.setSwell(apvts.getRawParameterValue("revSwell")->load());
     mChain.reverb.setPitch((int)apvts.getRawParameterValue("revPitch")->load());
     mChain.reverb.setFreeze(apvts.getRawParameterValue("revFreeze")->load() >= 0.5f);
+    mChain.reverb.setInputFilterHz(apvts.getRawParameterValue("revInputFilter")->load());
     mChain.reverb.setBypassed(apvts.getRawParameterValue("reverbOn")->load() < 0.5f);
 
     mChain.process(buffer);
@@ -802,4 +810,4 @@ void NamRigProcessor::setStateInformation(const void *data, int sizeInBytes)
 juce::AudioProcessor *JUCE_CALLTYPE createPluginFilter()
 {
     return new NamRigProcessor();
-}
+}
