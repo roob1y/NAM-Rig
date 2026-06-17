@@ -370,6 +370,9 @@ int main()
               "T22 Plate predelay exact in range (40 -> %.1f ms)", pv.mappedPredelay(40.0f));
         CHECK(std::fabs(pv.mappedPredelay(160.0f) - 80.0f) < 1e-4f,
               "T22 Plate predelay clamps at cap (160 -> %.1f ms)", pv.mappedPredelay(160.0f));
+        // Tone 0..1 maps dark->bright across the character's Hz window.
+        CHECK(std::fabs(pv.mappedTone(0.0f) - 1500.0f) < 1e-2f && std::fabs(pv.mappedTone(1.0f) - 14000.0f) < 1e-2f,
+              "T22 Plate Tone spans the window (%.0f..%.0f Hz)", pv.mappedTone(0.0f), pv.mappedTone(1.0f));
     }
 
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);

@@ -785,13 +785,13 @@ public:
     static bool tensionExposed(Type t) { return t == kSpring; }
     static bool swellExposed(Type t) { return t == kBloom; }
     static bool inputFilterExposed(Type t) { return t == kPlate; } // vintage plate/studio-style wet low-cut on the plate amp
-    static const char *toneCaption(Type t) { return t == kSpring ? "Tone" : "Damping"; }
+    static const char *toneCaption(Type) { return "Tone"; }
 
     // ---- per-character "sweet spot" knob windows ------------------------------
     // The shared Decay/Damping/Predelay knobs keep full 0..1 travel but map into a
     // curated musical window per character (below), so every position sounds good
     // and nothing unmusical is reachable. DECAY + PREDELAY read TRUE units inside
-    // their window (clamp at the caps); Damping remaps across the window. Engine setters
+    // their window (clamp at the caps); Tone (0..1, dark->bright) maps across the window. Engine setters
     // stay literal; the host layer maps raw->window via mapped*(). Outer ranges == APVTS
     // (single source of truth, referenced by PluginProcessor).
     static constexpr float kDecayMin = 0.3f,    kDecayMax = 8.0f;      // s
@@ -841,7 +841,7 @@ public:
     }
     // Convenience mappers for the active character (host/UI layer calls these).
     float mappedDecay(float rawSec)   const { const Range r = decayRange(mType); return std::clamp(rawSec, r.lo, r.hi); } // exact seconds in-window, clamp at caps
-    float mappedDamp(float rawHz)     const { return mapToRange(rawHz,  kDampMin,  kDampMax,  dampRange(mType)); }
+    float mappedTone(float t01)       const { const Range r = dampRange(mType); return r.lo + std::clamp(t01, 0.0f, 1.0f) * (r.hi - r.lo); } // Tone: 0=dark .. 1=bright -> character Hz window
     float mappedPredelay(float rawMs) const { const Range r = predelayRange(mType); return std::clamp(rawMs, r.lo, r.hi); } // exact ms in-window, clamp at caps
 
     const char *name() const override { return "Reverb"; }
