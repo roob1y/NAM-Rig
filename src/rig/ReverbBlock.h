@@ -253,7 +253,7 @@ public:
         mPredelay.prepare(samp(200.0) + 8);
         mLfo.prepare(mFs); mLfo.setRateHz(1.1f);
         for (int i = 0; i < 4; ++i) mInLen[(size_t)i] = samp(ms(kInS[(size_t)i]));
-        mAp1Len[0] = ms(672); mAp1Len[1] = ms(908);
+        mAp1Len[0] = samp(ms(672)); mAp1Len[1] = samp(ms(908));
         mDelALen[0] = samp(ms(4453)); mDelALen[1] = samp(ms(4217));
         mAp2Len[0] = samp(ms(1800)); mAp2Len[1] = samp(ms(2656));
         mDelBLen[0] = samp(ms(3720)); mDelBLen[1] = samp(ms(3163));
@@ -271,7 +271,7 @@ public:
         for (auto &l : mAp2) l.reset();
         for (auto &l : mDelB) l.reset();
         mPredelay.reset();
-        mBw = 0.0f; mDamp[0] = mDamp[1] = 0.0f; mTank[0] = mTank[1] = 0.0f;
+        mBw = 0.0f; mDamp[0] = mDamp[1] = 0.0f; mTank[0] = mTank[1] = 0.0f; mHsLpL = mHsLpR = mLfLpL = mLfLpR = 0.0f;
         mLfo.reset();
     }
 
@@ -287,7 +287,7 @@ public:
         if (mDirty) recompute();
         const bool stereo = (left != right);
         const int pre = (int)std::round((double)mPredelayMs * 0.001 * mFs);
-        const float excSamp = mFreeze ? 0.0f : (float)(mMod * 0.0008 * mFs);
+        const float excSamp = mFreeze ? 0.0f : (float)(mMod * 0.00005 * mFs); // subtle, vintage plate-cents-scale wobble (was 0.0008 = a giant sweep); tunable
         const float decay = mFreeze ? 1.0f : mDecay;
         const float inGain = mFreeze ? 0.0f : 1.0f;
 
@@ -335,8 +335,8 @@ public:
                                        - mAp2[0].readInt(mTapR[2]) + mDelB[0].readInt(mTapR[3])
                                        - mDelA[1].readInt(mTapR[4]) - mAp2[1].readInt(mTapR[5])
                                        - mDelB[1].readInt(mTapR[6]));
-            left[n] = wetL;
-            if (stereo) right[n] = wetR;
+            mHsLpL += mHsK * (wetL - mHsLpL); float oL = mHsGain * wetL + (1.0f - mHsGain) * mHsLpL; mLfLpL += mLfK * (oL - mLfLpL); left[n] = oL + 0.5f * mLfLpL;
+            mHsLpR += mHsK * (wetR - mHsLpR); float oR = mHsGain * wetR + (1.0f - mHsGain) * mHsLpR; mLfLpR += mLfK * (oR - mLfLpR); if (stereo) right[n] = oR + 0.5f * mLfLpR;
             mLfo.advance();
         }
         flush(mBw); flush(mDamp[0]); flush(mDamp[1]); flush(mTank[0]); flush(mTank[1]);
@@ -348,16 +348,16 @@ private:
     {
         using namespace reverb_detail;
         const double loopMs = (mDelALen[0] + mAp2Len[0] + mDelBLen[0]) / mFs * 1000.0;
-        mDecay = (float)std::clamp(std::pow(10.0, -3.0 * loopMs / ((double)mT60 * 1000.0)), 0.0, 0.95);
-        mDampK = onePole(mDampHz, mFs);
-        mBwCoef = onePole(11000.0, mFs);
+        mDecay = (float)std::clamp(std::pow(10.0, -1.5 * loopMs / ((double)mT60 * 1000.0)), 0.0, 0.997);
+        const double loopSec = loopMs / 1000.0, dN = std::clamp(((double)mDampHz - 1000.0) / 15000.0, 0.0, 1.0), t60HF = std::min(0.5 + dN * 1.3, (double)mT60), rHF = std::pow(10.0, -1.5 * loopSec * (1.0 / t60HF - 1.0 / (double)mT60)); mDampK = (float)std::clamp(2.0 * rHF / (1.0 + rHF), 1.0e-4, 1.0); // Jot-style: damping designed to a TARGET HF decay (vintage plate highs-die-fast ~0.5-1.8s set by the Damping knob = dark<->bright); HF clamped <= mid -> stable
+        mBwCoef = onePole(11000.0, mFs); mHsK = (float)onePole(4000.0, mFs); mHsGain = (float)(0.22 + dN * 0.78); mLfK = (float)onePole(350.0, mFs); // output: HF high-shelf (dark<->bright via Damping knob, pivot ~4 kHz) + a LOW-MID BLOOM shelf (~350 Hz, +3.5 dB) so 'dark' reads warm/lush not muffled (real vintage plate has more 150-500 Hz body)
         mDirty = false;
     }
 
     double mFs = 48000.0;
     static constexpr double kInS[4] = {142, 107, 379, 277};
-    static constexpr float kInG[4] = {0.75f, 0.75f, 0.625f, 0.625f};
-    static constexpr float kDecayDiff1 = 0.70f, kDecayDiff2 = 0.50f;
+    static constexpr float kInG[4] = {0.78f, 0.78f, 0.70f, 0.70f}; // denser input diffusion (smooths metallic HF -> less need to EQ it away)
+    static constexpr float kDecayDiff1 = 0.72f, kDecayDiff2 = 0.55f; // denser tank diffusion (smoother, less metallic tail)
     std::array<FracDelayLine, 4> mIn;
     std::array<FracDelayLine, 2> mAp1, mDelA, mAp2, mDelB;
     FracDelayLine mPredelay;
@@ -366,7 +366,7 @@ private:
     std::array<int, 2> mDelALen{}, mAp2Len{}, mDelBLen{};
     std::array<int, 7> mTapL{}, mTapR{};
     Lfo mLfo;
-    float mBw = 0.0f, mBwCoef = 0.0f;
+    float mBw = 0.0f, mBwCoef = 0.0f, mHsLpL = 0.0f, mHsLpR = 0.0f, mHsK = 0.0f, mHsGain = 1.0f, mLfLpL = 0.0f, mLfLpR = 0.0f, mLfK = 0.0f;
     std::array<float, 2> mDamp{}, mTank{};
     float mDecay = 0.5f, mDampK = 1.0f;
     float mT60 = 2.0f, mDampHz = 7000.0f, mPredelayMs = 10.0f, mMod = 0.3f;
