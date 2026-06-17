@@ -1134,44 +1134,52 @@ public:
         mIcon.setActive(on);
         if (type == mLastType && sync == mLastSync && on == mLastOn)
             return;
+        // Only a TYPE change alters which controls are shown / their bounds. Sync
+        // and On changes (incl. the type-reset zeroing Sync) must NOT relayout, or
+        // the resulting resized() can land on a subsequent dropdown click and eat
+        // it (the intermittent "won't select" bug).
+        const bool typeChanged = (type != mLastType);
         mLastType = type;
         mLastSync = sync;
         mLastOn = on;
-        const bool rotary = (type == 5);
-        mDepth->setVisible(type != 2);                 // phaser: no depth knob
-        mFeedback->setVisible(type == 1 || type == 2 || type == 8); // flanger/phaser/bi-phase
-        mMix->setVisible(nam_rig::ModVoice::mixExposed((nam_rig::ModVoice::Type)type)); // chorus + flanger
-        mWave.setVisible(type == 3);                   // tremolo shape
-        mRate->setVisible(!rotary);                    // rotary: slow/fast toggle, not a rate
-        if (!rotary) // knob ends exactly at this effect's rate ceiling (no dead travel past the internal cap)
+        if (typeChanged)
         {
-            mRate->slider().setNormalisableRange(
-                {0.03, (double)nam_rig::ModVoice::maxRateHz((nam_rig::ModVoice::Type)type), 0.01, 0.35});
-            mRate->updateReadout(); // re-evaluate the 0..10 text against the new range
+            const bool rotary = (type == 5);
+            mDepth->setVisible(type != 2);                 // phaser: no depth knob
+            mFeedback->setVisible(type == 1 || type == 2 || type == 8); // flanger/phaser/bi-phase
+            mMix->setVisible(nam_rig::ModVoice::mixExposed((nam_rig::ModVoice::Type)type)); // chorus + flanger
+            mWave.setVisible(type == 3);                   // tremolo shape
+            mRate->setVisible(!rotary);                    // rotary: slow/fast toggle, not a rate
+            if (!rotary) // knob ends exactly at this effect's rate ceiling (no dead travel past the internal cap)
+            {
+                mRate->slider().setNormalisableRange(
+                    {0.03, (double)nam_rig::ModVoice::maxRateHz((nam_rig::ModVoice::Type)type), 0.01, 0.35});
+                mRate->updateReadout(); // re-evaluate the 0..10 text against the new range
+            }
+            mSync.setVisible(!rotary);
+            mDrive->setVisible(rotary);                    // rotary: Leslie tube drive
+            mHornDrum->setVisible(rotary);                 // rotary: horn<->drum balance
+            mRotFast.setVisible(rotary);
+            mManual->setVisible(type == 1);                // flanger: static comb position
+            // Per-effect knob naming. M-126 flanger: the sweep-amount knob is
+            // "Sweep" (the M-126 "Width" term reads as the stereo control here, so
+            // call the sweep "Sweep") and the stereo knob is "Spread" (so there
+            // aren't two "Width"s). Uni-Vibe uses the authentic vibe terms: Rate ->
+            // "Speed", Depth -> "Intensity". Rotary: Depth drives the swirl
+            // intensity (doppler + directional pulse + drum throb) -> "Wom".
+            const bool flanger = (type == 1);
+            const bool uniVibe = (type == 6);
+            mRate->setCaption(uniVibe ? "Speed" : "Rate");
+            mDepth->setCaption(flanger ? "Sweep" : uniVibe ? "Intensity" : rotary ? "Wom" : "Depth");
+            mWidth->setCaption(flanger ? "Spread" : "Width");
+            mP2Ratio->setVisible(type == 8);               // bi-phase: Sweep Gen 2 ratio
+            mSeries.setVisible(type == 8);                  // bi-phase: series/parallel
+            mSeriesLabel.setVisible(type == 8);
         }
-        mSync.setVisible(!rotary);
-        mDrive->setVisible(rotary);                    // rotary: Leslie tube drive
-        mHornDrum->setVisible(rotary);                 // rotary: horn<->drum balance
-        mRotFast.setVisible(rotary);
-        mManual->setVisible(type == 1);                // flanger: static comb position
-        // Per-effect knob naming. M-126 flanger: the sweep-amount knob is "Sweep"
-        // (the M-126 "Width" term reads as the stereo control here, so call the
-        // sweep "Sweep") and the stereo knob is "Spread" (so there aren't two
-        // "Width"s). Uni-Vibe uses the authentic vibe terms: Rate -> "Speed",
-        // Depth -> "Intensity". Rotary: Depth drives the swirl intensity (doppler
-        // + directional pulse + drum throb) -> labelled "Wom" after the Leslie's
-        // directional amplitude pulse.
-        const bool flanger = (type == 1);
-        const bool uniVibe = (type == 6);
-        mRate->setCaption(uniVibe ? "Speed" : "Rate");
-        mDepth->setCaption(flanger ? "Sweep" : uniVibe ? "Intensity" : rotary ? "Wom" : "Depth");
-        mWidth->setCaption(flanger ? "Spread" : "Width");
-        mP2Ratio->setVisible(type == 8);               // bi-phase: Sweep Gen 2 ratio
-        mSeries.setVisible(type == 8);                  // bi-phase: series/parallel
-        mSeriesLabel.setVisible(type == 8);
-        mRate->setEnabled(sync == 0);                  // rate greyed when synced
-        repaint();                                     // LED
-        resized();
+        mRate->setEnabled(sync == 0); // rate greyed when synced (no relayout needed)
+        repaint();
+        if (typeChanged)
+            resized();
     }
 
     void paint(juce::Graphics &g) override
