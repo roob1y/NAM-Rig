@@ -368,7 +368,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
 
     // --- Dual-rig mixer + Rig B voice (RigChain dual core; see rig/RigChain.h).
     // Appended last so existing sessions keep their automation indices. Rig B
-    // shares the amp AA setting with Rig A (v1) -> no separate oversample param.
+    // has its own oversampleB / offlineAAB params; the chain delay-compensates.
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("rigMode", 1), "Rig Mode",
         juce::StringArray{"Solo A", "Solo B", "Dual"}, 0)); // default Solo A
@@ -759,7 +759,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.cab.setLpfHz(apvts.getRawParameterValue("cabLpf")->load());
     mChain.cab.setBypassed(apvts.getRawParameterValue("cabOn")->load() < 0.5f);
 
-    // ---- Rig B voice (amp shares AA with Rig A; EQ + cab cuts independent) ----
+    // ---- Rig B voice (independent amp AA + EQ + cab cuts; see oversampleB) ----
     {
         static const char *idsB[] = {"rigBeq62", "rigBeq125", "rigBeq250", "rigBeq500",
                                      "rigBeq1k", "rigBeq2k", "rigBeq4k", "rigBeq8k"};
