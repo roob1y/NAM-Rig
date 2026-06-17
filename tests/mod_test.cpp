@@ -62,8 +62,9 @@
 //   T40 tremolo DC-offset comp law: center 0 = cut-only (mean drops with depth),
 //       center 1 = mean-preserving (avg gain 1 at any depth); both full-chop;
 //       and the multiplier adds no DC to a zero-mean signal
-//   T41 rate-dependent sweep-width guardrail: full width <=2 Hz, narrows
-//       monotonically to the floor at the rate cap; phaser stays bounded fast
+//   T41 rate-dependent sweep-width guardrail (phaser + uni-vibe + bi-phase):
+//       full width <=2 Hz, narrows monotonically to the floor at the rate cap;
+//       phaser stays bounded driven fast
 #include "rig/ModBlock.h"
 #include <cstdio>
 #include <cmath>

@@ -1222,12 +1222,16 @@ public:
             area.removeFromRight(8);
         }
 
+        // Knob order (left -> right), one consistent rule across every effect:
+        // Rate/Speed (motion) first, then the amount + character controls (Manual,
+        // Depth, Feedback, Sweep 2, Drive, Horn/Drum), then the "output" controls
+        // Mix (blend) and Width (stereo) last. Filtered per effect by visibility.
         std::vector<juce::Component *> vis;
-        for (juce::Component *k : {(juce::Component *)mRate.get(), (juce::Component *)mDepth.get(),
-                                   (juce::Component *)mFeedback.get(), (juce::Component *)mP2Ratio.get(),
-                                   (juce::Component *)mManual.get(), (juce::Component *)mMix.get(),
-                                   (juce::Component *)mWidth.get(), (juce::Component *)mDrive.get(),
-                                   (juce::Component *)mHornDrum.get()})
+        for (juce::Component *k : {(juce::Component *)mRate.get(), (juce::Component *)mManual.get(),
+                                   (juce::Component *)mDepth.get(), (juce::Component *)mFeedback.get(),
+                                   (juce::Component *)mP2Ratio.get(), (juce::Component *)mDrive.get(),
+                                   (juce::Component *)mHornDrum.get(), (juce::Component *)mMix.get(),
+                                   (juce::Component *)mWidth.get()})
             if (k->isVisible())
                 vis.push_back(k);
         const int nk = (int)vis.size();

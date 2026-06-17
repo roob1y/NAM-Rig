@@ -702,7 +702,8 @@ private:
             {
                 const double fc = std::min(
                     0.45 * mFs,
-                    std::max(20.0, mult[s] * kUniCenterHz * std::pow(2.0, (double)w * (double)uDepth)));
+                    std::max(20.0, mult[s] * kUniCenterHz
+                                       * std::pow(2.0, (double)w * (double)uDepth * (double)mSweepWidth)));
                 const double g = std::tan(3.14159265358979323846 * fc / mFs);
                 G[s] = (float)(g / (1.0 + g));
                 alpha[s] = 2.0f * G[s] - 1.0f;
@@ -758,8 +759,10 @@ private:
             // no click. In parallel the two cores pan opposite (A/B stereo split)
             // by Width; mono at Width 0. Shared Feedback, 50/50 mix (notch effect).
             const float fb = mFeedback * kBiPhaseFbMax; // knob maps to the musical resonance window
-            // Depth knob remapped to [min..1] so the sweep never sits dead-static.
-            const float bpDepth = kBiPhaseDepthMin + depth * (1.0f - kBiPhaseDepthMin);
+            // Depth knob remapped to [min..1] so the sweep never sits dead-static,
+            // then scaled by the rate-dependent width guardrail (shimmer not wobble
+            // when driven fast; bit-identical at slow rates where mSweepWidth = 1).
+            const float bpDepth = (kBiPhaseDepthMin + depth * (1.0f - kBiPhaseDepthMin)) * mSweepWidth;
             const float a = phasor6(mBiA[(size_t)ch], x, mLfo.value(off), bpDepth, fb);
             const float bIn = (1.0f - mSeriesZ) * x + mSeriesZ * a; // parallel(x) -> series(A(x))
             const float b = phasor6(mBiB[(size_t)ch], bIn, mLfo2.value(off), bpDepth, fb);
