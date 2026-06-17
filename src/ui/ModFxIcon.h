@@ -143,6 +143,11 @@ public:
             stroke(sinePath(cy, H * 0.18f, 2.0f, 0.0f), 1.8f, 1.0f);
             stroke(sinePath(cy, H * 0.18f, 2.0f, 0.5f), 1.8f, 0.6f);
             break;
+        case 9: // Ring Mod — a fast carrier inside a slow amplitude envelope
+            stroke(sinePath(cy, H * 0.30f, 6.0f, 0.0f), 1.6f, 1.0f);
+            stroke(sinePath(cy, H * 0.30f, 1.0f, 0.0f), 1.4f, 0.45f);
+            stroke(sinePath(cy, H * 0.30f, 1.0f, 0.5f), 1.4f, 0.45f);
+            break;
         default:
             break;
         }

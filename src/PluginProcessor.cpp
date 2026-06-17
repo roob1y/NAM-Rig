@@ -136,7 +136,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
             juce::ParameterID(p + "Type", 1), n + "Type",
             juce::StringArray{"Chorus", "Flanger", "Phaser", "Tremolo",
-                              "Vibrato", "Rotary", "Uni-Vibe", "Harm Trem", "Bi-Phase"},
+                              "Vibrato", "Rotary", "Uni-Vibe", "Harm Trem", "Bi-Phase",
+                              "Ring Mod"},
             0));
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
             juce::ParameterID(p + "Wave", 1), n + "Waveform",
@@ -216,7 +217,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("postType", 1), "Post Type",
         juce::StringArray{"Chorus", "Flanger", "Phaser", "Tremolo",
-                          "Vibrato", "Rotary", "Uni-Vibe", "Harm Trem", "Bi-Phase"},
+                          "Vibrato", "Rotary", "Uni-Vibe", "Harm Trem", "Bi-Phase",
+                          "Ring Mod"},
         5)); // default Rotary
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("postWave", 1), "Post Waveform",

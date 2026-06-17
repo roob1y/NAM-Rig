@@ -35,7 +35,7 @@ public:
     enum Type
     {
         kChorus = 0, kFlanger, kPhaser, kTremolo,
-        kVibrato, kRotary, kUniVibe, kHarmTrem, kBiPhase
+        kVibrato, kRotary, kUniVibe, kHarmTrem, kBiPhase, kRingMod
     };
 
     // Voicing constants (fixed; knobs scale within these)
@@ -48,6 +48,13 @@ public:
     // tap crossing it, so the comb difference passes through 0 ms and inverts sign.
     static constexpr double kFlTzfRangeMs = 8.0; // max symmetric sweep half-range (tunable)
     static constexpr double kFlTzfGuardMs = 0.2; // keep both taps readable (>0; tunable)
+    // Ring modulator: a generated sine carrier multiplies the input. The Rate knob
+    // maps EXPONENTIALLY to the carrier (the Rate param tops at 20 Hz but the
+    // carrier wants audio rate). Depth = dry<->ring blend. The multiply is 4x
+    // oversampled (RingOS) to anti-alias the f+fc products. Reuses Rate/Depth/Width.
+    static constexpr double kRingCarrierMinHz = 3.0;    // knob bottom -- slow sub-audio throb (MF-102 low range); tunable
+    static constexpr double kRingCarrierMaxHz = 3000.0; // knob top -- clangy bell/robot extremes; tunable
+    static constexpr int kRingLatency = 32;             // oversampler group delay in input samples ((L-1)/I, rounded; L=128,I=4) -- dry aligned to it
     static constexpr double kVibBaseMs = 2.0, kVibSpreadMs = 8.0;
     static constexpr float kVibratoMaxRateHzExtreme = 16.0f; // Extreme: wild seasick warble (disjoint band [10,16]); tunable
     static constexpr double kRotBaseMs = 3.0, kRotSpreadMs = 4.0;
@@ -289,6 +296,8 @@ public:
             (int)std::ceil((kChorusBaseMs + kChorusSpreadMs * (double)kExtremeSweepWiden + 2.0) * 0.001 * mFs);
         for (auto &d : mLine)
             d.prepare(maxDelay);
+        for (auto &os : mRingOS)
+            os.design(); // ring-mod oversampler FIR (normalized cutoff -> fs-independent)
         mLfo.prepare(mFs);
         mLfo2.prepare(mFs); // Bi-Phase Sweep Gen 2
         mSmoothK = 1.0f - std::exp((float)(-1.0 / (0.010 * mFs))); // 10 ms
@@ -320,6 +329,9 @@ public:
         mBbdLp[0] = mBbdLp[1] = 0.0f;
         mBbdX1[0] = mBbdX1[1] = 0.0f;
         mBbdF1[0] = mBbdF1[1] = 0.0f;
+        for (auto &os : mRingOS) os.reset();
+        mRingPhase = 0.0;
+        for (auto &dch : mRingDry) dch.fill(0.0f);
         mUniLamp[0] = mUniLamp[1] = 0.5f; // lamp at mid brightness (no startup snap)
         mTremG[0] = mTremG[1] = 1.0f; // unity gain (no mute on start)
         mHornLp[0] = mHornLp[1] = 0.0f;
@@ -401,6 +413,17 @@ public:
         if (t == kChorus) return kChorusMaxRateHzExtreme;
         if (t == kVibrato) return kVibratoMaxRateHzExtreme;
         return maxRateHz(t);
+    }
+    // Ring-mod carrier frequency: EXPONENTIAL map of the Rate knob over its domain
+    // [0.03, maxRateHz(kRingMod)] -> [kRingCarrierMinHz, kRingCarrierMaxHz]. Public
+    // for the test. (Carrier is audio-rate; the Rate param's 20 Hz top is irrelevant
+    // here -- the knob's slider domain is what's mapped.)
+    static float ringCarrierHz(float rateHz)
+    {
+        const float lo = 0.03f, hi = maxRateHz(kRingMod);
+        float q = (rateHz - lo) / (hi - lo);
+        q = q < 0.0f ? 0.0f : (q > 1.0f ? 1.0f : q);
+        return (float)(kRingCarrierMinHz * std::pow(kRingCarrierMaxHz / kRingCarrierMinHz, (double)q));
     }
     // Extreme through-zero flanger tap delays (single source of truth; public for
     // the test). The reference tap sits at the Manual-set center D0; the swept tap
@@ -501,6 +524,18 @@ public:
         if (ty == kFlanger && mExtreme)
             mixTarget = mMix; // Extreme TZF: uncap the flanger mix so the pure two-tape pair (deepest null) is reachable
 
+        // Ring-mod carrier: the Rate knob (free rate, sync ignored -- the carrier is
+        // audio-rate) maps exponentially to the carrier Hz. Phase advances per
+        // OVERSAMPLED subsample inside processSample; the per-input advance below
+        // keeps both channels on one carrier clock.
+        if (ty == kRingMod)
+        {
+            mRingCarrierHz = ringCarrierHz(mFreeRateHz);
+            mRingCarrierInc = (double)mRingCarrierHz / mFs;
+            mRingIncOS = mRingCarrierInc / (double)RingOS::I;
+        }
+        else { mRingCarrierInc = 0.0; mRingIncOS = 0.0; }
+
         for (int i = 0; i < numSamples; ++i)
         {
             mDepthZ += mSmoothK * (mDepth - mDepthZ);
@@ -522,6 +557,8 @@ public:
             if (mRotHornPhase >= 1.0) mRotHornPhase -= 1.0;
             mRotDrumPhase += mDrumInc;
             if (mRotDrumPhase >= 1.0) mRotDrumPhase -= 1.0;
+            mRingPhase += mRingCarrierInc; // ring-mod carrier (0 for other types)
+            if (mRingPhase >= 1.0) mRingPhase -= 1.0;
         }
         flushDenormals();
     }
@@ -918,6 +955,31 @@ private:
             const float wet = (1.0f - mSeriesZ) * parallelWet + mSeriesZ * b;
             return (1.0f - mMixZ) * x + mMixZ * wet;
         }
+        case kRingMod:
+        {
+            // True (balanced) ring modulation y = x * carrier, done at 4x via RingOS
+            // so the f+fc products are band-limited before they fold. The carrier
+            // phase advances per OVERSAMPLED subsample (k); off shifts L/R for a
+            // stereo carrier. Depth blends dry<->ring; the dry path is delayed by the
+            // oversampler latency so the blend stays phase-aligned (no comb).
+            const double PI = 3.14159265358979323846;
+            RingOS &os = mRingOS[(size_t)ch];
+            for (int k = 0; k < RingOS::I; ++k)
+            {
+                os.pushU(k == 0 ? x : 0.0f);                    // zero-stuff to the oversampled rate
+                const float up = (float)RingOS::I * os.convU(); // interpolated (x I restores zero-stuff loss)
+                const double ph = mRingPhase + (double)k * mRingIncOS + off;
+                const float car = std::sin(2.0 * PI * ph);
+                os.pushD(up * car);                             // the multiply, at 4x
+            }
+            const float wet = os.convD();                       // decimate back to fs
+
+            float *dly = mRingDry[(size_t)ch].data();
+            const float dry = dly[kRingLatency - 1];            // x[n - latency], aligned to the wet
+            for (int i = kRingLatency - 1; i > 0; --i) dly[i] = dly[i - 1];
+            dly[0] = x;
+            return (1.0f - depth) * dry + depth * wet;          // Depth = dry<->ring amount
+        }
         }
         return x;
     }
@@ -1126,6 +1188,51 @@ private:
     std::array<float, 2> mHtHp1Z1{}, mHtHp1Z2{}, mHtHp2Z1{}, mHtHp2Z2{}; // HP cascade state
     std::array<float, 2> mBbdLp{};           // BBD HF-rolloff state
     std::array<float, 2> mBbdX1{}, mBbdF1{}; // BBD soft-clip ADAA: prev input + prev antiderivative (non-recursive)
+
+    // 4x FIR oversampler for the ring-mod carrier multiply (JUCE-free). Zero-stuff
+    // interpolation + decimation through a shared windowed-sinc lowpass (cutoff at
+    // the original Nyquist), so the f+fc products the multiply creates are
+    // band-limited before they fold. Linear-phase FIR -> fixed group delay
+    // (kRingLatency input samples), which the dry path is aligned to.
+    struct RingOS
+    {
+        static constexpr int I = 4;   // oversampling factor
+        static constexpr int L = 128; // prototype FIR taps (sharp transition near Nyquist)
+        float h[L]{};                // lowpass prototype (sum = 1)
+        float uline[L]{};            // upsampler delay line (zero-stuffed input; newest at [0])
+        float dline[L]{};            // downsampler delay line (oversampled products)
+        void design()
+        {
+            const double PI = 3.14159265358979323846;
+            const double fc = 0.5 / (double)I * 0.98; // pass to ~original Nyquist (small margin)
+            const double c = 0.5 * (double)(L - 1);
+            double sum = 0.0;
+            for (int n = 0; n < L; ++n)
+            {
+                const double t = (double)n - c;
+                const double s = (std::abs(t) < 1e-9) ? 2.0 * fc
+                                                      : std::sin(2.0 * PI * fc * t) / (PI * t);
+                const double w = 0.54 - 0.46 * std::cos(2.0 * PI * (double)n / (double)(L - 1)); // Hamming
+                h[n] = (float)(s * w);
+                sum += (double)h[n];
+            }
+            for (int n = 0; n < L; ++n) h[n] = (float)((double)h[n] / sum); // DC gain = 1
+        }
+        void reset()
+        {
+            for (int i = 0; i < L; ++i) { uline[i] = 0.0f; dline[i] = 0.0f; }
+        }
+        void pushU(float s) { for (int i = L - 1; i > 0; --i) uline[i] = uline[i - 1]; uline[0] = s; }
+        void pushD(float s) { for (int i = L - 1; i > 0; --i) dline[i] = dline[i - 1]; dline[0] = s; }
+        float convU() const { float a = 0.0f; for (int i = 0; i < L; ++i) a += h[i] * uline[i]; return a; }
+        float convD() const { float a = 0.0f; for (int i = 0; i < L; ++i) a += h[i] * dline[i]; return a; }
+    };
+    RingOS mRingOS[2];
+    double mRingPhase = 0.0;       // carrier phase in cycles [0,1); advanced once per input sample in process()
+    double mRingCarrierInc = 0.0;  // carrier cycles per INPUT sample (per block)
+    double mRingIncOS = 0.0;       // carrier cycles per OVERSAMPLED subsample
+    float mRingCarrierHz = 0.0f;   // for inspection
+    std::array<std::array<float, kRingLatency>, 2> mRingDry{}; // dry path delayed to the oversampler latency
     std::array<float, 2> mUniLamp{};         // uni-vibe lamp thermal envelope (per ch)
     std::array<float, 2> mTremG{1.0f, 1.0f}; // smoothed tremolo gain (de-click)
     std::array<float, kTremLutN> mTremLut{}; // tremolo gain-shape LUT (built in prepare)

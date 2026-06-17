@@ -996,6 +996,7 @@ public:
         {
             mType.addItem("Chorus", 1); mType.addItem("Flanger", 2); mType.addItem("Phaser", 3);
             mType.addItem("Vibrato", 5); mType.addItem("Uni-Vibe", 7); mType.addItem("Bi-Phase", 9);
+            mType.addItem("Ring Mod", 10);
         }
         else
         {
@@ -1156,7 +1157,7 @@ public:
                     {0.03, (double)nam_rig::ModVoice::maxRateHz((nam_rig::ModVoice::Type)type), 0.01, 0.35});
                 mRate->updateReadout(); // re-evaluate the 0..10 text against the new range
             }
-            mSync.setVisible(!rotary);
+            mSync.setVisible(!rotary && type != 9);         // ring mod: carrier is audio-rate, no tempo sync
             mDrive->setVisible(rotary);                    // rotary: Leslie tube drive
             mHornDrum->setVisible(rotary);                 // rotary: horn<->drum balance
             mRotFast.setVisible(rotary);
@@ -1169,8 +1170,9 @@ public:
             // intensity (doppler + directional pulse + drum throb) -> "Wom".
             const bool flanger = (type == 1);
             const bool uniVibe = (type == 6);
-            mRate->setCaption(uniVibe ? "Speed" : "Rate");
-            mDepth->setCaption(flanger ? "Sweep" : uniVibe ? "Intensity" : rotary ? "Wom" : "Depth");
+            const bool ring = (type == 9);                  // ring mod: Rate->carrier Freq, Depth->Amount
+            mRate->setCaption(uniVibe ? "Speed" : ring ? "Freq" : "Rate");
+            mDepth->setCaption(flanger ? "Sweep" : uniVibe ? "Intensity" : rotary ? "Wom" : ring ? "Amount" : "Depth");
             mWidth->setCaption(flanger ? "Spread" : "Width");
             mP2Ratio->setVisible(type == 8);               // bi-phase: Sweep Gen 2 ratio
             mSeries.setVisible(type == 8);                  // bi-phase: series/parallel
@@ -1179,7 +1181,7 @@ public:
             mExtreme.setVisible(extremeable);               // unlock the wild ranges
             mExtremeLabel.setVisible(extremeable);
         }
-        mRate->setEnabled(sync == 0); // rate greyed when synced (no relayout needed)
+        mRate->setEnabled(sync == 0 || type == 9); // rate greyed when synced; ring mod ignores sync so its Freq stays live
         repaint();
         if (typeChanged)
             resized();
@@ -1700,8 +1702,8 @@ private:
     static juce::String effectName(int type)
     {
         static const char *kNames[] = {"Chorus", "Flanger", "Phaser",   "Tremolo", "Vibrato",
-                                       "Rotary", "Uni-Vibe", "Harm Trem", "Bi-Phase"};
-        return (type >= 0 && type < 9) ? kNames[type] : "-";
+                                       "Rotary", "Uni-Vibe", "Harm Trem", "Bi-Phase", "Ring Mod"};
+        return (type >= 0 && type < 10) ? kNames[type] : "-";
     }
     int posOfSlot(int slot) const
     {

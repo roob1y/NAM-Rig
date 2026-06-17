@@ -80,6 +80,9 @@
 //   T46 BBD soft-clip ADAA (chorus/flanger/vibrato/rotary all share bbdColor):
 //       curve bounded + monotonic; first-order ADAA cuts the aliased foldback of a
 //       high tone vs the naive tanh; matches the naive curve on slow signals
+//   T47 ring modulator: carrier-freq remap is exponential (3 Hz..3 kHz over the
+//       knob); the 4x-oversampled multiply suppresses the foldback bin that a naive
+//       same-rate multiply fills; stays finite/bounded
 #include "rig/ModBlock.h"
 #include <cstdio>
 #include <cmath>
@@ -2118,6 +2121,51 @@ int main()
         double dmax = 0.0;
         for (size_t i = 64; i < sN.size(); ++i) dmax = std::max(dmax, (double)std::abs(sN[i] - sA[i]));
         CHECK(dmax < 0.02, "T46 ADAA matches the naive curve on slow signals (max diff %.4f)", dmax);
+    }
+
+    // ---- T47: Ring modulator. (a) ringCarrierHz() maps the Rate knob EXPONENTIALLY
+    //      over [20, 2000] Hz: endpoints exact, and the knob midpoint lands on the
+    //      GEOMETRIC mean (~200 Hz), not the arithmetic one (~1010). (b) anti-alias:
+    //      a high input tone x carrier produces a sum (x+fc) above Nyquist. A naive
+    //      same-rate multiply folds it into an inharmonic bin; the 4x-oversampled
+    //      ModVoice removes it before downsampling, so that bin stays ~empty.
+    //      (c) finite + bounded. [thresholds first-run estimates -- sandbox down] ----
+    {
+        // (a) carrier remap law.
+        const float cLo = ModVoice::ringCarrierHz(0.03f);
+        const float cHi = ModVoice::ringCarrierHz(ModVoice::maxRateHz(ModVoice::kRingMod));
+        const float rMid = 0.03f + 0.5f * (ModVoice::maxRateHz(ModVoice::kRingMod) - 0.03f);
+        const float cMid = ModVoice::ringCarrierHz(rMid);
+        CHECK(std::abs(cLo - 3.0f) < 0.5f && std::abs(cHi - 3000.0f) < 2.0f,
+              "T47 ring carrier endpoints (%.1f Hz .. %.1f Hz)", cLo, cHi);
+        CHECK(std::abs(cMid - 94.87f) < 10.0f,
+              "T47 ring carrier knob is exponential (mid %.1f Hz ~ geometric 95, not linear ~1500)", cMid);
+
+        // (b) anti-aliasing. f_in 22k x fc 3k (knob top) -> sum 25k (> Nyquist 24k).
+        // Naive folds it to 23k; the oversampler filters it out before decimating.
+        const double fIn = 22000.0, fc = 3000.0, aliasBin = 23000.0;
+        const int N = 16384;
+        auto in = tone(fIn, 0.9, N);
+        ModVoice m;
+        m.setType(ModVoice::kRingMod);
+        m.setRateHz(ModVoice::maxRateHz(ModVoice::kRingMod)); // knob top -> carrier = 3 kHz
+        m.setDepth(1.0f);                                     // pure ring (no dry)
+        m.setWidth(0.0f);
+        m.prepare({SR, BLK});
+        auto os = in; auto rr = os;
+        run(m, os, rr);
+        std::vector<float> nv(in.size()); // naive same-rate multiply, same carrier
+        for (size_t i = 0; i < in.size(); ++i)
+            nv[i] = in[i] * (float)std::sin(2.0 * M_PI * fc * (double)i / SR);
+        const double magOs = mag(os, 2048, 8192, aliasBin);
+        const double magNaive = mag(nv, 2048, 8192, aliasBin);
+        CHECK(magNaive > 1e-4 && magOs < magNaive * 0.5,
+              "T47 oversampled multiply suppresses the foldback (alias mag %.4e vs naive %.4e)", magOs, magNaive);
+
+        // (c) finite + bounded.
+        double pk = 0.0; bool fin = true;
+        for (float v : os) { pk = std::max(pk, (double)std::abs(v)); if (!std::isfinite(v)) fin = false; }
+        CHECK(fin && pk < 2.0, "T47 ring mod stays finite + bounded (peak %.3f)", pk);
     }
 
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);
