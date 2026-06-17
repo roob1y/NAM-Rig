@@ -1194,12 +1194,12 @@ public:
         mIcon.setBounds(iconCol.withSizeKeepingCentre(62, juce::jmin(iconCol.getHeight(), 46)));
         area.removeFromLeft(10);
 
-        auto meta = area.removeFromLeft(112).withSizeKeepingCentre(112, juce::jmin(area.getHeight(), 50));
+        auto meta = area.removeFromLeft(92).withSizeKeepingCentre(92, juce::jmin(area.getHeight(), 50));
         mType.setBounds(meta.removeFromTop(24));
         meta.removeFromTop(4);
         auto bottomMeta = meta.removeFromTop(22);
-        mSync.setBounds(bottomMeta.withWidth(88));         // non-rotary
-        mRotFast.setBounds(bottomMeta.removeFromLeft(54)); // rotary: slow/fast
+        mSync.setBounds(bottomMeta.withWidth(92));          // non-rotary
+        mRotFast.setBounds(bottomMeta.removeFromLeft(52));  // rotary: slow/fast
         area.removeFromLeft(10);
 
         if (mSoloSlot >= 0) // front slots only
