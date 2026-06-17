@@ -8,18 +8,29 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
       mStrip(p.apvts),
       mGatePanel(p.apvts),
       mCompPanel(p.apvts),
-      mAmpPanel(p),
-      mEqPanel(p.apvts),
-      mCabPanel(p),
+      mDrivePanel(p.apvts),
+      mAmpPanelA(p, 0),
+      mAmpPanelB(p, 1),
+      mEqPanelA(p.apvts, 0),
+      mEqPanelB(p.apvts, 1),
+      mCabPanelA(p, 0),
+      mCabPanelB(p, 1),
+      mMixPanel(p),
       mModPanel(p.apvts),
       mDelayPanel(p.apvts),
       mReverbPanel(p.apvts),
-      mPanels{&mGatePanel, &mCompPanel, &mAmpPanel, &mEqPanel, &mCabPanel,
+      mCalPanel(p.apvts),
+      mPanels{&mGatePanel, &mCompPanel, &mDrivePanel, &mAmpPanelA, &mEqPanelA, &mCabPanelA,
+              &mAmpPanelB, &mEqPanelB, &mCabPanelB, &mMixPanel,
               &mModPanel, &mDelayPanel, &mReverbPanel}
 {
     setLookAndFeel(&mLnf);
     addAndMakeVisible(mContent);
     mContent.setSize(kBaseW, kBaseH);
+
+    // Momentary mod-slot solo (dial-in): editor buttons -> processor state.
+    mModPanel.onSetSolo = [this](int slot, bool on) { mProc.setModSolo(slot, on); };
+    mModPanel.getSolo = [this](int slot) { return mProc.getModSolo(slot); };
 
     // --- Header ---
     mTitle.setFont(RigLookAndFeel::withHeight(22.0f).boldened());
@@ -55,11 +66,26 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
     for (auto *panel : mPanels)
         mContent.addChildComponent(*panel); // visibility driven by selection
 
-    mStrip.onSelectionChanged = [this](int i) { showPanel(i); };
+    // Global input-calibration overlay, toggled by the header INPUT button.
+    mContent.addChildComponent(mCalPanel);
+    mCalPanel.onClose = [this] { mCalPanel.setVisible(false); };
+    mContent.addAndMakeVisible(mCalBtn);
+    mCalBtn.onClick = [this]
+    {
+        const bool show = !mCalPanel.isVisible();
+        mCalPanel.setVisible(show);
+        if (show)
+            mCalPanel.toFront(true);
+    };
+
+    mStrip.onSelectionChanged = [this](int i)
+    { showPanel(i); };
     mStrip.select(juce::jlimit(0, (int)mPanels.size() - 1, mProc.uiSelectedBlock));
 
-    mAmpPanel.refresh();
-    mCabPanel.refresh();
+    mAmpPanelA.refresh();
+    mAmpPanelB.refresh();
+    mCabPanelA.refresh();
+    mCabPanelB.refresh();
 
     mLastTimerMs = juce::Time::getMillisecondCounterHiRes();
     startTimerHz(15);
@@ -79,6 +105,7 @@ NamRigEditor::~NamRigEditor()
 
 void NamRigEditor::showPanel(int selectableIndex)
 {
+    mCalPanel.setVisible(false); // selecting a block dismisses the cal overlay
     for (int i = 0; i < (int)mPanels.size(); ++i)
         mPanels[(size_t)i]->setVisible(i == selectableIndex);
     mProc.uiSelectedBlock = selectableIndex;
@@ -93,13 +120,19 @@ void NamRigEditor::timerCallback()
     mInMeter.push(mProc.mInputPeakDb.load(), dt);
     mOutMeter.push(mProc.mOutputPeakDb.load(), dt);
 
-    mAmpPanel.refresh();
-    mCabPanel.refresh();
+    mAmpPanelA.refresh();
+    mAmpPanelB.refresh();
+    mCabPanelA.refresh();
+    mCabPanelB.refresh();
+    mDrivePanel.refresh();
+    mMixPanel.refresh();
     mModPanel.refresh();
     mDelayPanel.refresh();
     mGatePanel.grMeter().push(-mProc.gateGainDb(), dt);
     mCompPanel.grMeter().push(mProc.compGrDb(), dt);
-    mPresetBar.updateDirty(); // modified-asterisk on the preset name
+    mCompPanel.grMeter().pushIn(mProc.compInDb(), dt);
+    mCompPanel.grMeter().pushOut(mProc.compOutDb(), dt);
+    mPresetBar.updateDirty();       // modified-asterisk on the preset name
     if (++mPresetRefreshTick >= 30) // rescan the preset folder ~every 2 s
     {
         mPresetRefreshTick = 0;
@@ -143,6 +176,8 @@ void NamRigEditor::resized()
     mTitle.setBounds(header.removeFromLeft(130));
     mPresetBar.setBounds(header.removeFromLeft(380).withSizeKeepingCentre(380, 26));
     header.removeFromLeft(12);
+    mCalBtn.setBounds(header.removeFromLeft(60).withSizeKeepingCentre(58, 26));
+    header.removeFromLeft(12);
 
     auto ioCluster = header.removeFromRight(220);
     auto laidOut = [&](juce::Label &label, juce::Slider &knob, PeakMeter &meter,
@@ -170,6 +205,7 @@ void NamRigEditor::resized()
     // --- Block panel ---
     for (auto *panel : mPanels)
         panel->setBounds(area);
+    mCalPanel.setBounds(area); // overlay occupies the block-panel area
 }
 
 juce::AudioProcessorEditor *NamRigProcessor::createEditor()

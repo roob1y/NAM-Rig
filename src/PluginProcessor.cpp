@@ -18,7 +18,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::NormalisableRange<float>(-24.0f, 24.0f, 0.1f), 0.0f,
         juce::AudioParameterFloatAttributes().withLabel("dB")));
 
-    // Amp AA oversampling — identical semantics to NAM-AA's parameter.
+    // Rig A amp AA oversampling (NAM-AA semantics). Rig B has its own
+    // oversampleB / offlineAAB; the chain delay-compensates differing factors.
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("oversample", 1), "Amp Oversampling",
         juce::StringArray{"Off", "2x", "4x", "8x", "16x", "32x"}, 0)); // default Off
@@ -79,6 +80,63 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::NormalisableRange<float>(0.0f, 20.0f, 0.1f), 0.0f,
         juce::AudioParameterFloatAttributes().withLabel("dB")));
 
+    // --- Drive rack: 3 series slots, shared/pre-split (rig/DriveBlock.h;
+    //     verified by tests/drive_test.cpp). Type "Off" leaves a slot out of
+    //     the path; an all-Off rack is bypassed (bit-exact). ---
+    for (int s = 1; s <= nam_rig::DriveBlock::kSlots; ++s)
+    {
+        const juce::String pid = "drv" + juce::String(s);
+        const juce::String lbl = "Drive " + juce::String(s) + " ";
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID(pid + "Type", 1), lbl + "Type",
+            juce::StringArray{"Off", "Boost", "Overdrive", "Distortion", "Fuzz"}, 0));
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID(pid + "On", 1), lbl + "On", true)); // footswitch
+        // Per-TYPE controls: each pedal type keeps its own knobs (no sharing
+        // across types within a slot). Drive/Tone are 0..1; Level/Volume in dB.
+        // Boost: one Boost knob + input-cap Range + model select.
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(pid + "bDrive", 1), lbl + "Boost",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID(pid + "bRange", 1), lbl + "Boost Range",
+            juce::StringArray{"Treble", "Mid", "Full"}, 0)); // treble-boost cap switch
+        params.push_back(std::make_unique<juce::AudioParameterInt>(
+            juce::ParameterID(pid + "bModel", 1), lbl + "Boost Model", 0, 3, 0));
+        // Overdrive: Drive / Tone / Level.
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(pid + "oDrive", 1), lbl + "OD Drive",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(pid + "oTone", 1), lbl + "OD Tone",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(pid + "oLevel", 1), lbl + "OD Level",
+            juce::NormalisableRange<float>(-12.0f, 12.0f, 0.1f), 0.0f,
+            juce::AudioParameterFloatAttributes().withLabel("dB")));
+        // Distortion: Distortion / Filter / Volume.
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(pid + "dDrive", 1), lbl + "Dist Drive",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(pid + "dTone", 1), lbl + "Dist Filter",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(pid + "dLevel", 1), lbl + "Dist Volume",
+            juce::NormalisableRange<float>(-12.0f, 12.0f, 0.1f), 0.0f,
+            juce::AudioParameterFloatAttributes().withLabel("dB")));
+        // Fuzz: Fuzz / Volume (no tone control).
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(pid + "fDrive", 1), lbl + "Fuzz",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(pid + "fLevel", 1), lbl + "Fuzz Volume",
+            juce::NormalisableRange<float>(-12.0f, 12.0f, 0.1f), 0.0f,
+            juce::AudioParameterFloatAttributes().withLabel("dB")));
+    }
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("driveAutoGain", 1), "Drive Auto Gain", false));
+
     // --- Graphic EQ, pre-cab (see rig/EqBlock.h; verified by tests/eq_test.cpp) ---
     {
         static const char *ids[] = {"eq62", "eq125", "eq250", "eq500",
@@ -103,23 +161,144 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::NormalisableRange<float>(2000.0f, 20000.0f, 10.0f, 0.5f), 20000.0f,
         juce::AudioParameterFloatAttributes().withLabel("Hz")));
 
-    // --- Modulation (rig/ModBlock.h; verified by tests/mod_test.cpp) ---
+    // --- Modulation: 3-slot series section (rig/ModBlock.h; mod_test.cpp).
+    // Per-slot bank (superset; the panel shows only each effect's real
+    // controls). Slot 1 on by default = the old single-chorus default.
+    for (int s = 1; s <= nam_rig::ModBlock::kSlots; ++s)
+    {
+        const juce::String p = "mod" + juce::String(s);
+        const juce::String n = "Mod " + juce::String(s) + " ";
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID(p + "Type", 1), n + "Type",
+            juce::StringArray{"Chorus", "Flanger", "Phaser", "Tremolo",
+                              "Vibrato", "Rotary", "Uni-Vibe", "Harm Trem", "Bi-Phase",
+                              "Ring Mod"},
+            0));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID(p + "Wave", 1), n + "Waveform",
+            juce::StringArray{"Sine", "Triangle", "Square", "S&H"}, 0));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID(p + "Sync", 1), n + "Sync",
+            juce::StringArray{"Off", "1/1", "1/2", "1/4", "1/4.", "1/4T",
+                              "1/8", "1/8.", "1/8T", "1/16"},
+            0));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(p + "Rate", 1), n + "Rate",
+            juce::NormalisableRange<float>(0.03f, 20.0f, 0.01f, 0.35f), 0.8f, // ModVoice caps per effect
+            juce::AudioParameterFloatAttributes().withLabel("Hz")));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(p + "Depth", 1), n + "Depth",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(p + "Feedback", 1), n + "Feedback",
+            juce::NormalisableRange<float>(0.0f, 0.95f, 0.01f), 0.0f)); // Regen (flanger/phaser)
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(p + "Mix", 1), n + "Mix",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(p + "Width", 1), n + "Width",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(p + "Drive", 1), n + "Drive",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f)); // Rotary tube amp
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID(p + "RotFast", 1), n + "Rotary Fast", false));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(p + "Manual", 1), n + "Manual",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.3f)); // Flanger static comb position
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID(p + "Invert", 1), n + "Invert", false)); // Flanger phase invert
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(p + "P2Ratio", 1), n + "Sweep 2",
+            juce::NormalisableRange<float>(0.5f, 2.0f, 0.01f, 0.63f), 1.5f)); // Bi-Phase Gen 2 ratio (musical detune, taper centred on 1.0)
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID(p + "Series", 1), n + "Series", false)); // Bi-Phase series/parallel
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(p + "HornDrum", 1), n + "Horn/Drum",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f)); // Rotary horn<->drum balance (0.5 = neutral)
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID(p + "Extreme", 1), n + "Extreme", false)); // reassigns controls to their wild range (phaser/uni-vibe/bi-phase)
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID(p + "On", 1), n + "Enable", s == 1));
+    }
+    // Mod section routing (whole-section, not per-slot): Series chains the slots;
+    // Parallel runs each slot on the dry input and blends them on a Cartesian pad
+    // (modPadX/modPadY), then one global Mod Mix vs dry. Default Series keeps the
+    // existing behaviour. (Distinct from each slot's Bi-Phase "Series" toggle.)
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
-        juce::ParameterID("modType", 1), "Mod Type",
-        juce::StringArray{"Chorus", "Flanger", "Phaser", "Tremolo"}, 0));
+        juce::ParameterID("modRouting", 1), "Mod Routing",
+        juce::StringArray{"Series", "Parallel"}, 0));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("modRate", 1), "Mod Rate",
-        juce::NormalisableRange<float>(0.05f, 10.0f, 0.01f, 0.4f), 0.8f,
-        juce::AudioParameterFloatAttributes().withLabel("Hz")));
+        juce::ParameterID("modPadX", 1), "Mod Blend X",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.5f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("modDepth", 1), "Mod Depth",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("modFeedback", 1), "Mod Feedback",
-        juce::NormalisableRange<float>(0.0f, 0.9f, 0.01f), 0.0f));
+        juce::ParameterID("modPadY", 1), "Mod Blend Y",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 1.0f / 3.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("modMix", 1), "Mod Mix",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+    // Series chain order: which slot runs at each position. One choice param (the
+    // six permutations of the three slots) so it saves/automates as a single value
+    // without the inconsistency a per-position param set could hit. Default
+    // "1-2-3" = the fixed order, so old presets are unchanged. Only acts in Series.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("modChainOrder", 1), "Mod Chain Order",
+        juce::StringArray{"1-2-3", "1-3-2", "2-1-3", "2-3-1", "3-1-2", "3-2-1"}, 0));
+
+    // POST modulation block: a dedicated end-of-section effect (rotary/tremolo/
+    // harm-trem "speaker/amp" stage) that processes the combined output of the 3
+    // front slots. Same control superset as a slot (enum-aligned Type; the editor
+    // only offers the post effects). Off by default; Rotary when first enabled.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("postType", 1), "Post Type",
+        juce::StringArray{"Chorus", "Flanger", "Phaser", "Tremolo",
+                          "Vibrato", "Rotary", "Uni-Vibe", "Harm Trem", "Bi-Phase",
+                          "Ring Mod"},
+        5)); // default Rotary
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("postWave", 1), "Post Waveform",
+        juce::StringArray{"Sine", "Triangle", "Square", "S&H"}, 0));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("postSync", 1), "Post Sync",
+        juce::StringArray{"Off", "1/1", "1/2", "1/4", "1/4.", "1/4T",
+                          "1/8", "1/8.", "1/8T", "1/16"},
+        0));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("postRate", 1), "Post Rate",
+        juce::NormalisableRange<float>(0.03f, 20.0f, 0.01f, 0.35f), 0.8f,
+        juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("postDepth", 1), "Post Depth",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("postFeedback", 1), "Post Feedback",
+        juce::NormalisableRange<float>(0.0f, 0.95f, 0.01f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("postMix", 1), "Post Mix",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("postWidth", 1), "Post Width",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("postDrive", 1), "Post Drive",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("postRotFast", 1), "Post Rotary Fast", false));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("postManual", 1), "Post Manual",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.3f));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("postInvert", 1), "Post Invert", false));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("postP2Ratio", 1), "Post Sweep 2",
+        juce::NormalisableRange<float>(0.5f, 2.0f, 0.01f, 0.63f), 1.5f));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("postSeries", 1), "Post Series", false));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("postHornDrum", 1), "Post Horn/Drum",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("postOn", 1), "Post Enable", false)); // off by default
 
     // --- Delay (rig/DelayBlock.h; verified by tests/delay_test.cpp) ---
     // Order must match DelayBlock::kSyncBeats — append only.
@@ -187,6 +366,72 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID("normalize", 1), "Normalize Output", false));
 
+    // --- Dual-rig mixer + Rig B voice (RigChain dual core; see rig/RigChain.h).
+    // Appended last so existing sessions keep their automation indices. Rig B
+    // shares the amp AA setting with Rig A (v1) -> no separate oversample param.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("rigMode", 1), "Rig Mode",
+        juce::StringArray{"Solo A", "Solo B", "Dual"}, 0)); // default Solo A
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("rigLevelA", 1), "Rig A Level",
+        juce::NormalisableRange<float>(-24.0f, 12.0f, 0.1f), 0.0f,
+        juce::AudioParameterFloatAttributes().withLabel("dB")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("rigLevelB", 1), "Rig B Level",
+        juce::NormalisableRange<float>(-24.0f, 12.0f, 0.1f), 0.0f,
+        juce::AudioParameterFloatAttributes().withLabel("dB")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("rigPanA", 1), "Rig A Pan",
+        juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), -1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("rigPanB", 1), "Rig B Pan",
+        juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("rigPolA", 1), "Rig A Polarity", false));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("rigPolB", 1), "Rig B Polarity", false));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("rigAlign", 1), "Rig Align",
+        juce::NormalisableRange<float>(-256.0f, 256.0f, 0.1f), 0.0f,
+        juce::AudioParameterFloatAttributes().withLabel("smp")));
+    {
+        static const char *idsB[] = {"rigBeq62", "rigBeq125", "rigBeq250", "rigBeq500",
+                                     "rigBeq1k", "rigBeq2k", "rigBeq4k", "rigBeq8k"};
+        static const char *namesB[] = {"Rig B EQ 62.5 Hz", "Rig B EQ 125 Hz",
+                                       "Rig B EQ 250 Hz", "Rig B EQ 500 Hz", "Rig B EQ 1 kHz",
+                                       "Rig B EQ 2 kHz", "Rig B EQ 4 kHz", "Rig B EQ 8 kHz"};
+        for (int b = 0; b < nam_rig::EqBlock::kNumBands; ++b)
+            params.push_back(std::make_unique<juce::AudioParameterFloat>(
+                juce::ParameterID(idsB[b], 1), namesB[b],
+                juce::NormalisableRange<float>(-nam_rig::EqBlock::kMaxGainDb,
+                                               nam_rig::EqBlock::kMaxGainDb, 0.1f),
+                0.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    }
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("rigBcabHpf", 1), "Rig B Cab Low Cut",
+        juce::NormalisableRange<float>(20.0f, 300.0f, 1.0f, 0.5f), 20.0f,
+        juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("rigBcabLpf", 1), "Rig B Cab High Cut",
+        juce::NormalisableRange<float>(2000.0f, 20000.0f, 10.0f, 0.5f), 20000.0f,
+        juce::AudioParameterFloatAttributes().withLabel("Hz")));
+
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("oversampleB", 1), "Rig B Oversampling",
+        juce::StringArray{"Off", "2x", "4x", "8x", "16x", "32x"}, 0));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("offlineAAB", 1), "Rig B Offline AA",
+        juce::StringArray{"Same as live", "8x", "16x", "32x"}, 1));
+
+    // Comp voicing (see rig/CompBlock.h). Appended last for automation
+    // stability; default Clean reproduces the original comp behaviour.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("compMode", 1), "Comp Mode",
+        juce::StringArray{"Clean", "OTA", "Opto", "FET"}, 0));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("compCharacter", 1), "Comp Character",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.35f));
+
     return {params.begin(), params.end()};
 }
 
@@ -197,13 +442,73 @@ NamRigProcessor::NamRigProcessor()
       apvts(*this, nullptr, "Parameters", createParameterLayout())
 {
     mPresets = std::make_unique<nam_rig::PresetManager>(*this);
+    // Listen for mod-slot type changes so a USER type switch resets that slot's
+    // knobs to the new type's defaults (suppressed during state/preset loads).
+    for (int s = 1; s <= nam_rig::ModBlock::kSlots; ++s)
+        apvts.addParameterListener("mod" + juce::String(s) + "Type", this);
+    apvts.addParameterListener("postType", this); // the post block resets too
 }
 
-NamRigProcessor::~NamRigProcessor() = default;
-
-float NamRigProcessor::calibrationGainDb() const
+NamRigProcessor::~NamRigProcessor()
 {
-    const auto &eng = mChain.amp.engine();
+    for (int s = 1; s <= nam_rig::ModBlock::kSlots; ++s)
+        apvts.removeParameterListener("mod" + juce::String(s) + "Type", this);
+    apvts.removeParameterListener("postType", this);
+}
+
+void NamRigProcessor::parameterChanged(const juce::String &paramID, float)
+{
+    if (mSuppressTypeReset.load())
+        return; // a state/preset load is in progress -> keep the saved knobs
+    if (paramID == "postType")
+    {
+        mPendingTypeReset.fetch_or(1 << nam_rig::ModBlock::kSlots); // post = bit kSlots
+        triggerAsyncUpdate();
+    }
+    else if (paramID.startsWith("mod") && paramID.endsWith("Type"))
+    {
+        const int slot = paramID[3] - '1'; // "mod1Type".."mod3Type" -> 0..2
+        if (slot >= 0 && slot < nam_rig::ModBlock::kSlots)
+        {
+            mPendingTypeReset.fetch_or(1 << slot);
+            triggerAsyncUpdate(); // do the actual param writes on the message thread
+        }
+    }
+}
+
+void NamRigProcessor::handleAsyncUpdate()
+{
+    const int mask = mPendingTypeReset.exchange(0);
+    // Reset everything on the slot EXCEPT its Type and On (enable) to defaults.
+    static const char *const suffix[] = {"Wave", "Sync", "Rate", "Depth", "Feedback",
+                                         "Mix", "Width", "Drive", "RotFast", "Manual",
+                                         "Invert", "P2Ratio", "Series", "HornDrum"};
+    auto resetPrefix = [&](const juce::String &p, int newType) {
+        // Tremolo (3) / Harm Trem (7) are amp-style effects -> default to MONO width
+        // (Width is one shared per-slot param, so the per-type default lives here).
+        const bool monoWidth = (newType == 3 || newType == 7);
+        for (auto *sfx : suffix)
+            if (auto *prm = apvts.getParameter(p + sfx))
+            {
+                const float v = (monoWidth && juce::String(sfx) == "Width")
+                                    ? prm->convertTo0to1(0.0f)
+                                    : prm->getDefaultValue();
+                prm->beginChangeGesture();
+                prm->setValueNotifyingHost(v);
+                prm->endChangeGesture();
+            }
+    };
+    for (int s = 0; s < nam_rig::ModBlock::kSlots; ++s)
+        if (mask & (1 << s))
+            resetPrefix("mod" + juce::String(s + 1),
+                        (int)apvts.getRawParameterValue("mod" + juce::String(s + 1) + "Type")->load());
+    if (mask & (1 << nam_rig::ModBlock::kSlots))
+        resetPrefix("post", (int)apvts.getRawParameterValue("postType")->load());
+}
+
+float NamRigProcessor::calibrationGainDb(int rig) const
+{
+    const auto &eng = ampFor(rig).engine();
     return nam_rig::CalNorm::calibrationGainDb(
         apvts.getRawParameterValue("calEnable")->load() >= 0.5f,
         eng.hasInputLevelDbu(),
@@ -211,21 +516,75 @@ float NamRigProcessor::calibrationGainDb() const
         eng.inputLevelDbu());
 }
 
-float NamRigProcessor::normalizationGainDb() const
+float NamRigProcessor::normalizationGainDb(int rig) const
 {
-    const auto &eng = mChain.amp.engine();
+    const auto &eng = ampFor(rig).engine();
     return nam_rig::CalNorm::normalizationGainDb(
         apvts.getRawParameterValue("normalize")->load() >= 0.5f,
         eng.hasLoudness(),
         eng.loudnessDb());
 }
 
-int NamRigProcessor::requestedFactorNow() const
+void NamRigProcessor::autoAlign()
 {
-    const int choice = static_cast<int>(apvts.getRawParameterValue("oversample")->load());
+    if (!isModelLoaded(0) || !isModelLoaded(1))
+        return;
+    suspendProcessing(true);
+    const auto r = mChain.measureAlignment();
+    suspendProcessing(false);
+    if (auto *p = apvts.getParameter("rigAlign"))
+    {
+        p->beginChangeGesture();
+        p->setValueNotifyingHost(
+            p->convertTo0to1((float)juce::jlimit(-256.0, 256.0, r.lagSamples)));
+        p->endChangeGesture();
+    }
+    if (auto *p = apvts.getParameter("rigPolB"))
+    {
+        p->beginChangeGesture();
+        p->setValueNotifyingHost(r.invert ? 1.0f : 0.0f);
+        p->endChangeGesture();
+    }
+}
+
+void NamRigProcessor::matchLevels()
+{
+    if (!isModelLoaded(0) || !isModelLoaded(1))
+        return;
+
+    suspendProcessing(true);
+    const auto lv = mChain.measureLevels();
+    suspendProcessing(false);
+
+    if (lv.rmsA <= 1.0e-9 || lv.rmsB <= 1.0e-9)
+        return; // a silent voice -> nothing meaningful to match
+
+    // Bring the louder rig down to the quieter (reference) so neither is boosted
+    // into clipping; both end at the same loudness.
+    const double ref = juce::jmin(lv.rmsA, lv.rmsB);
+    auto setLevel = [this](const char *id, double linearRatio)
+    {
+        if (auto *p = apvts.getParameter(id))
+        {
+            const float db = juce::jlimit(-24.0f, 12.0f,
+                                          (float)juce::Decibels::gainToDecibels(linearRatio));
+            p->beginChangeGesture();
+            p->setValueNotifyingHost(p->convertTo0to1(db));
+            p->endChangeGesture();
+        }
+    };
+    setLevel("rigLevelA", ref / lv.rmsA);
+    setLevel("rigLevelB", ref / lv.rmsB);
+}
+
+int NamRigProcessor::requestedFactorNow(int rig) const
+{
+    const char *osId = rig == 0 ? "oversample" : "oversampleB";
+    const char *offId = rig == 0 ? "offlineAA" : "offlineAAB";
+    const int choice = static_cast<int>(apvts.getRawParameterValue(osId)->load());
     int requested = 1 << juce::jlimit(0, 5, choice); // Off..32x -> 1..32
-    const int offline = static_cast<int>(apvts.getRawParameterValue("offlineAA")->load());
-    if (isNonRealtime() && offline > 0 && mChain.amp.engine().isA2())
+    const int offline = static_cast<int>(apvts.getRawParameterValue(offId)->load());
+    if (isNonRealtime() && offline > 0 && ampFor(rig).engine().isA2())
         requested = juce::jmax(requested, 8 << (offline - 1)); // 8x / 16x / 32x
     return requested;
 }
@@ -240,7 +599,8 @@ void NamRigProcessor::updateLatency()
 {
     if (!mChain.isPrepared())
         return;
-    mChain.amp.setRequestedFactor(requestedFactorNow());
+    mChain.amp.setRequestedFactor(requestedFactorNow(0));
+    mChain.ampB.setRequestedFactor(requestedFactorNow(1));
     mChain.gate.setLookaheadMs(apvts.getRawParameterValue("gateLook")->load());
     setLatencySamples((int)std::round(mChain.latencySamples()));
 }
@@ -264,10 +624,9 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
 
     // User input gain plus dBu calibration correction (0 dB when disabled/absent).
     const float inGain = juce::Decibels::decibelsToGain(
-        apvts.getRawParameterValue("inputGain")->load() + calibrationGainDb());
-    // User output gain plus loudness normalization (0 dB when disabled/absent).
+        apvts.getRawParameterValue("inputGain")->load());
     const float outGain = juce::Decibels::decibelsToGain(
-        apvts.getRawParameterValue("outputGain")->load() + normalizationGainDb());
+        apvts.getRawParameterValue("outputGain")->load());
 
     buffer.applyGain(inGain);
 
@@ -276,8 +635,16 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         inPeak = juce::jmax(inPeak, buffer.getMagnitude(ch, 0, numSamples));
     mInputPeakDb.store(juce::Decibels::gainToDecibels(inPeak, -100.0f));
 
-    // Bypass flags + amp AA factor from parameters.
-    mChain.amp.setRequestedFactor(requestedFactorNow());
+    const int fA = requestedFactorNow(0);
+    const int fB = requestedFactorNow(1);
+    mChain.amp.setRequestedFactor(fA);
+    mChain.ampB.setRequestedFactor(fB);
+    if (fA != mLastFactorA || fB != mLastFactorB)
+    {
+        mLastFactorA = fA;
+        mLastFactorB = fB;
+        updateLatency();
+    }
 
     // Gate parameters (atomics; cheap to push every block). Lookahead changes
     // PDC, so re-report latency when it moves.
@@ -301,8 +668,52 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.comp.setAttackMs(apvts.getRawParameterValue("compAttack")->load());
     mChain.comp.setLevelDb(apvts.getRawParameterValue("compLevel")->load());
     mChain.comp.setBoostDb(apvts.getRawParameterValue("compBoost")->load());
+    mChain.comp.setMode((int)apvts.getRawParameterValue("compMode")->load());
+    mChain.comp.setCharacter(apvts.getRawParameterValue("compCharacter")->load());
     mChain.comp.setBypassed(apvts.getRawParameterValue("compOn")->load() < 0.5f);
-    // Graphic EQ band gains (zero latency; chain bypass via eqOn is safe).
+
+    // Drive rack (shared, before the split). Block is bypassed -> skipped
+    // entirely when every slot is Off, keeping the no-drive path bit-exact.
+    for (int s = 0; s < nam_rig::DriveBlock::kSlots; ++s)
+    {
+        const juce::String pid = "drv" + juce::String(s + 1);
+        auto g = [&](const char *suf) { return apvts.getRawParameterValue(pid + suf)->load(); };
+        const int type = (int)g("Type");
+        mChain.drive.setKind(s, type);
+        mChain.drive.setOn(s, g("On") >= 0.5f);
+        // Read only the ACTIVE type's own params (each type is independent).
+        switch (type)
+        {
+        case 1: // Boost
+            mChain.drive.setDrive(s, g("bDrive"));
+            mChain.drive.setRange(s, (int)g("bRange"));
+            mChain.drive.setModel(s, (int)g("bModel"));
+            mChain.drive.setTone(s, 0.5f); mChain.drive.setLevelDb(s, 0.0f);
+            break;
+        case 2: // Overdrive
+            mChain.drive.setDrive(s, g("oDrive"));
+            mChain.drive.setTone(s, g("oTone"));
+            mChain.drive.setLevelDb(s, g("oLevel"));
+            mChain.drive.setRange(s, 0); mChain.drive.setModel(s, 0);
+            break;
+        case 3: // Distortion
+            mChain.drive.setDrive(s, g("dDrive"));
+            mChain.drive.setTone(s, g("dTone"));
+            mChain.drive.setLevelDb(s, g("dLevel"));
+            mChain.drive.setRange(s, 0); mChain.drive.setModel(s, 0);
+            break;
+        case 4: // Fuzz (no tone control)
+            mChain.drive.setDrive(s, g("fDrive"));
+            mChain.drive.setTone(s, 0.5f);
+            mChain.drive.setLevelDb(s, g("fLevel"));
+            mChain.drive.setRange(s, 0); mChain.drive.setModel(s, 0);
+            break;
+        default: break; // Off
+        }
+    }
+    mChain.drive.setAutoGain(apvts.getRawParameterValue("driveAutoGain")->load() >= 0.5f);
+    mChain.drive.setBypassed(!mChain.drive.anyActive());
+    // Graphic EQ band gains (Rig A; zero latency; chain bypass via eqOn is safe).
     {
         static const char *ids[] = {"eq62", "eq125", "eq250", "eq500",
                                     "eq1k", "eq2k", "eq4k", "eq8k"};
@@ -311,22 +722,117 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     }
     mChain.eq.setBypassed(apvts.getRawParameterValue("eqOn")->load() < 0.5f);
 
-    // Post-cab cuts ride with the cab block.
+    // Post-cab cuts ride with the cab block (Rig A).
     mChain.cab.setHpfHz(apvts.getRawParameterValue("cabHpf")->load());
     mChain.cab.setLpfHz(apvts.getRawParameterValue("cabLpf")->load());
     mChain.cab.setBypassed(apvts.getRawParameterValue("cabOn")->load() < 0.5f);
+
+    // ---- Rig B voice (amp shares AA with Rig A; EQ + cab cuts independent) ----
+    {
+        static const char *idsB[] = {"rigBeq62", "rigBeq125", "rigBeq250", "rigBeq500",
+                                     "rigBeq1k", "rigBeq2k", "rigBeq4k", "rigBeq8k"};
+        for (int b = 0; b < nam_rig::EqBlock::kNumBands; ++b)
+            mChain.eqB.setBandGainDb(b, apvts.getRawParameterValue(idsB[b])->load());
+    }
+    mChain.cabB.setHpfHz(apvts.getRawParameterValue("rigBcabHpf")->load());
+    mChain.cabB.setLpfHz(apvts.getRawParameterValue("rigBcabLpf")->load());
+
+    // ---- Dual-rig mixer (mode / per-rig level + pan + polarity + align) ----
+    mChain.setLevelA(juce::Decibels::decibelsToGain(apvts.getRawParameterValue("rigLevelA")->load()));
+    mChain.setLevelB(juce::Decibels::decibelsToGain(apvts.getRawParameterValue("rigLevelB")->load()));
+    mChain.setPanA(apvts.getRawParameterValue("rigPanA")->load());
+    mChain.setPanB(apvts.getRawParameterValue("rigPanB")->load());
+    mChain.setPolarityA(apvts.getRawParameterValue("rigPolA")->load() >= 0.5f);
+    mChain.setPolarityB(apvts.getRawParameterValue("rigPolB")->load() >= 0.5f);
+    // Input calibration is split: a GLOBAL stage trims the incoming signal to the
+    // reference level so the drive rack + gate/comp get a consistent level, then
+    // each amp gets only the RESIDUAL so its NET calibration is unchanged
+    // (global + residual == calibrationGainDb(rig); see CalNorm.h).
+    const float globalCalDb = nam_rig::CalNorm::globalCalibrationGainDb(
+        apvts.getRawParameterValue("calEnable")->load() >= 0.5f,
+        apvts.getRawParameterValue("calDbu")->load());
+    mChain.setInputCal(juce::Decibels::decibelsToGain(globalCalDb));
+    mChain.setInTrimA(juce::Decibels::decibelsToGain(calibrationGainDb(0) - globalCalDb));
+    mChain.setInTrimB(juce::Decibels::decibelsToGain(calibrationGainDb(1) - globalCalDb));
+    mChain.setOutTrimA(juce::Decibels::decibelsToGain(normalizationGainDb(0)));
+    mChain.setOutTrimB(juce::Decibels::decibelsToGain(normalizationGainDb(1)));
+    const int rigMode = (int)apvts.getRawParameterValue("rigMode")->load();
+    const float rigAlign = apvts.getRawParameterValue("rigAlign")->load();
+    mChain.setMode(rigMode);
+    mChain.setAlignmentLag(rigAlign);
+    // Mode (Solo<->Dual) and align both shift the reported PDC.
+    if (rigMode != mLastRigMode || rigAlign != mLastRigAlign)
+    {
+        mLastRigMode = rigMode;
+        mLastRigAlign = rigAlign;
+        updateLatency();
+    }
+
     // Stereo section (all zero-latency; plain chain bypass is safe).
-    mChain.mod.setType((int)apvts.getRawParameterValue("modType")->load());
-    mChain.mod.setRateHz(apvts.getRawParameterValue("modRate")->load());
-    mChain.mod.setDepth(apvts.getRawParameterValue("modDepth")->load());
-    mChain.mod.setFeedback(apvts.getRawParameterValue("modFeedback")->load());
-    mChain.mod.setMix(apvts.getRawParameterValue("modMix")->load());
+    // 3-slot mod section (ids prebuilt = no per-block string alloc; cf. EQ bands)
+    static const char *const modIds[3][17] = {
+        {"mod1Type", "mod1Wave", "mod1Sync", "mod1Rate", "mod1Depth", "mod1Feedback", "mod1Mix", "mod1Width", "mod1Drive", "mod1RotFast", "mod1Manual", "mod1Invert", "mod1P2Ratio", "mod1Series", "mod1HornDrum", "mod1Extreme", "mod1On"},
+        {"mod2Type", "mod2Wave", "mod2Sync", "mod2Rate", "mod2Depth", "mod2Feedback", "mod2Mix", "mod2Width", "mod2Drive", "mod2RotFast", "mod2Manual", "mod2Invert", "mod2P2Ratio", "mod2Series", "mod2HornDrum", "mod2Extreme", "mod2On"},
+        {"mod3Type", "mod3Wave", "mod3Sync", "mod3Rate", "mod3Depth", "mod3Feedback", "mod3Mix", "mod3Width", "mod3Drive", "mod3RotFast", "mod3Manual", "mod3Invert", "mod3P2Ratio", "mod3Series", "mod3HornDrum", "mod3Extreme", "mod3On"}};
+    for (int s = 0; s < nam_rig::ModBlock::kSlots; ++s)
+    {
+        mChain.mod.setType(s, (int)apvts.getRawParameterValue(modIds[s][0])->load());
+        mChain.mod.setWaveform(s, (int)apvts.getRawParameterValue(modIds[s][1])->load());
+        mChain.mod.setSyncIndex(s, (int)apvts.getRawParameterValue(modIds[s][2])->load());
+        mChain.mod.setRateHz(s, apvts.getRawParameterValue(modIds[s][3])->load());
+        mChain.mod.setDepth(s, apvts.getRawParameterValue(modIds[s][4])->load());
+        mChain.mod.setFeedback(s, apvts.getRawParameterValue(modIds[s][5])->load());
+        mChain.mod.setMix(s, apvts.getRawParameterValue(modIds[s][6])->load());
+        mChain.mod.setWidth(s, apvts.getRawParameterValue(modIds[s][7])->load());
+        mChain.mod.setDrive(s, apvts.getRawParameterValue(modIds[s][8])->load());
+        mChain.mod.setRotFast(s, apvts.getRawParameterValue(modIds[s][9])->load() >= 0.5f);
+        mChain.mod.setManual(s, apvts.getRawParameterValue(modIds[s][10])->load());
+        mChain.mod.setInvert(s, apvts.getRawParameterValue(modIds[s][11])->load() >= 0.5f);
+        mChain.mod.setP2Ratio(s, apvts.getRawParameterValue(modIds[s][12])->load());
+        mChain.mod.setSeries(s, apvts.getRawParameterValue(modIds[s][13])->load() >= 0.5f);
+        mChain.mod.setHornDrum(s, apvts.getRawParameterValue(modIds[s][14])->load());
+        mChain.mod.setExtreme(s, apvts.getRawParameterValue(modIds[s][15])->load() >= 0.5f);
+        mChain.mod.setSlotBypassed(s, apvts.getRawParameterValue(modIds[s][16])->load() < 0.5f);
+        mChain.mod.setSlotSolo(s, modSolo[(size_t)s].load()); // momentary dial-in solo
+    }
     mChain.mod.setBypassed(apvts.getRawParameterValue("modOn")->load() < 0.5f);
+    // Section routing + parallel blend pad + global mod-mix (whole-section).
+    mChain.mod.setParallel(apvts.getRawParameterValue("modRouting")->load() >= 0.5f);
+    mChain.mod.setPad(apvts.getRawParameterValue("modPadX")->load(),
+                      apvts.getRawParameterValue("modPadY")->load());
+    mChain.mod.setModMix(apvts.getRawParameterValue("modMix")->load());
+    // Map the chain-order choice (six permutations) to the slot sequence.
+    {
+        static const int kPerm[6][3] = {
+            {0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}};
+        const int oi = juce::jlimit(0, 5, (int)apvts.getRawParameterValue("modChainOrder")->load());
+        mChain.mod.setChainOrder(kPerm[oi][0], kPerm[oi][1], kPerm[oi][2]);
+    }
+    // Post block (end-of-section effect).
+    mChain.mod.setPostType((int)apvts.getRawParameterValue("postType")->load());
+    mChain.mod.setPostWaveform((int)apvts.getRawParameterValue("postWave")->load());
+    mChain.mod.setPostSyncIndex((int)apvts.getRawParameterValue("postSync")->load());
+    mChain.mod.setPostRateHz(apvts.getRawParameterValue("postRate")->load());
+    mChain.mod.setPostDepth(apvts.getRawParameterValue("postDepth")->load());
+    mChain.mod.setPostFeedback(apvts.getRawParameterValue("postFeedback")->load());
+    mChain.mod.setPostMix(apvts.getRawParameterValue("postMix")->load());
+    mChain.mod.setPostWidth(apvts.getRawParameterValue("postWidth")->load());
+    mChain.mod.setPostDrive(apvts.getRawParameterValue("postDrive")->load());
+    mChain.mod.setPostRotFast(apvts.getRawParameterValue("postRotFast")->load() >= 0.5f);
+    mChain.mod.setPostManual(apvts.getRawParameterValue("postManual")->load());
+    mChain.mod.setPostInvert(apvts.getRawParameterValue("postInvert")->load() >= 0.5f);
+    mChain.mod.setPostP2Ratio(apvts.getRawParameterValue("postP2Ratio")->load());
+    mChain.mod.setPostSeries(apvts.getRawParameterValue("postSeries")->load() >= 0.5f);
+    mChain.mod.setPostHornDrum(apvts.getRawParameterValue("postHornDrum")->load());
+    mChain.mod.setPostBypassed(apvts.getRawParameterValue("postOn")->load() < 0.5f);
 
     if (auto *ph = getPlayHead())
         if (auto pos = ph->getPosition())
             if (auto bpm = pos->getBpm())
+            {
                 mChain.delay.setBpm(*bpm);
+                mChain.mod.setBpm(*bpm);
+            }
     mChain.delay.setSyncIndex((int)apvts.getRawParameterValue("delaySync")->load());
     mChain.delay.setTimeMs(apvts.getRawParameterValue("delayTime")->load());
     mChain.delay.setFeedback(apvts.getRawParameterValue("delayFeedback")->load());
@@ -363,21 +869,22 @@ bool NamRigProcessor::isBusesLayoutSupported(const BusesLayout &layouts) const
     return mainOut == juce::AudioChannelSet::mono() || mainOut == juce::AudioChannelSet::stereo();
 }
 
-void NamRigProcessor::loadModel(const juce::File &namFile)
+void NamRigProcessor::loadModel(const juce::File &namFile, int rig)
 {
+    rig = juce::jlimit(0, 1, rig);
     if (!namFile.existsAsFile())
     {
-        mModelName = "File not found";
+        mModelName[rig] = "File not found";
         return;
     }
 
-    const auto info = mChain.amp.engine().loadModel(
+    const auto info = ampFor(rig).engine().loadModel(
         std::filesystem::path(namFile.getFullPathName().toStdString()));
 
     if (!info.ok)
     {
-        mModelName = juce::String("Error: ") + info.error;
-        mModelLoaded.store(false);
+        mModelName[rig] = juce::String("Error: ") + info.error;
+        mModelLoaded[rig].store(false);
         return;
     }
 
@@ -385,24 +892,25 @@ void NamRigProcessor::loadModel(const juce::File &namFile)
     if (info.expectedSampleRate > 0.0 && std::abs(info.expectedSampleRate - 48000.0) > 1.0)
         suffix += " [warn: native " + juce::String(info.expectedSampleRate, 0) + "Hz; AA assumes 48k]";
 
-    mModelName = namFile.getFileNameWithoutExtension() + suffix;
+    mModelName[rig] = namFile.getFileNameWithoutExtension() + suffix;
     // Cache the source text so presets can embed the model (single-file rigs).
-    mModelText = namFile.loadFileAsString();
-    mModelBaseName = namFile.getFileNameWithoutExtension();
-    mModelPath = namFile.getFullPathName();
-    mModelLoaded.store(true);
+    mModelText[rig] = namFile.loadFileAsString();
+    mModelBaseName[rig] = namFile.getFileNameWithoutExtension();
+    mModelPath[rig] = namFile.getFullPathName();
+    mModelLoaded[rig].store(true);
 
     updateLatency(); // available factors may have changed
 }
 
-void NamRigProcessor::loadIr(const juce::File &irFile)
+void NamRigProcessor::loadIr(const juce::File &irFile, int rig)
 {
-    if (mChain.cab.loadIr(irFile))
+    rig = juce::jlimit(0, 1, rig);
+    if (cabFor(rig).loadIr(irFile))
     {
-        mIrPath = irFile.getFullPathName();
+        mIrPath[rig] = irFile.getFullPathName();
         // Cache the source bytes so presets can embed the IR (single-file rigs).
-        irFile.loadFileAsData(mIrBytes);
-        mIrBaseName = irFile.getFileNameWithoutExtension();
+        irFile.loadFileAsData(mIrBytes[rig]);
+        mIrBaseName[rig] = irFile.getFileNameWithoutExtension();
         updateLatency();
     }
 }
@@ -410,8 +918,10 @@ void NamRigProcessor::loadIr(const juce::File &irFile)
 void NamRigProcessor::getStateInformation(juce::MemoryBlock &destData)
 {
     auto state = apvts.copyState();
-    state.setProperty("modelPath", mModelPath, nullptr);
-    state.setProperty("irPath", mIrPath, nullptr);
+    state.setProperty("modelPath", mModelPath[0], nullptr);
+    state.setProperty("irPath", mIrPath[0], nullptr);
+    state.setProperty("modelPathB", mModelPath[1], nullptr);
+    state.setProperty("irPathB", mIrPath[1], nullptr);
     std::unique_ptr<juce::XmlElement> xml(state.createXml());
     copyXmlToBinary(*xml, destData);
 }
@@ -423,14 +933,22 @@ void NamRigProcessor::setStateInformation(const void *data, int sizeInBytes)
         return;
 
     auto state = juce::ValueTree::fromXml(*xml);
+    beginStateLoad(); // don't let the type-change reset wipe the restored knobs
     apvts.replaceState(state);
+    endStateLoadDeferred();
 
     const juce::String modelPath = state.getProperty("modelPath", "");
     if (modelPath.isNotEmpty())
-        loadModel(juce::File(modelPath));
+        loadModel(juce::File(modelPath), 0);
     const juce::String irPath = state.getProperty("irPath", "");
     if (irPath.isNotEmpty())
-        loadIr(juce::File(irPath));
+        loadIr(juce::File(irPath), 0);
+    const juce::String modelPathB = state.getProperty("modelPathB", "");
+    if (modelPathB.isNotEmpty())
+        loadModel(juce::File(modelPathB), 1);
+    const juce::String irPathB = state.getProperty("irPathB", "");
+    if (irPathB.isNotEmpty())
+        loadIr(juce::File(irPathB), 1);
 }
 
 juce::AudioProcessor *JUCE_CALLTYPE createPluginFilter()

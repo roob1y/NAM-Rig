@@ -112,83 +112,132 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mLedAtt;
 };
 
-// The fixed serial chain as a row of tiles with flow chevrons between them.
+// The dual-rig chain as a branched tile diagram: shared full-height tiles for
+// the mono pre (gate, comp) and stereo post (mix, mod, delay, verb), with the
+// two rig voices as parallel half-height lanes (Rig A top, Rig B bottom) that
+// split off the comp and merge at the MIX tile.
 class BlockStrip : public juce::Component
 {
 public:
+    enum Lane { Full = 0, Top = 1, Bot = 2 };
     std::function<void(int)> onSelectionChanged; // selectable-block index
 
     BlockStrip(juce::AudioProcessorValueTreeState &apvts)
     {
-        struct Slot { const char *name, *param; bool future; };
+        struct Slot { const char *name, *param; int col, lane; };
+        // Order MUST match the editor's mPanels array (selectable index).
+        // Rig B's eq/cab have no per-rig bypass param -> no LED (always on).
         static const Slot slots[] = {
-            {"GATE",  "gateOn",   false},
-            {"COMP",  "compOn",   false},
-            {"AMP",   "",         false},
-            {"EQ",    "eqOn",     false},
-            {"CAB",   "cabOn",    false},
-            {"MOD",   "modOn",    false},
-            {"DELAY", "delayOn",  false},
-            {"VERB",  "reverbOn", false},
+            {"GATE",  "gateOn",   0, Full},
+            {"COMP",  "compOn",   1, Full},
+            {"DRIVE", "",         2, Full},
+            {"AMP A", "",         3, Top},
+            {"EQ A",  "eqOn",     4, Top},
+            {"CAB A", "cabOn",    5, Top},
+            {"AMP B", "",         3, Bot},
+            {"EQ B",  "",         4, Bot},
+            {"CAB B", "",         5, Bot},
+            {"MIX",   "",         6, Full},
+            {"MOD",   "modOn",    7, Full},
+            {"DELAY", "delayOn",  8, Full},
+            {"VERB",  "reverbOn", 9, Full},
         };
-        int selectable = 0;
         for (const auto &s : slots)
         {
-            auto tile = std::make_unique<BlockTile>(s.name, s.param, apvts, s.future);
-            if (!s.future)
-            {
-                const int index = selectable++;
-                tile->onSelect = [this, index] { select(index); };
-            }
+            const int index = (int)mTiles.size();
+            auto tile = std::make_unique<BlockTile>(s.name, s.param, apvts, false);
+            tile->onSelect = [this, index] { select(index); };
             addAndMakeVisible(*tile);
             mTiles.push_back(std::move(tile));
+            mLayout.push_back({s.col, s.lane});
         }
     }
 
     void select(int selectableIndex)
     {
         mSelected = selectableIndex;
-        int i = 0;
-        for (auto &t : mTiles)
-            if (!t->isFuture())
-                t->setSelected(i++ == selectableIndex);
+        for (int i = 0; i < (int)mTiles.size(); ++i)
+            mTiles[(size_t)i]->setSelected(i == selectableIndex);
         if (onSelectionChanged)
             onSelectionChanged(selectableIndex);
     }
 
     void resized() override
     {
-        const int n = (int)mTiles.size();
-        const int gap = 16;
-        const int tileW = (getWidth() - gap * (n - 1)) / n;
-        auto area = getLocalBounds();
-        for (int i = 0; i < n; ++i)
+        const int gap = 10;
+        const int colW = juce::jmax(1, (getWidth() - gap * (kCols - 1)) / kCols);
+        const int H = getHeight();
+        const int laneGap = 6;
+        const int laneH = (H - laneGap) / 2;
+        for (size_t i = 0; i < mTiles.size(); ++i)
         {
-            mTiles[(size_t)i]->setBounds(area.removeFromLeft(tileW));
-            if (i < n - 1)
-                area.removeFromLeft(gap);
+            const int col = mLayout[i].first, lane = mLayout[i].second;
+            const int x = col * (colW + gap);
+            int y = 0, h = H;
+            if (lane == Top) { y = 0; h = laneH; }
+            else if (lane == Bot) { y = H - laneH; h = laneH; }
+            mTiles[i]->setBounds(x, y, colW, h);
         }
     }
 
     void paint(juce::Graphics &g) override
     {
-        // Chevrons in the gaps: signal flow direction.
         g.setColour(colors::textDim);
-        for (size_t i = 0; i + 1 < mTiles.size(); ++i)
-        {
-            const float x0 = (float)mTiles[i]->getRight();
-            const float x1 = (float)mTiles[i + 1]->getX();
-            const float cx = (x0 + x1) * 0.5f, cy = (float)getHeight() * 0.5f;
-            juce::Path p;
-            p.startNewSubPath(cx - 2.5f, cy - 4.5f);
-            p.lineTo(cx + 2.5f, cy);
-            p.lineTo(cx - 2.5f, cy + 4.5f);
-            g.strokePath(p, juce::PathStrokeType(1.6f));
-        }
+        const float yC = (float)getHeight() * 0.5f;
+        auto cy = [](BlockTile &t) { return (float)t.getBounds().getCentreY(); };
+
+        // Split: DRIVE -> AMP A (top) and AMP B (bottom).
+        const float splitX = ((float)mTiles[2]->getRight() + (float)mTiles[3]->getX()) * 0.5f;
+        branch(g, (float)mTiles[2]->getRight(), yC, splitX, cy(*mTiles[3]),
+               (float)mTiles[3]->getX(), cy(*mTiles[6]), (float)mTiles[6]->getX());
+        // Merge: CAB A / CAB B -> MIX.
+        const float mergeX = ((float)mTiles[5]->getRight() + (float)mTiles[9]->getX()) * 0.5f;
+        branch(g, (float)mTiles[9]->getX(), yC, mergeX, cy(*mTiles[3]),
+               (float)mTiles[5]->getRight(), cy(*mTiles[6]), (float)mTiles[5]->getRight());
+
+        // Flow chevrons between adjacent same-lane tiles.
+        chevron(g, *mTiles[0], *mTiles[1]);   // GATE -> COMP
+        chevron(g, *mTiles[1], *mTiles[2]);   // COMP -> DRIVE
+        chevron(g, *mTiles[3], *mTiles[4]);   // AMP A -> EQ A
+        chevron(g, *mTiles[4], *mTiles[5]);   // EQ A -> CAB A
+        chevron(g, *mTiles[6], *mTiles[7]);   // AMP B -> EQ B
+        chevron(g, *mTiles[7], *mTiles[8]);   // EQ B -> CAB B
+        chevron(g, *mTiles[9], *mTiles[10]);  // MIX -> MOD
+        chevron(g, *mTiles[10], *mTiles[11]); // MOD -> DELAY
+        chevron(g, *mTiles[11], *mTiles[12]); // DELAY -> VERB
     }
 
 private:
+    // Y-connector: trunk at (x0,yC)->(xMid,yC), then to two lane stubs at xTop/xBot.
+    static void branch(juce::Graphics &g, float x0, float yC, float xMid,
+                       float yTop, float xTopEnd, float yBot, float xBotEnd)
+    {
+        juce::Path p;
+        p.startNewSubPath(x0, yC);
+        p.lineTo(xMid, yC);
+        p.startNewSubPath(xMid, yTop);
+        p.lineTo(xMid, yBot);
+        p.startNewSubPath(xMid, yTop);
+        p.lineTo(xTopEnd, yTop);
+        p.startNewSubPath(xMid, yBot);
+        p.lineTo(xBotEnd, yBot);
+        g.strokePath(p, juce::PathStrokeType(1.4f));
+    }
+
+    static void chevron(juce::Graphics &g, BlockTile &a, BlockTile &b)
+    {
+        const float cx = ((float)a.getRight() + (float)b.getX()) * 0.5f;
+        const float cyv = (float)a.getBounds().getCentreY();
+        juce::Path p;
+        p.startNewSubPath(cx - 2.5f, cyv - 4.0f);
+        p.lineTo(cx + 2.5f, cyv);
+        p.lineTo(cx - 2.5f, cyv + 4.0f);
+        g.strokePath(p, juce::PathStrokeType(1.5f));
+    }
+
+    static constexpr int kCols = 10;
     std::vector<std::unique_ptr<BlockTile>> mTiles;
+    std::vector<std::pair<int, int>> mLayout; // (col, lane) per tile
     int mSelected = -1;
 };
 

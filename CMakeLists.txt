@@ -35,6 +35,7 @@ target_sources(NAM_Rig PRIVATE
     src/PluginEditor.h
     src/CalNorm.h
     src/PresetFile.h
+    src/FactoryPresets.h
     src/PresetManager.h
     src/ui/RigLookAndFeel.h
     src/ui/Meter.h
@@ -149,6 +150,23 @@ if(BUILD_RIG_HARNESS)
     )
     if(MSVC)
         target_compile_options(gate_test PRIVATE /arch:AVX2 /fp:fast)
+    endif()
+
+    # DriveBlock measurement suite (Off/Boost exactness, ADAA anti-aliasing)
+    juce_add_console_app(drive_test PRODUCT_NAME "drive_test")
+    target_sources(drive_test PRIVATE tests/drive_test.cpp)
+    target_include_directories(drive_test PRIVATE src)
+    target_compile_definitions(drive_test PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        _USE_MATH_DEFINES   # M_PI on MSVC
+    )
+    target_link_libraries(drive_test PRIVATE
+        juce::juce_audio_basics
+        juce::juce_recommended_config_flags
+    )
+    if(MSVC)
+        target_compile_options(drive_test PRIVATE /arch:AVX2 /fp:fast)
     endif()
 
     # CompBlock measurement suite (PASS/FAIL, exits nonzero on failure)

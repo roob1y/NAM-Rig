@@ -9,8 +9,10 @@
 // T5 file write/read round-trip
 // T6 params-only preset: hasModel/hasIr false, still valid
 #include "PresetFile.h"
+#include "FactoryPresets.h"
 #include <cstdio>
 #include <random>
+#include <set>
 
 using nam_rig::PresetFile;
 
@@ -147,6 +149,68 @@ int main()
         CHECK(!q.hasModel() && !q.hasIr(), "T6 hasModel/hasIr false");
         CHECK((double)q.params.getDynamicObject()->getProperty("outputGain") == 3.0,
               "T6 value intact");
+    }
+
+    // ---- T7: v2 round-trips Rig B model + IR alongside Rig A ----
+    {
+        auto p = makeFull();
+        std::mt19937 rng(99);
+        juce::MemoryBlock irA(2048), irB(3072);
+        for (size_t i = 0; i < irA.getSize(); ++i)
+            ((unsigned char *)irA.getData())[i] = (unsigned char)(rng() & 0xff);
+        for (size_t i = 0; i < irB.getSize(); ++i)
+            ((unsigned char *)irB.getData())[i] = (unsigned char)(rng() & 0xff);
+        p.irBytes = irA;
+        p.modelNameB = "JCM800 lead";
+        p.modelTextB = juce::String::fromUTF8(
+            "{\"version\":\"0.5.4\",\"rigB\":true,\"weights\":[9.9e9,-1.0]}");
+        p.irNameB = "V30 2x12";
+        p.irBytesB = irB;
+
+        PresetFile q;
+        CHECK(PresetFile::parse(p.toJson(), q), "T7 v2 dual-rig preset parses");
+        CHECK(q.modelTextB == p.modelTextB && q.modelNameB == p.modelNameB,
+              "T7 Rig B model byte-exact");
+        CHECK(q.irBytesB == p.irBytesB && q.irNameB == p.irNameB, "T7 Rig B IR byte-exact");
+        CHECK(q.modelText == p.modelText && q.irBytes == p.irBytes, "T7 Rig A still intact");
+        CHECK(q.hasModelB() && q.hasIrB(), "T7 hasModelB/hasIrB true");
+        const auto v = juce::JSON::parse(p.toJson());
+        CHECK((int)v.getDynamicObject()->getProperty("version") == PresetFile::kVersion,
+              "T7 version stamped %d", PresetFile::kVersion);
+    }
+
+    // ---- T8: a v1 file (no Rig B) still loads, model -> Rig A ----
+    {
+        const char *v1 =
+            "{\"format\":\"nam-rig-preset\",\"version\":1,\"name\":\"old\","
+            "\"params\":{\"outputGain\":1.5},"
+            "\"model\":{\"name\":\"old amp\",\"nam\":\"{\\\"v\\\":1}\"}}";
+        PresetFile q;
+        CHECK(PresetFile::parse(v1, q), "T8 v1 preset parses");
+        CHECK(q.hasModel() && q.modelName == "old amp", "T8 v1 model -> Rig A");
+        CHECK(!q.hasModelB() && !q.hasIrB(), "T8 v1 has no Rig B");
+        CHECK((double)q.params.getDynamicObject()->getProperty("outputGain") == 1.5,
+              "T8 v1 params intact");
+    }
+
+    // ---- T9: factory preset bank is well-formed (params-only, unique) ----
+    {
+        auto facs = nam_rig::FactoryPresets::all();
+        CHECK(facs.size() >= 3, "T9 factory bank has presets (%d)", (int)facs.size());
+        bool ok = true;
+        std::set<juce::String> names;
+        for (auto &f : facs)
+        {
+            PresetFile q;
+            const bool parses = PresetFile::parse(f.toJson(), q);
+            auto *po = f.params.getDynamicObject();
+            if (!parses || po == nullptr || po->getProperties().size() == 0 ||
+                f.hasModel() || f.hasIr())
+                ok = false;
+            names.insert(f.name);
+        }
+        CHECK(ok, "T9 every factory preset round-trips and is params-only");
+        CHECK((int)names.size() == (int)facs.size(), "T9 factory names are unique");
     }
 
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);

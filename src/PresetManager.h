@@ -10,6 +10,7 @@
 
 #include "PluginProcessor.h"
 #include "PresetFile.h"
+#include "FactoryPresets.h"
 
 namespace nam_rig
 {
@@ -17,7 +18,7 @@ namespace nam_rig
 class PresetManager
 {
 public:
-    explicit PresetManager(NamRigProcessor &p) : mProc(p) {}
+    explicit PresetManager(NamRigProcessor &p) : mProc(p) { installFactory(); }
 
     static juce::File presetsDir()
     {
@@ -80,6 +81,16 @@ public:
             preset.irName = mProc.irBaseName();
             preset.irBytes = mProc.irBytes();
         }
+        if (mProc.isModelLoaded(1) && mProc.modelText(1).isNotEmpty())
+        {
+            preset.modelNameB = mProc.modelBaseName(1);
+            preset.modelTextB = mProc.modelText(1);
+        }
+        if (mProc.isIrLoaded(1) && mProc.irBytes(1).getSize() > 0)
+        {
+            preset.irNameB = mProc.irBaseName(1);
+            preset.irBytesB = mProc.irBytes(1);
+        }
         return preset;
     }
 
@@ -90,6 +101,9 @@ public:
     void applyState(const PresetFile &preset)
     {
         auto *obj = preset.params.getDynamicObject();
+        // Suppress the mod type-change knob reset while we apply saved values, so
+        // a slot's saved knobs aren't wiped when its Type param is set.
+        mProc.beginStateLoad();
         for (auto *p : mProc.getParameters())
             if (auto *rp = dynamic_cast<juce::RangedAudioParameter *>(p))
             {
@@ -100,6 +114,7 @@ public:
                 rp->setValueNotifyingHost(juce::jlimit(0.0f, 1.0f, norm));
                 rp->endChangeGesture();
             }
+        mProc.endStateLoadDeferred();
 
         const auto tmpDir = juce::File::getSpecialLocation(juce::File::tempDirectory)
                                 .getChildFile("NAMRigPreset");
@@ -124,6 +139,24 @@ public:
                 const auto tmp = tmpDir.getChildFile(sanitize(preset.irName) + ".wav");
                 if (tmp.replaceWithData(preset.irBytes.getData(), preset.irBytes.getSize()))
                     mProc.loadIr(tmp);
+            }
+        }
+        if (preset.hasModelB())
+        {
+            if (!mProc.isModelLoaded(1) || preset.modelTextB != mProc.modelText(1))
+            {
+                const auto tmp = tmpDir.getChildFile(sanitize(preset.modelNameB) + "_B.nam");
+                if (tmp.replaceWithText(preset.modelTextB))
+                    mProc.loadModel(tmp, 1);
+            }
+        }
+        if (preset.hasIrB())
+        {
+            if (!mProc.isIrLoaded(1) || preset.irBytesB != mProc.irBytes(1))
+            {
+                const auto tmp = tmpDir.getChildFile(sanitize(preset.irNameB) + "_B.wav");
+                if (tmp.replaceWithData(preset.irBytesB.getData(), preset.irBytesB.getSize()))
+                    mProc.loadIr(tmp, 1);
             }
         }
     }
@@ -154,31 +187,6 @@ public:
         mCurrentName = preset.name;
         mLoadedParams = preset.params; // snapshot for the modified indicator
         return true;
-    }
-
-    // ---- A/B compare: two in-memory full-state slots (params + model + IR) ----
-    // The active slot is the live rig; switching captures the live state into
-    // the slot being left so per-slot edits survive, and recalls the target.
-    int abActive() const { return mAbActive; }
-
-    void abSwitch(int slot)
-    {
-        slot = juce::jlimit(0, 1, slot);
-        if (slot == mAbActive)
-            return;
-        captureLiveInto(mAb[mAbActive]); // preserve edits + identity we leave
-        if (mAb[slot].valid)
-            restoreFrom(mAb[slot]);
-        else
-            mAb[slot] = mAb[mAbActive]; // first visit: clone so A and B match
-        mAbActive = slot;
-    }
-
-    // Copy the active (live) state onto the other slot, so both start equal.
-    void abCopyToOther()
-    {
-        captureLiveInto(mAb[mAbActive]);
-        mAb[1 - mAbActive] = mAb[mAbActive];
     }
 
     // ---- Rename / delete the current preset file (message thread) ----
@@ -227,42 +235,28 @@ private:
         return cleaned.isEmpty() ? juce::String("preset") : cleaned;
     }
 
-    // A/B slot: full rig state PLUS the preset identity, so the bar's name and
-    // modified-asterisk follow the active slot.
-    struct AbSlot
+    // Write the built-in factory presets to the presets folder once (guarded by
+    // a marker so a user can delete one without it coming back). Params-only:
+    // they apply over whatever amps are loaded.
+    void installFactory()
     {
-        PresetFile state;
-        juce::File presetFile;
-        juce::String presetName;
-        juce::var loadedParams;
-        bool valid = false;
-    };
-
-    void captureLiveInto(AbSlot &s) const
-    {
-        s.state = captureState();
-        s.presetFile = mCurrentFile;
-        s.presetName = mCurrentName;
-        s.loadedParams = mLoadedParams;
-        s.valid = true;
-    }
-
-    void restoreFrom(const AbSlot &s)
-    {
-        applyState(s.state); // skips model/IR reload when unchanged (fast)
-        mCurrentFile = s.presetFile;
-        mCurrentName = s.presetName;
-        mLoadedParams = s.loadedParams;
+        const auto marker = presetsDir().getChildFile(".factory_v1");
+        if (marker.existsAsFile())
+            return;
+        presetsDir().createDirectory();
+        for (const auto &f : FactoryPresets::all())
+        {
+            const auto file = presetsDir().getChildFile(sanitize(f.name) + PresetFile::kExtension);
+            if (!file.existsAsFile())
+                f.writeToFile(file);
+        }
+        marker.replaceWithText("nam-rig factory v1");
     }
 
     NamRigProcessor &mProc;
     juce::File mCurrentFile;
     juce::String mCurrentName;
     juce::var mLoadedParams;
-
-    // A/B compare slots. Both start invalid; the preset bar seeds them.
-    AbSlot mAb[2];
-    int mAbActive = 0;
 };
 
 } // namespace nam_rig

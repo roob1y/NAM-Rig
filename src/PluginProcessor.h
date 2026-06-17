@@ -6,9 +6,14 @@
 
 #include "rig/RigChain.h"
 
-namespace nam_rig { class PresetManager; }
+namespace nam_rig
+{
+    class PresetManager;
+}
 
-class NamRigProcessor : public juce::AudioProcessor
+class NamRigProcessor : public juce::AudioProcessor,
+                        private juce::AudioProcessorValueTreeState::Listener,
+                        private juce::AsyncUpdater
 {
 public:
     NamRigProcessor();
@@ -38,40 +43,58 @@ public:
     const juce::String getProgramName(int) override { return {}; }
     void changeProgramName(int, const juce::String &) override {}
 
-    // --- model / IR loading (message thread) ---
-    void loadModel(const juce::File &namFile);
-    void loadIr(const juce::File &irFile);
+    // --- model / IR loading (message thread). rig 0 = Rig A, 1 = Rig B. ---
+    void loadModel(const juce::File &namFile, int rig = 0);
+    void loadIr(const juce::File &irFile, int rig = 0);
 
     // Source content cached at load time (embedded into .namrig presets).
-    const juce::String &modelText() const { return mModelText; }
-    const juce::String &modelBaseName() const { return mModelBaseName; }
-    const juce::MemoryBlock &irBytes() const { return mIrBytes; }
-    const juce::String &irBaseName() const { return mIrBaseName; }
+    const juce::String &modelText(int rig = 0) const { return mModelText[rig]; }
+    const juce::String &modelBaseName(int rig = 0) const { return mModelBaseName[rig]; }
+    const juce::MemoryBlock &irBytes(int rig = 0) const { return mIrBytes[rig]; }
+    const juce::String &irBaseName(int rig = 0) const { return mIrBaseName[rig]; }
 
     // Preset manager lives on the processor so the current preset name
     // survives editor close/reopen (message thread only).
     nam_rig::PresetManager &presets() { return *mPresets; }
-    juce::String getModelName() const { return mModelName; }
-    juce::String getIrName() const { return mChain.cab.irName(); }
-    bool isModelLoaded() const { return mModelLoaded.load(); }
-    bool isIrLoaded() const { return mChain.cab.isIrLoaded(); }
-    bool isA2Model() const { return mChain.amp.engine().isA2(); }
+    juce::String getModelName(int rig = 0) const { return mModelName[rig]; }
+    juce::String getIrName(int rig = 0) const { return cabFor(rig).irName(); }
+    bool isModelLoaded(int rig = 0) const { return mModelLoaded[rig].load(); }
+    bool isIrLoaded(int rig = 0) const { return cabFor(rig).isIrLoaded(); }
+    bool isA2Model(int rig = 0) const { return ampFor(rig).engine().isA2(); }
 
     // Engaged amp factor on the last block (0 = passthrough). Editor status.
-    int engagedFactor() const { return mChain.amp.engagedFactor(); }
+    int engagedFactor(int rig = 0) const { return ampFor(rig).engagedFactor(); }
+
+    // Auto phase-align: probe both voices, cross-correlate, write the measured
+    // lag (rigAlign) + polarity (rigPolB) to params. Suspends processing around
+    // the offline render. Message thread; wired to the load/Align UI in 2d.
+    void autoAlign();
+
+    // Match Levels: probe both voices' actual loudness (cab + cal/normalize
+    // included) and set the per-rig Level params so they come out equal — the
+    // louder rig is brought down, no boost. Suspends processing; message thread.
+    void matchLevels();
 
     // --- Input calibration / output normalization (NAM-AA parity; CalNorm.h) ---
-    // Metadata availability gates the editor controls; the *GainDb() helpers
-    // return the live correction (0 dB when disabled/absent) for status display
-    // and are also folded into the in/out gains in processBlock.
-    bool hasInputCalibration() const { return mChain.amp.engine().hasInputLevelDbu(); }
-    bool hasLoudness() const { return mChain.amp.engine().hasLoudness(); }
-    float calibrationGainDb() const;
-    float normalizationGainDb() const;
+    // Per-rig: each rig is calibrated/normalized from its OWN model metadata,
+    // applied as that rig's voice in/out trims. The enable toggles are global;
+    // has*() is true if EITHER rig carries the metadata.
+    bool hasInputCalibration() const
+    {
+        return mChain.amp.engine().hasInputLevelDbu() || mChain.ampB.engine().hasInputLevelDbu();
+    }
+    bool hasLoudness() const
+    {
+        return mChain.amp.engine().hasLoudness() || mChain.ampB.engine().hasLoudness();
+    }
+    float calibrationGainDb(int rig = 0) const;
+    float normalizationGainDb(int rig = 0) const;
 
     // Live gain-reduction telemetry for the editor meters.
     float gateGainDb() const { return mChain.gate.currentGainDb(); }
     float compGrDb() const { return mChain.comp.grDb(); }
+    float compInDb() const { return mChain.comp.inPeakDb(); }
+    float compOutDb() const { return mChain.comp.outPeakDb(); }
 
     // --- Parameters ---
     juce::AudioProcessorValueTreeState apvts;
@@ -85,29 +108,74 @@ public:
     int uiSelectedBlock = 2; // strip selection, default AMP
     int uiWidth = 0;         // last editor width, 0 = use default
 
+    // Momentary mod-slot solo (dial-in tool; not a parameter -> not saved, not
+    // automated). When any slot is soloed, only soloed slots are heard. Set by
+    // the editor's solo buttons, read in updateChainParameters.
+    std::atomic<bool> modSolo[nam_rig::ModBlock::kSlots]{};
+    void setModSolo(int slot, bool on)
+    {
+        if (slot >= 0 && slot < nam_rig::ModBlock::kSlots)
+            modSolo[(size_t)slot].store(on);
+    }
+    bool getModSolo(int slot) const
+    {
+        return slot >= 0 && slot < nam_rig::ModBlock::kSlots && modSolo[(size_t)slot].load();
+    }
+
+    // State-load guard (used by setStateInformation + PresetManager): while set,
+    // a mod-slot type change does NOT reset that slot's knobs (so loading a
+    // preset keeps its saved knob values). Cleared asynchronously so it also
+    // covers JUCE's deferred parameter-attachment updates.
+    void beginStateLoad() { mSuppressTypeReset.store(true); }
+    void endStateLoadDeferred()
+    {
+        juce::MessageManager::callAsync([sp = juce::WeakReference<NamRigProcessor>(this)] {
+            if (auto *self = sp.get()) self->mSuppressTypeReset.store(false);
+        });
+    }
+
 private:
+    // On a USER mod-slot type change, reset that slot's knobs to the new type's
+    // defaults (so stale values don't carry across effects). Done via a parameter
+    // listener -> AsyncUpdater (message thread); suppressed during state loads.
+    void parameterChanged(const juce::String &paramID, float newValue) override;
+    void handleAsyncUpdate() override;
+
+    std::atomic<bool> mSuppressTypeReset{false};
+    std::atomic<int> mPendingTypeReset{0}; // bitmask of slots awaiting a knob reset
     void updateLatency();
-    int requestedFactorNow() const; // oversample param + offline bump (NAM-AA logic)
+    int requestedFactorNow(int rig) const; // per-rig oversample param + offline bump
+
+    // Per-rig block access (rig 0 = A, 1 = B).
+    nam_rig::AmpBlock &ampFor(int rig) { return rig ? mChain.ampB : mChain.amp; }
+    const nam_rig::AmpBlock &ampFor(int rig) const { return rig ? mChain.ampB : mChain.amp; }
+    nam_rig::CabBlock &cabFor(int rig) { return rig ? mChain.cabB : mChain.cab; }
+    const nam_rig::CabBlock &cabFor(int rig) const { return rig ? mChain.cabB : mChain.cab; }
 
     nam_rig::RigChain mChain;
 
-    juce::String mModelName{"No model loaded"};
-    std::atomic<bool> mModelLoaded{false};
+    // Per-rig model/IR state (index 0 = Rig A, 1 = Rig B).
+    juce::String mModelName[2]{"No model loaded", "No model loaded"};
+    std::atomic<bool> mModelLoaded[2]{};
 
     // Paths persisted in plugin state and restored on load.
-    juce::String mModelPath, mIrPath;
+    juce::String mModelPath[2], mIrPath[2];
 
     // Embedding caches (message thread only; written by loadModel/loadIr).
-    juce::String mModelText, mModelBaseName;
-    juce::MemoryBlock mIrBytes;
-    juce::String mIrBaseName;
+    juce::String mModelText[2], mModelBaseName[2];
+    juce::MemoryBlock mIrBytes[2];
+    juce::String mIrBaseName[2];
 
     std::unique_ptr<nam_rig::PresetManager> mPresets;
 
-    // Last gate lookahead pushed to the chain (PDC re-report on change).
+    // Re-report PDC when these change (lookahead / align / mode shift latency).
     float mLastGateLookMs = -1.0f;
+    float mLastRigAlign = -1.0e9f;
+    int mLastRigMode = -1;
+    int mLastFactorA = -1, mLastFactorB = -1;
 
     double mSampleRate = 48000.0;
 
+    JUCE_DECLARE_WEAK_REFERENCEABLE(NamRigProcessor)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(NamRigProcessor)
 };

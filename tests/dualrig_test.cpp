@@ -307,6 +307,81 @@ int main(int argc, char **argv)
         CHECK(std::fabs((pdc10 - pdc0) - 10.0) < 1e-9, "T6 align delay folds into PDC (+10)");
     }
 
+    // ===================== T7: auto-align probe recovers a cab offset =========
+    // Same model in both rigs; Rig A cab passthrough, Rig B cab = an IR whose
+    // body is delayed ~11 samples. measureAlignment() should report B later ~11.
+    {
+        const char *irPath = argc > 2 ? argv[2] : "delay11.wav";
+        RigChain chain;
+        chain.amp.engine().loadModel(model);
+        chain.ampB.engine().loadModel(model);
+        chain.prepare(48000.0, 256);
+        chain.amp.setRequestedFactor(1);
+        chain.ampB.setRequestedFactor(1);
+        const bool irOk = chain.cabB.loadIr(juce::File(juce::String(irPath)));
+        CHECK(irOk, "T7 Rig B delay IR loads (%s)", irPath);
+        const auto r = chain.measureAlignment();
+        CHECK(std::fabs(r.lagSamples - 11.0) < 1.5 && !r.invert,
+              "T7 auto-align recovers cab offset ~11 (got %.2f, inv=%d)",
+              r.lagSamples, (int)r.invert);
+    }
+
+    // ===================== T8: per-rig AA latency compensation ================
+    {
+        const int N = 1024, B = 256;
+        RigChain chain;
+        chain.amp.engine().loadModel(model);
+        chain.ampB.engine().loadModel(model);
+        chain.prepare(48000.0, B);
+        chain.amp.setRequestedFactor(1);
+        chain.ampB.setRequestedFactor(4);
+        chain.gate.setBypassed(true);
+        chain.comp.setBypassed(true);
+        chain.eq.setBypassed(true);
+        chain.eqB.setBypassed(true);
+        chain.cab.setBypassed(true);
+        chain.cabB.setBypassed(true);
+        chain.mod.setBypassed(true);
+        chain.delay.setBypassed(true);
+        chain.reverb.setBypassed(true);
+
+        chain.setMode(RigChain::SoloA);
+        const double la = chain.latencySamples();
+        chain.setMode(RigChain::SoloB);
+        const double lb = chain.latencySamples();
+        chain.setMode(RigChain::Dual);
+        const double ld = chain.latencySamples();
+        CHECK(std::fabs(ld - std::max(la, lb)) < 1e-9, "T8 Dual PDC = max(SoloA,SoloB) (%.1f)", ld);
+        CHECK(std::fabs(la - lb) > 0.5, "T8 per-rig AA -> different voice latency (%.1f vs %.1f)", la, lb);
+
+        std::vector<float> in(N);
+        std::uint32_t sd = 777u;
+        for (int i = 0; i < N; ++i)
+        {
+            sd = sd * 1103515245u + 12345u;
+            in[(size_t)i] = 0.2f * (float)((int)((sd >> 16) & 0x7fff) - 16384) / 16384.0f;
+        }
+        chain.reset();
+        chain.setMode(RigChain::Dual);
+        chain.setLevelA(1.0f);
+        chain.setLevelB(1.0f);
+        chain.setPanA(-1.0f);
+        chain.setPanB(1.0f);
+        std::vector<float> oL, oR;
+        for (int pos = 0; pos < N; pos += B)
+        {
+            const int m = std::min(B, N - pos);
+            juce::AudioBuffer<float> blk(2, m);
+            std::memcpy(blk.getWritePointer(0), in.data() + pos, (size_t)m * sizeof(float));
+            blk.clear(1, 0, m);
+            chain.process(blk);
+            oL.insert(oL.end(), blk.getReadPointer(0), blk.getReadPointer(0) + m);
+            oR.insert(oR.end(), blk.getReadPointer(1), blk.getReadPointer(1) + m);
+        }
+        const auto r = nam_rig::PhaseAlign::measure(oL.data(), oR.data(), N, 256);
+        CHECK(std::fabs(r.lagSamples) < 2.0, "T8 comp aligns the two voices (L/R lag %.2f)", r.lagSamples);
+    }
+
     std::printf("\n%s (%d failure%s)\n", gFails == 0 ? "ALL PASS" : "FAILURES",
                 gFails, gFails == 1 ? "" : "s");
     return gFails == 0 ? 0 : 1;
