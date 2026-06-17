@@ -3,19 +3,24 @@
 // A/B split: one board feeding both rigs, the common real two-amp live rig).
 //
 // Voicings are tuned to the MEASURED behaviour of the classic circuits they
-// model (ElectroSmash circuit analyses + published responses):
+// model (from published circuit analyses + measured frequency responses):
 //   Off          : out of the path — bit-exact passthrough.
-//   Treble Boost : Dallas Rangemaster — a germanium treble booster. Broad treble
-//                  PEAK (~3.5 kHz) keeping the lows near unity + soft asymmetric
-//                  germanium clip. Bright, mostly clean, breaks up when pushed.
-//   Overdrive    : Ibanez TS808 — the ~720 Hz midrange HUMP into a SYMMETRIC
-//                  soft clip (odd harmonics, warm "dirty + clean" layering),
-//                  with the gentle top-end roll-off above ~5 kHz.
-//   Distortion   : Pro Co RAT — a HARD symmetric clip (diodes to ground) tamed
-//                  by the RAT's filter: strong attenuation above ~5 kHz so it is
-//                  aggressive without fizz; lows pass, mids emphasised.
-//   Fuzz         : Fuzz Face — ASYMMETRIC clipping (one rail soft-ish, the other
-//                  to cutoff): a prominent 2nd harmonic and a "tilted" clip.
+//   Boost        : germanium treble booster ("Range '65") / FET clean boost
+//                  ("EP Boost"). Range '65 = a one-pole input-cap high-pass
+//                  (the 3-way switch moves the corner) + soft germanium clip.
+//   Green Drive  : a green-box mid-hump overdrive. The ~720 Hz midrange HUMP
+//                  lives in the GAIN stage, so the voicing is flat at Drive 0
+//                  and blooms (bass-tighten + hump + ~5 kHz roll-off) as Drive
+//                  rises, into a SYMMETRIC soft clip. Tuned to a measured TS9.
+//   Black Rodent : a hard-clip distortion. HARD symmetric silicon clip (diodes
+//                  to ground) fed by a gain stage whose bass-cut + ~1 kHz hump +
+//                  ~5 kHz roll-off all live in the feedback — so, like the real
+//                  circuit, the voicing is full/flat at Drive 0 and tightens to
+//                  a mid-forward, fizz-free crunch as Drive climbs.
+//   Round Fuzz   : a vintage germanium fuzz. Minimal EQ (keeps the highs, trims
+//                  only the deep bass, no tone control — as measured) + strongly
+//                  ASYMMETRIC clipping: a musical 2nd harmonic at low/mid Fuzz
+//                  that squares up toward both rails when cranked.
 //
 // Signal per slot:  drive gain -> pre low-cut -> mid/treble peak -> waveshaper
 //                   (1st-order ADAA) -> post low-pass -> DC blocker -> tone -> level.
@@ -56,11 +61,15 @@ public:
     void setDrive(int slot, float v)   { at(slot).drive.store(clamp01(v)); }
     void setTone(int slot, float v)    { at(slot).tone.store(clamp01(v)); }
     void setLevelDb(int slot, float v) { at(slot).levelDb.store(v); }
+    void setAutoGain(bool on) { mAutoGain.store(on); } // level-compensate Drive/Tone (default off)
+    void setRange(int slot, int r) { at(slot).range.store(r); } // treble-boost cap switch: 0 Treble/1 Mid/2 Full
+    void setOn(int slot, bool on) { at(slot).on.store(on); }            // footswitch (default on)
+    void setModel(int slot, int m) { at(slot).model.store(m); }         // model within the category
 
     bool anyActive() const
     {
         for (int s = 0; s < kSlots; ++s)
-            if ((Kind)mSlot[s].kind.load() != Kind::Off)
+            if ((Kind)mSlot[s].kind.load() != Kind::Off && mSlot[s].on.load())
                 return true;
         return false;
     }
@@ -77,23 +86,75 @@ public:
         float pivotHz;     // tone tilt pivot
         float outTrim;     // voicing output compensation
         float shapeTrack;  // 0 = pre-shaper EQ always on; 1 = EQ (low-cut + mid)
-                           //     scales with the Drive knob (the TS hump blooms
+                           //     scales with the Drive knob (the mid hump blooms
                            //     with gain instead of being a fixed band-pass)
         float midPost;     // 0 = mid peak PRE-clip (treble booster input cap);
-                           //     1 = POST-clip (TS/RAT tone stack -> peak freq is
+                           //     1 = POST-clip (overdrive/distortion tone stack -> peak freq is
                            //     level-stable instead of dragged down by clipping)
     };
 
-    static Voicing voicingFor(Kind k)
+    // A specific pedal MODEL inside a category (Type). A category can hold several
+    // models; the UI picks the Type (category) then the model. hasRange = the
+    // model exposes the 3-way input-cap switch (treble booster only).
+    struct Model { const char *name, *sub; Voicing v; bool hasRange; };
+
+    static const Model *modelsFor(Kind cat, int &count)
+    {                       // clip  gMin    gMax  lowCut   midHz  midDb midQ   lpHz   bias   pivot   outTrim shp post
+        static const Model boost[] = {
+            {"Range '65", "germanium treble boost",
+             { 0, 2.0f, 20.0f, 2600.0f,   0.0f, 0.0f, 0.7f,    0.0f, 0.20f, 2500.0f, 0.95f, 0.0f, 0.0f}, true},
+            {"EP Boost", "FET clean boost",
+             { 0, 1.0f,  6.0f,  40.0f, 5000.0f, 3.0f, 0.6f,    0.0f, 0.05f, 1000.0f, 0.95f, 0.0f, 1.0f}, false},
+        };
+        static const Model od[] = {
+            {"Green Drive", "mid-hump overdrive",
+             { 0, 1.5f, 30.0f, 560.0f,  780.0f, 6.0f, 0.7f, 1300.0f, 0.05f,  720.0f, 1.10f, 1.0f, 1.0f}, false},
+        };
+        static const Model dist[] = {
+            {"Black Rodent", "hard-clip distortion",
+             { 1, 2.0f,160.0f, 300.0f, 1000.0f, 4.0f, 0.6f, 5000.0f, 0.00f, 1500.0f, 0.44f, 1.0f, 1.0f}, false},
+        };
+        static const Model fuzz[] = {
+            {"Round Fuzz", "germanium fuzz",
+             { 2, 6.0f,300.0f,  40.0f,    0.0f, 0.0f, 0.7f,    0.0f, 0.45f,  700.0f, 0.45f, 0.0f, 0.0f}, false},
+        };
+        switch (cat)
+        {
+        case Kind::Boost:      count = 2; return boost;
+        case Kind::Overdrive:  count = 1; return od;
+        case Kind::Distortion: count = 1; return dist;
+        case Kind::Fuzz:       count = 1; return fuzz;
+        default:               count = 0; return nullptr;
+        }
+    }
+
+    static int modelCount(Kind c) { int n = 0; modelsFor(c, n); return n; }
+    static const char *modelName(Kind c, int m)
+    { int n = 0; const Model *a = modelsFor(c, n); return (a && n > 0) ? a[juce::jlimit(0, n - 1, m)].name : ""; }
+    static const char *modelSub(Kind c, int m)
+    { int n = 0; const Model *a = modelsFor(c, n); return (a && n > 0) ? a[juce::jlimit(0, n - 1, m)].sub : ""; }
+    static bool modelHasRange(Kind c, int m)
+    { int n = 0; const Model *a = modelsFor(c, n); return a && n > 0 && a[juce::jlimit(0, n - 1, m)].hasRange; }
+
+    static Voicing voicingFor(Kind c, int m)
     {
-        switch (k)
-        {                       // clip  gMin    gMax  lowCut   midHz  midDb midQ   lpHz   bias   pivot   outTrim
-        case Kind::Boost:      return { 0, 1.0f,  10.0f, 120.0f, 3500.0f, 8.0f, 0.5f,    0.0f, 0.20f, 2500.0f, 0.85f, 0.0f, 0.0f};
-        case Kind::Overdrive:  return { 0, 1.5f,  30.0f, 560.0f,  780.0f, 6.0f, 0.7f, 1300.0f, 0.05f,  720.0f, 1.10f, 1.0f, 1.0f};
-        case Kind::Distortion: return { 1, 2.0f, 130.0f,  50.0f, 1000.0f, 3.0f, 0.6f, 5000.0f, 0.00f, 1500.0f, 0.42f, 0.0f, 1.0f};
-        case Kind::Fuzz:       return { 2, 6.0f, 300.0f,  70.0f,    0.0f, 0.0f, 0.7f,    0.0f, 0.45f,  700.0f, 0.45f, 0.0f, 0.0f};
-        case Kind::Off:
-        default:               return { 0, 1.0f,   1.0f,   0.0f,    0.0f, 0.0f, 0.7f,    0.0f, 0.00f,  700.0f, 1.00f, 0.0f, 0.0f};
+        int n = 0; const Model *a = modelsFor(c, n);
+        if (!a || n == 0) return { 0, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.7f, 0.0f, 0.0f, 700.0f, 1.0f, 0.0f, 0.0f };
+        return a[juce::jlimit(0, n - 1, m)].v;
+    }
+    static Voicing voicingFor(Kind c) { return voicingFor(c, 0); } // compat (model 0)
+
+    // Treble-boost input-cap switch: larger cap (Mid/Full) lets more low-end
+    // through and shifts the emphasis down (Treble = bright, Full = fat).
+    static void applyRange(Voicing &v, int rng)
+    {
+        // Input-cap mod: a single one-pole high-pass whose corner moves with the
+        // cap. Stock 5nF -> 2.6 kHz; 10nF -> 1.3 kHz; 47nF -> 0.3 kHz. No peak.
+        switch (rng)
+        {
+        case 1: v.lowCutHz = 1300.0f; break; // Mid  (10nF, fuller)
+        case 2: v.lowCutHz =  300.0f; break; // Full (47nF, near full-range)
+        default: v.lowCutHz = 2600.0f; break; // Treble (5nF stock)
         }
     }
 
@@ -120,20 +181,26 @@ public:
         {
             Slot &s = mSlot[si];
             const Kind k = (Kind)s.kind.load();
-            if (k == Kind::Off)
+            if (k == Kind::Off || !s.on.load()) // footswitch off -> bypass this slot
                 continue;
-            const Voicing v = voicingFor(k);
+            const int model = s.model.load();
+            Voicing v = voicingFor(k, model);
+            const bool hasRange = modelHasRange(k, model);
+            const int rng = hasRange ? s.range.load() : 0;
+            if (hasRange)
+                applyRange(v, rng);
 
-            if ((int)k != s.lastKind) // reconfigure the peak only on a voicing change
+            const int cfg = ((int)k * 16 + model) * 8 + rng; // reconfigure peak on type/model/range change
+            if (cfg != s.lastKind)
             {
-                s.lastKind = (int)k;
+                s.lastKind = cfg;
                 s.mid = (v.midDb != 0.0f) ? Biquad::peaking(sr, v.midHz, v.midQ, v.midDb)
                                           : Biquad::identity();
             }
 
             const float preGain = v.gMin * std::pow(v.gMax / v.gMin, s.drive.load()); // log
             // How much of the pre-shaper EQ is engaged: static voicings use the
-            // full EQ; for the TS the hump + bass-tighten scale with Drive.
+            // full EQ; for the overdrive the hump + bass-tighten scale with Drive.
             const float shapeAmt = 1.0f - v.shapeTrack * (1.0f - s.drive.load());
             const float hpCoef = (v.lowCutHz > 0.0f) ? coefForHz(v.lowCutHz, sr) : 0.0f;
             const float lpCoef = (v.lpHz > 0.0f) ? coefForHz(v.lpHz, sr) : 0.0f;
@@ -142,8 +209,9 @@ public:
             const bool useLp = (v.lpHz > 0.0f);
             const double asym = (v.clip == 2) ? (double)v.bias : 0.0;     // type-2 rail
             const double inBias = (v.clip == 2) ? 0.0 : (double)v.bias;   // type 0/1 input bias
-            const float levelLin = std::pow(10.0f, s.levelDb.load() * 0.05f) * v.outTrim
-                                  * driveMakeup(k, s.drive.load()) * toneMakeup(k, s.tone.load());
+            float levelLin = std::pow(10.0f, s.levelDb.load() * 0.05f) * v.outTrim;
+            if (mAutoGain.load()) // OFF by default: Drive then naturally pushes the amp harder
+                levelLin *= driveMakeup(k, model, s.drive.load()) * toneMakeup(k, model, s.tone.load());
 
             const float tilt = (s.tone.load() - 0.5f) * 2.0f;
             const float trebleG = std::pow(10.0f, (tilt * kMaxTiltDb) * 0.05f);
@@ -172,7 +240,7 @@ public:
                 x0 = xb;
                 float c = (float)y;
 
-                if (useMid && midPost) { const float m = s.mid.processSample(c); c += shapeAmt * (m - c); } // post-clip peak (TS/RAT tone stack; level-stable)
+                if (useMid && midPost) { const float m = s.mid.processSample(c); c += shapeAmt * (m - c); } // post-clip peak (OD/dist tone stack; level-stable)
                 if (useLp) { lpz += lpCoef * (c - lpz); c += shapeAmt * (lpz - c); } // post low-pass (drive-scaled)
 
                 // DC blocker (one-pole HPF ~4 Hz): removes the offset asymmetric
@@ -201,6 +269,9 @@ private:
         std::atomic<float> drive{0.5f};
         std::atomic<float> tone{0.5f};
         std::atomic<float> levelDb{0.0f};
+        std::atomic<int> range{0};
+        std::atomic<int> model{0};
+        std::atomic<bool> on{true};
         float hp = 0.0f, lp = 0.0f, toneLp = 0.0f, dcX1 = 0.0f, dcY1 = 0.0f;
         double x0 = 0.0; // ADAA history in double
         int lastKind = -1;
@@ -223,7 +294,7 @@ private:
         if (type == 1) return x > 1.0 ? 1.0 : (x < -1.0 ? -1.0 : x);
         // type 2 (fuzz): soft saturation on the positive half (tanh -> +1), hard
         // CUTOFF on the negative half (clamp to -lo). Different SHAPES per polarity
-        // -> strong even harmonics at all levels (the Fuzz Face character).
+        // -> strong even harmonics at all levels (the vintage-fuzz character).
         const double lo = 1.0 - asym;
         return x >= 0.0 ? std::tanh(x) : (x < -lo ? -lo : x);
     }
@@ -252,23 +323,32 @@ private:
         if (i >= n - 1) return t[n - 1];
         return t[i] + (pos - (float)i) * (t[i + 1] - t[i]);
     }
-    static float driveMakeup(Kind k, float drive)
+    // Auto-gain is UNITY-REFERENCED: the drive table = rms_in / rms_out(drive),
+    // so Auto Gain ON brings the pedal to ~bypass level at every Drive (was
+    // normalised to the pedal's own mid-drive level, which sat +11..+18 dB hot).
+    // Per-MODEL because Boost holds two very different models (Range '65 / EP
+    // Boost) a single category table can't level. Tone table stays relative.
+    static float driveMakeup(Kind k, int model, float drive)
     {
-        static const float B[6] = {2.259f, 1.547f, 1.129f, 0.899f, 0.773f, 0.705f};
-        static const float O[6] = {2.297f, 1.524f, 1.112f, 0.909f, 0.807f, 0.738f};
-        static const float D[6] = {2.270f, 1.262f, 1.029f, 0.973f, 0.961f, 0.956f};
-        static const float F[6] = {1.266f, 1.078f, 1.013f, 0.991f, 0.985f, 0.985f};
-        const float *t = (k == Kind::Boost) ? B : (k == Kind::Overdrive) ? O
+        static const float B0[6] = {1.505f, 0.988f, 0.639f, 0.416f, 0.278f, 0.197f};
+        static const float B1[6] = {1.203f, 0.846f, 0.597f, 0.425f, 0.307f, 0.228f};
+        static const float O[6]  = {0.666f, 0.435f, 0.296f, 0.212f, 0.161f, 0.129f};
+        static const float D[6]  = {1.229f, 0.568f, 0.310f, 0.242f, 0.223f, 0.214f};
+        static const float F[6]  = {0.543f, 0.367f, 0.302f, 0.280f, 0.273f, 0.271f};
+        const float *t = (k == Kind::Boost) ? (model <= 0 ? B0 : B1)
+                       : (k == Kind::Overdrive) ? O
                        : (k == Kind::Distortion) ? D : F;
         return lerpTbl(t, 6, drive);
     }
-    static float toneMakeup(Kind k, float tone)
+    static float toneMakeup(Kind k, int model, float tone)
     {
-        static const float B[5] = {0.473f, 0.751f, 1.000f, 0.892f, 0.595f};
-        static const float O[5] = {0.554f, 0.857f, 1.000f, 0.756f, 0.473f};
-        static const float D[5] = {0.451f, 0.728f, 1.000f, 0.914f, 0.607f};
-        static const float F[5] = {0.643f, 0.953f, 1.000f, 0.708f, 0.436f};
-        const float *t = (k == Kind::Boost) ? B : (k == Kind::Overdrive) ? O
+        static const float B0[5] = {0.604f, 0.895f, 1.000f, 0.767f, 0.490f};
+        static const float B1[5] = {0.499f, 0.789f, 1.000f, 0.818f, 0.522f};
+        static const float O[5]  = {0.472f, 0.757f, 1.000f, 0.851f, 0.548f};
+        static const float D[5]  = {0.450f, 0.725f, 1.000f, 0.916f, 0.609f};
+        static const float F[5]  = {0.533f, 0.833f, 1.000f, 0.773f, 0.485f};
+        const float *t = (k == Kind::Boost) ? (model <= 0 ? B0 : B1)
+                       : (k == Kind::Overdrive) ? O
                        : (k == Kind::Distortion) ? D : F;
         return lerpTbl(t, 5, tone);
     }
@@ -281,6 +361,7 @@ private:
     static float flush(float v) { return std::abs(v) < 1.0e-30f ? 0.0f : v; }
 
     Slot mSlot[kSlots];
+    std::atomic<bool> mAutoGain{false};
     double mSampleRate = 48000.0;
     bool mPrepared = false;
 };

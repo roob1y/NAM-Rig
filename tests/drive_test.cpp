@@ -118,7 +118,7 @@ int main()
         CHECK(!d.anyActive(), "T1 anyActive() false when all slots Off");
     }
 
-    // ---- T2: Overdrive has a midrange hump (the TS signature) ----
+    // ---- T2: Overdrive has a midrange hump (the mid-hump signature) ----
     {
         const auto v = DriveBlock::voicingFor(Kind::Overdrive);
         Biquad mid = Biquad::peaking(SR, v.midHz, v.midQ, v.midDb);
@@ -168,7 +168,7 @@ int main()
         auto fz = realSlot(Kind::Fuzz, 0.7f, in);
         auto ds = realSlot(Kind::Distortion, 0.7f, in);
         // Even-harmonic content vs the fundamental = asymmetry. Fuzz (bias 0.45)
-        // should sit clearly above Distortion (bias 0.12).
+        // should sit clearly above the symmetric Distortion (bias 0).
         auto h2overH1 = [&](const std::vector<float> &y) {
             return goertzel(y, 440.0) / (goertzel(y, 220.0) + 1e-9);
         };
@@ -201,6 +201,17 @@ int main()
         const double vsHigh = respDb(Kind::Overdrive, 1.0f, 700.0, 3000.0); // 700 vs 3k
         CHECK(vsLow > 3.0 && vsHigh > 3.0,
               "T9 OD@drive1 mid-hump: 700Hz +%.1f vs 100Hz, +%.1f vs 3k", vsLow, vsHigh);
+    }
+
+    // ---- T10: Black Rodent (Distortion) blooms like the real RAT gain stage ----
+    // Bass-cut + hump live in the gain feedback: flat at Drive 0, tightening
+    // (mid-forward, bass pulled out) as Drive climbs.
+    {
+        const double lo0 = respDb(Kind::Distortion, 0.0f, 100.0, 1000.0); // ~flat at drive 0
+        const double lo1 = respDb(Kind::Distortion, 1.0f, 100.0, 1000.0); // bass cut when driven
+        CHECK(lo0 > -2.0, "T10 Dist@drive0 full-range: 100Hz %.1f dB (vs 1k)", lo0);
+        CHECK(lo1 < -6.0 && lo1 < lo0 - 4.0,
+              "T10 Dist@drive1 tightens: 100Hz %.1f dB (vs 1k), %.1f at drive0", lo1, lo0);
     }
 
     std::printf("\n%s (%d failure%s)\n", gFails ? "RESULT: FAIL" : "RESULT: ALL PASS", gFails, gFails == 1 ? "" : "s");

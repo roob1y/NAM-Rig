@@ -124,6 +124,7 @@ void NamRigEditor::timerCallback()
     mAmpPanelB.refresh();
     mCabPanelA.refresh();
     mCabPanelB.refresh();
+    mDrivePanel.refresh();
     mMixPanel.refresh();
     mModPanel.refresh();
     mDelayPanel.refresh();
