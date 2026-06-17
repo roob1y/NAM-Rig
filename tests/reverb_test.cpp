@@ -356,6 +356,15 @@ int main()
               "T22 mapToRange spans the window (%.2f..%.2f)", atMin, atMax);
         CHECK(std::fabs(pr.lo - 0.5f) < 1e-4f && std::fabs(pr.hi - 5.5f) < 1e-4f,
               "T22 Plate decay window is the vintage plate 0.5-5.5 s (%.2f..%.2f)", pr.lo, pr.hi);
+        // Decay reads TRUE seconds inside the window, clamps at the caps (all characters).
+        ReverbBlock pv; pv.setType(RB::kPlate);
+        CHECK(std::fabs(pv.mappedDecay(3.0f) - 3.0f) < 1e-4f,
+              "T22 Plate decay exact in range (3.0 -> %.2f s)", pv.mappedDecay(3.0f));
+        CHECK(std::fabs(pv.mappedDecay(8.0f) - 5.5f) < 1e-4f,
+              "T22 Plate decay clamps at cap (8.0 -> %.2f s)", pv.mappedDecay(8.0f));
+        ReverbBlock hv; hv.setType(RB::kHall);
+        CHECK(std::fabs(hv.mappedDecay(4.0f) - 4.0f) < 1e-4f,
+              "T22 Hall decay exact in range (4.0 -> %.2f s)", hv.mappedDecay(4.0f));
     }
 
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);
