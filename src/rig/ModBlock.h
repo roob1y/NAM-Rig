@@ -969,7 +969,7 @@ private:
                 os.pushU(k == 0 ? x : 0.0f);                    // zero-stuff to the oversampled rate
                 const float up = (float)RingOS::I * os.convU(); // interpolated (x I restores zero-stuff loss)
                 const double ph = mRingPhase + (double)k * mRingIncOS + off;
-                const float car = std::sin(2.0 * PI * ph);
+                const float car = (float)std::sin(2.0 * PI * ph);
                 os.pushD(up * car);                             // the multiply, at 4x
             }
             const float wet = os.convD();                       // decimate back to fs

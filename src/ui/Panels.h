@@ -53,11 +53,8 @@ public:
     // knob). Used for the mod lanes, where the value box reads as clutter.
     void hideValue() { mSlider.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0); }
 
-    // Relabel at runtime (the mod flanger renames Depth->Width to match the M-126).
-    void setCaption(const juce::String &caption)
-    {
-        mLabel.setText(caption, juce::dontSendNotification);
-    }
+    // (setCaption above is the runtime relabel used by the mod flanger Width/Spread
+    // + uni-vibe Speed/Intensity + ring-mod Freq/Amount captions.)
 
     // Show the value box as a 0..top reading of the knob's ROTATION (pedal-style,
     // "everything goes to 10") instead of raw parameter units -- so a lane of
