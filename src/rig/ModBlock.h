@@ -87,16 +87,18 @@ public:
     static constexpr float kUniAmDepth = 0.10f;      // subtle photocell amplitude ripple
     static constexpr float kUniDepthMin = 0.10f;     // always some throb (never dead-static)
     // Tremolo gain-shape LUT + DC-offset compensation. The LUT waveshapes the
-    // bipolar LFO modulator through a (default-linear) ODD-symmetric taper, so it
-    // stays zero-mean -> it can never add a DC component to the gain (no thump),
-    // and kTremTaper > 1 sharpens / < 1 rounds the throb shoulders by ear.
-    // kTremCenter is the DC-offset compensation: 0 = cut-only gain in [1-depth,1]
-    // (the original voicing; mean drops with depth, the section ModLevelLock takes
-    // up the slack) ... 1 = mean-preserving (gain mean = 1 at any depth, troughs
-    // still chop to 0, peaks boost). Default 0 keeps the loved sound; tune by ear.
+    // bipolar LFO modulator through an ODD-symmetric taper, so it stays zero-mean
+    // -> it can never add a DC component to the gain (no thump); kTremTaper > 1
+    // sharpens / < 1 rounds the throb shoulders. kTremCenter is the DC-offset
+    // compensation: 0 = cut-only gain in [1-depth,1] (mean drops with depth, the
+    // section ModLevelLock takes up the slack) ... 1 = mean-preserving (gain mean
+    // = 1 at any depth, troughs still chop to 0, peaks boost).
+    // VOICED BY EAR (Robbie, 2026-06-17, live knob audition): a light DC-comp
+    // (~3.5/10) + a touch of sharpening -- keeps the loved cut-only character,
+    // just trims the depth level-sag and adds a hair of snap. Tunable by ear.
     static constexpr int kTremLutN = 1024;
-    static constexpr float kTremTaper = 1.0f;
-    static constexpr float kTremCenter = 0.0f;
+    static constexpr float kTremTaper = 1.53f;
+    static constexpr float kTremCenter = 0.33f;
 
     // ---- per-effect voicing (public so the tests + UI can read it) ----
     static int authenticWave(Type t) { return t == kFlanger ? Lfo::Triangle : Lfo::Sine; }
@@ -260,8 +262,6 @@ public:
         mBbdLp[0] = mBbdLp[1] = 0.0f;
         mUniLamp[0] = mUniLamp[1] = 0.5f; // lamp at mid brightness (no startup snap)
         mTremG[0] = mTremG[1] = 1.0f; // unity gain (no mute on start)
-        mVibApX[0] = mVibApX[1] = 0.0f;
-        mVibApY[0] = mVibApY[1] = 0.0f;
         mHornLp[0] = mHornLp[1] = 0.0f;
         mDrumLp[0] = mDrumLp[1] = 0.0f;
         mCabZ1[0] = mCabZ1[1] = 0.0f;
@@ -410,7 +410,9 @@ private:
         {
         case kChorus:
         {
-            // 3 voices read the same line at offset LFO phases -> lush + wide
+            // 3 voices read the same line at offset LFO phases -> lush + wide.
+            // 6-point Lagrange interpolation (flatter than the 4-point Hermite,
+            // FIR so the swept taps never click at integer crossings).
             mLine[(size_t)ch].write(x);
             float wet = 0.0f;
             for (int v = 0; v < 3; ++v)
@@ -418,7 +420,7 @@ private:
                 const float lv = mLfo.value(off + (double)v * 0.3333);
                 const double sweepMs =
                     kChorusBaseMs + (double)depth * kChorusSpreadMs * (0.5 + 0.5 * (double)lv);
-                wet += mLine[(size_t)ch].readFrac(sweepMs * 0.001 * mFs);
+                wet += mLine[(size_t)ch].readFrac6(sweepMs * 0.001 * mFs);
             }
             wet = bbdColor(ch, wet * 0.45f);
             return (1.0f - mMixZ) * x + mMixZ * wet;
@@ -505,8 +507,8 @@ private:
             if ((mUserWave == Lfo::Square || mUserWave == Lfo::SampleHold) && ch == 1)
                 wMod = lfo * (1.0f - 2.0f * mWidth);
             // LUT-waveshape the modulator (odd-symmetric -> adds no DC) then apply
-            // the DC-offset-compensated gain law. At the default taper=1/center=0
-            // this is bit-identical to the original 1 - depth*(0.5+0.5*lfo).
+            // the DC-offset-compensated gain law (kTremCenter/kTremTaper voiced by
+            // ear above).
             const float target = tremGain(depth, tremLut(wMod), kTremCenter);
             float &gn = mTremG[(size_t)ch];
             gn += mTremCoef * (target - gn); // smoothing de-clicks square/S&H edges
@@ -514,27 +516,17 @@ private:
         }
         case kVibrato:
         {
-            // Single-tap time-varying delay with FIRST-ORDER ALL-PASS fractional
-            // interpolation. An all-pass has UNITY magnitude at every frequency, so
-            // the swept delay imparts pure pitch modulation with no amplitude ripple
-            // -- the polynomial (Hermite) interpolator's small, fractional-position-
-            // dependent HF gain loss is what made the old vibrato shimmer as it
-            // swept. The fractional delay is biased into [0.5, 1.5) so |c| <= 1/3:
-            // well inside stability and the lowest-transient region for when the
-            // integer tap steps mid-sweep (the known weak spot of allpass interp).
+            // Single-tap time-varying delay -> pure pitch vibrato. Read with the
+            // 6-point Lagrange interpolator: it is FIR (no recursive state), so the
+            // swept tap is a continuous function of the fractional delay and never
+            // clicks at integer-sample crossings -- unlike a recursive all-pass
+            // interpolator, whose state re-settles at each crossing and rings on
+            // fast/deep sweeps. Its 5th-order flatness keeps the magnitude steady
+            // enough that there's no audible Hermite-style brightness shimmer either.
             const double sweepMs =
                 kVibBaseMs + (double)depth * kVibSpreadMs * (0.5 + 0.5 * (double)lfo);
-            const double d = std::max(2.0, sweepMs * 0.001 * mFs);
-            const int di = (int)(d - 0.5);                 // integer tap (frac lands in [0.5,1.5))
-            const float frac = (float)(d - (double)di);    // fractional delay realised by the allpass
-            const float c = (1.0f - frac) / (1.0f + frac); // allpass coefficient for that delay
             mLine[(size_t)ch].write(x);
-            const float xr = mLine[(size_t)ch].readInt(di); // integer-delayed sample
-            float &apx = mVibApX[(size_t)ch];               // previous integer-read input
-            float &apy = mVibApY[(size_t)ch];               // previous allpass output
-            float wet = c * xr + apx - c * apy;             // y = c*x[n] + x[n-1] - c*y[n-1]
-            apx = xr;
-            apy = wet;
+            float wet = mLine[(size_t)ch].readFrac6(std::max(3.0, sweepMs * 0.001 * mFs));
             wet = bbdColor(ch, wet);
             return (1.0f - mMixZ) * x + mMixZ * wet;
         }
@@ -890,8 +882,6 @@ private:
             if (std::abs(f) < 1.0e-30f) f = 0.0f;
         for (auto &f : mBbdLp)
             if (std::abs(f) < 1.0e-30f) f = 0.0f;
-        for (auto &f : mVibApY) // recursive allpass state
-            if (std::abs(f) < 1.0e-30f) f = 0.0f;
         for (auto &f : mFbLp)
             if (std::abs(f) < 1.0e-30f) f = 0.0f;
         for (auto &f : mHornLp)
@@ -938,8 +928,6 @@ private:
     std::array<float, 2> mBbdLp{};           // BBD HF-rolloff state
     std::array<float, 2> mUniLamp{};         // uni-vibe lamp thermal envelope (per ch)
     std::array<float, 2> mTremG{1.0f, 1.0f}; // smoothed tremolo gain (de-click)
-    std::array<float, 2> mVibApX{};          // vibrato allpass: prev integer-read input
-    std::array<float, 2> mVibApY{};          // vibrato allpass: prev output (recursive)
     std::array<float, kTremLutN> mTremLut{}; // tremolo gain-shape LUT (built in prepare)
     float mDepth = 0.5f, mFeedback = 0.0f, mMix = 0.5f;
     float mDepthZ = 0.5f, mMixZ = 0.5f, mSmoothK = 0.01f;

@@ -117,6 +117,37 @@ public:
         return ((((a * t) - b) * t + c) * t + x0);
     }
 
+    // 6-point, 5th-order Lagrange fractional read. Flatter magnitude than the
+    // 4-point Hermite readFrac (reproduces cubics exactly, not just quadratics),
+    // and being FIR it is a continuous function of the fractional delay -- no
+    // recursive state -- so a swept delay (chorus / vibrato) never clicks at the
+    // integer-sample crossings that make a recursive all-pass interpolator glitch.
+    // Reads taps di-2 .. di+3, so keep delaySamples >= 2; prepare's +8 ring guard
+    // already covers di+3.
+    float readFrac6(double delaySamples) const
+    {
+        const int di = (int)delaySamples;
+        const float t = (float)(delaySamples - di);
+        const float xm2 = readInt(di - 2);
+        const float xm1 = readInt(di - 1);
+        const float x0  = readInt(di);
+        const float x1  = readInt(di + 1);
+        const float x2  = readInt(di + 2);
+        const float x3  = readInt(di + 3);
+        // Lagrange basis factors for offsets {-2,-1,0,1,2,3} at position t; each
+        // tap's coefficient is the product of all factors EXCEPT its own, over a
+        // fixed denominator (the product of node spacings).
+        const float tm2 = t + 2.0f, tm1 = t + 1.0f, t0 = t,
+                    t1 = t - 1.0f, t2 = t - 2.0f, t3 = t - 3.0f;
+        const float c_m2 = (tm1 * t0 * t1 * t2 * t3) * (-1.0f / 120.0f);
+        const float c_m1 = (tm2 * t0 * t1 * t2 * t3) * ( 1.0f / 24.0f);
+        const float c_0  = (tm2 * tm1 * t1 * t2 * t3) * (-1.0f / 12.0f);
+        const float c_1  = (tm2 * tm1 * t0 * t2 * t3) * ( 1.0f / 12.0f);
+        const float c_2  = (tm2 * tm1 * t0 * t1 * t3) * (-1.0f / 24.0f);
+        const float c_3  = (tm2 * tm1 * t0 * t1 * t2) * ( 1.0f / 120.0f);
+        return c_m2 * xm2 + c_m1 * xm1 + c_0 * x0 + c_1 * x1 + c_2 * x2 + c_3 * x3;
+    }
+
     int maxDelay() const { return mMaxDelay; }
 
 private:

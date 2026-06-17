@@ -51,13 +51,14 @@
 //       reordering two effects changes the sound; a malformed order is rejected
 //   T35 tremolo Width per shape: Square/S&H mono at 0, amplitude auto-pan at 1;
 //       sine spreads via quadrature
-//   T36 chorus interpolation is true 4-point cubic Hermite: FracDelayLine
-//       reproduces a quadratic ~exactly (a linear interpolator can't)
+//   T36 chorus + vibrato use the 6-point 5th-order Lagrange read: it reproduces
+//       a cubic ~exactly (the 4-point cubic-Hermite read can't)
 //   T37 harm-trem LR4 recombines magnitude-flat at unity AM (depth 0); bounded
 //   T38 harm-trem LR4 band separation is steep (24 dB/oct): a tone 2 octaves
 //       above the crossover modulates near-fully (a one-pole split couldn't)
-//   T39 vibrato all-pass interp has flat magnitude: a swept high tone shows
-//       almost no amplitude ripple (the Hermite read rippled); finite/bounded
+//   T39 vibrato 6-point-Lagrange interp: flat magnitude at a steady delay; a
+//       fast/deep sweep stays low-ripple (FIR -> no integer-crossing glitch,
+//       unlike the recursive all-pass which rang at ~0.224 here)
 //   T40 tremolo DC-offset comp law: center 0 = cut-only (mean drops with depth),
 //       center 1 = mean-preserving (avg gain 1 at any depth); both full-chop;
 //       and the multiplier adds no DC to a zero-mean signal
@@ -153,8 +154,15 @@ int main()
         double mn = 1e9, mx = 0;
         for (auto e : env) { mn = std::min(mn, e); mx = std::max(mx, e); }
         const double meas = 1.0 - mn / mx;
-        const double want = 0.6 * ModVoice::depthMax(ModVoice::kTremolo);
-        CHECK(std::abs(meas - want) < 0.04, "T1 tremolo depth %.3f (voiced want %.3f)", meas, want);
+        // Trough/peak envelope ratio from the actual gain law: with DC-offset
+        // comp (kTremCenter) the peak gain boosts above 1, so 1-min/max is no
+        // longer simply the depth knob. Derive want from tremGain at the extremes
+        // (LFO modulator = +1 trough, -1 peak); independent of kTremTaper (=+-1 ends).
+        const float d = 0.6f * ModVoice::depthMax(ModVoice::kTremolo);
+        const double minG = ModVoice::tremGain(d, 1.0f, ModVoice::kTremCenter);
+        const double maxG = ModVoice::tremGain(d, -1.0f, ModVoice::kTremCenter);
+        const double want = 1.0 - minG / maxG;
+        CHECK(std::abs(meas - want) < 0.05, "T1 tremolo depth %.3f (voiced want %.3f)", meas, want);
     }
 
     // ---- T2: tremolo rate ----
@@ -1559,29 +1567,27 @@ int main()
         CHECK(si1 > 0.02, "T35 sine tremolo still spreads L/R (diff %.3f)", si1);
     }
 
-    // ---- T36: Chorus interpolation IS true 4-point cubic Hermite. A cubic
-    //      (Keys a=-1/2) interpolator reproduces a quadratic EXACTLY; a linear
-    //      interpolator cannot. Drive FracDelayLine (rig/Lfo.h) directly with a
-    //      quadratic and read at many fractional delays. ----
+    // ---- T36: Chorus + Vibrato use the 6-point 5th-order Lagrange read. A 6-point
+    //      Lagrange reproduces polynomials up to degree 5 EXACTLY, so it nails a
+    //      cubic; the 4-point cubic-Hermite readFrac (3rd-order, exact only to
+    //      quadratics) does not. Drive FracDelayLine (rig/Lfo.h) with a cubic and
+    //      read at many fractional delays -> readFrac6 ~exact, readFrac visibly off.
+    //      (This is the interpolation upgrade behind chorus/vibrato.) ----
     {
         nam_rig::FracDelayLine dl;
         dl.prepare(64);
-        auto q = [](double n) { return 0.1 * n - 0.01 * n * n; }; // quadratic
-        const int N = 24;
+        auto q = [](double n) { return 0.01 * n * n * n; }; // a genuine cubic
+        const int N = 20;
         for (int n = 0; n < N; ++n) dl.write((float)q(n));
-        double maxErr = 0.0, maxLinErr = 0.0;
-        for (double D = 2.2; D <= 8.0; D += 0.1)
+        double err6 = 0.0, errH = 0.0;
+        for (double D = 3.2; D <= 6.0; D += 0.1)
         {
             const double npos = (double)(N - 1) - D; // absolute position read
-            maxErr = std::max(maxErr, std::abs((double)dl.readFrac(D) - q(npos)));
-            const int di = (int)D;
-            const double t = D - (double)di;
-            const double lin = (1.0 - t) * q((double)(N - 1 - di))
-                             + t * q((double)(N - 1 - (di + 1)));
-            maxLinErr = std::max(maxLinErr, std::abs(lin - q(npos)));
+            err6 = std::max(err6, std::abs((double)dl.readFrac6(D) - q(npos)));
+            errH = std::max(errH, std::abs((double)dl.readFrac(D) - q(npos)));
         }
-        CHECK(maxErr < 1.0e-4, "T36 cubic-Hermite reproduces a quadratic (max err %.2e < 1e-4)", maxErr);
-        CHECK(maxLinErr > 1.5e-3, "T36 ...where a linear interpolator cannot (linear err %.2e)", maxLinErr);
+        CHECK(err6 < 1.0e-4, "T36 6-point Lagrange reproduces a cubic (max err %.2e < 1e-4)", err6);
+        CHECK(errH > 5.0e-4, "T36 ...where the 4-point cubic-Hermite read cannot (err %.2e)", errH);
     }
 
     // ---- T37: harm-trem LR4 recombines magnitude-FLAT at unity AM. At depth 0
@@ -1638,11 +1644,35 @@ int main()
               "T38 LR4 steep separation: 2-octave tone modulates fully (min/max %.4f < 0.1; one-pole ~0.25)", ratio);
     }
 
-    // ---- T39: vibrato all-pass interpolation has FLAT magnitude. A high tone
-    //      swept by the vibrato should keep a near-constant peak amplitude
-    //      (pitch/FM changes, amplitude does not) -- the polynomial (Hermite)
-    //      read used to ripple the amplitude as the fractional delay moved. ----
+    // ---- T39: vibrato 6-point-Lagrange interpolation is CLEAN under a fast/deep
+    //      sweep. Because the read is FIR (no recursive state), it is a continuous
+    //      function of the fractional delay -> no integer-crossing transients, so a
+    //      hard sweep of a high tone keeps a near-constant peak amplitude. This is
+    //      the SAME signal that the recursive all-pass rippled at ~0.224; the FIR
+    //      read should land far lower. Also (a) flat magnitude at a steady delay. ----
     {
+        // (a) fixed-delay flat magnitude: equal 250 + 1500 Hz tones, depth 0 (delay
+        // constant), full wet. The ratio cancels the common BBD soft-clip gain,
+        // leaving the Lagrange read + BBD HF rolloff -> ~flat (<5%).
+        auto fixedMag = [](double f) {
+            ModVoice m;
+            m.setType(ModVoice::kVibrato);
+            m.setRateHz(2.0f);
+            m.setDepth(0.0f);
+            m.setMix(1.0f);
+            m.prepare({SR, BLK});
+            auto l = tone(f, 0.3, (int)SR), r = l;
+            auto ref = l;
+            run(m, l, r);
+            return mag(l, (size_t)SR / 2, (size_t)SR / 2, f)
+                 / (mag(ref, (size_t)SR / 2, (size_t)SR / 2, f) + 1e-12);
+        };
+        const double rel = fixedMag(1500.0) / (fixedMag(250.0) + 1e-12);
+        CHECK(std::abs(rel - 1.0) < 0.05,
+              "T39a Lagrange flat magnitude at steady delay (1500/250 ratio %.3f ~ 1)", rel);
+
+        // (b) fast/deep sweep of a 6 kHz tone: FIR read -> low amplitude ripple
+        // (the all-pass gave 0.224 here; Lagrange has no integer-crossing snap).
         ModVoice m;
         m.setType(ModVoice::kVibrato);
         m.setRateHz(5.0f);
@@ -1653,15 +1683,16 @@ int main()
         run(m, l, r);
         bool finite = true;
         for (float v : l) if (!std::isfinite(v)) finite = false;
+        // wide window (~32 cycles at 6 kHz) so peak detection is steady and the
+        // ripple we measure is real amplitude variation, not sampling-phase noise.
         std::vector<float> tail(l.begin() + (int)SR, l.end());
-        auto env = envelope(tail, 64);
-        double mn = 1e9, mx = 0, sum = 0;
-        for (double e : env) { mn = std::min(mn, e); mx = std::max(mx, e); sum += e; }
-        const double mean = sum / (double)env.size();
+        auto env = envelope(tail, 256);
+        double mn = 1e9, mx = 0.0, mean = 0.0;
+        for (double e : env) { mn = std::min(mn, e); mx = std::max(mx, e); mean += e; }
+        mean /= (double)env.size();
         const double ripple = (mx - mn) / (mean + 1e-12);
-        CHECK(finite, "T39 vibrato all-pass output finite");
-        CHECK(mean > 0.05, "T39 vibrato non-silent (mean env %.3f)", mean);
-        CHECK(ripple < 0.15, "T39 all-pass flat magnitude: swept-tone ripple %.3f < 0.15 (no Hermite shimmer)", ripple);
+        CHECK(finite && mean > 0.05, "T39b vibrato finite + non-silent (mean env %.3f)", mean);
+        CHECK(ripple < 0.12, "T39b FIR sweep stays flat: ripple %.3f < 0.12 (all-pass was 0.224)", ripple);
     }
 
     // ---- T40: tremolo DC-offset compensation law. center 0 = cut-only (mean
