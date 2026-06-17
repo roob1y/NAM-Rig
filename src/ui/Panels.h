@@ -34,9 +34,13 @@ public:
     void resized() override
     {
         auto b = getLocalBounds();
-        mLabel.setBounds(b.removeFromTop(16));
+        mLabel.setBounds(b.removeFromTop(mCaptionH));
         mSlider.setBounds(b);
     }
+
+    // Shrink the caption row (and thus its font, via the LookAndFeel) so longer
+    // captions fit the narrower mod-lane knobs without truncating.
+    void setCaptionHeight(int h) { mCaptionH = h; resized(); }
 
     juce::Slider &slider() { return mSlider; }
 
@@ -89,6 +93,7 @@ private:
     juce::Label mLabel;
     juce::Slider mSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mAtt;
+    int mCaptionH = 16;
 };
 
 // Horizontal knob in a rounded bordered box: knob on the left, caption + value
@@ -1031,7 +1036,7 @@ public:
 
         mRate = std::make_unique<LabeledKnob>(apvts, p + "Rate", "Rate");
         mDepth = std::make_unique<LabeledKnob>(apvts, p + "Depth", "Depth");
-        mFeedback = std::make_unique<LabeledKnob>(apvts, p + "Feedback", "Feedback");
+        mFeedback = std::make_unique<LabeledKnob>(apvts, p + "Feedback", "Fdbk");
         mMix = std::make_unique<LabeledKnob>(apvts, p + "Mix", "Mix");
         mWidth = std::make_unique<LabeledKnob>(apvts, p + "Width", "Width");
         addAndMakeVisible(*mRate);
@@ -1042,7 +1047,7 @@ public:
 
         mDrive = std::make_unique<LabeledKnob>(apvts, p + "Drive", "Drive");
         addChildComponent(*mDrive); // rotary only (Leslie tube amp)
-        mHornDrum = std::make_unique<LabeledKnob>(apvts, p + "HornDrum", "Horn/Drum");
+        mHornDrum = std::make_unique<LabeledKnob>(apvts, p + "HornDrum", "Drum/Horn");
         addChildComponent(*mHornDrum); // rotary only (horn<->drum balance)
         mRotFast.setButtonText("Fast");
         addChildComponent(mRotFast); // rotary only (slow/fast rotor)
@@ -1052,7 +1057,7 @@ public:
         mManual = std::make_unique<LabeledKnob>(apvts, p + "Manual", "Manual");
         addChildComponent(*mManual); // flanger only (M-126 static comb position)
 
-        mP2Ratio = std::make_unique<LabeledKnob>(apvts, p + "P2Ratio", "Sweep 2");
+        mP2Ratio = std::make_unique<LabeledKnob>(apvts, p + "P2Ratio", "Swp 2");
         addChildComponent(*mP2Ratio); // bi-phase only (Sweep Gen 2 rate ratio)
         mSeries.setButtonText(""); // checkbox only; caption sits beneath (saves width)
         addChildComponent(mSeries); // bi-phase only (series/parallel routing)
@@ -1072,8 +1077,9 @@ public:
                                mHornDrum.get()})
         {
             k->setRotationReadout(10.0);
-            k->setAccent(laneCol); // value arc tinted to the lane colour
-            k->hideValue();        // no number box -> a bigger knob
+            k->setAccent(laneCol);    // value arc tinted to the lane colour
+            k->hideValue();           // no number box -> a bigger knob
+            k->setCaptionHeight(14);  // smaller caption so longer names don't truncate
         }
 
         refresh();
