@@ -758,6 +758,98 @@ private:
 // ===========================================================================
 // ReverbBlock — character selector + shared guardrail mixer.
 // ===========================================================================
+// ===========================================================================
+// EarlyReflections — shoebox image-source early-reflection generator. Gives Room
+// its true first-bounce character: distinct early echoes off the close walls,
+// decorrelated L/R via a spaced virtual capture pair. Mono excitation in, stereo
+// ER out. Size scales the virtual room dimensions (and thus the reflection times).
+// Profiled against a real small treated room (RT60 ~0.2s, bright ~5 kHz).
+// ===========================================================================
+class EarlyReflections
+{
+public:
+    static constexpr int kMaxTaps = 48;
+
+    void prepare(double fs)
+    {
+        mFs = fs;
+        mLine.prepare((int)std::ceil(0.14 * fs) + 16); // headroom for the largest room
+        mBuilt = false; mLastSize = -1.0f;
+        setBrightHz(9000.0f);
+        setSize(1.0f);
+        reset(); mPrepared = true;
+    }
+    void reset() { mLine.reset(); mLpL = mLpR = 0.0f; }
+
+    void setSize(float s)
+    {
+        s = std::clamp(s, 0.5f, 1.5f);
+        if (mBuilt && s == mLastSize) return;
+        mLastSize = s; rebuild(s); mBuilt = true;
+    }
+    void setBrightHz(float hz) { mLpK = (float)reverb_detail::onePole(std::clamp(hz, 2000.0f, 16000.0f), mFs); }
+
+    // Mono excitation from (inL+inR)/2; stereo ER written to outL/outR.
+    void process(const float *inL, const float *inR, float *outL, float *outR, int n)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            mLine.write(0.5f * (inL[i] + inR[i]));
+            float l = 0.0f, r = 0.0f;
+            for (int k = 0; k < mNL; ++k) l += mGainL[(size_t)k] * mLine.readInt(mDelL[(size_t)k]);
+            for (int k = 0; k < mNR; ++k) r += mGainR[(size_t)k] * mLine.readInt(mDelR[(size_t)k]);
+            mLpL += mLpK * (l - mLpL); outL[i] = mLpL; // gentle air absorption
+            mLpR += mLpK * (r - mLpR); outR[i] = mLpR;
+        }
+    }
+
+private:
+    void rebuild(float sz)
+    {
+        const double c = 343.0;
+        const double Lx = 4.0*sz, Ly = 3.0*sz, Lz = 2.5*sz;        // ~small treated room at sz=1
+        const double sx = 0.9*sz, sy = 1.1*sz, sz0 = 1.2*sz;        // off-centre source (breaks L/R symmetry)
+        const double lx = 3.0*sz, lz = 1.2*sz;
+        buildEar(Lx,Ly,Lz, sx,sy,sz0, lx, 1.00*sz, lz, mDelL, mGainL, mNL); // left  capture
+        buildEar(Lx,Ly,Lz, sx,sy,sz0, lx, 2.10*sz, lz, mDelR, mGainR, mNR); // right capture (spaced)
+    }
+    void buildEar(double Lx,double Ly,double Lz,double sx,double sy,double sz,
+                  double lx,double ly,double lz,std::array<int,kMaxTaps>&del,
+                  std::array<float,kMaxTaps>&gain,int&count)
+    {
+        const double c = 343.0, r = 0.70; // wall reflection coeff (bright, ~0.4 absorptive)
+        struct T { int d; float g; };
+        std::array<T, 512> tmp{}; int m = 0;
+        const int N = 3;
+        for (int mx=-N;mx<=N;++mx) for (int my=-N;my<=N;++my) for (int mz=-N;mz<=N;++mz) {
+            if (!mx && !my && !mz) continue;                 // skip direct sound
+            double ix = mx*Lx + ((mx&1)?(Lx-sx):sx);
+            double iy = my*Ly + ((my&1)?(Ly-sy):sy);
+            double iz = mz*Lz + ((mz&1)?(Lz-sz):sz);
+            double dx=ix-lx, dy=iy-ly, dz=iz-lz;
+            double dist = std::sqrt(dx*dx+dy*dy+dz*dz);
+            double dms = dist/c*1000.0; if (dms > 80.0) continue;     // early reflections only
+            int refl = std::abs(mx)+std::abs(my)+std::abs(mz);
+            double g = std::pow(r,(double)refl) / std::max(1.0, dist);
+            if (g < 0.004) continue;
+            if (m < 512) { tmp[(size_t)m].d = std::max(1,(int)std::llround(dist/c*mFs)); tmp[(size_t)m].g = (float)g; ++m; }
+        }
+        std::sort(tmp.begin(), tmp.begin()+m, [](const T&a,const T&b){return a.g>b.g;});
+        count = std::min(m, kMaxTaps);
+        float norm = 0.0f; for (int k=0;k<count;++k) norm += tmp[(size_t)k].g;
+        norm = norm > 0 ? 1.0f/norm : 1.0f;                  // sum-normalize so ER level is size-independent
+        for (int k=0;k<count;++k){ del[(size_t)k]=tmp[(size_t)k].d; gain[(size_t)k]=tmp[(size_t)k].g*norm; }
+    }
+
+    double mFs = 48000.0;
+    FracDelayLine mLine;
+    std::array<int,kMaxTaps> mDelL{}, mDelR{};
+    std::array<float,kMaxTaps> mGainL{}, mGainR{};
+    int mNL = 0, mNR = 0;
+    float mLpL = 0.0f, mLpR = 0.0f, mLpK = 0.5f, mLastSize = -1.0f;
+    bool mBuilt = false, mPrepared = false;
+};
+
 class ReverbBlock : public StereoBlock
 {
 public:
@@ -776,7 +868,7 @@ public:
     static bool usesFdn(Type t) { return t == kRoom || t == kHall || t == kAmbience || t == kBloom; }
 
     // ---- voicing introspection (UI + tests) ----
-    static bool sizeExposed(Type t) { return t == kHall; }
+    static bool sizeExposed(Type t) { return t == kHall || t == kRoom; } // Room: scales the virtual room
     static bool toneExposed(Type) { return true; }
     static bool predelayExposed(Type t) { return t == kPlate || t == kBloom; } // Hall folds it into Size; Shimmer/Room/Spring/Ambience hardwire
     static bool modExposed(Type t) { return t == kHall || t == kPlate || t == kBloom || t == kShimmer; } // Ambience hardwires
@@ -853,6 +945,8 @@ public:
         mSpring.prepare(ctx.sampleRate);
         mShimmer.prepare(ctx.sampleRate);
         mMixer.prepare(ctx.sampleRate);
+        mER.prepare(ctx.sampleRate);
+        mRoomLfK = (float)reverb_detail::onePole(550.0, ctx.sampleRate); mRoomLfL = mRoomLfR = 0.0f; // Room low-bloom bed cutoff
         const int cap = std::max(16, ctx.maxBlockSize);
         mDryL.assign((size_t)cap, 0.0f);
         mDryR.assign((size_t)cap, 0.0f);
@@ -864,7 +958,7 @@ public:
 
     void reset() override
     {
-        mFdn.reset(); mPlate.reset(); mSpring.reset(); mShimmer.reset();
+        mFdn.reset(); mPlate.reset(); mSpring.reset(); mShimmer.reset(); mER.reset();
         mMixer.reset();
         mMixer.snapMix(mPrepared ? effMix() : 0.0f);
     }
@@ -908,6 +1002,21 @@ public:
         case kPlate: mPlate.process(left, right, numSamples); break;
         case kSpring: mSpring.process(left, right, numSamples); break;
         case kShimmer: mShimmer.process(left, right, numSamples); break;
+        case kRoom:
+        {
+            if ((int)mErL.size() < numSamples) { mErL.assign((size_t)numSamples, 0.0f); mErR.assign((size_t)numSamples, 0.0f); }
+            mER.process(mDryL.data(), mDryR.data(), mErL.data(), mErR.data(), numSamples); // early reflections (image-source)
+            mFdn.process(left, right, numSamples);                                          // diffuse late wash
+            for (int n = 0; n < numSamples; ++n) {
+                // late wash split: a little full-band + a boosted low-passed bed = blooming
+                // low tail under bright early reflections (tight top, warm sustain below).
+                mRoomLfL += mRoomLfK * (left[n] - mRoomLfL);
+                mRoomLfR += mRoomLfK * (right[n] - mRoomLfR);
+                left[n] = kErMix * mErL[(size_t)n] + kLateHi * left[n] + kLateLow * mRoomLfL;
+                if (stereo) right[n] = kErMix * mErR[(size_t)n] + kLateHi * right[n] + kLateLow * mRoomLfR;
+            }
+            break;
+        }
         default: mFdn.process(left, right, numSamples); break;
         }
 
@@ -1015,21 +1124,26 @@ private:
             float size, mod, pre, diff;
             switch (mType)
             {
-            case kRoom:     size = 0.6f;  mod = 0.15f; pre = 8.0f;  diff = 0.70f; break;
+            case kRoom:     size = 0.5f + (mSize - kMinSize) * 0.3f; mod = 0.15f; pre = 8.0f; diff = 0.70f; break;
             case kAmbience: size = 0.45f; mod = 0.25f; pre = 0.0f;  diff = 0.78f; break;
             // Bloom hardwires a long predelay; Hall folds predelay into Size.
             case kBloom:    size = 1.45f; mod = std::max(0.45f, mMod); pre = mPredelayMs; diff = 0.60f; break;
             case kHall:
             default:        size = mSize; mod = mMod;  pre = 10.0f + (mSize - kMinSize) * 60.0f; diff = 0.65f; break;
             }
+            if (mType == kRoom) { mER.setSize(mSize); mER.setBrightHz(mDampHz); } // ER scales w/ Size, brightness w/ Tone
             mFdn.setSize(size); mFdn.setModDepth(mod); mFdn.setPredelayMs(pre);
-            mFdn.setDiffusion(diff); mFdn.setDecaySeconds(effT60()); mFdn.setDampHz(mDampHz);
+            mFdn.setDiffusion(diff); mFdn.setDecaySeconds(mType == kRoom ? effT60() * 0.5f : effT60()); mFdn.setDampHz(mDampHz);
             mFdn.setFreeze(mFreeze);
             break;
         }
         }
     }
 
+    static constexpr float kErMix = 1.0f, kLateHi = 0.22f, kLateLow = 1.05f; // Room: bright ER + low-bloom late bed
+    float mRoomLfL = 0.0f, mRoomLfR = 0.0f, mRoomLfK = 0.0f;
+    EarlyReflections mER;
+    std::vector<float> mErL, mErR;
     FdnReverb mFdn;
     PlateReverb mPlate;
     SpringReverb mSpring;
