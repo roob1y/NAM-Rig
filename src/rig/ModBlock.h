@@ -86,15 +86,27 @@ public:
     static constexpr float kUniCellGamma = 1.5f;     // photoconductive transfer: fc ~ light^gamma
     static constexpr float kUniAmDepth = 0.10f;      // subtle photocell amplitude ripple
     static constexpr float kUniDepthMin = 0.10f;     // always some throb (never dead-static)
+    // Tremolo gain-shape LUT + DC-offset compensation. The LUT waveshapes the
+    // bipolar LFO modulator through a (default-linear) ODD-symmetric taper, so it
+    // stays zero-mean -> it can never add a DC component to the gain (no thump),
+    // and kTremTaper > 1 sharpens / < 1 rounds the throb shoulders by ear.
+    // kTremCenter is the DC-offset compensation: 0 = cut-only gain in [1-depth,1]
+    // (the original voicing; mean drops with depth, the section ModLevelLock takes
+    // up the slack) ... 1 = mean-preserving (gain mean = 1 at any depth, troughs
+    // still chop to 0, peaks boost). Default 0 keeps the loved sound; tune by ear.
+    static constexpr int kTremLutN = 1024;
+    static constexpr float kTremTaper = 1.0f;
+    static constexpr float kTremCenter = 0.0f;
 
     // ---- per-effect voicing (public so the tests + UI can read it) ----
     static int authenticWave(Type t) { return t == kFlanger ? Lfo::Triangle : Lfo::Sine; }
-    static float depthMax(Type t)
+    static float depthMax(Type)
     {
-        // Tremolo now chops to full silence at max depth (de-click smoothing in
-        // processSample stops the square/S&H clicks). Harm-trem stays short of
-        // silence for now -- its full-depth chop comes with the LR4 rework.
-        return (t == kHarmTrem) ? 0.85f : 1.0f;
+        // Every effect now reaches full depth. Tremolo chops to full silence
+        // (de-click smoothing stops the square/S&H clicks); harm-trem chops fully
+        // too now that the LR4 crossover recombines phase-coherent and flat, so
+        // the complementary AM is a clean spectral pan instead of a lumpy split.
+        return 1.0f;
     }
     static float bakedBbd(Type t)
     {
@@ -158,6 +170,18 @@ public:
         return (std::tanh(x * pre + bias) - std::tanh(bias)) * (2.6f / pre);
     }
 
+    // Tremolo gain law (single source of truth, public so the test verifies the
+    // DC-offset compensation directly). mod = shaped bipolar modulator in [-1,1];
+    // center 0 = cut-only (gain in [1-depth, 1], original voicing), center 1 =
+    // DC-compensated (mean gain = 1 at any depth, trough still reaches 0 = full
+    // chop). At depth 1 both ends meet (gain = 1 - mod). The DC term carries the
+    // only mean offset; an odd-symmetric mod keeps everything else zero-mean.
+    static float tremGain(float depth, float mod, float center)
+    {
+        const float dc = 0.5f * (1.0f - center);            // mean-offset term
+        return 1.0f - depth * (dc + mod * (0.5f + 0.5f * center));
+    }
+
     float uniVibeWarp(int ch, float lfo)
     {
         const float drive = 0.5f + 0.5f * lfo; // LFO -> lamp drive [0,1]
@@ -185,6 +209,22 @@ public:
         rbjPeaking(kAmpEmphHz, kAmpEmphQ, kAmpEmphDb, mFs, mApB0, mApB1, mApB2, mApA1, mApA2);
         rbjPeaking(kAmpEmphHz, kAmpEmphQ, -kAmpEmphDb, mFs, mAqB0, mAqB1, mAqB2, mAqA1, mAqA2);
         mAmpToneCoef = coefForHz(kAmpToneHz, mFs);
+        // Harmonic-tremolo Linkwitz-Riley 4th-order crossover: a Butterworth
+        // (Q=1/sqrt2) LP and HP at kHarmXoverHz, each cascaded twice in process.
+        rbjLowpass(kHarmXoverHz, 0.70710678, mFs, mHtLpB0, mHtLpB1, mHtLpB2, mHtLpA1, mHtLpA2);
+        rbjHighpass(kHarmXoverHz, 0.70710678, mFs, mHtHpB0, mHtHpB1, mHtHpB2, mHtHpA1, mHtHpA2);
+        // Tremolo gain-shape LUT: an ODD-symmetric taper of the bipolar modulator
+        // (-1..1). Linear at kTremTaper=1 (transparent: a table read replaces the
+        // curve eval and the table is exactly zero-mean, so it adds no DC).
+        for (int i = 0; i < kTremLutN; ++i)
+        {
+            const double u = -1.0 + 2.0 * (double)i / (double)(kTremLutN - 1);
+            mTremLut[(size_t)i] =
+                (kTremTaper == 1.0f)
+                    ? (float)u
+                    : (float)(u < 0.0 ? -std::pow(-u, (double)kTremTaper)
+                                      : std::pow(u, (double)kTremTaper));
+        }
         const int maxDelay =
             (int)std::ceil((kChorusBaseMs + kChorusSpreadMs + 2.0) * 0.001 * mFs);
         for (auto &d : mLine)
@@ -213,9 +253,15 @@ public:
         mFbState[0] = mFbState[1] = 0.0f;
         mFbLp[0] = mFbLp[1] = 0.0f;
         mXoverLp[0] = mXoverLp[1] = 0.0f;
+        mHtLp1Z1[0] = mHtLp1Z1[1] = mHtLp1Z2[0] = mHtLp1Z2[1] = 0.0f;
+        mHtLp2Z1[0] = mHtLp2Z1[1] = mHtLp2Z2[0] = mHtLp2Z2[1] = 0.0f;
+        mHtHp1Z1[0] = mHtHp1Z1[1] = mHtHp1Z2[0] = mHtHp1Z2[1] = 0.0f;
+        mHtHp2Z1[0] = mHtHp2Z1[1] = mHtHp2Z2[0] = mHtHp2Z2[1] = 0.0f;
         mBbdLp[0] = mBbdLp[1] = 0.0f;
         mUniLamp[0] = mUniLamp[1] = 0.5f; // lamp at mid brightness (no startup snap)
         mTremG[0] = mTremG[1] = 1.0f; // unity gain (no mute on start)
+        mVibApX[0] = mVibApX[1] = 0.0f;
+        mVibApY[0] = mVibApY[1] = 0.0f;
         mHornLp[0] = mHornLp[1] = 0.0f;
         mDrumLp[0] = mDrumLp[1] = 0.0f;
         mCabZ1[0] = mCabZ1[1] = 0.0f;
@@ -455,20 +501,40 @@ private:
             // an amplitude AUTO-PAN: the R channel crossfades to anti-phase as Width
             // rises (0 = mono, 1 = full L/R ping-pong), so a chop pans cleanly
             // instead of lurching.
-            float useLfo = lfo;
+            float wMod = lfo;
             if ((mUserWave == Lfo::Square || mUserWave == Lfo::SampleHold) && ch == 1)
-                useLfo = lfo * (1.0f - 2.0f * mWidth);
-            const float target = 1.0f - depth * (0.5f + 0.5f * useLfo);
+                wMod = lfo * (1.0f - 2.0f * mWidth);
+            // LUT-waveshape the modulator (odd-symmetric -> adds no DC) then apply
+            // the DC-offset-compensated gain law. At the default taper=1/center=0
+            // this is bit-identical to the original 1 - depth*(0.5+0.5*lfo).
+            const float target = tremGain(depth, tremLut(wMod), kTremCenter);
             float &gn = mTremG[(size_t)ch];
             gn += mTremCoef * (target - gn); // smoothing de-clicks square/S&H edges
             return (1.0f - mMixZ) * x + mMixZ * (x * gn);
         }
         case kVibrato:
         {
+            // Single-tap time-varying delay with FIRST-ORDER ALL-PASS fractional
+            // interpolation. An all-pass has UNITY magnitude at every frequency, so
+            // the swept delay imparts pure pitch modulation with no amplitude ripple
+            // -- the polynomial (Hermite) interpolator's small, fractional-position-
+            // dependent HF gain loss is what made the old vibrato shimmer as it
+            // swept. The fractional delay is biased into [0.5, 1.5) so |c| <= 1/3:
+            // well inside stability and the lowest-transient region for when the
+            // integer tap steps mid-sweep (the known weak spot of allpass interp).
             const double sweepMs =
                 kVibBaseMs + (double)depth * kVibSpreadMs * (0.5 + 0.5 * (double)lfo);
+            const double d = std::max(2.0, sweepMs * 0.001 * mFs);
+            const int di = (int)(d - 0.5);                 // integer tap (frac lands in [0.5,1.5))
+            const float frac = (float)(d - (double)di);    // fractional delay realised by the allpass
+            const float c = (1.0f - frac) / (1.0f + frac); // allpass coefficient for that delay
             mLine[(size_t)ch].write(x);
-            float wet = mLine[(size_t)ch].readFrac(std::max(2.0, sweepMs * 0.001 * mFs));
+            const float xr = mLine[(size_t)ch].readInt(di); // integer-delayed sample
+            float &apx = mVibApX[(size_t)ch];               // previous integer-read input
+            float &apy = mVibApY[(size_t)ch];               // previous allpass output
+            float wet = c * xr + apx - c * apy;             // y = c*x[n] + x[n-1] - c*y[n-1]
+            apx = xr;
+            apy = wet;
             wet = bbdColor(ch, wet);
             return (1.0f - mMixZ) * x + mMixZ * wet;
         }
@@ -643,11 +709,24 @@ private:
         }
         case kHarmTrem:
         {
-            float &lp = mXoverLp[(size_t)ch];
-            lp += mXoverCoef * (x - lp);
-            const float low = lp, high = x - lp;
+            // Linkwitz-Riley 4th-order crossover at kHarmXoverHz: two cascaded
+            // Butterworth (Q=1/sqrt2) sections per band = 24 dB/oct with a
+            // phase-coherent LP+HP sum (flat magnitude), so the two bands are
+            // cleanly separated AND recombine without colouring the dry tone.
+            // Complementary LFO AM: the two band gains sum to a constant, so this
+            // is a spectral PAN (bass<->treble) rather than a volume tremolo --
+            // which is why it now chops to full depth without a level dip.
+            const size_t c = (size_t)ch;
+            float lo = biquadTDF2(x, mHtLpB0, mHtLpB1, mHtLpB2, mHtLpA1, mHtLpA2,
+                                  mHtLp1Z1[c], mHtLp1Z2[c]);
+            lo = biquadTDF2(lo, mHtLpB0, mHtLpB1, mHtLpB2, mHtLpA1, mHtLpA2,
+                            mHtLp2Z1[c], mHtLp2Z2[c]);
+            float hi = biquadTDF2(x, mHtHpB0, mHtHpB1, mHtHpB2, mHtHpA1, mHtHpA2,
+                                  mHtHp1Z1[c], mHtHp1Z2[c]);
+            hi = biquadTDF2(hi, mHtHpB0, mHtHpB1, mHtHpB2, mHtHpA1, mHtHpA2,
+                            mHtHp2Z1[c], mHtHp2Z2[c]);
             const float g = 0.5f + 0.5f * lfo;
-            const float wet = low * (1.0f - depth * g) + high * (1.0f - depth * (1.0f - g));
+            const float wet = lo * (1.0f - depth * g) + hi * (1.0f - depth * (1.0f - g));
             return (1.0f - mMixZ) * x + mMixZ * wet;
         }
         case kBiPhase:
@@ -724,6 +803,18 @@ private:
         return wet + mBakedBbd * (soft - wet);
     }
 
+    // Linear-interpolated read of the tremolo gain-shape LUT for a bipolar
+    // modulator in [-1, 1]. Exact (== w) when the table is the identity taper.
+    float tremLut(float w) const
+    {
+        float p = 0.5f * (w + 1.0f) * (float)(kTremLutN - 1);
+        if (p < 0.0f) p = 0.0f;
+        int i = (int)p;
+        if (i > kTremLutN - 2) i = kTremLutN - 2;
+        const float f = p - (float)i;
+        return mTremLut[(size_t)i] + f * (mTremLut[(size_t)i + 1] - mTremLut[(size_t)i]);
+    }
+
     static float coefForHz(double hz, double fs)
     {
         const double fc = std::min(std::max(hz, 1.0), 0.45 * fs);
@@ -747,6 +838,43 @@ private:
         a1 = (float)((-2.0 * cw) / a0);
         a2 = (float)((1.0 - al / A) / a0);
     }
+    // RBJ low-pass biquad, a0-normalised (TDF2-ready). Q = 1/sqrt(2) gives a
+    // 2nd-order Butterworth section -> two cascaded = a Linkwitz-Riley 4th-order.
+    static void rbjLowpass(double fc, double Q, double fs,
+                           float &b0, float &b1, float &b2, float &a1, float &a2)
+    {
+        const double w0 = 2.0 * 3.14159265358979323846 * fc / fs;
+        const double cw = std::cos(w0), sw = std::sin(w0), al = sw / (2.0 * Q);
+        const double a0 = 1.0 + al;
+        b0 = (float)(((1.0 - cw) * 0.5) / a0);
+        b1 = (float)((1.0 - cw) / a0);
+        b2 = b0;
+        a1 = (float)((-2.0 * cw) / a0);
+        a2 = (float)((1.0 - al) / a0);
+    }
+    // RBJ high-pass biquad, a0-normalised (TDF2-ready). Butterworth at Q=1/sqrt(2).
+    static void rbjHighpass(double fc, double Q, double fs,
+                            float &b0, float &b1, float &b2, float &a1, float &a2)
+    {
+        const double w0 = 2.0 * 3.14159265358979323846 * fc / fs;
+        const double cw = std::cos(w0), sw = std::sin(w0), al = sw / (2.0 * Q);
+        const double a0 = 1.0 + al;
+        b0 = (float)(((1.0 + cw) * 0.5) / a0);
+        b1 = (float)(-(1.0 + cw) / a0);
+        b2 = b0;
+        a1 = (float)((-2.0 * cw) / a0);
+        a2 = (float)((1.0 - al) / a0);
+    }
+    // Transposed-Direct-Form-II biquad step (a0-normalised coeffs). Advances the
+    // two state words in place. Shared by the harm-trem LR4 crossover sections.
+    static float biquadTDF2(float x, float b0, float b1, float b2, float a1, float a2,
+                            float &z1, float &z2)
+    {
+        const float y = b0 * x + z1;
+        z1 = b1 * x - a1 * y + z2;
+        z2 = b2 * x - a2 * y;
+        return y;
+    }
 
     void flushDenormals()
     {
@@ -761,6 +889,8 @@ private:
         for (auto &f : mXoverLp)
             if (std::abs(f) < 1.0e-30f) f = 0.0f;
         for (auto &f : mBbdLp)
+            if (std::abs(f) < 1.0e-30f) f = 0.0f;
+        for (auto &f : mVibApY) // recursive allpass state
             if (std::abs(f) < 1.0e-30f) f = 0.0f;
         for (auto &f : mFbLp)
             if (std::abs(f) < 1.0e-30f) f = 0.0f;
@@ -778,7 +908,9 @@ private:
             if (std::abs(f) < 1.0e-30f) f = 0.0f;
         for (auto &f : mHornTiltLp)
             if (std::abs(f) < 1.0e-30f) f = 0.0f;
-        for (auto *bank : {&mApZ1, &mApZ2, &mAqZ1, &mAqZ2, &mAmpToneLp})
+        for (auto *bank : {&mApZ1, &mApZ2, &mAqZ1, &mAqZ2, &mAmpToneLp,
+                           &mHtLp1Z1, &mHtLp1Z2, &mHtLp2Z1, &mHtLp2Z2,
+                           &mHtHp1Z1, &mHtHp1Z2, &mHtHp2Z1, &mHtHp2Z2})
             for (auto &f : *bank)
                 if (std::abs(f) < 1.0e-30f) f = 0.0f;
     }
@@ -796,10 +928,19 @@ private:
     std::array<ApState, 2 * kPhaserStages> mAllpass{};
     std::array<float, 2> mFbState{};
     std::array<float, 2> mFbLp{};            // flanger feedback tone state
-    std::array<float, 2> mXoverLp{};         // harmonic-trem / rotary crossover state
+    std::array<float, 2> mXoverLp{};         // rotary 800 Hz crossover state (one-pole)
+    // Harmonic-tremolo LR4 crossover: two cascaded Butterworth biquads per band.
+    // Coeffs are fixed (corner = kHarmXoverHz), computed in prepare().
+    float mHtLpB0 = 1.0f, mHtLpB1 = 0.0f, mHtLpB2 = 0.0f, mHtLpA1 = 0.0f, mHtLpA2 = 0.0f;
+    float mHtHpB0 = 1.0f, mHtHpB1 = 0.0f, mHtHpB2 = 0.0f, mHtHpA1 = 0.0f, mHtHpA2 = 0.0f;
+    std::array<float, 2> mHtLp1Z1{}, mHtLp1Z2{}, mHtLp2Z1{}, mHtLp2Z2{}; // LP cascade state
+    std::array<float, 2> mHtHp1Z1{}, mHtHp1Z2{}, mHtHp2Z1{}, mHtHp2Z2{}; // HP cascade state
     std::array<float, 2> mBbdLp{};           // BBD HF-rolloff state
     std::array<float, 2> mUniLamp{};         // uni-vibe lamp thermal envelope (per ch)
     std::array<float, 2> mTremG{1.0f, 1.0f}; // smoothed tremolo gain (de-click)
+    std::array<float, 2> mVibApX{};          // vibrato allpass: prev integer-read input
+    std::array<float, 2> mVibApY{};          // vibrato allpass: prev output (recursive)
+    std::array<float, kTremLutN> mTremLut{}; // tremolo gain-shape LUT (built in prepare)
     float mDepth = 0.5f, mFeedback = 0.0f, mMix = 0.5f;
     float mDepthZ = 0.5f, mMixZ = 0.5f, mSmoothK = 0.01f;
     float mManual = 0.3f, mManualZ = 0.3f; // Flanger Manual (static comb position)

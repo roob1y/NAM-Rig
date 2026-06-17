@@ -51,6 +51,16 @@
 //       reordering two effects changes the sound; a malformed order is rejected
 //   T35 tremolo Width per shape: Square/S&H mono at 0, amplitude auto-pan at 1;
 //       sine spreads via quadrature
+//   T36 chorus interpolation is true 4-point cubic Hermite: FracDelayLine
+//       reproduces a quadratic ~exactly (a linear interpolator can't)
+//   T37 harm-trem LR4 recombines magnitude-flat at unity AM (depth 0); bounded
+//   T38 harm-trem LR4 band separation is steep (24 dB/oct): a tone 2 octaves
+//       above the crossover modulates near-fully (a one-pole split couldn't)
+//   T39 vibrato all-pass interp has flat magnitude: a swept high tone shows
+//       almost no amplitude ripple (the Hermite read rippled); finite/bounded
+//   T40 tremolo DC-offset comp law: center 0 = cut-only (mean drops with depth),
+//       center 1 = mean-preserving (avg gain 1 at any depth); both full-chop;
+//       and the multiplier adds no DC to a zero-mean signal
 #include "rig/ModBlock.h"
 #include <cstdio>
 #include <cmath>
@@ -449,8 +459,8 @@ int main()
     // ---- T13: per-effect voicing constants ----
     {
         const bool ok =
-            ModVoice::depthMax(ModVoice::kTremolo) == 1.0f &&   // tremolo now chops to full silence
-            ModVoice::depthMax(ModVoice::kHarmTrem) < 1.0f &&    // harm-trem still short of silence (LR4 rework pending)
+            ModVoice::depthMax(ModVoice::kTremolo) == 1.0f &&   // tremolo chops to full silence
+            ModVoice::depthMax(ModVoice::kHarmTrem) == 1.0f &&   // harm-trem now full-chop (LR4 recombines flat)
             ModVoice::depthMax(ModVoice::kChorus) == 1.0f &&
             ModVoice::bakedBbd(ModVoice::kChorus) > 0.0f &&
             ModVoice::bakedBbd(ModVoice::kPhaser) == 0.0f &&
@@ -458,7 +468,7 @@ int main()
             ModVoice::authenticWave(ModVoice::kChorus) == Lfo::Sine &&
             ModVoice::mixFor(ModVoice::kFlanger, 1.0f) == 0.5f &&  // flanger Mix caps at 50/50
             ModVoice::mixFor(ModVoice::kFlanger, 0.0f) == 0.0f;    // ...and reaches fully dry
-        CHECK(ok, "T13 voicing constants (tremolo chops full / harm-trem capped, BBD baked on delay types, flanger=triangle, flanger mix caps 50/50)");
+        CHECK(ok, "T13 voicing constants (tremolo + harm-trem chop full, BBD baked on delay types, flanger=triangle, flanger mix caps 50/50)");
     }
 
     // ---- T14: tremolo at full depth chops to near-silence (full-depth chop) ----
@@ -1547,6 +1557,148 @@ int main()
         CHECK(sh0 < 1e-6, "T35 S&H Width 0 = mono (L==R, diff %.2e)", sh0);
         CHECK(sh1 > 0.02, "T35 S&H Width 1 = auto-pan (L!=R, diff %.3f)", sh1);
         CHECK(si1 > 0.02, "T35 sine tremolo still spreads L/R (diff %.3f)", si1);
+    }
+
+    // ---- T36: Chorus interpolation IS true 4-point cubic Hermite. A cubic
+    //      (Keys a=-1/2) interpolator reproduces a quadratic EXACTLY; a linear
+    //      interpolator cannot. Drive FracDelayLine (rig/Lfo.h) directly with a
+    //      quadratic and read at many fractional delays. ----
+    {
+        nam_rig::FracDelayLine dl;
+        dl.prepare(64);
+        auto q = [](double n) { return 0.1 * n - 0.01 * n * n; }; // quadratic
+        const int N = 24;
+        for (int n = 0; n < N; ++n) dl.write((float)q(n));
+        double maxErr = 0.0, maxLinErr = 0.0;
+        for (double D = 2.2; D <= 8.0; D += 0.1)
+        {
+            const double npos = (double)(N - 1) - D; // absolute position read
+            maxErr = std::max(maxErr, std::abs((double)dl.readFrac(D) - q(npos)));
+            const int di = (int)D;
+            const double t = D - (double)di;
+            const double lin = (1.0 - t) * q((double)(N - 1 - di))
+                             + t * q((double)(N - 1 - (di + 1)));
+            maxLinErr = std::max(maxLinErr, std::abs(lin - q(npos)));
+        }
+        CHECK(maxErr < 1.0e-4, "T36 cubic-Hermite reproduces a quadratic (max err %.2e < 1e-4)", maxErr);
+        CHECK(maxLinErr > 1.5e-3, "T36 ...where a linear interpolator cannot (linear err %.2e)", maxLinErr);
+    }
+
+    // ---- T37: harm-trem LR4 recombines magnitude-FLAT at unity AM. At depth 0
+    //      both band gains are 1, so wet = LP+HP = a Linkwitz-Riley allpass sum;
+    //      its magnitude is unity at every frequency (no colouring of the dry
+    //      tone), including right at the crossover. ----
+    {
+        auto ratioAt = [](double f) {
+            ModVoice m;
+            m.setType(ModVoice::kHarmTrem);
+            m.setRateHz(3.0f);
+            m.setDepth(0.0f);
+            m.setMix(1.0f);
+            m.prepare({SR, BLK});
+            auto l = tone(f, 0.4, (int)SR), r = l;
+            auto ref = l;
+            run(m, l, r);
+            const double out = mag(l, (size_t)SR / 2, (size_t)SR / 2, f);
+            const double in = mag(ref, (size_t)SR / 2, (size_t)SR / 2, f);
+            return out / (in + 1e-12);
+        };
+        double worst = 0.0;
+        bool finite = true;
+        for (double f : {100.0, 400.0, 800.0, 1600.0, 4000.0})
+        {
+            const double rr = ratioAt(f);
+            if (!std::isfinite(rr)) finite = false;
+            worst = std::max(worst, std::abs(rr - 1.0));
+        }
+        CHECK(finite && worst < 0.06,
+              "T37 LR4 recombines magnitude-flat at unity AM (worst dev %.3f < 0.06)", worst);
+    }
+
+    // ---- T38: harm-trem LR4 band separation is STEEP (24 dB/oct). A tone two
+    //      octaves above the crossover lands ~48 dB down in the low band, so at
+    //      full depth the complementary AM modulates it almost completely
+    //      (min/max ~0.004). The old one-pole split (6 dB/oct) only reached ~0.25
+    //      here, so this threshold is what proves the LR4 rework. ----
+    {
+        ModVoice m;
+        m.setType(ModVoice::kHarmTrem);
+        m.setRateHz(1.0f);
+        m.setDepth(1.0f);
+        m.setMix(1.0f);
+        m.prepare({SR, BLK});
+        auto l = tone(3200.0, 0.4, (int)SR * 3), r = l; // 3200 = 800 * 4 (2 octaves up)
+        run(m, l, r);
+        std::vector<float> tail(l.begin() + (int)(SR * 1.5), l.end());
+        auto env = envelope(tail, 480);
+        double mn = 1e9, mx = 0;
+        for (double e : env) { mn = std::min(mn, e); mx = std::max(mx, e); }
+        const double ratio = mn / (mx + 1e-12);
+        CHECK(ratio < 0.1,
+              "T38 LR4 steep separation: 2-octave tone modulates fully (min/max %.4f < 0.1; one-pole ~0.25)", ratio);
+    }
+
+    // ---- T39: vibrato all-pass interpolation has FLAT magnitude. A high tone
+    //      swept by the vibrato should keep a near-constant peak amplitude
+    //      (pitch/FM changes, amplitude does not) -- the polynomial (Hermite)
+    //      read used to ripple the amplitude as the fractional delay moved. ----
+    {
+        ModVoice m;
+        m.setType(ModVoice::kVibrato);
+        m.setRateHz(5.0f);
+        m.setDepth(0.6f);
+        m.setMix(1.0f);
+        m.prepare({SR, BLK});
+        auto l = tone(6000.0, 0.4, (int)SR * 2), r = l;
+        run(m, l, r);
+        bool finite = true;
+        for (float v : l) if (!std::isfinite(v)) finite = false;
+        std::vector<float> tail(l.begin() + (int)SR, l.end());
+        auto env = envelope(tail, 64);
+        double mn = 1e9, mx = 0, sum = 0;
+        for (double e : env) { mn = std::min(mn, e); mx = std::max(mx, e); sum += e; }
+        const double mean = sum / (double)env.size();
+        const double ripple = (mx - mn) / (mean + 1e-12);
+        CHECK(finite, "T39 vibrato all-pass output finite");
+        CHECK(mean > 0.05, "T39 vibrato non-silent (mean env %.3f)", mean);
+        CHECK(ripple < 0.15, "T39 all-pass flat magnitude: swept-tone ripple %.3f < 0.15 (no Hermite shimmer)", ripple);
+    }
+
+    // ---- T40: tremolo DC-offset compensation law. center 0 = cut-only (mean
+    //      gain drops with depth, the original voicing); center 1 = mean-
+    //      preserving (avg gain 1 at any depth); both reach 0 at the trough
+    //      (full chop). The AM of a zero-mean signal must add no DC. ----
+    {
+        auto meanGain = [](float depth, float center) {
+            const int N = 2001;
+            double s = 0.0;
+            for (int i = 0; i < N; ++i)
+            {
+                const float mod = -1.0f + 2.0f * (float)i / (float)(N - 1);
+                s += (double)ModVoice::tremGain(depth, mod, center);
+            }
+            return s / (double)N;
+        };
+        const bool law =
+            std::abs(meanGain(0.8f, 0.0f) - 0.6) < 0.01 &&      // cut-only: mean = 1 - 0.5*depth
+            std::abs(meanGain(0.8f, 1.0f) - 1.0) < 0.01 &&      // DC-comp: mean = 1
+            std::abs(meanGain(0.3f, 1.0f) - 1.0) < 0.01 &&      // ...independent of depth
+            std::abs(ModVoice::tremGain(1.0f, 1.0f, 0.0f)) < 1e-6 && // full chop (cut-only)
+            std::abs(ModVoice::tremGain(1.0f, 1.0f, 1.0f)) < 1e-6;   // full chop (DC-comp)
+        CHECK(law, "T40 tremolo DC-comp law (cut-only mean drops with depth, DC-comp mean=1, both full-chop)");
+
+        ModVoice m;
+        m.setType(ModVoice::kTremolo);
+        m.setRateHz(5.0f);
+        m.setDepth(1.0f);
+        m.setMix(1.0f);
+        m.prepare({SR, BLK});
+        auto l = tone(1000.0, 0.4, (int)SR), r = l;
+        run(m, l, r);
+        double dc = 0.0;
+        for (size_t i = 4800; i < l.size(); ++i) dc += (double)l[i];
+        dc /= (double)(l.size() - 4800);
+        CHECK(std::abs(dc) < 1.0e-3, "T40 tremolo adds no DC to a zero-mean signal (DC %.2e)", dc);
     }
 
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);
