@@ -790,8 +790,8 @@ public:
     // ---- per-character "sweet spot" knob windows ------------------------------
     // The shared Decay/Damping/Predelay knobs keep full 0..1 travel but map into a
     // curated musical window per character (below), so every position sounds good
-    // and nothing unmusical is reachable. DECAY reads TRUE seconds inside its window
-    // (clamp at the caps); Damping/Predelay remap across the window. Engine setters
+    // and nothing unmusical is reachable. DECAY + PREDELAY read TRUE units inside
+    // their window (clamp at the caps); Damping remaps across the window. Engine setters
     // stay literal; the host layer maps raw->window via mapped*(). Outer ranges == APVTS
     // (single source of truth, referenced by PluginProcessor).
     static constexpr float kDecayMin = 0.3f,    kDecayMax = 8.0f;      // s
@@ -842,7 +842,7 @@ public:
     // Convenience mappers for the active character (host/UI layer calls these).
     float mappedDecay(float rawSec)   const { const Range r = decayRange(mType); return std::clamp(rawSec, r.lo, r.hi); } // exact seconds in-window, clamp at caps
     float mappedDamp(float rawHz)     const { return mapToRange(rawHz,  kDampMin,  kDampMax,  dampRange(mType)); }
-    float mappedPredelay(float rawMs) const { return mapToRange(rawMs,  kPreMin,   kPreMax,   predelayRange(mType)); }
+    float mappedPredelay(float rawMs) const { const Range r = predelayRange(mType); return std::clamp(rawMs, r.lo, r.hi); } // exact ms in-window, clamp at caps
 
     const char *name() const override { return "Reverb"; }
 

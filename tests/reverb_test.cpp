@@ -365,6 +365,11 @@ int main()
         ReverbBlock hv; hv.setType(RB::kHall);
         CHECK(std::fabs(hv.mappedDecay(4.0f) - 4.0f) < 1e-4f,
               "T22 Hall decay exact in range (4.0 -> %.2f s)", hv.mappedDecay(4.0f));
+        // Predelay also reads true ms in-window, clamps at the cap (Plate 0-80, Bloom 0-160).
+        CHECK(std::fabs(pv.mappedPredelay(40.0f) - 40.0f) < 1e-4f,
+              "T22 Plate predelay exact in range (40 -> %.1f ms)", pv.mappedPredelay(40.0f));
+        CHECK(std::fabs(pv.mappedPredelay(160.0f) - 80.0f) < 1e-4f,
+              "T22 Plate predelay clamps at cap (160 -> %.1f ms)", pv.mappedPredelay(160.0f));
     }
 
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);
