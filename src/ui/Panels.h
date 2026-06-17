@@ -1231,11 +1231,12 @@ public:
             if (k->isVisible())
                 vis.push_back(k);
         const int nk = (int)vis.size();
-        if (mScope) // live scope fills the space between Type/Sync and the knobs
+        if (mScope) // scope gets a guaranteed slice FIRST; the knobs share the rest
         {
-            const int reserve = nk * 72 + 14;
-            const int scopeW = juce::jlimit(0, 200, area.getWidth() - reserve);
-            if (scopeW >= 80)
+            // Reserve the scope, leaving at least ~44px per knob so even the
+            // densest effects (Flanger/Bi-Phase = 6 knobs) still show the waveform.
+            int scopeW = juce::jmin(area.getWidth() - nk * 44 - 12, 132);
+            if (scopeW >= 70)
             {
                 mScope->setVisible(true);
                 mScope->setBounds(area.removeFromLeft(scopeW)
