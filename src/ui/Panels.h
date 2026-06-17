@@ -1083,7 +1083,9 @@ public:
     void setScopeBrightness(float b) { if (mScope) mScope->setBrightness(b); }
 
     // Write the filtered type combo's selection (item id = enum + 1) back to the
-    // full 9-choice Type parameter.
+    // full 9-choice Type parameter. The combo is authoritative here -- we apply the
+    // layout from it directly and do NOT re-read/re-sync the combo (which could
+    // fight the user's fresh pick).
     void syncTypeParam()
     {
         const int id = mType.getSelectedId();
@@ -1099,15 +1101,27 @@ public:
                 prm->endChangeGesture();
             }
         }
-        refresh();
+        applyType();
     }
 
     void refresh()
     {
+        const int type = (int)mApvts.getRawParameterValue(mPrefix + "Type")->load();
+        // Re-sync the filtered combo to the param for EXTERNAL changes (preset /
+        // automation) -- but never while the dropdown is open, or the editor's
+        // periodic refresh would fight the user's selection (the "needs a second
+        // click" bug).
+        if (!mType.isPopupActive() && mType.getSelectedId() != type + 1)
+            mType.setSelectedId(type + 1, juce::dontSendNotification);
+        applyType();
+    }
+
+    // Show/relayout the controls for the current Type/Sync/On (reads the params;
+    // never touches the combo, so it's safe to call from a fresh user selection).
+    void applyType()
+    {
         const juce::String p = mPrefix;
         const int type = (int)mApvts.getRawParameterValue(p + "Type")->load();
-        if (mType.getSelectedId() != type + 1) // keep the filtered combo in sync
-            mType.setSelectedId(type + 1, juce::dontSendNotification);
         const int sync = (int)mApvts.getRawParameterValue(p + "Sync")->load();
         const bool on = mApvts.getRawParameterValue(p + "On")->load() >= 0.5f;
         mIcon.setType(type);
