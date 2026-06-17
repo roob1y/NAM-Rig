@@ -787,6 +787,62 @@ public:
     static bool inputFilterExposed(Type t) { return t == kPlate; } // vintage plate/studio-style wet low-cut on the plate amp
     static const char *toneCaption(Type t) { return t == kSpring ? "Tone" : "Damping"; }
 
+    // ---- per-character "sweet spot" knob windows ------------------------------
+    // The shared Decay/Damping/Predelay knobs keep full 0..1 travel but map into a
+    // curated musical window per character (below), so every position sounds good
+    // and nothing unmusical is reachable. Engine setters stay literal; the host
+    // layer maps raw->window via mapped*(). Outer ranges == the APVTS param ranges
+    // (single source of truth, referenced by PluginProcessor).
+    static constexpr float kDecayMin = 0.3f,    kDecayMax = 8.0f;      // s
+    static constexpr float kDampMin  = 1500.0f, kDampMax  = 16000.0f;  // Hz
+    static constexpr float kPreMin   = 0.0f,    kPreMax   = 160.0f;    // ms
+    static constexpr float kMixMax   = 0.70f;                          // wet cap (Mix is universal)
+    struct Range { float lo, hi; };
+    static Range decayRange(Type t)
+    {
+        switch (t) {
+        case kRoom:     return {0.3f, 2.0f};
+        case kHall:     return {0.8f, 6.0f};
+        case kPlate:    return {0.5f, 5.5f};   // real vintage plate spec
+        case kSpring:   return {1.0f, 4.0f};
+        case kShimmer:  return {1.5f, 8.0f};
+        case kAmbience: return {0.3f, 1.2f};
+        case kBloom:    return {2.5f, 8.0f};
+        default:        return {kDecayMin, kDecayMax};
+        }
+    }
+    static Range dampRange(Type t)
+    {
+        switch (t) {
+        case kRoom:     return {2500.0f, 12000.0f};
+        case kHall:     return {2000.0f, 12000.0f};
+        case kPlate:    return {1500.0f, 14000.0f}; // voiced dark<->bright span
+        case kSpring:   return {1500.0f,  8000.0f};
+        case kShimmer:  return {3000.0f, 16000.0f};
+        case kAmbience: return {3000.0f, 13000.0f};
+        case kBloom:    return {1500.0f, 10000.0f};
+        default:        return {kDampMin, kDampMax};
+        }
+    }
+    static Range predelayRange(Type t)
+    {
+        switch (t) {
+        case kPlate: return {0.0f,  80.0f};
+        case kBloom: return {0.0f, 160.0f};
+        default:     return {0.0f, kPreMax};
+        }
+    }
+    // Map a raw knob value (within [outMin,outMax]) into a per-character window.
+    static float mapToRange(float raw, float outMin, float outMax, Range r)
+    {
+        const float t = (outMax > outMin) ? (raw - outMin) / (outMax - outMin) : 0.0f;
+        return r.lo + std::clamp(t, 0.0f, 1.0f) * (r.hi - r.lo);
+    }
+    // Convenience mappers for the active character (host/UI layer calls these).
+    float mappedDecay(float rawSec)   const { return mapToRange(rawSec, kDecayMin, kDecayMax, decayRange(mType)); }
+    float mappedDamp(float rawHz)     const { return mapToRange(rawHz,  kDampMin,  kDampMax,  dampRange(mType)); }
+    float mappedPredelay(float rawMs) const { return mapToRange(rawMs,  kPreMin,   kPreMax,   predelayRange(mType)); }
+
     const char *name() const override { return "Reverb"; }
 
     void prepare(const BlockContext &ctx) override

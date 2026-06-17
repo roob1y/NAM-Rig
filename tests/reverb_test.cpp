@@ -337,6 +337,27 @@ int main()
         CHECK(fl > 0.25, "T21 Hall tail spectral flatness %.3f (>0.25 = smooth, not metallic)", fl);
     }
 
+    // ===================== T22: per-character knob windows are sane =====================
+    {
+        using RB = ReverbBlock;
+        bool ok = true;
+        for (int t = 0; t < RB::kNumTypes; ++t) {
+            auto T = (RB::Type)t;
+            auto d = RB::decayRange(T); auto h = RB::dampRange(T); auto pre = RB::predelayRange(T);
+            if (!(d.lo < d.hi && d.lo >= RB::kDecayMin - 1e-4f && d.hi <= RB::kDecayMax + 1e-4f)) ok = false;
+            if (!(h.lo < h.hi && h.lo >= RB::kDampMin - 0.1f && h.hi <= RB::kDampMax + 0.1f)) ok = false;
+            if (!(pre.lo <= pre.hi && pre.hi <= RB::kPreMax + 1e-4f)) ok = false;
+        }
+        CHECK(ok, "T22 per-character Decay/Damp/Predelay windows ordered + within outer bounds");
+        auto pr = RB::decayRange(RB::kPlate);
+        const float atMin = RB::mapToRange(RB::kDecayMin, RB::kDecayMin, RB::kDecayMax, pr);
+        const float atMax = RB::mapToRange(RB::kDecayMax, RB::kDecayMin, RB::kDecayMax, pr);
+        CHECK(std::fabs(atMin - pr.lo) < 1e-4f && std::fabs(atMax - pr.hi) < 1e-4f,
+              "T22 mapToRange spans the window (%.2f..%.2f)", atMin, atMax);
+        CHECK(std::fabs(pr.lo - 0.5f) < 1e-4f && std::fabs(pr.hi - 5.5f) < 1e-4f,
+              "T22 Plate decay window is the vintage plate 0.5-5.5 s (%.2f..%.2f)", pr.lo, pr.hi);
+    }
+
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);
     return gFails == 0 ? 0 : 1;
 }

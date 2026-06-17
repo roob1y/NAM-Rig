@@ -246,19 +246,22 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         1.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("revDecay", 1), "Reverb Decay",
-        juce::NormalisableRange<float>(0.2f, 10.0f, 0.05f, 0.5f), 2.0f,
+        juce::NormalisableRange<float>(nam_rig::ReverbBlock::kDecayMin,
+                                       nam_rig::ReverbBlock::kDecayMax, 0.05f, 0.5f), 2.0f,
         juce::AudioParameterFloatAttributes().withLabel("s")));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("revDamp", 1), "Reverb Damping",
-        juce::NormalisableRange<float>(1000.0f, 16000.0f, 10.0f, 0.5f), 6000.0f,
+        juce::NormalisableRange<float>(nam_rig::ReverbBlock::kDampMin,
+                                       nam_rig::ReverbBlock::kDampMax, 10.0f, 0.5f), 6000.0f,
         juce::AudioParameterFloatAttributes().withLabel("Hz")));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("revPredelay", 1), "Reverb Pre-Delay",
-        juce::NormalisableRange<float>(0.0f, 200.0f, 1.0f, 0.5f), 20.0f,
+        juce::NormalisableRange<float>(nam_rig::ReverbBlock::kPreMin,
+                                       nam_rig::ReverbBlock::kPreMax, 1.0f, 0.5f), 20.0f,
         juce::AudioParameterFloatAttributes().withLabel("ms")));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("revMix", 1), "Reverb Mix",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.25f));
+        juce::NormalisableRange<float>(0.0f, nam_rig::ReverbBlock::kMixMax, 0.01f, 0.6f), 0.25f));
 
     // --- Input calibration + output normalization (NAM-AA parity; see CalNorm.h).
     // Both are metadata-driven and unity when disabled / metadata absent.
@@ -694,9 +697,9 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
 
     mChain.reverb.setType((int)apvts.getRawParameterValue("revType")->load());
     mChain.reverb.setSize(apvts.getRawParameterValue("revSize")->load());
-    mChain.reverb.setDecaySeconds(apvts.getRawParameterValue("revDecay")->load());
-    mChain.reverb.setDampHz(apvts.getRawParameterValue("revDamp")->load());
-    mChain.reverb.setPredelayMs(apvts.getRawParameterValue("revPredelay")->load());
+    mChain.reverb.setDecaySeconds(mChain.reverb.mappedDecay(apvts.getRawParameterValue("revDecay")->load()));
+    mChain.reverb.setDampHz(mChain.reverb.mappedDamp(apvts.getRawParameterValue("revDamp")->load()));
+    mChain.reverb.setPredelayMs(mChain.reverb.mappedPredelay(apvts.getRawParameterValue("revPredelay")->load()));
     mChain.reverb.setMix(apvts.getRawParameterValue("revMix")->load());
     mChain.reverb.setMod(apvts.getRawParameterValue("revMod")->load());
     mChain.reverb.setShimmer(apvts.getRawParameterValue("revShimmer")->load());
