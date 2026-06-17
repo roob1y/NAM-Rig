@@ -967,6 +967,16 @@ public:
 
         const juce::Colour laneCol = colors::laneColour(soloSlot);
         mIcon.setAccent(laneCol); // tint the glyph + box border per lane
+        mIcon.onClick = [this] {   // click the icon to toggle this slot on/off
+            if (auto *prm = mApvts.getParameter(mPrefix + "On"))
+            {
+                const bool now = prm->getValue() >= 0.5f;
+                prm->beginChangeGesture();
+                prm->setValueNotifyingHost(now ? 0.0f : 1.0f);
+                prm->endChangeGesture();
+            }
+            refresh();
+        };
 
         mScope = std::make_unique<LaneScope>(apvts, p, laneCol);
         addAndMakeVisible(*mScope); // live LFO/effect motion for this slot
@@ -1006,12 +1016,7 @@ public:
         mWaveAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
             apvts, p + "Wave", mWave);
 
-        mOn.setButtonText("On");
-        mOn.getProperties().set("pill", true); // pill style (filled when on)
-        addAndMakeVisible(mOn);
-        mOnAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            apvts, p + "On", mOn);
-        mOn.onClick = [this] { refresh(); };
+        // (No On button: the slot is toggled by clicking its icon, wired above.)
 
         // Solo = momentary dial-in (front slots only; NOT an APVTS param).
         if (isFront)
@@ -1196,9 +1201,6 @@ public:
         mRotFast.setBounds(bottomMeta.removeFromLeft(54)); // rotary: slow/fast
         area.removeFromLeft(10);
 
-        auto onCol = area.removeFromRight(44);
-        mOn.setBounds(onCol.withSizeKeepingCentre(44, 22));
-        area.removeFromRight(6);
         if (mSoloSlot >= 0) // front slots only
         {
             mSolo.setBounds(area.removeFromRight(30).withSizeKeepingCentre(30, 22));
@@ -1263,9 +1265,7 @@ private:
     std::unique_ptr<LaneScope> mScope;
     juce::ComboBox mType, mWave, mSync;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mWaveAtt, mSyncAtt; // (Type combo synced by hand)
-    juce::ToggleButton mOn;
     juce::ToggleButton mSolo; // momentary dial-in (not APVTS-attached)
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mOnAtt;
     std::unique_ptr<LabeledKnob> mRate, mDepth, mFeedback, mMix, mWidth, mDrive, mManual, mP2Ratio, mHornDrum;
     juce::ToggleButton mRotFast, mInvert, mSeries;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mRotFastAtt, mInvertAtt, mSeriesAtt;

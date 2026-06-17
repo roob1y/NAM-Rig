@@ -14,7 +14,11 @@ namespace nam_rig::ui
 class ModFxIcon : public juce::Component, private juce::Timer
 {
 public:
-    ModFxIcon() {} // static glyphs (the lane scope carries the live motion now)
+    ModFxIcon() { setMouseCursor(juce::MouseCursor::PointingHandCursor); } // click to toggle On
+
+    // Clicking the icon toggles the slot on/off (replaces the old On button).
+    std::function<void()> onClick;
+    void mouseDown(const juce::MouseEvent &) override { if (onClick) onClick(); }
 
     void setType(int t)
     {
