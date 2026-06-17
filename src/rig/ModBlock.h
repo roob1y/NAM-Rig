@@ -77,6 +77,13 @@ public:
     static constexpr double kRightLfoOffset = 0.25; // 90 degrees at Width = 1
     static constexpr float kPhaserFixedDepth = 1.0f; // phaser sweep is hardwired
     static constexpr float kPhaserFbMax = 0.7f;      // musical resonance ceiling (no whistle)
+    // Rate-dependent sweep-width guardrail (keeps a swept-filter effect sounding
+    // like itself across the whole rate range): full sweep width at/below
+    // kSweepFullRateHz, narrowing smoothly to kSweepNarrowFloor of full width as
+    // the rate climbs to the cap -- so fast settings SHIMMER instead of wobbling.
+    // Shared/reusable (phaser now; uni-vibe / bi-phase can adopt it later).
+    static constexpr float kSweepFullRateHz = 2.0f;   // full width at/below this rate
+    static constexpr float kSweepNarrowFloor = 0.35f; // min width fraction at the rate cap
     static constexpr float kUniFeedback = 0.3f;      // uni-vibe resonance is hardwired (positive fb)
     // Photocell warp (replaces the old pow-skew): the incandescent lamp heats
     // faster than it cools (asymmetric one-pole), and the LDR maps light to stage
@@ -182,6 +189,19 @@ public:
     {
         const float dc = 0.5f * (1.0f - center);            // mean-offset term
         return 1.0f - depth * (dc + mod * (0.5f + 0.5f * center));
+    }
+
+    // Rate-dependent sweep-width scale (single source of truth, public so the test
+    // checks the law). Returns 1.0 (full sweep) at/below kSweepFullRateHz, then
+    // narrows linearly to kSweepNarrowFloor as rateHz climbs to maxRateHz, so an
+    // LFO-swept filter stays musical (shimmer, not wobble) when driven fast. A
+    // multiplier on the effect's sweep depth/octaves; reusable across effects.
+    static float sweepWidthScale(float rateHz, float maxRateHz)
+    {
+        if (rateHz <= kSweepFullRateHz) return 1.0f;
+        const float span = std::max(0.001f, maxRateHz - kSweepFullRateHz);
+        const float t = std::min(1.0f, (rateHz - kSweepFullRateHz) / span); // 0..1 above the knee
+        return 1.0f - (1.0f - kSweepNarrowFloor) * t;                       // 1.0 -> floor
     }
 
     float uniVibeWarp(int ch, float lfo)
@@ -346,6 +366,9 @@ public:
         const Type ty = mType;
         const double rate = (double)effectiveRateHz();
         mLfo.setRateHz((float)rate);
+        // Rate-dependent sweep-width guardrail (per block; sync + free rate both
+        // honour it). Used by the phaser now; vibe/bi-phase can adopt it later.
+        mSweepWidth = sweepWidthScale((float)rate, maxRateHz(ty));
         mLfo.setWaveform(ty == kTremolo ? mUserWave : authenticWave(ty)); // shape hardwired per type
         // Bi-Phase Sweep Gen 2 = Gen 1 x ratio, but clamped to the same musical
         // ceiling so the detune can't push one core into the buzzy zone.
@@ -460,9 +483,13 @@ private:
             // analytically. Feedback is NEGATIVE in the loop (authentic Phase-90
             // notch structure): u = (x - k*B)/(1 + k*A); denom > 0 for all k >= 0,
             // so the loop is unconditionally stable and the full range is usable.
+            // Sweep octaves scaled by the rate-dependent width guardrail: full
+            // 2.6 oct at slow rates (bit-identical to before), narrowing as the
+            // rate rises so a fast phaser shimmers instead of wobbling.
             const double fc = std::min(
                 0.45 * mFs,
-                kPhaserCenterHz * std::pow(2.0, (double)lfo * kPhaserOctaves * (double)kPhaserFixedDepth));
+                kPhaserCenterHz * std::pow(2.0, (double)lfo * kPhaserOctaves
+                                                    * (double)kPhaserFixedDepth * (double)mSweepWidth));
             const double g = std::tan(3.14159265358979323846 * fc / mFs);
             const float G = (float)(g / (1.0 + g));
             const float alpha = 2.0f * G - 1.0f; // per-stage instantaneous gain, |alpha| < 1
@@ -966,6 +993,7 @@ private:
     std::array<float, 2> mAmpToneLp{};                       // transformer-rolloff shelf state
     float mAmpToneCoef = 1.0f;                               // transformer-rolloff corner coef
     float mFreeRateHz = 1.0f;
+    float mSweepWidth = 1.0f; // per-block rate-dependent sweep-width scale (phaser)
     double mBpm = 120.0;
     int mSyncIndex = 0;
     bool mPrepared = false;

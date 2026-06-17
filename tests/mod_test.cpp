@@ -62,6 +62,8 @@
 //   T40 tremolo DC-offset comp law: center 0 = cut-only (mean drops with depth),
 //       center 1 = mean-preserving (avg gain 1 at any depth); both full-chop;
 //       and the multiplier adds no DC to a zero-mean signal
+//   T41 rate-dependent sweep-width guardrail: full width <=2 Hz, narrows
+//       monotonically to the floor at the rate cap; phaser stays bounded fast
 #include "rig/ModBlock.h"
 #include <cstdio>
 #include <cmath>
@@ -1730,6 +1732,45 @@ int main()
         for (size_t i = 4800; i < l.size(); ++i) dc += (double)l[i];
         dc /= (double)(l.size() - 4800);
         CHECK(std::abs(dc) < 1.0e-3, "T40 tremolo adds no DC to a zero-mean signal (DC %.2e)", dc);
+    }
+
+    // ---- T41: rate-dependent sweep-width guardrail. The width scale is full
+    //      (1.0) at/below kSweepFullRateHz and narrows monotonically to
+    //      kSweepNarrowFloor at the rate cap, so a fast phaser shimmers instead of
+    //      wobbling. (a) the law; (b) the phaser stays finite/bounded when driven
+    //      to its rate cap with the narrowed sweep. ----
+    {
+        const float mx = ModVoice::maxRateHz(ModVoice::kPhaser); // 10 Hz
+        const bool law =
+            ModVoice::sweepWidthScale(0.5f, mx) == 1.0f &&                          // slow = full width
+            ModVoice::sweepWidthScale(ModVoice::kSweepFullRateHz, mx) == 1.0f &&    // knee = still full
+            std::abs(ModVoice::sweepWidthScale(mx, mx) - ModVoice::kSweepNarrowFloor) < 1e-6f && // cap = floor
+            ModVoice::sweepWidthScale(6.0f, mx) < 1.0f &&                           // mid = narrowed
+            ModVoice::sweepWidthScale(6.0f, mx) > ModVoice::kSweepNarrowFloor;
+        bool mono = true;
+        float prev = 1.0f;
+        for (float rr = ModVoice::kSweepFullRateHz; rr <= mx; rr += 0.5f)
+        {
+            const float w = ModVoice::sweepWidthScale(rr, mx);
+            if (w > prev + 1e-6f) mono = false;
+            prev = w;
+        }
+        CHECK(law && mono,
+              "T41 sweep-width guardrail: full <=2 Hz, narrows monotonically to the floor at the cap");
+
+        // (b) phaser at the rate cap (with the narrowed sweep) stays well-behaved
+        ModVoice m;
+        m.setType(ModVoice::kPhaser);
+        m.setRateHz(20.0f); // capped to 10 Hz; sweep width at the floor
+        m.setFeedback(0.5f);
+        m.setMix(0.5f);
+        m.prepare({SR, BLK});
+        auto l = tone(1000.0, 0.3, (int)SR), r = l;
+        run(m, l, r);
+        bool fin = true;
+        double pk = 0.0, energy = 0.0;
+        for (float v : l) { if (!std::isfinite(v)) fin = false; pk = std::max(pk, (double)std::abs(v)); energy += (double)v * v; }
+        CHECK(fin && pk < 4.0 && energy > 0.0, "T41 phaser at the rate cap stays finite + bounded (peak %.2f)", pk);
     }
 
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);
