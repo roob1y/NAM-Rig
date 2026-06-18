@@ -375,17 +375,19 @@ int main()
               "T22 Plate Tone spans the window (%.0f..%.0f Hz)", pv.mappedTone(0.0f), pv.mappedTone(1.0f));
     }
 
-    // ===================== T23: Room image-source early reflections =====================
+    // ===================== T23: Room (small-room FDN) is short, flat, smooth, wide =====================
     {
-        ReverbBlock v; v.setType(ReverbBlock::kRoom); v.setMix(1.0f); v.setSize(1.0f);
-        v.setDecaySeconds(0.5f); v.prepare({SR, BLK});
+        ReverbBlock v; v.setType(ReverbBlock::kRoom); v.setMix(1.0f); v.setDecaySeconds(0.3f); v.prepare({SR, BLK});
         std::vector<float> l((size_t)SR, 0.0f), r = l; l[0] = r[0] = 1.0f; run(v, l, r);
-        const size_t W = (size_t)(SR * 0.06); // first 60 ms = the ER cloud
-        double el = 0, er2 = 0, elr = 0;
-        for (size_t i = 0; i < W; ++i) { el += (double)l[i]*l[i]; er2 += (double)r[i]*r[i]; elr += (double)l[i]*r[i]; }
-        const double corr = elr / (std::sqrt(el * er2) + 1e-12);
-        CHECK(el > 1e-6, "T23 Room early reflections present (E=%.3g)", el);
-        CHECK(corr < 0.9, "T23 Room early reflections decorrelated (corr=%.2f)", corr);
+        // RT60 from broadband Schroeder
+        std::vector<double> e(l.size()); for (size_t i = 0; i < l.size(); ++i) e[i] = (double)l[i]*l[i];
+        double acc = 0; std::vector<double> sc(e.size()); for (long i = (long)e.size()-1; i >= 0; --i) { acc += e[i]; sc[i] = acc; }
+        double s0 = sc[0]; long i5 = -1, i35 = -1;
+        for (size_t i = 0; i < sc.size(); ++i) { double db = 10*std::log10(sc[i]/s0 + 1e-30); if (i5<0 && db<=-5) i5=i; if (i35<0 && db<=-35){ i35=i; break; } }
+        double rt60 = (i5>=0 && i35>i5) ? (double)(i35-i5)/SR * (60.0/30.0) : 0;
+        CHECK(rt60 > 0.15 && rt60 < 0.55, "T23 Room decay short (RT60=%.2fs at 0.3 set)", rt60);
+        double sl=0,sr=0,slr=0; for (size_t i=0;i<l.size();++i){ sl+=l[i]*l[i]; sr+=r[i]*r[i]; slr+=l[i]*r[i]; }
+        CHECK(slr/(std::sqrt(sl*sr)+1e-12) < 0.6, "T23 Room is wide/decorrelated");
     }
 
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);
