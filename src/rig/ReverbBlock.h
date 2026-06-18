@@ -774,14 +774,15 @@ public:
     {
         mFs = fs;
         mLine.prepare((int)std::ceil(0.30 * fs) + 16);
-        const double dms[4] = {13.3, 19.1, 17.7, 23.3}; // tail-loop allpasses (smooth reverberant decay)
-        for (int k = 0; k < 4; ++k) { mApLen[(size_t)k] = std::max(1,(int)std::round(dms[k]*0.001*fs)); mAp[(size_t)k].prepare(mApLen[(size_t)k] + 8); }
+        const double dms[6] = {13.7, 21.3, 29.1, 16.1, 23.9, 31.7}; // tail allpasses: 3/ch, short+incommensurate
+        for (int k = 0; k < 6; ++k) { mApLen[(size_t)k] = std::max(1,(int)std::round(dms[k]*0.001*fs)); mAp[(size_t)k].prepare(mApLen[(size_t)k] + 16); }
+        mLfo.prepare(fs); mLfo.setRateHz(0.7f); // slow modulation breaks up metallic resonances
         mBuilt = false; mLastSize = -1.0f;
         setBrightHz(9000.0f);
         mFb = 0.0f; setSize(1.0f);
         reset(); mPrepared = true;
     }
-    void reset() { mLine.reset(); for (auto &l : mAp) l.reset(); mLpL = mLpR = mFbL = mFbR = 0.0f; }
+    void reset() { mLine.reset(); for (auto &l : mAp) l.reset(); mLfo.reset(); mLpL = mLpR = mFbL = mFbR = 0.0f; }
 
     void setSize(float s)
     {
@@ -790,30 +791,39 @@ public:
         mLastSize = s; rebuild(s); mBuilt = true;
     }
     void setBrightHz(float hz) { mLpK = (float)reverb_detail::onePole(std::clamp(hz, 2000.0f, 16000.0f), mFs); }
-    // Tail decay: allpass-loop feedback gain. 0 = dead (early reflections only), higher = longer tail.
-    void setLiveness(float g) { mFb = std::clamp(g, 0.0f, 0.85f); }
+    void setLiveness(float g) { mFb = std::clamp(g, 0.0f, 0.85f); } // allpass-loop feedback = tail length
 
-    // Mono excitation -> stereo: discrete early reflections + an allpass-loop tail whose
-    // length is set by the feedback gain (no FDN floor; smoothly tunable from dead up).
     void process(const float *inL, const float *inR, float *outL, float *outR, int n)
     {
         using namespace reverb_detail;
+        const float md = 3.5f; // modulation depth (samples)
+        auto modAp = [](FracDelayLine &ln, int len, float g, float x, float mod) {
+            const float z = ln.readFrac((double)len + (double)mod);
+            const float y = -g * x + z;
+            ln.write(x + g * y);
+            return y;
+        };
         for (int i = 0; i < n; ++i)
         {
             mLine.write(0.5f * (inL[i] + inR[i]));
             float l = 0.0f, r = 0.0f;
             for (int k = 0; k < mNL; ++k) l += mGainL[(size_t)k] * mLine.readInt(mDelL[(size_t)k]);
             for (int k = 0; k < mNR; ++k) r += mGainR[(size_t)k] * mLine.readInt(mDelR[(size_t)k]);
-            float vL = l + mFb * mFbL;                               // inject ER + feedback
-            vL = allpassInt(mAp[0], mApLen[0], 0.5f, vL); vL = allpassInt(mAp[1], mApLen[1], 0.42f, vL);
+            float vL = l + mFb * mFbL;
+            vL = modAp(mAp[0], mApLen[0], 0.5f, vL, md * mLfo.value(0.00));
+            vL = modAp(mAp[1], mApLen[1], 0.5f, vL, md * mLfo.value(0.33));
+            vL = modAp(mAp[2], mApLen[2], 0.42f, vL, md * mLfo.value(0.66));
             mFbL = vL;
             float vR = r + mFb * mFbR;
-            vR = allpassInt(mAp[2], mApLen[2], 0.5f, vR); vR = allpassInt(mAp[3], mApLen[3], 0.42f, vR);
+            vR = modAp(mAp[3], mApLen[3], 0.5f, vR, md * mLfo.value(0.50));
+            vR = modAp(mAp[4], mApLen[4], 0.5f, vR, md * mLfo.value(0.16));
+            vR = modAp(mAp[5], mApLen[5], 0.42f, vR, md * mLfo.value(0.83));
             mFbR = vR;
-            mLpL += mLpK * (vL - mLpL); outL[i] = mLpL;              // air absorption
+            mLpL += mLpK * (vL - mLpL); outL[i] = mLpL;
             mLpR += mLpK * (vR - mLpR); outR[i] = mLpR;
+            mLfo.advance();
         }
-        reverb_detail::flush(mFbL); reverb_detail::flush(mFbR);
+        flush(mFbL); flush(mFbR);
     }
 
 private:
@@ -829,7 +839,7 @@ private:
                   double lx,double ly,double lz,std::array<int,kMaxTaps>&del,
                   std::array<float,kMaxTaps>&gain,int&count)
     {
-        const double c = 343.0, r = 0.68; // early-reflection wall coeff (fixed; tail length is the loop's job)
+        const double c = 343.0, r = 0.68;
         struct T { int d; float g; };
         std::array<T, 2048> tmp{}; int m = 0;
         const int N = 4;
@@ -840,7 +850,7 @@ private:
             double iz = mz*Lz + ((mz&1)?(Lz-sz):sz);
             double dx=ix-lx, dy=iy-ly, dz=iz-lz;
             double dist = std::sqrt(dx*dx+dy*dy+dz*dz);
-            double dms = dist/c*1000.0; if (dms > 70.0) continue;    // tight ER cloud -> dead end stays short
+            double dms = dist/c*1000.0; if (dms > 70.0) continue;
             int refl = std::abs(mx)+std::abs(my)+std::abs(mz);
             double g = std::pow(r,(double)refl) / std::max(1.0, dist);
             if (g < 0.005) continue;
@@ -855,14 +865,17 @@ private:
 
     double mFs = 48000.0;
     FracDelayLine mLine;
-    std::array<FracDelayLine,4> mAp;
-    std::array<int,4> mApLen{};
+    std::array<FracDelayLine,6> mAp;
+    std::array<int,6> mApLen{};
+    Lfo mLfo;
     std::array<int,kMaxTaps> mDelL{}, mDelR{};
     std::array<float,kMaxTaps> mGainL{}, mGainR{};
     int mNL = 0, mNR = 0;
     float mLpL = 0.0f, mLpR = 0.0f, mLpK = 0.5f, mLastSize = -1.0f, mFb = 0.0f, mFbL = 0.0f, mFbR = 0.0f;
     bool mBuilt = false, mPrepared = false;
-};class ReverbBlock : public StereoBlock
+};
+
+class ReverbBlock : public StereoBlock
 {
 public:
     enum Type { kRoom = 0, kHall, kPlate, kSpring, kShimmer, kAmbience, kBloom };
@@ -906,7 +919,7 @@ public:
     static Range decayRange(Type t)
     {
         switch (t) {
-        case kRoom:     return {0.21f, 0.6f}; // dead room -> live room; reads true RT60
+        case kRoom:     return {0.28f, 0.6f}; // dead room -> live room; reads true RT60
         case kHall:     return {0.8f, 6.0f};
         case kPlate:    return {0.5f, 5.5f};   // real vintage plate spec
         case kSpring:   return {1.0f, 4.0f};
@@ -1139,8 +1152,8 @@ private:
             default:        size = mSize; mod = mMod;  pre = 10.0f + (mSize - kMinSize) * 60.0f; diff = 0.65f; break;
             }
             if (mType == kRoom) {
-                const float t = std::clamp(effT60(), 0.21f, 0.6f);                  // = target RT60 (knob reads true)
-                mER.setLiveness(std::clamp(0.82f * std::pow(std::max(0.0f, t - 0.21f), 0.67f), 0.0f, 0.85f)); // feedback curve so RT60 ~= knob
+                const float t = std::clamp(effT60(), 0.28f, 0.6f);                  // = target RT60 (knob reads true)
+                mER.setLiveness(std::clamp((t - 0.28f) * 1.05f, 0.0f, 0.85f)); // feedback ~ linear so RT60 ~= knob
                 mER.setSize(mSize); mER.setBrightHz(mDampHz * 0.80f);
                 mRoomLate = 0.0f; // Room is ER + allpass-loop tail (no FDN)
             }
