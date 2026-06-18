@@ -1273,13 +1273,15 @@ public:
         mFreezeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             apvts, "revFreeze", mFreeze);
 
-        // Build every knob once; refresh() shows the subset the character uses.
-        mDecay = std::make_unique<LabeledKnob>(apvts, "revDecay", "Decay");
-        mSize = std::make_unique<LabeledKnob>(apvts, "revSize", "Size");
-        mPredelay = std::make_unique<LabeledKnob>(apvts, "revPredelay", "Pre-Delay");
+        // Build every knob once; refresh() rebinds Decay/Tone/Size/Predelay/Mod to the
+        // ACTIVE character's per-character param + shows the subset the character uses.
+        using RB0 = nam_rig::ReverbBlock;
+        mDecay = std::make_unique<LabeledKnob>(apvts, juce::String(RB0::paramId("Decay", RB0::kHall)), "Decay");
+        mSize = std::make_unique<LabeledKnob>(apvts, juce::String(RB0::paramId("Size", RB0::kHall)), "Size");
+        mPredelay = std::make_unique<LabeledKnob>(apvts, juce::String(RB0::paramId("Predelay", RB0::kPlate)), "Pre-Delay");
         mInputFilter = std::make_unique<LabeledKnob>(apvts, "revInputFilter", "Input Filter"); // Plate only
-        mTone = std::make_unique<LabeledKnob>(apvts, "revDamp", "Damping");
-        mMod = std::make_unique<LabeledKnob>(apvts, "revMod", "Mod");
+        mTone = std::make_unique<LabeledKnob>(apvts, juce::String(RB0::paramId("Tone", RB0::kHall)), "Damping");
+        mMod = std::make_unique<LabeledKnob>(apvts, juce::String(RB0::paramId("Mod", RB0::kHall)), "Mod");
         mShimmer = std::make_unique<LabeledKnob>(apvts, "revShimmer", "Shimmer");
         mTension = std::make_unique<LabeledKnob>(apvts, "revTension", "Tension");
         mSwell = std::make_unique<LabeledKnob>(apvts, "revSwell", "Swell");
@@ -1321,6 +1323,12 @@ public:
         mTension->setVisible(RB::tensionExposed(t));
         mSwell->setVisible(RB::swellExposed(t));
         mPitch.setVisible(RB::pitchExposed(t));
+        // rebind the shared knobs to THIS character's own params (own range + state)
+        mDecay->rebind(mApvts, juce::String(RB::paramId("Decay", type)));
+        mTone->rebind(mApvts, juce::String(RB::paramId("Tone", type)));
+        if (RB::sizeExposed(t)) mSize->rebind(mApvts, juce::String(RB::paramId("Size", type)));
+        if (RB::predelayExposed(t)) mPredelay->rebind(mApvts, juce::String(RB::paramId("Predelay", type)));
+        if (RB::modExposed(t)) mMod->rebind(mApvts, juce::String(RB::paramId("Mod", type)));
         mTone->setCaption(RB::toneCaption(t)); // "Damping" / "Tone" (spring)
         resized();
     }

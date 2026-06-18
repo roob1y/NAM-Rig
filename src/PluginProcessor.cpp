@@ -245,24 +245,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.25f));
 
     // --- Reverb (rig/ReverbBlock.h; verified by tests/reverb_test.cpp) ---
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("revSize", 1), "Reverb Size",
-        juce::NormalisableRange<float>(nam_rig::ReverbBlock::kMinSize,
-                                       nam_rig::ReverbBlock::kMaxSize, 0.01f),
-        1.0f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("revDecay", 1), "Reverb Decay",
-        juce::NormalisableRange<float>(nam_rig::ReverbBlock::kDecayMin,
-                                       nam_rig::ReverbBlock::kDecayMax, 0.05f, 0.5f), 2.0f,
-        juce::AudioParameterFloatAttributes().withLabel("s")));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("revDamp", 1), "Reverb Tone",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.4f, pct()));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("revPredelay", 1), "Reverb Pre-Delay",
-        juce::NormalisableRange<float>(nam_rig::ReverbBlock::kPreMin,
-                                       nam_rig::ReverbBlock::kPreMax, 1.0f, 0.5f), 0.0f,
-        juce::AudioParameterFloatAttributes().withLabel("ms")));
+    // Reverb Decay/Tone/Predelay/Mod/Size are PER-CHARACTER (generated below); the UI
+    // rebinds the knobs to the active character's params (see ui/Panels.h). Mix stays global.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("revMix", 1), "Reverb Mix",
         juce::NormalisableRange<float>(0.0f, nam_rig::ReverbBlock::kMixMax, 0.01f, 0.6f), 0.25f, pct()));
@@ -354,9 +338,6 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::StringArray{"Room", "Hall", "Plate", "Spring", "Shimmer", "Ambience", "Bloom"},
         nam_rig::ReverbBlock::kHall));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("revMod", 1), "Reverb Modulation",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.3f, pct()));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("revShimmer", 1), "Reverb Shimmer",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f, pct()));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
@@ -383,6 +364,42 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::ParameterID("revInputFilter", 1), "Reverb Input Filter",
         juce::NormalisableRange<float>(20.0f, 400.0f, 1.0f, 0.5f), 95.0f,
         juce::AudioParameterFloatAttributes().withLabel("Hz")));
+
+    // --- Per-character reverb knobs (independent state + own ranges, like the drive
+    // pedal). Appended last for automation stability. IDs come from ReverbBlock::paramId
+    // so the layout, processor and UI can never disagree.
+    {
+        using RB = nam_rig::ReverbBlock;
+        for (int t = 0; t < RB::kNumTypes; ++t)
+        {
+            const RB::Type T = (RB::Type)t;
+            const juce::String nm = RB::typeName(t);
+            const auto dr = RB::decayRange(T);
+            params.push_back(std::make_unique<juce::AudioParameterFloat>(
+                juce::ParameterID(juce::String(RB::paramId("Decay", t)), 1), nm + " Decay",
+                juce::NormalisableRange<float>(dr.lo, dr.hi, 0.01f, 0.5f), RB::rangeDefault(dr),
+                juce::AudioParameterFloatAttributes().withLabel("s")));
+            params.push_back(std::make_unique<juce::AudioParameterFloat>(
+                juce::ParameterID(juce::String(RB::paramId("Tone", t)), 1), nm + " Tone",
+                juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.4f, pct()));
+            if (RB::predelayExposed(T))
+            {
+                const auto pr = RB::predelayRange(T);
+                params.push_back(std::make_unique<juce::AudioParameterFloat>(
+                    juce::ParameterID(juce::String(RB::paramId("Predelay", t)), 1), nm + " Pre-Delay",
+                    juce::NormalisableRange<float>(pr.lo, pr.hi, 1.0f, 0.5f), 0.0f,
+                    juce::AudioParameterFloatAttributes().withLabel("ms")));
+            }
+            if (RB::modExposed(T))
+                params.push_back(std::make_unique<juce::AudioParameterFloat>(
+                    juce::ParameterID(juce::String(RB::paramId("Mod", t)), 1), nm + " Modulation",
+                    juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.3f, pct()));
+            if (RB::sizeExposed(T))
+                params.push_back(std::make_unique<juce::AudioParameterFloat>(
+                    juce::ParameterID(juce::String(RB::paramId("Size", t)), 1), nm + " Size",
+                    juce::NormalisableRange<float>(RB::kMinSize, RB::kMaxSize, 0.01f), 1.0f));
+        }
+    }
 
     return {params.begin(), params.end()};
 }
@@ -699,13 +716,19 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.delay.setMix(apvts.getRawParameterValue("delayMix")->load());
     mChain.delay.setBypassed(apvts.getRawParameterValue("delayOn")->load() < 0.5f);
 
-    mChain.reverb.setType((int)apvts.getRawParameterValue("revType")->load());
-    mChain.reverb.setSize(apvts.getRawParameterValue("revSize")->load());
-    mChain.reverb.setDecaySeconds(mChain.reverb.mappedDecay(apvts.getRawParameterValue("revDecay")->load()));
-    mChain.reverb.setDampHz(mChain.reverb.mappedTone(apvts.getRawParameterValue("revDamp")->load()));
-    mChain.reverb.setPredelayMs(mChain.reverb.mappedPredelay(apvts.getRawParameterValue("revPredelay")->load()));
+    {
+        using RB = nam_rig::ReverbBlock;
+        const int rt = (int)apvts.getRawParameterValue("revType")->load();
+        const RB::Type T = (RB::Type)rt;
+        mChain.reverb.setType(rt);
+        auto pv = [&](const char *knob) { return apvts.getRawParameterValue(juce::String(RB::paramId(knob, rt)))->load(); };
+        mChain.reverb.setDecaySeconds(pv("Decay"));                 // per-character param is already true seconds in-range
+        mChain.reverb.setDampHz(mChain.reverb.mappedTone(pv("Tone")));
+        mChain.reverb.setPredelayMs(RB::predelayExposed(T) ? pv("Predelay") : 0.0f);
+        mChain.reverb.setMod(RB::modExposed(T) ? pv("Mod") : 0.0f);
+        mChain.reverb.setSize(RB::sizeExposed(T) ? pv("Size") : 1.0f);
+    }
     mChain.reverb.setMix(apvts.getRawParameterValue("revMix")->load());
-    mChain.reverb.setMod(apvts.getRawParameterValue("revMod")->load());
     mChain.reverb.setShimmer(apvts.getRawParameterValue("revShimmer")->load());
     mChain.reverb.setTension(apvts.getRawParameterValue("revTension")->load());
     mChain.reverb.setWidth(apvts.getRawParameterValue("revWidth")->load());

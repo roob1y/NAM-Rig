@@ -35,7 +35,7 @@ struct FactoryPresets
 
         add("Wide Clean Dual",
             mk({{"rigMode", 2}, {"rigPanA", -0.7}, {"rigPanB", 0.7},
-                {"reverbOn", 1}, {"revMix", 0.22}, {"revDecay", 2.2}, {"revSize", 1.1},
+                {"reverbOn", 1}, {"revMix", 0.22}, {"revDecayHall", 2.2}, {"revSizeHall", 1.1},
                 {"delayOn", 1}, {"delayMix", 0.1}, {"delayTime", 300.0},
                 {"gateOn", 0}, {"compOn", 0}}));
 
@@ -49,8 +49,8 @@ struct FactoryPresets
 
         add("Ambient Spread",
             mk({{"rigMode", 2}, {"rigPanA", -1.0}, {"rigPanB", 1.0},
-                {"reverbOn", 1}, {"revMix", 0.4}, {"revDecay", 4.5}, {"revSize", 1.6},
-                {"revPredelay", 45.0}, {"delayOn", 1}, {"delaySync", 3},
+                {"reverbOn", 1}, {"revMix", 0.4}, {"revDecayHall", 4.5}, {"revSizeHall", 1.5},
+                {"delayOn", 1}, {"delaySync", 3},
                 {"delayMix", 0.32}, {"delayFeedback", 0.5}, {"delayPingPong", 1}}));
 
         add("Solo Crunch Boost",

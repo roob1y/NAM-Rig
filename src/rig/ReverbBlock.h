@@ -32,6 +32,7 @@
 #include "Biquad.h" // input voicing bells for the small room
 #include <array>
 #include <vector>
+#include <string>
 #include <algorithm>
 #include <cmath>
 
@@ -889,6 +890,9 @@ public:
     static constexpr float kMinSize = FdnReverb::kMinSize;
     static constexpr float kMaxSize = FdnReverb::kMaxSize;
 
+    // Per-character parameter id (single source for layout/processor/UI), e.g.
+    // paramId("Decay", kRoom) -> "revDecayRoom". Each character has its OWN params.
+    static std::string paramId(const char *knob, int t) { return std::string("rev") + knob + typeName(t); }
     static const char *typeName(int t)
     {
         static const char *n[kNumTypes] = {"Room", "Hall", "Plate", "Spring", "Shimmer", "Ambience", "Bloom"};
@@ -920,6 +924,7 @@ public:
     static constexpr float kPreMin   = 0.0f,    kPreMax   = 160.0f;    // ms
     static constexpr float kMixMax   = 0.70f;                          // wet cap (Mix is universal)
     struct Range { float lo, hi; };
+    static float rangeDefault(Range r) { return r.lo + 0.30f * (r.hi - r.lo); } // default 30%% up a window
     static Range decayRange(Type t)
     {
         switch (t) {
