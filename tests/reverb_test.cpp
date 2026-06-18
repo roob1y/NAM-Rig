@@ -375,6 +375,19 @@ int main()
               "T22 Plate Tone spans the window (%.0f..%.0f Hz)", pv.mappedTone(0.0f), pv.mappedTone(1.0f));
     }
 
+    // ===================== T23: Room image-source early reflections =====================
+    {
+        ReverbBlock v; v.setType(ReverbBlock::kRoom); v.setMix(1.0f); v.setSize(1.0f);
+        v.setDecaySeconds(0.5f); v.prepare({SR, BLK});
+        std::vector<float> l((size_t)SR, 0.0f), r = l; l[0] = r[0] = 1.0f; run(v, l, r);
+        const size_t W = (size_t)(SR * 0.06); // first 60 ms = the ER cloud
+        double el = 0, er2 = 0, elr = 0;
+        for (size_t i = 0; i < W; ++i) { el += (double)l[i]*l[i]; er2 += (double)r[i]*r[i]; elr += (double)l[i]*r[i]; }
+        const double corr = elr / (std::sqrt(el * er2) + 1e-12);
+        CHECK(el > 1e-6, "T23 Room early reflections present (E=%.3g)", el);
+        CHECK(corr < 0.9, "T23 Room early reflections decorrelated (corr=%.2f)", corr);
+    }
+
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);
     return gFails == 0 ? 0 : 1;
 }
