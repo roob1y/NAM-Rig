@@ -29,7 +29,7 @@
 
 #include "Blocks.h"
 #include "Lfo.h" // FracDelayLine + Lfo
-#include "Biquad.h" // corrective EQ for Room
+#include "Biquad.h" // input voicing bells for the small room
 #include <array>
 #include <vector>
 #include <algorithm>
@@ -779,6 +779,10 @@ public:
         for (int k = 0; k < 2; ++k) { mEarlyLen[(size_t)k] = std::max(2, (int)std::round(kEarlyMs[(size_t)k] * 0.001 * fs)); mEarly[(size_t)k].prepare(mEarlyLen[(size_t)k] + 8); }
         mPredelay.prepare((int)std::ceil(0.08 * fs) + 8);
         mLfo.prepare(fs); mLfo.setRateHz(0.6f);
+        mUmidEq = Biquad::peaking(fs, 1850.0, 0.9, -4.5); // tame the FDN upper-mid (den dips there)
+        mBoxEq = Biquad::peaking(fs, 540.0, 0.65, -3.0);  // guitar: scoop the boxy 400-900Hz (sits under the amp)
+        mHiCut = Biquad::lowpass(fs, 10000.0, 0.5);       // guitar: gentle safety rolloff (cab already limits the input)
+        mLoK = (float)reverb_detail::onePole(350.0, fs);
         setToneHz(1750.0f);
         setSize(1.0f);
         reset(); mPrepared = true;
@@ -787,8 +791,8 @@ public:
     {
         for (auto &l : mLine) l.reset();
         for (auto &l : mAp) l.reset();
-        mPredelay.reset(); mLfo.reset(); for (auto &l : mEarly) l.reset();
-        mInLp = mLoSh = 0.0f;
+        mPredelay.reset(); mLfo.reset(); for (auto &l : mEarly) l.reset(); mLoSh = 0.0f; mUmidEq.reset(); mBoxEq.reset(); mHiCut.reset();
+        mInLp = 0.0f;
     }
     void setDecaySeconds(float t60) { mT60 = std::max(0.05f, t60); mDirty = true; }
     void setToneHz(float hz) { mToneHz = std::clamp(hz, 600.0f, 8000.0f); mInLpK = (float)reverb_detail::onePole(mToneHz, mFs); }
@@ -802,7 +806,7 @@ public:
         const double scale = std::clamp(std::pow((double)mSize, 1.7), 0.42, 2.05); // dramatic but bounded
         for (int i = 0; i < kN; ++i) mLen[(size_t)i] = std::max(2, (int)std::round(kBaseMs[(size_t)i] * scale * 0.001 * mFs));
         for (int k = 0; k < kNap; ++k) mApLen[(size_t)k] = std::max(2, (int)std::round(kApMs[(size_t)k] * 0.001 * mFs));
-        mLoG = (float)std::clamp(0.35 + (scale - 1.0) * 0.40, 0.10, 0.85); // bigger room -> more low-mid body
+        mLoG = (float)std::clamp(0.80 + (scale - 1.0) * 0.30, 0.30, 1.30); // low-shelf gain: den is ~5dB fuller below ~350Hz; more with Size
         mDirty = true;
     }
     void setFreeze(bool f) { mFreeze = f; }
@@ -815,14 +819,16 @@ public:
         const float fb = mFreeze ? 1.0f : mFb;
         const float inG = mFreeze ? 0.0f : 1.0f;
         const float modS = mFreeze ? 0.0f : (mMod * 3.0f); // gentle delay modulation (samples)
-        const float loG = mLoG;
         for (int n = 0; n < numSamples; ++n)
         {
             mPredelay.write(inG * 0.5f * (left[n] + (stereo ? right[n] : left[n])));
             float in = mPredelay.readInt(mPreSamp);            // predelay
             for (int k = 0; k < kNap; ++k) in = allpassInt(mAp[(size_t)k], mApLen[(size_t)k], 0.65f, in); // input diffuser cascade -> dense diffuse onset
             mInLp += mInLpK * (in - mInLp); in = mInLp;        // input darkening (Tone)
-            mLoSh += mLoK * (in - mLoSh); in += loG * mLoSh;   // low-mid body (scales with Size)
+            mLoSh += mLoK * (in - mLoSh); in += mLoG * mLoSh; // low-shelf: den warmth below ~350Hz
+            in = mUmidEq.processSample(in);                    // tame upper-mid
+            in = mBoxEq.processSample(in);                     // scoop boxy low-mids (guitar)
+            in = mHiCut.processSample(in);                     // cab-style top rolloff (guitar)
             float d[kN];
             for (int i = 0; i < kN; ++i) d[i] = mLine[(size_t)i].readFrac((double)mLen[(size_t)i] + (double)(modS * mLfo.value((double)i * 0.13)));
             float h[kN]; for (int i = 0; i < kN; ++i) h[i] = d[i];
@@ -835,7 +841,7 @@ public:
             left[n] = kEarlyG * el + kTailG * 0.5f * l; if (stereo) right[n] = kEarlyG * er + kTailG * 0.5f * r;
             mLfo.advance();
         }
-        flush(mInLp); flush(mLoSh);
+        flush(mInLp);
     }
 
 private:
@@ -843,7 +849,6 @@ private:
     {
         double loopMs = 0; for (int i = 0; i < kN; ++i) loopMs += mLen[(size_t)i] / mFs * 1000.0; loopMs /= kN;
         mFb = (float)std::clamp(std::pow(10.0, -3.0 * loopMs / ((double)mT60 * 1000.0)), 0.0, 0.995);
-        mLoK = (float)reverb_detail::onePole(320.0, mFs);
         mDirty = false;
     }
     static constexpr double kBaseMs[kN] = {6.7, 8.3, 9.7, 11.3, 12.9, 14.3, 15.9, 17.3,
@@ -863,7 +868,9 @@ private:
     std::array<FracDelayLine, 2> mEarly;
     std::array<int, 2> mEarlyLen{};
     static constexpr float kEarlyG = 0.85f, kTailG = 0.5f;
-    float mInLp = 0.0f, mInLpK = 0.0f, mLoSh = 0.0f, mLoK = 0.0f, mLoG = 0.35f;
+    float mInLp = 0.0f, mInLpK = 0.0f;
+    Biquad mUmidEq, mBoxEq, mHiCut;
+    float mLoSh = 0.0f, mLoK = 0.0f, mLoG = 0.8f;
     float mFb = 0.0f, mT60 = 0.3f, mToneHz = 1750.0f, mSize = 1.0f;
     float mPredelayMs = 0.0f, mMod = 0.0f; int mPreSamp = 1;
     bool mFreeze = false, mPrepared = false, mDirty = true;
