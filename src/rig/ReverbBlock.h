@@ -29,6 +29,7 @@
 
 #include "Blocks.h"
 #include "Lfo.h" // FracDelayLine + Lfo
+#include "Biquad.h" // corrective EQ for Room
 #include <array>
 #include <vector>
 #include <algorithm>
@@ -971,6 +972,10 @@ public:
         mShimmer.prepare(ctx.sampleRate);
         mMixer.prepare(ctx.sampleRate);
         mER.prepare(ctx.sampleRate);
+        mRoomBodyL = mRoomBodyR = Biquad::lowShelf(ctx.sampleRate, 360.0, 4.5);       // low-mid warmth
+        mRoomBumpL = mRoomBumpR = Biquad::peaking(ctx.sampleRate, 285.0, 1.3, 3.0);   // low-mid body (the real room mode)
+        mRoomDipL  = mRoomDipR  = Biquad::peaking(ctx.sampleRate, 480.0, 2.0, -2.5);  // tame our resonant peak (narrow)
+        mRoomHonkL = mRoomHonkR = Biquad::peaking(ctx.sampleRate, 1850.0, 0.8, -5.0); // broad de-honk (1.3-2.8k)
         const int cap = std::max(16, ctx.maxBlockSize);
         mDryL.assign((size_t)cap, 0.0f);
         mDryR.assign((size_t)cap, 0.0f);
@@ -1032,8 +1037,14 @@ public:
             mER.process(mDryL.data(), mDryR.data(), mErL.data(), mErR.data(), numSamples); // early reflections (image-source)
             mFdn.process(left, right, numSamples);                                          // diffuse late wash
             for (int n = 0; n < numSamples; ++n) {
-                left[n] = kErMix * mErL[(size_t)n] + mRoomLate * left[n];
-                if (stereo) right[n] = kErMix * mErR[(size_t)n] + mRoomLate * right[n];
+                float wl = kErMix * mErL[(size_t)n] + mRoomLate * left[n];
+                wl = mRoomHonkL.processSample(mRoomDipL.processSample(mRoomBumpL.processSample(mRoomBodyL.processSample(wl)))); // shape to the reference
+                left[n] = wl;
+                if (stereo) {
+                    float wr = kErMix * mErR[(size_t)n] + mRoomLate * right[n];
+                    wr = mRoomHonkR.processSample(mRoomDipR.processSample(mRoomBumpR.processSample(mRoomBodyR.processSample(wr))));
+                    right[n] = wr;
+                }
             }
             break;
         }
@@ -1085,7 +1096,7 @@ private:
         switch (t)
         {
         case kSpring: return 150.0f;
-        case kRoom: return 150.0f; // guitar: keep the room clear of the amp low-mids
+        case kRoom: return 80.0f; // gentle: keep the warm low-mids the real room has
         case kAmbience: return 130.0f;
         case kPlate: return 95.0f;
         case kShimmer: return 100.0f;
@@ -1168,6 +1179,7 @@ private:
     static constexpr float kErMix = 2.6f; // Room: ER carries the sound (boosted; sum-normalized ER is quiet)
     float mRoomLate = 0.0f;
     EarlyReflections mER;
+    Biquad mRoomBodyL, mRoomBodyR, mRoomBumpL, mRoomBumpR, mRoomDipL, mRoomDipR, mRoomHonkL, mRoomHonkR; // Room corrective EQ
     std::vector<float> mErL, mErR;
     FdnReverb mFdn;
     PlateReverb mPlate;

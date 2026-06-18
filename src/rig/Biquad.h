@@ -59,6 +59,24 @@ struct Biquad
         return q;
     }
 
+    static Biquad lowShelf(double fs, double f0, double gainDb, double S = 0.9)
+    {
+        if (gainDb == 0.0) return identity();
+        const double A = std::pow(10.0, gainDb / 40.0);
+        const double w = 2.0 * kPi * f0 / fs;
+        const double cosw = std::cos(w), sinw = std::sin(w);
+        const double alpha = sinw / 2.0 * std::sqrt((A + 1.0 / A) * (1.0 / S - 1.0) + 2.0);
+        const double tsa = 2.0 * std::sqrt(A) * alpha;
+        const double a0 = (A + 1.0) + (A - 1.0) * cosw + tsa;
+        Biquad q;
+        q.b0 = (float)(A * ((A + 1.0) - (A - 1.0) * cosw + tsa) / a0);
+        q.b1 = (float)(2.0 * A * ((A - 1.0) - (A + 1.0) * cosw) / a0);
+        q.b2 = (float)(A * ((A + 1.0) - (A - 1.0) * cosw - tsa) / a0);
+        q.a1 = (float)(-2.0 * ((A - 1.0) + (A + 1.0) * cosw) / a0);
+        q.a2 = (float)(((A + 1.0) + (A - 1.0) * cosw - tsa) / a0);
+        return q;
+    }
+
     static Biquad highpass(double fs, double f0, double Q = 0.70710678118654752)
     {
         const double w = 2.0 * kPi * f0 / fs;
