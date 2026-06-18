@@ -774,9 +774,11 @@ public:
     {
         mFs = fs;
         for (int i = 0; i < kN; ++i)
-            mLine[(size_t)i].prepare((int)std::ceil(kBaseMs[(size_t)i] * 1.7 * 0.001 * fs) + 8);
+            mLine[(size_t)i].prepare((int)std::ceil(kBaseMs[(size_t)i] * 2.2 * 0.001 * fs) + 16);
         mAp[0].prepare((int)std::ceil(5.3 * 0.001 * fs) + 8);
         mAp[1].prepare((int)std::ceil(8.1 * 0.001 * fs) + 8);
+        mPredelay.prepare((int)std::ceil(0.08 * fs) + 8);
+        mLfo.prepare(fs); mLfo.setRateHz(0.6f);
         setToneHz(1750.0f);
         setSize(1.0f);
         reset(); mPrepared = true;
@@ -785,16 +787,23 @@ public:
     {
         for (auto &l : mLine) l.reset();
         for (auto &l : mAp) l.reset();
+        mPredelay.reset(); mLfo.reset();
         mInLp = mLoSh = 0.0f;
     }
     void setDecaySeconds(float t60) { mT60 = std::max(0.05f, t60); mDirty = true; }
     void setToneHz(float hz) { mToneHz = std::clamp(hz, 600.0f, 8000.0f); mInLpK = (float)reverb_detail::onePole(mToneHz, mFs); }
+    void setPredelayMs(float ms) { mPredelayMs = std::clamp(ms, 0.0f, 80.0f); mPreSamp = std::max(1, (int)std::round((double)mPredelayMs * 0.001 * mFs)); }
+    void setModDepth(float d) { mMod = std::clamp(d, 0.0f, 1.0f); }
+    // Size = room dimensions: a curved scale of the delay lines (small tight booth ..
+    // big roomy space) plus a size-dependent low-mid body. Default (1.0) = the House Den match.
     void setSize(float s)
     {
-        mSize = std::clamp(s, 0.7f, 1.6f);
-        for (int i = 0; i < kN; ++i) mLen[(size_t)i] = std::max(2, (int)std::round(kBaseMs[(size_t)i] * (double)mSize * 0.001 * mFs));
+        mSize = std::clamp(s, 0.5f, 1.5f);
+        const double scale = std::clamp(std::pow((double)mSize, 1.7), 0.42, 2.05); // dramatic but bounded
+        for (int i = 0; i < kN; ++i) mLen[(size_t)i] = std::max(2, (int)std::round(kBaseMs[(size_t)i] * scale * 0.001 * mFs));
         mApLen[0] = std::max(2, (int)std::round(5.3 * 0.001 * mFs));
         mApLen[1] = std::max(2, (int)std::round(8.1 * 0.001 * mFs));
+        mLoG = (float)std::clamp(0.35 + (scale - 1.0) * 0.40, 0.10, 0.85); // bigger room -> more low-mid body
         mDirty = true;
     }
     void setFreeze(bool f) { mFreeze = f; }
@@ -806,20 +815,25 @@ public:
         const bool stereo = (left != right);
         const float fb = mFreeze ? 1.0f : mFb;
         const float inG = mFreeze ? 0.0f : 1.0f;
+        const float modS = mFreeze ? 0.0f : (mMod * 3.0f); // gentle delay modulation (samples)
+        const float loG = mLoG;
         for (int n = 0; n < numSamples; ++n)
         {
-            float in = inG * 0.5f * (left[n] + (stereo ? right[n] : left[n]));
-            in = allpassInt(mAp[0], mApLen[0], 0.5f, in);     // smooth onset
+            mPredelay.write(inG * 0.5f * (left[n] + (stereo ? right[n] : left[n])));
+            float in = mPredelay.readInt(mPreSamp);            // predelay
+            in = allpassInt(mAp[0], mApLen[0], 0.5f, in);      // smooth onset
             in = allpassInt(mAp[1], mApLen[1], 0.5f, in);
             mInLp += mInLpK * (in - mInLp); in = mInLp;        // input darkening (Tone)
-            mLoSh += mLoK * (in - mLoSh); in += kLoShelf * mLoSh; // low-mid warmth
-            float d[kN]; for (int i = 0; i < kN; ++i) d[i] = mLine[(size_t)i].readInt(mLen[(size_t)i]);
+            mLoSh += mLoK * (in - mLoSh); in += loG * mLoSh;   // low-mid body (scales with Size)
+            float d[kN];
+            for (int i = 0; i < kN; ++i) d[i] = mLine[(size_t)i].readFrac((double)mLen[(size_t)i] + (double)(modS * mLfo.value((double)i * 0.13)));
             float h[kN]; for (int i = 0; i < kN; ++i) h[i] = d[i];
             for (int s = 1; s < kN; s <<= 1) for (int i = 0; i < kN; i += s << 1) for (int j = i; j < i + s; ++j) { float a = h[j], b = h[j + s]; h[j] = a + b; h[j + s] = a - b; }
             for (int i = 0; i < kN; ++i) mLine[(size_t)i].write(fb * h[i] * kFwhtNorm + in * kInInject);
             float l = 0.0f, r = 0.0f;
             for (int i = 0; i < kN; ++i) { float sgn = (i & 1) ? -1.0f : 1.0f; l += d[i] * ((i % 3) ? 1.0f : 0.7f); r += d[i] * sgn * ((i % 2) ? 0.8f : 1.0f); }
             left[n] = 0.5f * l; if (stereo) right[n] = 0.5f * r;
+            mLfo.advance();
         }
         flush(mInLp); flush(mLoSh);
     }
@@ -834,14 +848,17 @@ private:
     }
     static constexpr double kBaseMs[kN] = {7.1, 9.7, 11.3, 13.9, 16.7, 19.3, 21.7, 23.9};
     static constexpr float kFwhtNorm = 0.35355339f; // 1/sqrt(8)
-    static constexpr float kInInject = 0.35f, kLoShelf = 0.6f;
+    static constexpr float kInInject = 0.35f;
     double mFs = 48000.0;
     std::array<FracDelayLine, kN> mLine;
     std::array<int, kN> mLen{};
     std::array<FracDelayLine, 2> mAp;
     std::array<int, 2> mApLen{};
-    float mInLp = 0.0f, mInLpK = 0.0f, mLoSh = 0.0f, mLoK = 0.0f;
+    FracDelayLine mPredelay;
+    Lfo mLfo;
+    float mInLp = 0.0f, mInLpK = 0.0f, mLoSh = 0.0f, mLoK = 0.0f, mLoG = 0.35f;
     float mFb = 0.0f, mT60 = 0.3f, mToneHz = 1750.0f, mSize = 1.0f;
+    float mPredelayMs = 0.0f, mMod = 0.0f; int mPreSamp = 1;
     bool mFreeze = false, mPrepared = false, mDirty = true;
 };
 
@@ -868,8 +885,8 @@ public:
     // ---- voicing introspection (UI + tests) ----
     static bool sizeExposed(Type t) { return t == kHall || t == kRoom; } // Room: scales the room size
     static bool toneExposed(Type) { return true; }
-    static bool predelayExposed(Type t) { return t == kPlate || t == kBloom; } // Hall folds it into Size; Shimmer/Room/Spring/Ambience hardwire
-    static bool modExposed(Type t) { return t == kHall || t == kPlate || t == kBloom || t == kShimmer; } // Ambience hardwires
+    static bool predelayExposed(Type t) { return t == kPlate || t == kBloom || t == kRoom; } // Hall folds it into Size; Shimmer/Room/Spring/Ambience hardwire
+    static bool modExposed(Type t) { return t == kHall || t == kPlate || t == kBloom || t == kShimmer || t == kRoom; } // Ambience hardwires
     static bool shimmerExposed(Type t) { return t == kShimmer; }
     static bool pitchExposed(Type t) { return t == kShimmer; }
     static bool tensionExposed(Type t) { return t == kSpring; }
@@ -920,6 +937,7 @@ public:
         switch (t) {
         case kPlate: return {0.0f,  80.0f};
         case kBloom: return {0.0f, 160.0f};
+        case kRoom:  return {0.0f,  60.0f};
         default:     return {0.0f, kPreMax};
         }
     }
@@ -1105,7 +1123,8 @@ private:
             break;
         case kRoom: // dedicated short-line small-room FDN
             mSmallRoom.setDecaySeconds(effT60()); mSmallRoom.setToneHz(mDampHz);
-            mSmallRoom.setSize(mSize); mSmallRoom.setFreeze(mFreeze);
+            mSmallRoom.setSize(mSize); mSmallRoom.setPredelayMs(mPredelayMs);
+            mSmallRoom.setModDepth(mMod); mSmallRoom.setFreeze(mFreeze);
             break;
         default: // FDN family
         {
