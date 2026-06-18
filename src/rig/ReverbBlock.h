@@ -768,37 +768,43 @@ private:
 class EarlyReflections
 {
 public:
-    static constexpr int kMaxTaps = 48;
+    static constexpr int kMaxTaps = 128;
 
     void prepare(double fs)
     {
         mFs = fs;
-        mLine.prepare((int)std::ceil(0.14 * fs) + 16); // headroom for the largest room
-        mBuilt = false; mLastSize = -1.0f;
+        mLine.prepare((int)std::ceil(0.32 * fs) + 16); // up to ~250 ms of reflections (largest room)
+        const double dms[4] = {7.3, 11.7, 8.1, 12.9};   // output diffusers (smooth the discrete taps)
+        for (int k = 0; k < 4; ++k) { mApLen[(size_t)k] = std::max(1,(int)std::round(dms[k]*0.001*fs)); mAp[(size_t)k].prepare(mApLen[(size_t)k] + 8); }
+        mBuilt = false; mLastSize = -1.0f; mLastR = -1.0f;
         setBrightHz(9000.0f);
-        setSize(1.0f);
+        mR = 0.70f; setSize(1.0f);
         reset(); mPrepared = true;
     }
-    void reset() { mLine.reset(); mLpL = mLpR = 0.0f; }
+    void reset() { mLine.reset(); for (auto &l : mAp) l.reset(); mLpL = mLpR = 0.0f; }
 
     void setSize(float s)
     {
         s = std::clamp(s, 0.5f, 1.5f);
-        if (mBuilt && s == mLastSize) return;
-        mLastSize = s; rebuild(s); mBuilt = true;
+        if (mBuilt && s == mLastSize && mR == mLastR) return;
+        mLastSize = s; mLastR = mR; rebuild(s); mBuilt = true;
     }
     void setBrightHz(float hz) { mLpK = (float)reverb_detail::onePole(std::clamp(hz, 2000.0f, 16000.0f), mFs); }
+    // Wall reflection coefficient = how live the room is (low = dead/absorptive, fast decay).
+    void setLiveness(float r) { r = std::clamp(r, 0.40f, 0.82f); if (r != mR) { mR = r; if (mBuilt) { rebuild(mLastSize); mLastR = mR; } } }
 
-    // Mono excitation from (inL+inR)/2; stereo ER written to outL/outR.
     void process(const float *inL, const float *inR, float *outL, float *outR, int n)
     {
+        using namespace reverb_detail;
         for (int i = 0; i < n; ++i)
         {
             mLine.write(0.5f * (inL[i] + inR[i]));
             float l = 0.0f, r = 0.0f;
             for (int k = 0; k < mNL; ++k) l += mGainL[(size_t)k] * mLine.readInt(mDelL[(size_t)k]);
             for (int k = 0; k < mNR; ++k) r += mGainR[(size_t)k] * mLine.readInt(mDelR[(size_t)k]);
-            mLpL += mLpK * (l - mLpL); outL[i] = mLpL; // gentle air absorption
+            l = allpassInt(mAp[0], mApLen[0], 0.62f, l); l = allpassInt(mAp[1], mApLen[1], 0.55f, l);
+            r = allpassInt(mAp[2], mApLen[2], 0.62f, r); r = allpassInt(mAp[3], mApLen[3], 0.55f, r);
+            mLpL += mLpK * (l - mLpL); outL[i] = mLpL;
             mLpR += mLpK * (r - mLpR); outR[i] = mLpR;
         }
     }
@@ -806,50 +812,50 @@ public:
 private:
     void rebuild(float sz)
     {
-        const double c = 343.0;
-        const double Lx = 4.0*sz, Ly = 3.0*sz, Lz = 2.5*sz;        // ~small treated room at sz=1
-        const double sx = 0.9*sz, sy = 1.1*sz, sz0 = 1.2*sz;        // off-centre source (breaks L/R symmetry)
+        const double Lx = 4.0*sz, Ly = 3.0*sz, Lz = 2.5*sz;
+        const double sx = 0.9*sz, sy = 1.1*sz, sz0 = 1.2*sz;
         const double lx = 3.0*sz, lz = 1.2*sz;
-        buildEar(Lx,Ly,Lz, sx,sy,sz0, lx, 1.00*sz, lz, mDelL, mGainL, mNL); // left  capture
-        buildEar(Lx,Ly,Lz, sx,sy,sz0, lx, 2.10*sz, lz, mDelR, mGainR, mNR); // right capture (spaced)
+        buildEar(Lx,Ly,Lz, sx,sy,sz0, lx, 1.00*sz, lz, mDelL, mGainL, mNL);
+        buildEar(Lx,Ly,Lz, sx,sy,sz0, lx, 2.10*sz, lz, mDelR, mGainR, mNR);
     }
     void buildEar(double Lx,double Ly,double Lz,double sx,double sy,double sz,
                   double lx,double ly,double lz,std::array<int,kMaxTaps>&del,
                   std::array<float,kMaxTaps>&gain,int&count)
     {
-        const double c = 343.0, r = 0.70; // wall reflection coeff (bright, ~0.4 absorptive)
+        const double c = 343.0, r = mR;
         struct T { int d; float g; };
-        std::array<T, 512> tmp{}; int m = 0;
-        const int N = 3;
+        std::array<T, 2048> tmp{}; int m = 0;
+        const int N = 4;
         for (int mx=-N;mx<=N;++mx) for (int my=-N;my<=N;++my) for (int mz=-N;mz<=N;++mz) {
-            if (!mx && !my && !mz) continue;                 // skip direct sound
+            if (!mx && !my && !mz) continue;
             double ix = mx*Lx + ((mx&1)?(Lx-sx):sx);
             double iy = my*Ly + ((my&1)?(Ly-sy):sy);
             double iz = mz*Lz + ((mz&1)?(Lz-sz):sz);
             double dx=ix-lx, dy=iy-ly, dz=iz-lz;
             double dist = std::sqrt(dx*dx+dy*dy+dz*dz);
-            double dms = dist/c*1000.0; if (dms > 80.0) continue;     // early reflections only
+            double dms = dist/c*1000.0; if (dms > 250.0) continue;
             int refl = std::abs(mx)+std::abs(my)+std::abs(mz);
             double g = std::pow(r,(double)refl) / std::max(1.0, dist);
-            if (g < 0.004) continue;
-            if (m < 512) { tmp[(size_t)m].d = std::max(1,(int)std::llround(dist/c*mFs)); tmp[(size_t)m].g = (float)g; ++m; }
+            if (g < 0.0015) continue;
+            if (m < 2048) { tmp[(size_t)m].d = std::max(1,(int)std::llround(dist/c*mFs)); tmp[(size_t)m].g = (float)g; ++m; }
         }
         std::sort(tmp.begin(), tmp.begin()+m, [](const T&a,const T&b){return a.g>b.g;});
         count = std::min(m, kMaxTaps);
         float norm = 0.0f; for (int k=0;k<count;++k) norm += tmp[(size_t)k].g;
-        norm = norm > 0 ? 1.0f/norm : 1.0f;                  // sum-normalize so ER level is size-independent
+        norm = norm > 0 ? 1.0f/norm : 1.0f;
         for (int k=0;k<count;++k){ del[(size_t)k]=tmp[(size_t)k].d; gain[(size_t)k]=tmp[(size_t)k].g*norm; }
     }
 
     double mFs = 48000.0;
     FracDelayLine mLine;
+    std::array<FracDelayLine,4> mAp;
+    std::array<int,4> mApLen{};
     std::array<int,kMaxTaps> mDelL{}, mDelR{};
     std::array<float,kMaxTaps> mGainL{}, mGainR{};
     int mNL = 0, mNR = 0;
-    float mLpL = 0.0f, mLpR = 0.0f, mLpK = 0.5f, mLastSize = -1.0f;
+    float mLpL = 0.0f, mLpR = 0.0f, mLpK = 0.5f, mLastSize = -1.0f, mR = 0.70f, mLastR = -1.0f;
     bool mBuilt = false, mPrepared = false;
 };
-
 class ReverbBlock : public StereoBlock
 {
 public:
@@ -1007,8 +1013,8 @@ public:
             mER.process(mDryL.data(), mDryR.data(), mErL.data(), mErR.data(), numSamples); // early reflections (image-source)
             mFdn.process(left, right, numSamples);                                          // diffuse late wash
             for (int n = 0; n < numSamples; ++n) {
-                left[n] = kErMix * mErL[(size_t)n] + kLateMix * left[n];
-                if (stereo) right[n] = kErMix * mErR[(size_t)n] + kLateMix * right[n];
+                left[n] = kErMix * mErL[(size_t)n] + mRoomLate * left[n];
+                if (stereo) right[n] = kErMix * mErR[(size_t)n] + mRoomLate * right[n];
             }
             break;
         }
@@ -1126,7 +1132,12 @@ private:
             case kHall:
             default:        size = mSize; mod = mMod;  pre = 10.0f + (mSize - kMinSize) * 60.0f; diff = 0.65f; break;
             }
-            if (mType == kRoom) { mER.setSize(mSize); mER.setBrightHz(mDampHz * 0.80f); } // ER tracks Tone (darker for an even tail), scales w/ Size
+            if (mType == kRoom) {
+                const float dn = std::clamp((effT60() - 0.3f) / 1.7f, 0.0f, 1.0f); // 0 = dead .. 1 = live
+                mER.setLiveness(std::round((0.50f + dn * 0.30f) * 50.0f) / 50.0f);  // wall r: dead->live (quantized, avoids rebuild thrash)
+                mER.setSize(mSize); mER.setBrightHz(mDampHz * 0.80f);
+                mRoomLate = dn * 0.20f; // FDN wash fades in only as the room gets livelier
+            }
             mFdn.setSize(size); mFdn.setModDepth(mod); mFdn.setPredelayMs(pre);
             mFdn.setDiffusion(diff); mFdn.setDecaySeconds(mType == kRoom ? effT60() * 0.45f : effT60()); mFdn.setDampHz(mDampHz);
             mFdn.setFreeze(mFreeze);
@@ -1135,7 +1146,8 @@ private:
         }
     }
 
-    static constexpr float kErMix = 1.0f, kLateMix = 0.20f; // Room: ER-forward dimension + faint warm glue tail (guitar-first)
+    static constexpr float kErMix = 1.0f; // Room: ER carries the sound; wash morphs in with Decay
+    float mRoomLate = 0.0f;
     EarlyReflections mER;
     std::vector<float> mErL, mErR;
     FdnReverb mFdn;
