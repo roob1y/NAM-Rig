@@ -779,11 +779,6 @@ public:
         for (int k = 0; k < kNap; ++k) mAp[(size_t)k].prepare((int)std::ceil(kApMs[(size_t)k] * 0.001 * fs) + 8);
         for (int k = 0; k < 2; ++k) { mEarlyLen[(size_t)k] = std::max(2, (int)std::round(kEarlyMs[(size_t)k] * 0.001 * fs)); mEarly[(size_t)k].prepare(mEarlyLen[(size_t)k] + 8); }
         mPredelay.prepare((int)std::ceil(0.08 * fs) + 8);
-        { static const double a1[kN]={1.7,2.3,2.9,3.7,4.3,5.1,5.9,6.7,7.3,8.1,8.9,9.7,10.7,11.3,12.1,13.1};
-          static const double a2[kN]={3.1,4.1,5.3,6.1,7.1,8.3,9.1,10.1,11.1,12.3,13.3,14.1,15.1,16.3,17.1,18.1};
-          static const double a3[kN]={5.7,6.9,8.1,9.3,10.9,12.1,13.7,14.9,16.1,17.3,18.9,20.1,21.3,22.7,23.9,25.1};
-          auto mk=[&](std::array<FracDelayLine,kN>&L,std::array<int,kN>&N,const double*ms){ for(int i=0;i<kN;++i){ N[(size_t)i]=std::max(2,(int)std::round(ms[(size_t)i]*0.001*fs)); L[(size_t)i].prepare(N[(size_t)i]+8);} };
-          mk(mFrzAp,mFrzApLen,a1); mk(mFrzAp2,mFrzApLen2,a2); mk(mFrzAp3,mFrzApLen3,a3); }
         mLfo.prepare(fs); mLfo.setRateHz(0.6f);
         mUmidEq = Biquad::peaking(fs, 1850.0, 0.9, -4.5); // tame the FDN upper-mid (den dips there)
         mBoxEq = Biquad::peaking(fs, 540.0, 0.65, -3.0);  // guitar: scoop the boxy 400-900Hz (sits under the amp)
@@ -798,7 +793,6 @@ public:
         for (auto &l : mLine) l.reset();
         for (auto &l : mAp) l.reset();
         mPredelay.reset(); mLfo.reset(); for (auto &l : mEarly) l.reset(); mLoSh = 0.0f; mUmidEq.reset(); mBoxEq.reset(); mHiCut.reset();
-        for (auto &l : mFrzAp) l.reset(); for (auto &l : mFrzAp2) l.reset(); for (auto &l : mFrzAp3) l.reset();
         mInLp = 0.0f;
     }
     void setDecaySeconds(float t60) { mT60 = std::max(0.05f, t60); mDirty = true; }
@@ -825,7 +819,7 @@ public:
         const bool stereo = (left != right);
         const float fb = mFreeze ? 1.0f : mFb;
         const float inG = mFreeze ? 0.0f : 1.0f;
-        const float modS = mFreeze ? 0.0f : (mMod * 3.0f); // gentle delay modulation (samples)
+        const float modS = mFreeze ? 2.0f : (mMod * 3.0f); // while frozen: a fixed gentle modulation slowly detunes the held FDN eigenmodes so they don't ring as fixed metallic pitches (the "kooky" freeze). Live path (mMod*3) unchanged.
         for (int n = 0; n < numSamples; ++n)
         {
             mPredelay.write(inG * 0.5f * (left[n] + (stereo ? right[n] : left[n])));
@@ -840,16 +834,7 @@ public:
             for (int i = 0; i < kN; ++i) d[i] = mLine[(size_t)i].readFrac((double)mLen[(size_t)i] + (double)(modS * mLfo.value((double)i * 0.13)));
             float h[kN]; for (int i = 0; i < kN; ++i) h[i] = d[i];
             for (int s = 1; s < kN; s <<= 1) for (int i = 0; i < kN; i += s << 1) for (int j = i; j < i + s; ++j) { float a = h[j], b = h[j + s]; h[j] = a + b; h[j + s] = a - b; }
-            for (int i = 0; i < kN; ++i)
-            {
-                float fbsig = h[i] * kFwhtNorm;
-                if (mFreeze) { // freeze-only 3-stage allpass diffusion: spreads the held FDN modes into a dense wash so the frozen tail doesn't ring as metallic pitches. Gated on mFreeze, so the live path is bit-for-bit unchanged.
-                    fbsig = allpassInt(mFrzAp[(size_t)i], mFrzApLen[(size_t)i], 0.7f, fbsig);
-                    fbsig = allpassInt(mFrzAp2[(size_t)i], mFrzApLen2[(size_t)i], 0.7f, fbsig);
-                    fbsig = allpassInt(mFrzAp3[(size_t)i], mFrzApLen3[(size_t)i], 0.7f, fbsig);
-                }
-                mLine[(size_t)i].write(fb * fbsig + in * kInInject);
-            }
+            for (int i = 0; i < kN; ++i) mLine[(size_t)i].write(fb * h[i] * kFwhtNorm + in * kInInject);
             float el = allpassInt(mEarly[0], mEarlyLen[0], 0.6f, in);  // immediate early energy (decorrelated)
             float er = allpassInt(mEarly[1], mEarlyLen[1], 0.6f, in);
             float l = 0.0f, r = 0.0f;
@@ -889,7 +874,6 @@ private:
     float mLoSh = 0.0f, mLoK = 0.0f, mLoG = 0.8f;
     float mFb = 0.0f, mT60 = 0.3f, mToneHz = 1750.0f, mSize = 1.0f;
     float mPredelayMs = 0.0f, mMod = 0.0f; int mPreSamp = 1;
-    std::array<FracDelayLine, kN> mFrzAp, mFrzAp2, mFrzAp3; std::array<int, kN> mFrzApLen{}, mFrzApLen2{}, mFrzApLen3{};
     bool mFreeze = false, mPrepared = false, mDirty = true;
 };
 
