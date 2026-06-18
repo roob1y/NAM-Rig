@@ -768,15 +768,15 @@ private:
 class SmallRoomFdn
 {
 public:
-    static constexpr int kN = 8;
+    static constexpr int kN = 16;
 
     void prepare(double fs)
     {
         mFs = fs;
         for (int i = 0; i < kN; ++i)
             mLine[(size_t)i].prepare((int)std::ceil(kBaseMs[(size_t)i] * 2.2 * 0.001 * fs) + 16);
-        mAp[0].prepare((int)std::ceil(5.3 * 0.001 * fs) + 8);
-        mAp[1].prepare((int)std::ceil(8.1 * 0.001 * fs) + 8);
+        for (int k = 0; k < kNap; ++k) mAp[(size_t)k].prepare((int)std::ceil(kApMs[(size_t)k] * 0.001 * fs) + 8);
+        for (int k = 0; k < 2; ++k) { mEarlyLen[(size_t)k] = std::max(2, (int)std::round(kEarlyMs[(size_t)k] * 0.001 * fs)); mEarly[(size_t)k].prepare(mEarlyLen[(size_t)k] + 8); }
         mPredelay.prepare((int)std::ceil(0.08 * fs) + 8);
         mLfo.prepare(fs); mLfo.setRateHz(0.6f);
         setToneHz(1750.0f);
@@ -787,7 +787,7 @@ public:
     {
         for (auto &l : mLine) l.reset();
         for (auto &l : mAp) l.reset();
-        mPredelay.reset(); mLfo.reset();
+        mPredelay.reset(); mLfo.reset(); for (auto &l : mEarly) l.reset();
         mInLp = mLoSh = 0.0f;
     }
     void setDecaySeconds(float t60) { mT60 = std::max(0.05f, t60); mDirty = true; }
@@ -801,8 +801,7 @@ public:
         mSize = std::clamp(s, 0.5f, 1.5f);
         const double scale = std::clamp(std::pow((double)mSize, 1.7), 0.42, 2.05); // dramatic but bounded
         for (int i = 0; i < kN; ++i) mLen[(size_t)i] = std::max(2, (int)std::round(kBaseMs[(size_t)i] * scale * 0.001 * mFs));
-        mApLen[0] = std::max(2, (int)std::round(5.3 * 0.001 * mFs));
-        mApLen[1] = std::max(2, (int)std::round(8.1 * 0.001 * mFs));
+        for (int k = 0; k < kNap; ++k) mApLen[(size_t)k] = std::max(2, (int)std::round(kApMs[(size_t)k] * 0.001 * mFs));
         mLoG = (float)std::clamp(0.35 + (scale - 1.0) * 0.40, 0.10, 0.85); // bigger room -> more low-mid body
         mDirty = true;
     }
@@ -821,8 +820,7 @@ public:
         {
             mPredelay.write(inG * 0.5f * (left[n] + (stereo ? right[n] : left[n])));
             float in = mPredelay.readInt(mPreSamp);            // predelay
-            in = allpassInt(mAp[0], mApLen[0], 0.5f, in);      // smooth onset
-            in = allpassInt(mAp[1], mApLen[1], 0.5f, in);
+            for (int k = 0; k < kNap; ++k) in = allpassInt(mAp[(size_t)k], mApLen[(size_t)k], 0.65f, in); // input diffuser cascade -> dense diffuse onset
             mInLp += mInLpK * (in - mInLp); in = mInLp;        // input darkening (Tone)
             mLoSh += mLoK * (in - mLoSh); in += loG * mLoSh;   // low-mid body (scales with Size)
             float d[kN];
@@ -830,9 +828,11 @@ public:
             float h[kN]; for (int i = 0; i < kN; ++i) h[i] = d[i];
             for (int s = 1; s < kN; s <<= 1) for (int i = 0; i < kN; i += s << 1) for (int j = i; j < i + s; ++j) { float a = h[j], b = h[j + s]; h[j] = a + b; h[j + s] = a - b; }
             for (int i = 0; i < kN; ++i) mLine[(size_t)i].write(fb * h[i] * kFwhtNorm + in * kInInject);
+            float el = allpassInt(mEarly[0], mEarlyLen[0], 0.6f, in);  // immediate early energy (decorrelated)
+            float er = allpassInt(mEarly[1], mEarlyLen[1], 0.6f, in);
             float l = 0.0f, r = 0.0f;
             for (int i = 0; i < kN; ++i) { float sgn = (i & 1) ? -1.0f : 1.0f; l += d[i] * ((i % 3) ? 1.0f : 0.7f); r += d[i] * sgn * ((i % 2) ? 0.8f : 1.0f); }
-            left[n] = 0.5f * l; if (stereo) right[n] = 0.5f * r;
+            left[n] = kEarlyG * el + kTailG * 0.5f * l; if (stereo) right[n] = kEarlyG * er + kTailG * 0.5f * r;
             mLfo.advance();
         }
         flush(mInLp); flush(mLoSh);
@@ -846,16 +846,23 @@ private:
         mLoK = (float)reverb_detail::onePole(320.0, mFs);
         mDirty = false;
     }
-    static constexpr double kBaseMs[kN] = {7.1, 9.7, 11.3, 13.9, 16.7, 19.3, 21.7, 23.9};
-    static constexpr float kFwhtNorm = 0.35355339f; // 1/sqrt(8)
+    static constexpr double kBaseMs[kN] = {6.7, 8.3, 9.7, 11.3, 12.9, 14.3, 15.9, 17.3,
+                                            18.9, 20.3, 21.7, 23.3, 24.7, 26.1, 27.7, 29.3};
+    static constexpr float kFwhtNorm = 0.25f; // 1/sqrt(16)
     static constexpr float kInInject = 0.35f;
     double mFs = 48000.0;
     std::array<FracDelayLine, kN> mLine;
     std::array<int, kN> mLen{};
-    std::array<FracDelayLine, 2> mAp;
-    std::array<int, 2> mApLen{};
+    static constexpr int kNap = 3;
+    static constexpr double kApMs[kNap] = {2.3, 3.7, 5.9};
+    std::array<FracDelayLine, kNap> mAp;
+    std::array<int, kNap> mApLen{};
     FracDelayLine mPredelay;
     Lfo mLfo;
+    static constexpr double kEarlyMs[2] = {7.3, 9.7};
+    std::array<FracDelayLine, 2> mEarly;
+    std::array<int, 2> mEarlyLen{};
+    static constexpr float kEarlyG = 0.85f, kTailG = 0.5f;
     float mInLp = 0.0f, mInLpK = 0.0f, mLoSh = 0.0f, mLoK = 0.0f, mLoG = 0.35f;
     float mFb = 0.0f, mT60 = 0.3f, mToneHz = 1750.0f, mSize = 1.0f;
     float mPredelayMs = 0.0f, mMod = 0.0f; int mPreSamp = 1;
@@ -1154,7 +1161,7 @@ private:
     std::vector<float> mDryL, mDryR;
 
     Type mType = kHall;
-    float mSize = 1.0f, mT60 = 2.0f, mDampHz = 6000.0f, mPredelayMs = 20.0f, mMix = 0.25f;
+    float mSize = 1.0f, mT60 = 2.0f, mDampHz = 6000.0f, mPredelayMs = 0.0f, mMix = 0.25f;
     float mMod = 0.3f, mShimmerAmt = 0.5f, mTension = 0.5f, mWidth = 1.0f, mSwell = 0.4f;
     float mInputFilterHz = 95.0f; // Plate Input Filter corner (20-400 Hz); 95 = prior hardwired Plate low-cut
     int mPitch = 0;

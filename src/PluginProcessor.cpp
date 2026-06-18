@@ -261,7 +261,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("revPredelay", 1), "Reverb Pre-Delay",
         juce::NormalisableRange<float>(nam_rig::ReverbBlock::kPreMin,
-                                       nam_rig::ReverbBlock::kPreMax, 1.0f, 0.5f), 20.0f,
+                                       nam_rig::ReverbBlock::kPreMax, 1.0f, 0.5f), 0.0f,
         juce::AudioParameterFloatAttributes().withLabel("ms")));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("revMix", 1), "Reverb Mix",
