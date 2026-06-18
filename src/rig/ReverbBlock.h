@@ -1060,7 +1060,7 @@ private:
         switch (t)
         {
         case kSpring: return 150.0f;
-        case kRoom: return 110.0f;
+        case kRoom: return 150.0f; // guitar: keep the room clear of the amp low-mids
         case kAmbience: return 130.0f;
         case kPlate: return 95.0f;
         case kShimmer: return 100.0f;
@@ -1135,7 +1135,7 @@ private:
         }
     }
 
-    static constexpr float kErMix = 0.92f, kLateMix = 0.28f; // Room: early reflections + even dark wash
+    static constexpr float kErMix = 1.0f, kLateMix = 0.20f; // Room: ER-forward dimension + faint warm glue tail (guitar-first)
     EarlyReflections mER;
     std::vector<float> mErL, mErR;
     FdnReverb mFdn;
