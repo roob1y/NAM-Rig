@@ -887,7 +887,7 @@ public:
     // stay literal; the host layer maps raw->window via mapped*(). Outer ranges == APVTS
     // (single source of truth, referenced by PluginProcessor).
     static constexpr float kDecayMin = 0.3f,    kDecayMax = 8.0f;      // s
-    static constexpr float kDampMin  = 1500.0f, kDampMax  = 16000.0f;  // Hz
+    static constexpr float kDampMin  = 900.0f,  kDampMax  = 16000.0f;  // Hz
     static constexpr float kPreMin   = 0.0f,    kPreMax   = 160.0f;    // ms
     static constexpr float kMixMax   = 0.70f;                          // wet cap (Mix is universal)
     struct Range { float lo, hi; };
@@ -907,7 +907,7 @@ public:
     static Range dampRange(Type t)
     {
         switch (t) {
-        case kRoom:     return {2500.0f, 12000.0f};
+        case kRoom:     return {900.0f, 4500.0f}; // warm/dark room
         case kHall:     return {2000.0f, 12000.0f};
         case kPlate:    return {1500.0f, 14000.0f}; // voiced dark<->bright span
         case kSpring:   return {1500.0f,  8000.0f};
@@ -946,7 +946,6 @@ public:
         mShimmer.prepare(ctx.sampleRate);
         mMixer.prepare(ctx.sampleRate);
         mER.prepare(ctx.sampleRate);
-        mRoomLfK = (float)reverb_detail::onePole(550.0, ctx.sampleRate); mRoomLfL = mRoomLfR = 0.0f; // Room low-bloom bed cutoff
         const int cap = std::max(16, ctx.maxBlockSize);
         mDryL.assign((size_t)cap, 0.0f);
         mDryR.assign((size_t)cap, 0.0f);
@@ -1008,12 +1007,8 @@ public:
             mER.process(mDryL.data(), mDryR.data(), mErL.data(), mErR.data(), numSamples); // early reflections (image-source)
             mFdn.process(left, right, numSamples);                                          // diffuse late wash
             for (int n = 0; n < numSamples; ++n) {
-                // late wash split: a little full-band + a boosted low-passed bed = blooming
-                // low tail under bright early reflections (tight top, warm sustain below).
-                mRoomLfL += mRoomLfK * (left[n] - mRoomLfL);
-                mRoomLfR += mRoomLfK * (right[n] - mRoomLfR);
-                left[n] = kErMix * mErL[(size_t)n] + kLateHi * left[n] + kLateLow * mRoomLfL;
-                if (stereo) right[n] = kErMix * mErR[(size_t)n] + kLateHi * right[n] + kLateLow * mRoomLfR;
+                left[n] = kErMix * mErL[(size_t)n] + kLateMix * left[n];
+                if (stereo) right[n] = kErMix * mErR[(size_t)n] + kLateMix * right[n];
             }
             break;
         }
@@ -1124,24 +1119,23 @@ private:
             float size, mod, pre, diff;
             switch (mType)
             {
-            case kRoom:     size = 0.5f + (mSize - kMinSize) * 0.3f; mod = 0.15f; pre = 8.0f; diff = 0.70f; break;
+            case kRoom:     size = kMinSize; mod = 0.15f; pre = 8.0f; diff = 0.70f; break; // tail kept short; Size scales the ER
             case kAmbience: size = 0.45f; mod = 0.25f; pre = 0.0f;  diff = 0.78f; break;
             // Bloom hardwires a long predelay; Hall folds predelay into Size.
             case kBloom:    size = 1.45f; mod = std::max(0.45f, mMod); pre = mPredelayMs; diff = 0.60f; break;
             case kHall:
             default:        size = mSize; mod = mMod;  pre = 10.0f + (mSize - kMinSize) * 60.0f; diff = 0.65f; break;
             }
-            if (mType == kRoom) { mER.setSize(mSize); mER.setBrightHz(mDampHz); } // ER scales w/ Size, brightness w/ Tone
+            if (mType == kRoom) { mER.setSize(mSize); mER.setBrightHz(mDampHz * 0.80f); } // ER tracks Tone (darker for an even tail), scales w/ Size
             mFdn.setSize(size); mFdn.setModDepth(mod); mFdn.setPredelayMs(pre);
-            mFdn.setDiffusion(diff); mFdn.setDecaySeconds(mType == kRoom ? effT60() * 0.5f : effT60()); mFdn.setDampHz(mDampHz);
+            mFdn.setDiffusion(diff); mFdn.setDecaySeconds(mType == kRoom ? effT60() * 0.45f : effT60()); mFdn.setDampHz(mDampHz);
             mFdn.setFreeze(mFreeze);
             break;
         }
         }
     }
 
-    static constexpr float kErMix = 1.0f, kLateHi = 0.22f, kLateLow = 1.05f; // Room: bright ER + low-bloom late bed
-    float mRoomLfL = 0.0f, mRoomLfR = 0.0f, mRoomLfK = 0.0f;
+    static constexpr float kErMix = 0.92f, kLateMix = 0.28f; // Room: early reflections + even dark wash
     EarlyReflections mER;
     std::vector<float> mErL, mErR;
     FdnReverb mFdn;
