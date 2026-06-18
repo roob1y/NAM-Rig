@@ -1267,11 +1267,12 @@ public:
         mPitchAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
             apvts, "revPitch", mPitch);
 
-        // Freeze — infinite sustain, shown for every character.
+        // Freeze — infinite sustain. Only on the lush/evolving characters (Hall/Shimmer/
+        // Bloom); hidden elsewhere via refresh() + RB::freezeExposed.
         mFreeze.setButtonText("Freeze");
-        addAndMakeVisible(mFreeze);
+        addChildComponent(mFreeze);
         mFreezeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            apvts, "revFreeze", mFreeze);
+            apvts, juce::String(nam_rig::ReverbBlock::paramId("Freeze", nam_rig::ReverbBlock::kHall)), mFreeze);
 
         // Build every knob once; refresh() rebinds Decay/Tone/Size/Predelay/Mod to the
         // ACTIVE character's per-character param + shows the subset the character uses.
@@ -1323,12 +1324,17 @@ public:
         mTension->setVisible(RB::tensionExposed(t));
         mSwell->setVisible(RB::swellExposed(t));
         mPitch.setVisible(RB::pitchExposed(t));
+        mFreeze.setVisible(RB::freezeExposed(t));
         // rebind the shared knobs to THIS character's own params (own range + state)
         mDecay->rebind(mApvts, juce::String(RB::paramId("Decay", type)));
         mTone->rebind(mApvts, juce::String(RB::paramId("Tone", type)));
         if (RB::sizeExposed(t)) mSize->rebind(mApvts, juce::String(RB::paramId("Size", type)));
         if (RB::predelayExposed(t)) mPredelay->rebind(mApvts, juce::String(RB::paramId("Predelay", type)));
         if (RB::modExposed(t)) mMod->rebind(mApvts, juce::String(RB::paramId("Mod", type)));
+        mFreezeAtt.reset(); // per-character Freeze: rebind the button to THIS character's own state
+        if (RB::freezeExposed(t))
+            mFreezeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+                mApvts, juce::String(RB::paramId("Freeze", type)), mFreeze);
         mTone->setCaption(RB::toneCaption(t)); // "Damping" / "Tone" (spring)
         resized();
     }

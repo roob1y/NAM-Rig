@@ -910,6 +910,7 @@ public:
     static bool tensionExposed(Type t) { return t == kSpring; }
     static bool swellExposed(Type t) { return t == kBloom; }
     static bool inputFilterExposed(Type t) { return t == kPlate; } // vintage plate/studio-style wet low-cut on the plate amp
+    static bool freezeExposed(Type t) { return t == kHall || t == kShimmer || t == kBloom; } // infinite-sustain pad only makes sense on the lush/evolving characters
     static const char *toneCaption(Type) { return "Tone"; }
 
     // ---- per-character "sweet spot" knob windows ------------------------------
@@ -1014,7 +1015,7 @@ public:
     void setInputFilterHz(float hz) { mInputFilterHz = std::clamp(hz, 20.0f, 400.0f); } // Plate Input Filter (wet low-cut corner)
     void setSwell(float s) { mSwell = std::clamp(s, 0.0f, 1.0f); }
     void setPitch(int p) { mPitch = std::clamp(p, 0, 2); if (mPrepared) pushParams(); }
-    void setFreeze(bool f) { mFreeze = f; if (mPrepared) pushParams(); }
+    void setFreeze(bool f) { mFreeze = f && freezeExposed(mType); if (mPrepared) pushParams(); } // Freeze is gated to Hall/Shimmer/Bloom; inert on other characters even if the param/MIDI is on
 
     int lineLengthSamples(int i) const { return mFdn.lineLengthSamples(i); }
     float lineGain(int i) const { return mFdn.lineGain(i); }

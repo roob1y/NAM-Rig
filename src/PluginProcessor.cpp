@@ -355,8 +355,6 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("revPitch", 1), "Reverb Shimmer Pitch",
         juce::StringArray{"Octave", "+2 Oct", "Fifth+Oct"}, 0));
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID("revFreeze", 1), "Reverb Freeze", false));
     // Plate Input Filter (vintage plate/studio-style wet low-cut at the plate amp). Plate-only
     // in the UI via ReverbBlock::inputFilterExposed; default 95 Hz = prior hardwired
     // Plate low-cut, so existing Plate sessions are unchanged. Appended last.
@@ -398,6 +396,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
                 params.push_back(std::make_unique<juce::AudioParameterFloat>(
                     juce::ParameterID(juce::String(RB::paramId("Size", t)), 1), nm + " Size",
                     juce::NormalisableRange<float>(RB::kMinSize, RB::kMaxSize, 0.01f), 1.0f));
+            if (RB::freezeExposed(T)) // independent Freeze on/off per lush character
+                params.push_back(std::make_unique<juce::AudioParameterBool>(
+                    juce::ParameterID(juce::String(RB::paramId("Freeze", t)), 1), nm + " Freeze", false));
         }
     }
 
@@ -727,6 +728,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         mChain.reverb.setPredelayMs(RB::predelayExposed(T) ? pv("Predelay") : 0.0f);
         mChain.reverb.setMod(RB::modExposed(T) ? pv("Mod") : 0.0f);
         mChain.reverb.setSize(RB::sizeExposed(T) ? pv("Size") : 1.0f);
+        mChain.reverb.setFreeze(RB::freezeExposed(T) && pv("Freeze") >= 0.5f); // per-character Freeze state
     }
     mChain.reverb.setMix(apvts.getRawParameterValue("revMix")->load());
     mChain.reverb.setShimmer(apvts.getRawParameterValue("revShimmer")->load());
@@ -734,7 +736,6 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.reverb.setWidth(apvts.getRawParameterValue("revWidth")->load());
     mChain.reverb.setSwell(apvts.getRawParameterValue("revSwell")->load());
     mChain.reverb.setPitch((int)apvts.getRawParameterValue("revPitch")->load());
-    mChain.reverb.setFreeze(apvts.getRawParameterValue("revFreeze")->load() >= 0.5f);
     mChain.reverb.setInputFilterHz(apvts.getRawParameterValue("revInputFilter")->load());
     mChain.reverb.setBypassed(apvts.getRawParameterValue("reverbOn")->load() < 0.5f);
 
