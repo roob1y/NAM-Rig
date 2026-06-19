@@ -383,67 +383,72 @@ private:
 };
 
 // ===========================================================================
-// SpringReverb — studio spring-voiced studio spring. Four long "springs" run in parallel,
-// each = a dispersion cascade (first-order allpasses -> the spring chirp) + two
-// in-loop allpass diffusers + a slow drift, inside a feedback loop. Their sum is
-// then smeared by an output allpass diffuser bank, which dissolves the discrete
-// chirp-repeats into ONE smooth, dense, lush wash (the AKG studio spring character) rather
-// than the boingy discrete pings of a cheap amp tank. Tension = Density (how much
-// in-loop diffusion: low = open/springy, high = dense/smooth). Renders WET only.
-// (The boingy chirp-delay v1 is kept in history for the future in-amp spring.)
+// SpringReverb — studio spring-voiced studio spring (FDN realization, 2026-06-19 rework).
+// Matched to the studio spring reference IRs via the offline optimizer + ear
+// voicing ("41_tone-fix"), then ported faithfully to real time: a single dense
+// 8-line Householder FDN (same mixing/feedback as the offline model) fed by a
+// DELAYED low-band injection so the low-mids BLOOM ~50-80 ms after the immediate
+// highs (the "alive" swell). RAW (pre-damp) line reads go to the output so the
+// attack keeps its highs; the feedback path is HF-damped so the highs decay
+// faster than the lows (the studio spring lows-ring-longest tilt). Voicing: 110 Hz low-cut
+// + Tone-driven input darkening + a 2.5 kHz presence dip + a 2nd-order output
+// band-limit give the studio spring's warm, mid-focused tone. Stereo = Python sign-pattern
+// decorrelation with a width blend. Decay = RT60, Tone = brightness, Tension =
+// bloom amount. Renders WET only. (Old parallel-spring engine kept in git history.)
 // ===========================================================================
 class SpringReverb
 {
 public:
-    static constexpr int kSprings = 4;
-    static constexpr int kMaxStages = 160;
-    static constexpr int kOut = 4;
+    static constexpr int kLines = 8;
+    // line lengths (ms): fdn_base 16.39 * (1 + (ratio-1)*spread), spread 0.831
+    static constexpr std::array<double, kLines> kLineMs = {
+        16.39, 18.84, 21.43, 23.74, 26.33, 28.78, 31.65, 34.24};
+    static constexpr double kLowCutHz   = 110.0;   // input low-cut (sub the studio spring lacks)
+    static constexpr double kBloomFc    = 422.0;   // split: lows delayed, highs immediate
+    static constexpr double kBloomDelMs = 52.0;    // low-band injection delay -> the bloom
+    static constexpr double kPresenceHz = 2550.0;  // -2.5 dB presence dip
+    static constexpr double kPresenceDb = -2.5;
+    static constexpr double kPresenceQ  = 1.0;
+    static constexpr double kTiltDampHz = 11000.0; // feedback HF damping -> lows ring longest (tuned vs 41)
+    static constexpr double kCutMul     = 1.60;    // output band-limit = Tone * this (2nd-order)
+    static constexpr double kModMs      = 0.4;     // subtle spring sag
+    static constexpr double kDecayComp  = 1.05;    // gain T60 vs knob (offsets feedback damping)
+    static constexpr double kDarkScale  = 1.10;    // input dark cutoff vs Tone knob
 
     void prepare(double fs)
     {
         mFs = fs;
-        const double lms[kSprings] = {28.0, 33.0, 39.0, 46.0};
-        const double d0[kSprings] = {6.7, 7.9, 9.1, 10.3};
-        const double d1[kSprings] = {11.3, 12.9, 14.7, 16.1};
-        for (int s = 0; s < kSprings; ++s)
-        {
-            mBaseLoop[(size_t)s] = lms[s] * 0.001 * mFs;
-            mLoop[(size_t)s].prepare((int)std::ceil(mBaseLoop[(size_t)s] * 1.45) + 64);
-            mDif0Len[(size_t)s] = (int)std::round(d0[s] * 0.001 * mFs);
-            mDif1Len[(size_t)s] = (int)std::round(d1[s] * 0.001 * mFs);
-            mDif0[(size_t)s].prepare(mDif0Len[(size_t)s] + 8);
-            mDif1[(size_t)s].prepare(mDif1Len[(size_t)s] + 8);
-        }
-        const double odl[kOut] = {9.7, 14.2, 20.9, 28.3};
-        const double odr[kOut] = {8.3, 12.7, 18.9, 25.1};
-        for (int k = 0; k < kOut; ++k)
-        {
-            mOdLLen[(size_t)k] = (int)std::round(odl[k] * 0.001 * mFs); mOdL[(size_t)k].prepare(mOdLLen[(size_t)k] + 8);
-            mOdRLen[(size_t)k] = (int)std::round(odr[k] * 0.001 * mFs); mOdR[(size_t)k].prepare(mOdRLen[(size_t)k] + 8);
-        }
-        mPredelay.prepare((int)std::ceil(0.05 * mFs) + 8);
+        const double head = kModMs * 0.001 * mFs + 8.0;
+        for (int i = 0; i < kLines; ++i)
+            mLine[(size_t)i].prepare((int)std::ceil(kLineMs[(size_t)i] * 0.001 * mFs + head) + 8);
+        mBloomDelay.prepare((int)std::ceil(kBloomDelMs * 0.001 * mFs) + 16);
+        mDecL.prepare((int)std::ceil(0.02 * mFs) + 16); mDecR.prepare((int)std::ceil(0.02 * mFs) + 16);
+        mDecLLen = (int)std::round(0.0073 * mFs); mDecRLen = (int)std::round(0.0131 * mFs);
         mLfo.prepare(mFs); mLfo.setRateHz(0.4f);
+        // Householder vector u (||u||=1): H8 = I - 2 u u^T  (same as the offline model)
+        const float uv[kLines] = {1,1,1,1,1,1,1,-1};
+        float nrm = 0.0f; for (int i = 0; i < kLines; ++i) nrm += uv[i]*uv[i];
+        nrm = std::sqrt(nrm); for (int i = 0; i < kLines; ++i) mU[(size_t)i] = uv[i]/nrm;
+        designFilters();
+        updateGeometry();
         reset();
         mPrepared = true;
     }
 
     void reset()
     {
-        for (auto &l : mLoop) l.reset();
-        for (auto &l : mDif0) l.reset();
-        for (auto &l : mDif1) l.reset();
-        for (auto &l : mOdL) l.reset();
-        for (auto &l : mOdR) l.reset();
-        for (auto &c : mApx) std::fill(c.begin(), c.end(), 0.0f);
-        for (auto &c : mApy) std::fill(c.begin(), c.end(), 0.0f);
-        mPredelay.reset();
-        for (int s = 0; s < kSprings; ++s) { mLp[(size_t)s]=0; mDc[(size_t)s]=0; mZ[(size_t)s]=0; }
+        for (auto &l : mLine) l.reset();
+        mBloomDelay.reset(); mDecL.reset(); mDecR.reset();
+        mInHp = mInLp = mLowLp = 0.0f;
+        std::fill(mDamp.begin(), mDamp.end(), 0.0f);
+        for (auto &z : mPresL) z = 0.0f; for (auto &z : mPresR) z = 0.0f;
+        for (auto &z : mCutL)  z = 0.0f; for (auto &z : mCutR)  z = 0.0f;
         mLfo.reset();
     }
 
     void setDecaySeconds(float t60) { mT60 = std::max(0.1f, t60); mDirty = true; }
-    void setDampHz(float hz) { mDampHz = hz; mDirty = true; }
-    void setTension(float t) { mTension = std::clamp(t, 0.0f, 1.0f); mDirty = true; } // = Density
+    void setDampHz(float hz) { mDampHz = std::clamp(hz, 600.0f, 16000.0f); mDirty = true; } // Tone = brightness
+    void setTension(float t) { mTension = std::clamp(t, 0.0f, 1.0f); }                       // = bloom amount
     void setFreeze(bool f) { mFreeze = f; }
 
     void process(float *left, float *right, int numSamples)
@@ -451,73 +456,105 @@ public:
         using namespace reverb_detail;
         if (mDirty) recompute();
         const bool stereo = (left != right);
-        const float fb = mFreeze ? 0.99f : mFb;
         const float inGain = mFreeze ? 0.0f : 1.0f;
-        const float modS = (float)(0.5 * 0.001 * mFs); // subtle spring sag, not a warble
+        const float bloomMix = 0.72f * mTension;
+        const float modS = (float)(kModMs * 0.001 * mFs);
+        const int bloomLen = std::max(1, (int)std::round(kBloomDelMs * 0.001 * mFs));
         for (int n = 0; n < numSamples; ++n)
         {
             const float dryL = left[n];
             const float dryR = stereo ? right[n] : dryL;
-            mPredelay.write(0.5f * (dryL + dryR));
-            const float in = inGain * mPredelay.readInt(std::max(1, mPreLen));
-            float sum = 0.0f;
-            for (int s = 0; s < kSprings; ++s)
+            float x = 0.5f * (dryL + dryR);
+            mInHp += mHpK * (x - mInHp); x = x - mInHp;          // one-pole high-pass (low-cut)
+            mInLp += mDarkK * (x - mInLp); x = mInLp;            // one-pole low-pass (Tone/dark)
+            mLowLp += mBloomK * (x - mLowLp);                    // split at bloomFc
+            const float lo = mLowLp, hi = x - lo;
+            mBloomDelay.write(lo);
+            const float fdnIn = inGain * (hi + bloomMix * mBloomDelay.readInt(bloomLen));
+
+            std::array<float, kLines> D, V;
+            for (int i = 0; i < kLines; ++i)
             {
-                float v = in + fb * mZ[(size_t)s];
-                auto &X = mApx[(size_t)s]; auto &Y = mApy[(size_t)s];
-                for (int k = 0; k < mStages; ++k)
-                { const float y = mApA * v + X[(size_t)k] - mApA * Y[(size_t)k]; X[(size_t)k]=v; Y[(size_t)k]=y; v=y; }
-                v = allpassInt(mDif0[(size_t)s], mDif0Len[(size_t)s], mDensG, v); // in-loop density
-                v = allpassInt(mDif1[(size_t)s], mDif1Len[(size_t)s], mDensG, v);
-                const double md = (double)mLoopLen[(size_t)s] + (double)(modS * mLfo.value((double)s * 0.25));
-                mLoop[(size_t)s].write(v);
-                float d = mLoop[(size_t)s].readFrac(md);
-                mLp[(size_t)s] += mDampK * (d - mLp[(size_t)s]); d = mLp[(size_t)s];
-                mDc[(size_t)s] += mDcK * (d - mDc[(size_t)s]); d = d - mDc[(size_t)s];
-                mZ[(size_t)s] = d; sum += d;
+                const double md = (double)mLen[(size_t)i] + (double)(modS * mLfo.value((double)i * 0.25));
+                D[(size_t)i] = mLine[(size_t)i].readFrac(md);    // RAW read -> output (keeps attack highs)
+                auto &z = mDamp[(size_t)i]; z += mDampK * (D[(size_t)i] - z); V[(size_t)i] = z; // damped -> feedback
             }
-            sum *= 0.5f;
-            float wl = sum, wr = sum;
-            for (int k = 0; k < kOut; ++k) wl = allpassInt(mOdL[(size_t)k], mOdLLen[(size_t)k], 0.55f, wl); // smooth the wash
-            for (int k = 0; k < kOut; ++k) wr = allpassInt(mOdR[(size_t)k], mOdRLen[(size_t)k], 0.55f, wr);
-            left[n] = 1.6f * wl;
-            if (stereo) right[n] = 1.6f * wr;
+            // output: width blend of common + sign-decorrelated (Python _stereo)
+            float wetL = 0.0f, wetR = 0.0f;   // interleaved half-sums: decorrelated (studio spring-wide) yet
+            for (int i = 0; i < kLines; ++i) { if (i & 1) wetR += D[(size_t)i]; else wetL += D[(size_t)i]; } // sum-preserving (keeps low-mid body + bloom, unlike zero-sum rows)
+            // feedback: Householder mix of damped V, scalar g, inject fdnIn equally
+            std::array<float, kLines> fbv;
+            for (int i = 0; i < kLines; ++i) fbv[(size_t)i] = (mFreeze ? 1.0f : mGain[(size_t)i]) * V[(size_t)i];
+            float s = 0.0f; for (int i = 0; i < kLines; ++i) s += mU[(size_t)i]*fbv[(size_t)i];
+            s *= 2.0f;
+            for (int i = 0; i < kLines; ++i)
+                mLine[(size_t)i].write((fbv[(size_t)i] - s*mU[(size_t)i]) + fdnIn);
+
+            wetL = allpassInt(mDecL, mDecLLen, 0.7f, wetL);   // per-channel allpass decorrelation
+            if (stereo) wetR = allpassInt(mDecR, mDecRLen, 0.7f, wetR);
+            float yl = biquad(mCutL, mCutB, biquad(mPresL, mPresB, mOutGain*wetL));
+            left[n] = yl;
+            if (stereo) right[n] = biquad(mCutR, mCutB, biquad(mPresR, mPresB, mOutGain*wetR));
             mLfo.advance();
         }
-        for (int s = 0; s < kSprings; ++s) { flush(mZ[(size_t)s]); flush(mLp[(size_t)s]); flush(mDc[(size_t)s]); }
+        for (auto &z : mDamp) flush(z);
+        flush(mInHp); flush(mInLp); flush(mLowLp);
     }
 
 private:
-    void recompute()
+    struct BQ { float b0=1,b1=0,b2=0,a1=0,a2=0; };
+    static void peakCoef(BQ &c, double f, double q, double gdb, double fs)
     {
         using namespace reverb_detail;
-        mPreLen = std::max(1, (int)std::round(0.004 * mFs));
-        mDensG = 0.55f;                            // in-loop diffusion fixed (the lush wash)
-        // Tension = spring tightness: scales the loop lengths, shifting the spring's
-        // resonant pitch/brightness audibly (~1 kHz of centroid travel).
-        const float sc = 0.6f + 0.8f * mTension;
-        for (int s = 0; s < kSprings; ++s) mLoopLen[(size_t)s] = std::max(2, (int)std::round(mBaseLoop[(size_t)s] * sc));
-        const double eff = (28.0 + 46.0) * 0.5 * (double)sc + 8.0;
-        mFb = (float)std::clamp(std::pow(10.0, -3.0 * eff / ((double)mT60 * 1000.0)), 0.0, 0.9);
-        mDampK = onePole((double)mDampHz, mFs);
-        mDcK = onePole(20.0, mFs);
-        mDirty = false;
+        const double A=std::pow(10.0,gdb/40.0), w0=2.0*kPi*f/fs, al=std::sin(w0)/(2.0*q), cs=std::cos(w0);
+        const double a0=1.0+al/A;
+        c.b0=(float)((1.0+al*A)/a0); c.b1=(float)((-2.0*cs)/a0); c.b2=(float)((1.0-al*A)/a0);
+        c.a1=(float)((-2.0*cs)/a0);  c.a2=(float)((1.0-al/A)/a0);
+    }
+    static void lpCoef(BQ &c, double f, double q, double fs)
+    {
+        using namespace reverb_detail;
+        f=std::min(f,0.45*fs); const double w0=2.0*kPi*f/fs, al=std::sin(w0)/(2.0*q), cs=std::cos(w0);
+        const double a0=1.0+al, b1=1.0-cs;
+        c.b0=(float)((b1*0.5)/a0); c.b1=(float)(b1/a0); c.b2=(float)((b1*0.5)/a0);
+        c.a1=(float)((-2.0*cs)/a0); c.a2=(float)((1.0-al)/a0);
+    }
+    static inline float biquad(std::array<float,4> &s, const BQ &c, float x)
+    {
+        const float y = c.b0*x + c.b1*s[0] + c.b2*s[1] - c.a1*s[2] - c.a2*s[3];
+        s[1]=s[0]; s[0]=x; s[3]=s[2]; s[2]=y; return y;
+    }
+    void designFilters() { peakCoef(mPresB, kPresenceHz, kPresenceQ, kPresenceDb, mFs); }
+    void recompute() { updateGeometry(); mDirty = false; }
+    void updateGeometry()
+    {
+        using namespace reverb_detail;
+        for (int i = 0; i < kLines; ++i) {
+            mLen[(size_t)i] = std::max(3, (int)std::round(kLineMs[(size_t)i]*0.001*mFs));
+            mGain[(size_t)i] = (float)std::pow(10.0, -3.0*(double)mLen[(size_t)i]/(((double)mT60*kDecayComp)*mFs));
+        }
+        mHpK    = onePole(kLowCutHz, mFs);
+        mBloomK = onePole(kBloomFc, mFs);
+        mDampK  = onePole(kTiltDampHz, mFs);
+        mDarkK  = onePole((double)mDampHz*kDarkScale, mFs);
+        lpCoef(mCutB, std::min((double)mDampHz*kCutMul, 0.45*mFs), 0.707, mFs);
     }
 
     double mFs = 48000.0;
-    std::array<FracDelayLine, kSprings> mLoop, mDif0, mDif1;
-    std::array<std::array<float, kMaxStages>, kSprings> mApx{}, mApy{};
-    FracDelayLine mPredelay;
-    std::array<FracDelayLine, kOut> mOdL, mOdR;
-    std::array<int, kSprings> mLoopLen{}, mDif0Len{}, mDif1Len{};
-    std::array<double, kSprings> mBaseLoop{};
-    std::array<int, kOut> mOdLLen{}, mOdRLen{};
-    std::array<float, kSprings> mLp{}, mDc{}, mZ{};
+    std::array<FracDelayLine, kLines> mLine;
+    FracDelayLine mBloomDelay, mDecL, mDecR;
+    int mDecLLen=350, mDecRLen=629;
     Lfo mLfo;
-    int mPreLen = 1, mStages = 140;
-    float mApA = 0.6f, mDensG = 0.55f, mFb = 0.8f, mDampK = 1.0f, mDcK = 0.01f;
-    float mT60 = 3.0f, mDampHz = 5200.0f, mTension = 0.5f;
-    bool mPrepared = false, mDirty = true, mFreeze = false;
+    std::array<int, kLines> mLen{};
+    std::array<float, kLines> mDamp{};
+    std::array<float, kLines> mGain{};
+    float mU[8]{};
+    BQ mPresB, mCutB;
+    std::array<float,4> mPresL{}, mPresR{}, mCutL{}, mCutR{};
+    float mInHp=0, mInLp=0, mLowLp=0;
+    float mHpK=0.01f, mBloomK=0.05f, mDampK=0.3f, mDarkK=0.4f;
+    float mT60=3.0f, mDampHz=3871.0f, mTension=0.5f, mOutGain=2.0f;
+    bool mPrepared=false, mDirty=true, mFreeze=false;
 };
 
 // ===========================================================================
