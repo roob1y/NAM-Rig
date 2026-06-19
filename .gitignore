@@ -1,3 +1,6 @@
 build/
 build-*/
 *.log
+plate_proto/ir/ 
+plate_proto/plate_rebuild_demos_v*/ 
+plate_proto/*.f32 
