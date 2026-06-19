@@ -1,0 +1,10 @@
+# Keep audio + binary artifacts OUT of git (repo bloat + studio spring is reference-only/EULA).
+# These all regenerate from the harness; they live on disk only.
+*.wav
+*.npy
+*.pkl
+ckpt.npz
+fdn_proto
+__pycache__/
+stub/
+src/
