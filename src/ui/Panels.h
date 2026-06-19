@@ -1254,7 +1254,10 @@ public:
     explicit ReverbPanel(juce::AudioProcessorValueTreeState &apvts)
         : BlockPanel("REVERB"), mApvts(apvts)
     {
-        mType.addItemList({"Room", "Hall", "Plate", "Spring", "Shimmer", "Ambience", "Bloom"}, 1);
+        // Only shipped characters (Ambience/Bloom locked away — RB::shipped()/kNumShipped).
+        // Item IDs are 1-based and equal Type+1, matching the revType choice indices.
+        for (int t = 0; t < nam_rig::ReverbBlock::kNumShipped; ++t)
+            mType.addItem(nam_rig::ReverbBlock::typeName(t), t + 1);
         addAndMakeVisible(mType);
         mTypeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
             apvts, "revType", mType);

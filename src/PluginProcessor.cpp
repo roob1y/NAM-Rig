@@ -333,10 +333,18 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     // Appended last for automation stability; default Hall + mod 0 reproduces the
     // original 8-line FDN reverb. revSize/revDecay/revDamp/revPredelay/revMix are
     // shared across characters and reinterpreted per type by ReverbBlock.
-    params.push_back(std::make_unique<juce::AudioParameterChoice>(
-        juce::ParameterID("revType", 1), "Reverb Character",
-        juce::StringArray{"Room", "Hall", "Plate", "Spring", "Shimmer", "Ambience", "Bloom"},
-        nam_rig::ReverbBlock::kHall));
+    // Only the SHIPPED characters are offered in the selector (Ambience/Bloom are
+    // implemented but locked away — see ReverbBlock::shipped()/kNumShipped). Shipped
+    // characters are the first kNumShipped enum entries, so choice index == Type and
+    // automation indices stay stable.
+    {
+        using RB = nam_rig::ReverbBlock;
+        juce::StringArray revTypes;
+        for (int t = 0; t < RB::kNumShipped; ++t)
+            revTypes.add(RB::typeName(t));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID("revType", 1), "Reverb Character", revTypes, RB::kHall));
+    }
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("revShimmer", 1), "Reverb Shimmer",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f, pct()));

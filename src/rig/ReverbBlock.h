@@ -923,6 +923,16 @@ public:
     enum Type { kRoom = 0, kHall, kPlate, kSpring, kShimmer, kAmbience, kBloom };
     static constexpr int kNumTypes = 7;
 
+    // ---- shipped set (v1 commercial release) ----------------------------------
+    // We SHIP a few fantastic characters and LOCK AWAY the rest (kept in code for a
+    // v1.1 roadmap / paid expansion). Shipped = Room, Hall, Plate, Spring, Shimmer.
+    // Ambience + Bloom are fully implemented but hidden from the selector. They sit
+    // LAST in the enum, so the shipped set is exactly [0, kNumShipped), keeping
+    // automation indices of shipped characters stable. UI + the revType choice param
+    // build their lists from shipped()/kNumShipped — this is the single source of truth.
+    static constexpr int kNumShipped = 5;
+    static bool shipped(Type t) { return (int)t >= 0 && (int)t < kNumShipped; }
+
     static constexpr int kNumLines = FdnReverb::kNumLines;
     static constexpr float kMinSize = FdnReverb::kMinSize;
     static constexpr float kMaxSize = FdnReverb::kMaxSize;
