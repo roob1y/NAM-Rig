@@ -101,6 +101,9 @@ public:
     void applyState(const PresetFile &preset)
     {
         auto *obj = preset.params.getDynamicObject();
+        // Suppress the mod type-change knob reset while we apply saved values, so
+        // a slot's saved knobs aren't wiped when its Type param is set.
+        mProc.beginStateLoad();
         for (auto *p : mProc.getParameters())
             if (auto *rp = dynamic_cast<juce::RangedAudioParameter *>(p))
             {
@@ -111,6 +114,7 @@ public:
                 rp->setValueNotifyingHost(juce::jlimit(0.0f, 1.0f, norm));
                 rp->endChangeGesture();
             }
+        mProc.endStateLoadDeferred();
 
         const auto tmpDir = juce::File::getSpecialLocation(juce::File::tempDirectory)
                                 .getChildFile("NAMRigPreset");

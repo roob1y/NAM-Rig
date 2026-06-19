@@ -22,6 +22,7 @@
 #include "Lfo.h"
 #include <array>
 #include <algorithm>
+#include <vector>
 
 namespace nam_rig
 {
@@ -34,28 +35,114 @@ public:
     enum Type
     {
         kChorus = 0, kFlanger, kPhaser, kTremolo,
-        kVibrato, kRotary, kUniVibe, kHarmTrem
+        kVibrato, kRotary, kUniVibe, kHarmTrem, kBiPhase, kRingMod
     };
 
     // Voicing constants (fixed; knobs scale within these)
     static constexpr double kChorusBaseMs = 7.0, kChorusSpreadMs = 10.0;
-    static constexpr double kFlangerBaseMs = 1.0, kFlangerSpreadMs = 5.0;
+    static constexpr float kChorusMaxRateHz = 3.5f; // keep chorus a chorus (faster -> vibrato/warble); tunable
+    static constexpr float kChorusMaxRateHzExtreme = 10.0f; // Extreme: the withheld fast/seasick zone (disjoint band [3.5,10]); tunable
+    // M-126-style wide flanger: Manual sets a static base delay, Width sweeps above it.
+    static constexpr double kFlMinMs = 0.5, kFlManualMaxMs = 8.0, kFlSweepMs = 6.0, kFlMaxMs = 14.0;
+    // Extreme through-zero flanger: a reference tap at the Manual center + a swept
+    // tap crossing it, so the comb difference passes through 0 ms and inverts sign.
+    static constexpr double kFlTzfRangeMs = 8.0; // max symmetric sweep half-range (tunable)
+    static constexpr double kFlTzfGuardMs = 0.2; // keep both taps readable (>0; tunable)
+    // Ring modulator: a generated sine carrier multiplies the input. The Rate knob
+    // maps EXPONENTIALLY to the carrier (the Rate param tops at 20 Hz but the
+    // carrier wants audio rate). Depth = dry<->ring blend. The multiply is 4x
+    // oversampled (RingOS) to anti-alias the f+fc products. Reuses Rate/Depth/Width.
+    static constexpr double kRingCarrierMinHz = 3.0;    // knob bottom -- slow sub-audio throb (MF-102 low range); tunable
+    static constexpr double kRingCarrierMaxHz = 3000.0; // knob top -- clangy bell/robot extremes; tunable
+    static constexpr int kRingLatency = 32;             // oversampler group delay in input samples ((L-1)/I, rounded; L=128,I=4) -- dry aligned to it
     static constexpr double kVibBaseMs = 2.0, kVibSpreadMs = 8.0;
+    static constexpr float kVibratoMaxRateHzExtreme = 16.0f; // Extreme: wild seasick warble (disjoint band [10,16]); tunable
     static constexpr double kRotBaseMs = 3.0, kRotSpreadMs = 4.0;
     static constexpr float kRotSlowHz = 0.72f, kRotFastHz = 6.6f; // chorale / tremolo
-    static constexpr double kPhaserCenterHz = 700.0, kPhaserOctaves = 2.0;
+    // Leslie angle-dependent EQ (CCRMA / Smith-Lee model, DAFx-02): as the horn
+    // rotates away from the mic the level drops AND highs roll off faster than
+    // lows -- i.e. a high-shelf tilt whose HF gain tracks the horn-facing factor.
+    // This is the "2D" angle behaviour a static body biquad can't produce; the
+    // facing signal (cosH/face) is already computed in kRotary, so no new LFO.
+    static constexpr float kRotHornTiltHz = 3000.0f; // angle-shelf corner
+    static constexpr float kRotHornTiltDepth = 0.6f; // HF cut when horn faces fully away (0..1)
+    // Fixed horn-throat presence shaping (angle-INDEPENDENT "H0" voicing), layered
+    // on the ~250 Hz wooden-body resonance for a fuller measured-average tone.
+    static constexpr double kRotThroatHz = 1600.0, kRotThroatQ = 0.9, kRotThroatDb = 2.5;
+    // Leslie tube power-amp voicing. The amp colours the tone even clean (warmth
+    // floor + output-transformer HF rolloff), and the Drive saturation breaks up
+    // mid-first (pre/de-emphasis "honk") and is ADAA-anti-aliased in processSample.
+    static constexpr float kAmpWarmth = 0.06f;   // always-on tube softening (0 = off)
+    static constexpr double kAmpEmphHz = 900.0, kAmpEmphQ = 0.7, kAmpEmphDb = 4.0; // pre/de-emphasis
+    static constexpr float kAmpToneHz = 5500.0f; // output-transformer rolloff corner
+    static constexpr float kAmpToneHf = 0.62f;   // HF gain above the corner (~ -4 dB)
+    static constexpr double kPhaserCenterHz = 650.0, kPhaserOctaves = 2.6; // opened-up sweep (~107 Hz..3.9 kHz); tunable by ear
     static constexpr double kUniCenterHz = 400.0;
     static constexpr double kHarmXoverHz = 800.0;
     static constexpr int kPhaserStages = 4;
+    static constexpr int kBiPhaseStages = 6;                                   // Mu-Tron Bi-Phase: 6 stages per phasor
+    static constexpr double kBiPhaseCenterHz = 500.0, kBiPhaseOctaves = 2.4;   // tunable by ear
+    static constexpr float kBiPhaseFbMax = 0.65f;                              // musical resonance ceiling (no whistle)
+    static constexpr float kBiPhaseDepthMin = 0.15f;                           // always some sweep (never dead-static)
+    // One Bi-Phase phasor's TPT integrator states (6 stages), per channel.
+    // Declared here (before phasor6's signature uses it).
+    struct PhasorCore { float s[kBiPhaseStages] = {0.0f}; };
     static constexpr double kRightLfoOffset = 0.25; // 90 degrees at Width = 1
     static constexpr float kPhaserFixedDepth = 1.0f; // phaser sweep is hardwired
-    static constexpr float kUniFeedback = 0.3f;      // uni-vibe resonance is hardwired
+    static constexpr float kPhaserFbMax = 0.7f;      // musical resonance ceiling (no whistle)
+    // Rate-dependent sweep-width guardrail (keeps a swept-filter effect sounding
+    // like itself across the whole rate range): full sweep width at/below
+    // kSweepFullRateHz, narrowing smoothly to kSweepNarrowFloor of full width as
+    // the rate climbs to the cap -- so fast settings SHIMMER instead of wobbling.
+    // Shared/reusable (phaser now; uni-vibe / bi-phase can adopt it later).
+    static constexpr float kSweepFullRateHz = 2.0f;   // full width at/below this rate
+    static constexpr float kSweepNarrowFloor = 0.35f; // min width fraction at the cap (wide effects: phaser/bi-phase)
+    // The Uni-Vibe's base sweep is only ~+-1 octave (vs the phaser's ~+-2.6), so the
+    // standard floor would shrink it to a tiny wiggle. It barely wobbles when fast
+    // anyway, so give it a much higher floor -> stays lively. Tunable by ear.
+    static constexpr float kUniVibeSweepFloor = 0.85f;
+    // EXTREME mode (per-slot switch): reassigns each guardrailed control to its
+    // WILD range only (Normal is untouched/identical). Knob-ranged controls get a
+    // disjoint upper band; behaviours (fast-rate sweep) go full-wild. Tunable.
+    static constexpr float kModFbParamMax = 0.95f;     // mirrors the mod{N}Feedback APVTS range
+    static constexpr float kPhaserFbExtMax = 0.95f;    // phaser fb Extreme top (toward self-oscillation)
+    static constexpr float kBiPhaseFbExtMax = 0.92f;   // bi-phase fb Extreme top (toward whistle)
+    static constexpr float kUniFeedbackExtreme = 0.5f; // uni-vibe Extreme: more resonant vibe
+    static constexpr float kUniExtremeWiden = 1.8f;    // uni-vibe Extreme: wider sweep (octave mult)
+    static constexpr float kExtremeSweepWiden = 1.3f;  // Extreme: sweep WIDER than Normal at every rate (not just fast)
+    static constexpr float kUniDepthMinExtreme = 0.6f; // uni-vibe Extreme: high depth floor (never subtle)
+    static constexpr float kUniFeedback = 0.3f;      // uni-vibe resonance is hardwired (positive fb)
+    // Photocell warp (replaces the old pow-skew): the incandescent lamp heats
+    // faster than it cools (asymmetric one-pole), and the LDR maps light to stage
+    // frequency through a power law -- the authentic lopsided Uni-Vibe throb.
+    static constexpr float kUniLampHeatMs = 8.0f;    // filament heating time constant
+    static constexpr float kUniLampCoolMs = 55.0f;   // filament cooling (slower -> lopsided)
+    static constexpr float kUniCellGamma = 1.5f;     // photoconductive transfer: fc ~ light^gamma
+    static constexpr float kUniAmDepth = 0.10f;      // subtle photocell amplitude ripple
+    static constexpr float kUniDepthMin = 0.10f;     // always some throb (never dead-static)
+    // Tremolo gain-shape LUT + DC-offset compensation. The LUT waveshapes the
+    // bipolar LFO modulator through an ODD-symmetric taper, so it stays zero-mean
+    // -> it can never add a DC component to the gain (no thump); kTremTaper > 1
+    // sharpens / < 1 rounds the throb shoulders. kTremCenter is the DC-offset
+    // compensation: 0 = cut-only gain in [1-depth,1] (mean drops with depth, the
+    // section ModLevelLock takes up the slack) ... 1 = mean-preserving (gain mean
+    // = 1 at any depth, troughs still chop to 0, peaks boost).
+    // VOICED BY EAR (Robbie, 2026-06-17, live knob audition): a light DC-comp
+    // (~3.5/10) + a touch of sharpening -- keeps the loved cut-only character,
+    // just trims the depth level-sag and adds a hair of snap. Tunable by ear.
+    static constexpr int kTremLutN = 1024;
+    static constexpr float kTremTaper = 1.53f;
+    static constexpr float kTremCenter = 0.33f;
 
     // ---- per-effect voicing (public so the tests + UI can read it) ----
     static int authenticWave(Type t) { return t == kFlanger ? Lfo::Triangle : Lfo::Sine; }
-    static float depthMax(Type t)
+    static float depthMax(Type)
     {
-        return (t == kTremolo || t == kHarmTrem) ? 0.85f : 1.0f; // keep AM short of silence
+        // Every effect now reaches full depth. Tremolo chops to full silence
+        // (de-click smoothing stops the square/S&H clicks); harm-trem chops fully
+        // too now that the LR4 crossover recombines phase-coherent and flat, so
+        // the complementary AM is a clean spectral pan instead of a lumpy split.
+        return 1.0f;
     }
     static float bakedBbd(Type t)
     {
@@ -76,38 +163,148 @@ public:
         switch (t)
         {
         case kChorus: return knobMix;
-        case kFlanger:
+        case kFlanger: return knobMix * 0.5f; // knob spans dry..50/50 (deepest flange) -- can't thin past the sweet spot
         case kPhaser:
+        case kBiPhase:
         case kUniVibe: return 0.5f;
         default: return 1.0f; // vibrato / rotary / tremolo / harm-trem = full wet
         }
     }
-    static bool mixExposed(Type t) { return t == kChorus; }
+    static bool mixExposed(Type t) { return t == kChorus || t == kFlanger; }
+
+    // Uni-Vibe photocell sweep warp (the authentic lopsided lamp motion): an
+    // asymmetric thermal one-pole on the lamp drive (heats fast / cools slow)
+    // feeding the LDR power-law transfer. Advances the per-channel lamp state.
+    // Public so the test can drive it directly (the coeffs are set in prepare()).
+    // Returns the warped sweep control in [-1, 1].
+    // Leslie angle-dependent horn-tilt HF gain (single source of truth, public so
+    // T27 can check the law directly). face in [0,1] (1 = horn facing the mic),
+    // depth scales it so the angle colour only acts when the rotor is working.
+    // Returns 1 at face=1 (flat/bright); 1 - kRotHornTiltDepth at face=0,depth=1.
+    static float hornTiltGain(float face, float depth)
+    {
+        return 1.0f - kRotHornTiltDepth * depth * (1.0f - face);
+    }
+
+    // Rotary horn/drum balance gain (single source of truth, public so T29 can
+    // check the law). k in [0,1]: 0.5 = both rotors at unity (neutral, the level
+    // you like); toward 1 fades the drum out (1 = horn solo); toward 0 fades the
+    // horn out (0 = drum solo). horn=true returns the horn gain, else the drum.
+    static float rotorBalance(float k, bool horn)
+    {
+        return std::min(1.0f, 2.0f * (horn ? k : 1.0f - k));
+    }
+
+    // Leslie tube-amp saturation CURVE (memoryless; the processSample path applies
+    // it via first-order ADAA to anti-alias). Public so T28 can check the curve.
+    // drive in [0,1]; the warmth floor keeps a faint tube softening even clean.
+    static float ampShape(float x, float drive)
+    {
+        const float dEff = std::max(drive, kAmpWarmth);
+        const float pre = 1.0f + dEff * 5.0f;
+        const float bias = 0.15f * dEff;
+        return (std::tanh(x * pre + bias) - std::tanh(bias)) * (2.6f / pre);
+    }
+
+    // BBD soft-clip CURVE (memoryless; bbdColor applies it via first-order ADAA to
+    // anti-alias). baked = the per-type BBD amount; gain rises gently with it.
+    // Public so the test can check the curve + alias reduction.
+    static float bbdGain(float baked) { return 1.0f + baked * 0.5f; }
+    static float bbdShape(float u, float baked) { return std::tanh(u * bbdGain(baked)); }
+    // Antiderivative of bbdShape w.r.t. u: F(u) = ln(cosh(g*u))/g, g = bbdGain.
+    static float bbdAntideriv(float u, float baked)
+    {
+        const float g = bbdGain(baked);
+        return std::log(std::cosh(u * g)) / g;
+    }
+
+    // Tremolo gain law (single source of truth, public so the test verifies the
+    // DC-offset compensation directly). mod = shaped bipolar modulator in [-1,1];
+    // center 0 = cut-only (gain in [1-depth, 1], original voicing), center 1 =
+    // DC-compensated (mean gain = 1 at any depth, trough still reaches 0 = full
+    // chop). At depth 1 both ends meet (gain = 1 - mod). The DC term carries the
+    // only mean offset; an odd-symmetric mod keeps everything else zero-mean.
+    static float tremGain(float depth, float mod, float center)
+    {
+        const float dc = 0.5f * (1.0f - center);            // mean-offset term
+        return 1.0f - depth * (dc + mod * (0.5f + 0.5f * center));
+    }
+
+    // Rate-dependent sweep-width scale (single source of truth, public so the test
+    // checks the law). Returns 1.0 (full sweep) at/below kSweepFullRateHz, then
+    // narrows linearly to kSweepNarrowFloor as rateHz climbs to maxRateHz, so an
+    // LFO-swept filter stays musical (shimmer, not wobble) when driven fast. A
+    // multiplier on the effect's sweep depth/octaves; reusable across effects.
+    static float sweepWidthScale(float rateHz, float maxRateHz, float floor = kSweepNarrowFloor)
+    {
+        if (rateHz <= kSweepFullRateHz) return 1.0f;
+        const float span = std::max(0.001f, maxRateHz - kSweepFullRateHz);
+        const float t = std::min(1.0f, (rateHz - kSweepFullRateHz) / span); // 0..1 above the knee
+        return 1.0f - (1.0f - floor) * t;                                   // 1.0 -> floor
+    }
+    // Per-effect sweep-width floor: wide effects tame hard, the narrow-sweep
+    // Uni-Vibe stays lively (see kUniVibeSweepFloor).
+    static float sweepFloor(Type t) { return (t == kUniVibe) ? kUniVibeSweepFloor : kSweepNarrowFloor; }
+
+    float uniVibeWarp(int ch, float lfo)
+    {
+        const float drive = 0.5f + 0.5f * lfo; // LFO -> lamp drive [0,1]
+        float &lamp = mUniLamp[(size_t)ch];
+        lamp += (drive > lamp ? mUniHeatCoef : mUniCoolCoef) * (drive - lamp);
+        const float cell = std::pow(std::max(0.0f, lamp), kUniCellGamma); // LDR transfer
+        return cell * 2.0f - 1.0f;                                        // warped control [-1,1]
+    }
 
     const char *name() const override { return "Modulation"; }
 
     void prepare(const BlockContext &ctx) override
     {
         mFs = ctx.sampleRate;
-        // wooden-cabinet resonance: peaking biquad ~250 Hz, Q 1.2, +4 dB (RBJ)
+        // Leslie body voicing (angle-INDEPENDENT "H0"): the wooden-cabinet
+        // resonance (~250 Hz peaking) PLUS a horn-throat presence bump (~1.6 kHz),
+        // two RBJ peaking biquads in series -> closer to the measured average tone.
+        rbjPeaking(250.0, 1.2, 4.0, mFs, mCabB0, mCabB1, mCabB2, mCabA1, mCabA2);
+        rbjPeaking(kRotThroatHz, kRotThroatQ, kRotThroatDb, mFs,
+                   mThB0, mThB1, mThB2, mThA1, mThA2);
+        mHornTiltCoef = coefForHz(kRotHornTiltHz, mFs); // angle-shelf split corner
+        // Tube-amp pre/de-emphasis: boost the mids INTO the clipper then cut them
+        // back after, so the midrange breaks up first (the amp "honk"); the +/-
+        // pair nulls to ~flat when undriven. Plus the transformer HF-rolloff corner.
+        rbjPeaking(kAmpEmphHz, kAmpEmphQ, kAmpEmphDb, mFs, mApB0, mApB1, mApB2, mApA1, mApA2);
+        rbjPeaking(kAmpEmphHz, kAmpEmphQ, -kAmpEmphDb, mFs, mAqB0, mAqB1, mAqB2, mAqA1, mAqA2);
+        mAmpToneCoef = coefForHz(kAmpToneHz, mFs);
+        // Harmonic-tremolo Linkwitz-Riley 4th-order crossover: a Butterworth
+        // (Q=1/sqrt2) LP and HP at kHarmXoverHz, each cascaded twice in process.
+        rbjLowpass(kHarmXoverHz, 0.70710678, mFs, mHtLpB0, mHtLpB1, mHtLpB2, mHtLpA1, mHtLpA2);
+        rbjHighpass(kHarmXoverHz, 0.70710678, mFs, mHtHpB0, mHtHpB1, mHtHpB2, mHtHpA1, mHtHpA2);
+        // Tremolo gain-shape LUT: an ODD-symmetric taper of the bipolar modulator
+        // (-1..1). Linear at kTremTaper=1 (transparent: a table read replaces the
+        // curve eval and the table is exactly zero-mean, so it adds no DC).
+        for (int i = 0; i < kTremLutN; ++i)
         {
-            const double fc = 250.0, Q = 1.2, gainDb = 4.0;
-            const double A = std::pow(10.0, gainDb / 40.0);
-            const double w0 = 2.0 * 3.14159265358979323846 * fc / mFs;
-            const double cw = std::cos(w0), sw = std::sin(w0), al = sw / (2.0 * Q);
-            const double a0 = 1.0 + al / A;
-            mCabB0 = (float)((1.0 + al * A) / a0);
-            mCabB1 = (float)((-2.0 * cw) / a0);
-            mCabB2 = (float)((1.0 - al * A) / a0);
-            mCabA1 = (float)((-2.0 * cw) / a0);
-            mCabA2 = (float)((1.0 - al / A) / a0);
+            const double u = -1.0 + 2.0 * (double)i / (double)(kTremLutN - 1);
+            mTremLut[(size_t)i] =
+                (kTremTaper == 1.0f)
+                    ? (float)u
+                    : (float)(u < 0.0 ? -std::pow(-u, (double)kTremTaper)
+                                      : std::pow(u, (double)kTremTaper));
         }
+        // Size for the deepest tap the CHORUS can request -- including Extreme,
+        // which widens the sweep excursion by kExtremeSweepWiden (so the buffer
+        // must fit base + spread*widen, not just base + spread).
         const int maxDelay =
-            (int)std::ceil((kChorusBaseMs + kChorusSpreadMs + 2.0) * 0.001 * mFs);
+            (int)std::ceil((kChorusBaseMs + kChorusSpreadMs * (double)kExtremeSweepWiden + 2.0) * 0.001 * mFs);
         for (auto &d : mLine)
             d.prepare(maxDelay);
+        for (auto &os : mRingOS)
+            os.design(); // ring-mod oversampler FIR (normalized cutoff -> fs-independent)
         mLfo.prepare(mFs);
+        mLfo2.prepare(mFs); // Bi-Phase Sweep Gen 2
         mSmoothK = 1.0f - std::exp((float)(-1.0 / (0.010 * mFs))); // 10 ms
+        // Uni-Vibe lamp filament: fixed heat/cool one-poles (rate-independent), so
+        // the sweep gets more lopsided as the LFO speeds up -- like the real lamp.
+        mUniHeatCoef = coefForMs(kUniLampHeatMs, mFs);
+        mUniCoolCoef = coefForMs(kUniLampCoolMs, mFs);
         reset();
         mPrepared = true;
     }
@@ -118,22 +315,48 @@ public:
             d.reset();
         for (auto &ap : mAllpass)
             ap = {};
+        for (auto &c : mBiA)
+            c = {};
+        for (auto &c : mBiB)
+            c = {};
         mFbState[0] = mFbState[1] = 0.0f;
         mFbLp[0] = mFbLp[1] = 0.0f;
         mXoverLp[0] = mXoverLp[1] = 0.0f;
+        mHtLp1Z1[0] = mHtLp1Z1[1] = mHtLp1Z2[0] = mHtLp1Z2[1] = 0.0f;
+        mHtLp2Z1[0] = mHtLp2Z1[1] = mHtLp2Z2[0] = mHtLp2Z2[1] = 0.0f;
+        mHtHp1Z1[0] = mHtHp1Z1[1] = mHtHp1Z2[0] = mHtHp1Z2[1] = 0.0f;
+        mHtHp2Z1[0] = mHtHp2Z1[1] = mHtHp2Z2[0] = mHtHp2Z2[1] = 0.0f;
         mBbdLp[0] = mBbdLp[1] = 0.0f;
+        mBbdX1[0] = mBbdX1[1] = 0.0f;
+        mBbdF1[0] = mBbdF1[1] = 0.0f;
+        for (auto &os : mRingOS) os.reset();
+        mRingPhase = 0.0;
+        for (auto &dch : mRingDry) dch.fill(0.0f);
+        mUniLamp[0] = mUniLamp[1] = 0.5f; // lamp at mid brightness (no startup snap)
         mTremG[0] = mTremG[1] = 1.0f; // unity gain (no mute on start)
         mHornLp[0] = mHornLp[1] = 0.0f;
         mDrumLp[0] = mDrumLp[1] = 0.0f;
         mCabZ1[0] = mCabZ1[1] = 0.0f;
         mCabZ2[0] = mCabZ2[1] = 0.0f;
+        mThZ1[0] = mThZ1[1] = 0.0f;
+        mThZ2[0] = mThZ2[1] = 0.0f;
+        mHornTiltLp[0] = mHornTiltLp[1] = 0.0f;
+        mApZ1[0] = mApZ1[1] = mApZ2[0] = mApZ2[1] = 0.0f;
+        mAqZ1[0] = mAqZ1[1] = mAqZ2[0] = mAqZ2[1] = 0.0f;
+        mAmpX1[0] = mAmpX1[1] = 0.0f;
+        mAmpF1[0] = mAmpF1[1] = 0.0f;
+        mAmpToneLp[0] = mAmpToneLp[1] = 0.0f;
         mRotHornPhase = 0.0;
         mRotDrumPhase = 0.0;
         mRotHornSpeed = kRotSlowHz;
         mRotDrumSpeed = kRotSlowHz * 0.78f;
         mLfo.reset();
+        mLfo2.reset();
         mDepthZ = mDepth;
         mMixZ = mMix;
+        mManualZ = mManual;
+        mHornDrumZ = mHornDrum;
+        mSeriesZ = mSeries ? 1.0f : 0.0f;
     }
 
     // ---- parameters (audio thread) ----
@@ -154,9 +377,15 @@ public:
     void setDepth(float d) { mDepth = d; }
     void setFeedback(float f) { mFeedback = f; }   // Flanger/Phaser only
     void setMix(float m) { mMix = m; }
+    void setManual(float m) { mManual = m; }       // Flanger: static comb position (M-126 Manual)
+    void setInvert(bool inv) { mInvert = inv; }    // Flanger: phase-invert the wet/regen path
+    void setP2Ratio(float r) { mP2Ratio = r; }     // Bi-Phase: Sweep Gen 2 rate as a ratio of Gen 1
+    void setSeries(bool s) { mSeries = s; }        // Bi-Phase: series (true) vs parallel (false) routing
     void setWidth(float w) { mWidth = w; }         // 0 = mono spread, 1 = 90 deg
     void setDrive(float d) { mRotDrive = d; }      // Rotary: Leslie tube-amp drive
     void setRotFast(bool f) { mRotFast = f; }      // Rotary: slow (chorale) / fast (tremolo)
+    void setHornDrum(float b) { mHornDrum = b; }   // Rotary: horn<->drum balance (0.5 = both full)
+    void setExtreme(bool e) { mExtreme = e; }      // per-slot: reassign controls to their wild range
 
     // LFO period in beats for each modSync choice (index 0 = Off = free rate).
     static constexpr int kNumSync = 10;
@@ -166,10 +395,75 @@ public:
                                                0.5, 0.75, 1.0 / 3.0, 0.25};
         return (i > 0 && i < kNumSync) ? beats[i] : 0.0;
     }
+    // Free-rate ceiling per effect. The M-126 flanger sweeps up to 20 Hz (fast,
+    // metallic); chorus stays slow so it never tips into vibrato/warble; other
+    // effects stay musical at <=10 Hz. Sync ignores this (it honours the host
+    // division).
+    static float maxRateHz(Type t)
+    {
+        if (t == kFlanger) return 20.0f;
+        if (t == kChorus) return kChorusMaxRateHz;
+        return 10.0f;
+    }
+    // Extreme free-rate ceiling per effect (the top of the wild fast band). Effects
+    // not listed return their Normal cap, so Extreme leaves their rate unchanged
+    // (their wild range lives elsewhere -- feedback, sweep width, etc.).
+    static float extremeMaxRateHz(Type t)
+    {
+        if (t == kChorus) return kChorusMaxRateHzExtreme;
+        if (t == kVibrato) return kVibratoMaxRateHzExtreme;
+        return maxRateHz(t);
+    }
+    // Ring-mod carrier frequency: EXPONENTIAL map of the Rate knob over its domain
+    // [0.03, maxRateHz(kRingMod)] -> [kRingCarrierMinHz, kRingCarrierMaxHz]. Public
+    // for the test. (Carrier is audio-rate; the Rate param's 20 Hz top is irrelevant
+    // here -- the knob's slider domain is what's mapped.)
+    static float ringCarrierHz(float rateHz)
+    {
+        const float lo = 0.03f, hi = maxRateHz(kRingMod);
+        float q = (rateHz - lo) / (hi - lo);
+        q = q < 0.0f ? 0.0f : (q > 1.0f ? 1.0f : q);
+        return (float)(kRingCarrierMinHz * std::pow(kRingCarrierMaxHz / kRingCarrierMinHz, (double)q));
+    }
+    // Extreme through-zero flanger tap delays (single source of truth; public for
+    // the test). The reference tap sits at the Manual-set center D0; the swept tap
+    // crosses it at D0 + delta, delta = depth*range*lfo (lfo bipolar). So the comb
+    // difference (delta) sweeps through 0 ms and inverts sign -- the tape-flanger
+    // jet. range is clamped so BOTH taps stay readable (>= guard) and inside the
+    // line (<= kFlMaxMs); it's widest with Manual near the middle.
+    struct TzfTaps { double refMs, sweptMs; };
+    static TzfTaps tzfTaps(float manualZ, float depth, float lfo)
+    {
+        const double d0 = kFlMinMs + (double)manualZ * (kFlManualMaxMs - kFlMinMs);
+        double range = kFlTzfRangeMs;
+        range = std::min(range, d0 - kFlTzfGuardMs); // keep swept >= guard
+        range = std::min(range, kFlMaxMs - d0);      // keep swept <= line max
+        range = std::max(0.0, range);
+        const double delta = (double)depth * range * (double)lfo;
+        return TzfTaps{d0, d0 + delta};
+    }
     float effectiveRateHz() const
     {
         const double beats = syncBeats(mSyncIndex);
-        return beats > 0.0 ? (float)((mBpm / 60.0) / beats) : mFreeRateHz;
+        if (beats > 0.0)
+            return (float)((mBpm / 60.0) / beats); // synced: honour the division
+        float r = std::min(mFreeRateHz, maxRateHz(mType)); // free: cap per effect
+        // Extreme (chorus + vibrato): remap the Normal-capped knob into the withheld
+        // fast band [maxRateHz, extremeMaxRateHz] ONLY -- disjoint from Normal, so the
+        // effect is always in the fast/seasick zone. Same idiom as the phaser/bi-phase
+        // feedback + Sweep-2 ratio reassignment (unlock a knob's wild range, don't
+        // extend it). Effects whose extreme ceiling == normal cap are left unchanged.
+        if (mExtreme)
+        {
+            const float norm = maxRateHz(mType);
+            const float ext = extremeMaxRateHz(mType);
+            if (ext > norm)
+            {
+                const float q = r / norm; // knob proportion over its normal range
+                r = norm + q * (ext - norm);
+            }
+        }
+        return r;
     }
 
     void process(float *left, float *right, int numSamples) override
@@ -178,7 +472,30 @@ public:
         const Type ty = mType;
         const double rate = (double)effectiveRateHz();
         mLfo.setRateHz((float)rate);
+        // Rate-dependent sweep-width guardrail (per block; sync + free rate both
+        // honour it). Used by the phaser now; vibe/bi-phase can adopt it later.
+        // Extreme widens the sweep BEYOND Normal at every rate (kExtremeSweepWiden
+        // > 1) so even a slow Extreme sweep is bigger than Normal, plus no fast-end
+        // narrowing (full warble). Normal narrows the fast end per the per-effect floor.
+        mSweepWidth = mExtreme ? kExtremeSweepWiden : sweepWidthScale((float)rate, maxRateHz(ty), sweepFloor(ty));
         mLfo.setWaveform(ty == kTremolo ? mUserWave : authenticWave(ty)); // shape hardwired per type
+        // Bi-Phase Sweep Gen 2 = Gen 1 x ratio. Normal: the musical 0.5..2.0 detune
+        // (knob spans it). Extreme reassigns the knob to the WILD band ONLY -- a
+        // strong 2x..4x detune (never the gentle middle), so it's disjoint from
+        // Normal rather than a superset. (mod{N}P2Ratio APVTS range is 0.5..2.0.)
+        double p2 = (double)mP2Ratio;
+        if (mExtreme)
+        {
+            const double q = ((double)mP2Ratio - 0.5) / 1.5; // knob proportion over its 0.5..2.0 range
+            p2 = 2.0 + q * 2.0;                              // wild band [2.0, 4.0] only
+        }
+        const double rate2 = std::min((double)maxRateHz(ty), rate * p2);
+        mLfo2.setRateHz((float)rate2);
+        // Bi-Phase Core B gets its OWN sweep-width guardrail from Gen 2's (faster)
+        // rate, so a high ratio that pushes Gen 2 past the wobble knee narrows Core
+        // B even when Gen 1 (the base rate) is slow. Extreme widens both alike.
+        mSweepWidthB = mExtreme ? kExtremeSweepWiden : sweepWidthScale((float)rate2, maxRateHz(ty), sweepFloor(ty));
+        mLfo2.setWaveform(Lfo::Sine);
         const float dMax = depthMax(ty);
         mBakedBbd = bakedBbd(ty);
         mBbdCoef = coefForHz(12000.0 - 10000.0 * (double)mBakedBbd, mFs);
@@ -196,13 +513,36 @@ public:
         mDrumInc = (double)mRotDrumSpeed / mFs;
         mHornLpCoef = coefForHz(5000.0, mFs); // horn driver: rolls off the extreme top
         mDrumLpCoef = coefForHz(70.0, mFs);   // bass rotor: rolls off the deep lows
-        const double rOff = (double)mWidth * kRightLfoOffset;
-        const float mixTarget = mixFor(ty, mMix); // only Chorus uses the knob
+        double rOff = (double)mWidth * kRightLfoOffset;
+        // Hard-edged tremolo shapes (Square / S&H) read the LFO IN PHASE across L/R
+        // (no quadrature offset, which would make a chop lurch); their stereo Width
+        // is an amplitude AUTO-PAN applied per-channel in processSample instead.
+        // Sine/triangle keep the quadrature phase offset (the smooth throb).
+        if (ty == kTremolo && (mUserWave == Lfo::Square || mUserWave == Lfo::SampleHold))
+            rOff = 0.0;
+        float mixTarget = mixFor(ty, mMix); // only Chorus (+ Extreme flanger) use the knob
+        if (ty == kFlanger && mExtreme)
+            mixTarget = mMix; // Extreme TZF: uncap the flanger mix so the pure two-tape pair (deepest null) is reachable
+
+        // Ring-mod carrier: the Rate knob (free rate, sync ignored -- the carrier is
+        // audio-rate) maps exponentially to the carrier Hz. Phase advances per
+        // OVERSAMPLED subsample inside processSample; the per-input advance below
+        // keeps both channels on one carrier clock.
+        if (ty == kRingMod)
+        {
+            mRingCarrierHz = ringCarrierHz(mFreeRateHz);
+            mRingCarrierInc = (double)mRingCarrierHz / mFs;
+            mRingIncOS = mRingCarrierInc / (double)RingOS::I;
+        }
+        else { mRingCarrierInc = 0.0; mRingIncOS = 0.0; }
 
         for (int i = 0; i < numSamples; ++i)
         {
             mDepthZ += mSmoothK * (mDepth - mDepthZ);
             mMixZ += mSmoothK * (mixTarget - mMixZ);
+            mManualZ += mSmoothK * (mManual - mManualZ); // de-zipper the Manual knob
+            mHornDrumZ += mSmoothK * (mHornDrum - mHornDrumZ); // de-zipper Horn/Drum balance
+            mSeriesZ += mSmoothK * ((mSeries ? 1.0f : 0.0f) - mSeriesZ); // de-click the routing toggle
             const float depth = mDepthZ * dMax; // voiced musical maximum
 
             // pass the LFO phase OFFSET (not value) so multi-tap effects can
@@ -212,10 +552,13 @@ public:
                 right[i] = processSample(1, right[i], rOff, depth);
 
             mLfo.advance();
+            mLfo2.advance(); // Bi-Phase Sweep Gen 2
             mRotHornPhase += mHornInc;
             if (mRotHornPhase >= 1.0) mRotHornPhase -= 1.0;
             mRotDrumPhase += mDrumInc;
             if (mRotDrumPhase >= 1.0) mRotDrumPhase -= 1.0;
+            mRingPhase += mRingCarrierInc; // ring-mod carrier (0 for other types)
+            if (mRingPhase >= 1.0) mRingPhase -= 1.0;
         }
         flushDenormals();
     }
@@ -228,26 +571,67 @@ private:
         {
         case kChorus:
         {
-            // 3 voices read the same line at offset LFO phases -> lush + wide
+            // 3 voices read the same line at offset LFO phases -> lush + wide.
+            // 6-point Lagrange interpolation (flatter than the 4-point Hermite,
+            // FIR so the swept taps never click at integer crossings).
             mLine[(size_t)ch].write(x);
+            // Extreme widens the pitch excursion (deeper sweep) by kExtremeSweepWiden
+            // so even a slow Extreme chorus is distinctly bigger than Normal. Normal
+            // = 1.0 -> bit-identical. (Same idiom as the Uni-Vibe Extreme widen.)
+            const double widen = mExtreme ? (double)kExtremeSweepWiden : 1.0;
             float wet = 0.0f;
             for (int v = 0; v < 3; ++v)
             {
                 const float lv = mLfo.value(off + (double)v * 0.3333);
                 const double sweepMs =
-                    kChorusBaseMs + (double)depth * kChorusSpreadMs * (0.5 + 0.5 * (double)lv);
-                wet += mLine[(size_t)ch].readFrac(sweepMs * 0.001 * mFs);
+                    kChorusBaseMs + (double)depth * kChorusSpreadMs * widen * (0.5 + 0.5 * (double)lv);
+                wet += mLine[(size_t)ch].readFrac6(sweepMs * 0.001 * mFs);
             }
             wet = bbdColor(ch, wet * 0.45f);
             return (1.0f - mMixZ) * x + mMixZ * wet;
         }
         case kFlanger:
         {
-            const double sweepMs =
-                kFlangerBaseMs + (double)depth * kFlangerSpreadMs * (0.5 + 0.5 * (double)lfo);
+            if (mExtreme)
+            {
+                // TRUE THROUGH-ZERO (Extreme only). Two taps from one line: a
+                // reference at the Manual-set centre D0 and a swept tap crossing it.
+                // The comb sits at the difference, which sweeps through 0 ms and
+                // inverts sign (the tape/jet null). Invert selects the crossing
+                // character: OFF = the taps REINFORCE (sum -> flat/doubled moment,
+                // notches sweep out), ON = the taps CANCEL (difference -> broadband
+                // null, the jet drops to nothing). BBD warmth is applied ONCE to the
+                // pair (state-correct), and crucially AFTER the sum/difference so the
+                // cancel-mode null stays clean (bbdColor(0)=0). Regen kept as Normal.
+                const TzfTaps t = tzfTaps(mManualZ, depth, lfo);
+                mLine[(size_t)ch].write(x + mFeedback * mFbState[(size_t)ch]);
+                const float ref = mLine[(size_t)ch].readFrac6(std::max(3.0, t.refMs * 0.001 * mFs));
+                const float swp = mLine[(size_t)ch].readFrac6(std::max(3.0, t.sweptMs * 0.001 * mFs));
+                float wet = mInvert ? 0.5f * (ref - swp)  // cancel: broadband null at delta=0
+                                    : 0.5f * (ref + swp); // reinforce: flat/doubled at delta=0
+                wet = bbdColor(ch, wet);
+                float &flp = mFbLp[(size_t)ch];
+                flp += mFbLpCoef * (wet - flp); // tone-shape the regen
+                mFbState[(size_t)ch] = flp;
+                // Mix is uncapped for Extreme (set in process()) so the pure two-tape
+                // pair (deepest null) is reachable; the knob still blends dry down.
+                return (1.0f - mMixZ) * x + mMixZ * wet;
+            }
+            // M-126-style: Manual sets the static comb position, Width (depth)
+            // sweeps a wide range above it, and Invert phase-flips the delayed
+            // path -- which moves the comb (notch<->peak) AND flips the regen
+            // polarity, exactly like the hardware's single phase-invert switch.
+            // BBD voicing (HF rolloff + soft clip) is baked in via bbdColor().
+            const double manualBaseMs =
+                kFlMinMs + (double)mManualZ * (kFlManualMaxMs - kFlMinMs);
+            const double sweepMs = (double)depth * kFlSweepMs * (0.5 + 0.5 * (double)lfo);
+            const double delayMs =
+                std::min(kFlMaxMs, std::max(kFlMinMs, manualBaseMs + sweepMs));
             mLine[(size_t)ch].write(x + mFeedback * mFbState[(size_t)ch]);
-            float wet = mLine[(size_t)ch].readFrac(std::max(2.0, sweepMs * 0.001 * mFs));
+            float wet = mLine[(size_t)ch].readFrac(std::max(2.0, delayMs * 0.001 * mFs));
             wet = bbdColor(ch, wet);
+            if (mInvert)
+                wet = -wet; // phase-invert: flips comb polarity + regen together
             float &flp = mFbLp[(size_t)ch];
             flp += mFbLpCoef * (wet - flp); // tone-shape the regen (tames fizz)
             mFbState[(size_t)ch] = flp;
@@ -255,39 +639,96 @@ private:
         }
         case kPhaser:
         {
-            // 4 first-order allpasses, classic sweep hardwired (depth fixed);
-            // Feedback (resonance) is the one exposed control.
+            // 4-stage phaser, rebuilt as ZDF/TPT (topology-preserving) first-order
+            // all-passes with the global feedback resolved with ZERO delay -- no
+            // unit-sample lag in the regen path, so the resonance is placed
+            // accurately and the sweep stays clean even as fc moves fast. All four
+            // stages share one swept centre. Each TPT all-pass is affine in its
+            // input: ap_i = alpha*in_i + beta_i, with alpha = 2G-1 (depends only on
+            // fc) and beta_i = 2(1-G)*s_i (depends only on the stored state). The
+            // chain therefore collapses to y_chain = A*u + B and the loop solves
+            // analytically. Feedback is NEGATIVE in the loop (authentic Phase-90
+            // notch structure): u = (x - k*B)/(1 + k*A); denom > 0 for all k >= 0,
+            // so the loop is unconditionally stable and the full range is usable.
+            // Sweep octaves scaled by the rate-dependent width guardrail: full
+            // 2.6 oct at slow rates (bit-identical to before), narrowing as the
+            // rate rises so a fast phaser shimmers instead of wobbling.
             const double fc = std::min(
                 0.45 * mFs,
-                kPhaserCenterHz * std::pow(2.0, (double)lfo * kPhaserOctaves * (double)kPhaserFixedDepth));
-            const double tanw = std::tan(3.14159265358979323846 * fc / mFs);
-            const float a = (float)((tanw - 1.0) / (tanw + 1.0));
+                kPhaserCenterHz * std::pow(2.0, (double)lfo * kPhaserOctaves
+                                                    * (double)kPhaserFixedDepth * (double)mSweepWidth));
+            const double g = std::tan(3.14159265358979323846 * fc / mFs);
+            const float G = (float)(g / (1.0 + g));
+            const float alpha = 2.0f * G - 1.0f; // per-stage instantaneous gain, |alpha| < 1
 
-            float v = x + mFeedback * mFbState[(size_t)ch];
-            for (int s = 0; s < kPhaserStages; ++s)
+            // Per-channel state block (ch0 -> states 0..3, ch1 -> 4..7): fully decoupled.
+            ApState *ap = &mAllpass[(size_t)(ch * kPhaserStages)];
+
+            // Gather each stage's state contribution and build B via Horner:
+            // B = alpha^3*b0 + alpha^2*b1 + alpha*b2 + b3.
+            float beta[kPhaserStages];
+            float B = 0.0f;
+            for (int i = 0; i < kPhaserStages; ++i)
             {
-                auto &st = mAllpass[(size_t)(ch * kPhaserStages + s)];
-                const float y = a * v + st.x1 - a * st.y1;
-                st.x1 = v;
-                st.y1 = y;
-                v = y;
+                beta[i] = 2.0f * (1.0f - G) * ap[i].s;
+                B = alpha * B + beta[i];
             }
-            mFbState[(size_t)ch] = v;
-            return (1.0f - mMixZ) * x + mMixZ * v;
+            const float A = alpha * alpha * alpha * alpha; // alpha^4
+
+            // Feedback range select: Normal maps the knob to the safe resonance
+            // window [0, normCeil]; Extreme reassigns the WHOLE knob to the wild
+            // band [normCeil, kPhaserFbExtMax] (toward self-oscillation). Normal is
+            // unchanged; the bands are disjoint (you pick safe vs wild with the switch).
+            const float k = extremeFb(kPhaserFbMax, kPhaserFbExtMax);
+            const float u = (x - k * B) / (1.0f + k * A); // zero-delay resolved chain input
+
+            // Single evaluation pass: true output per stage + TPT integrator update.
+            float in = u;
+            for (int i = 0; i < kPhaserStages; ++i)
+            {
+                const float out = alpha * in + beta[i]; // = ap_i (reuses precomputed beta_i)
+                const float v = (in - ap[i].s) * G;
+                ap[i].s += 2.0f * v;                     // s_new = s + 2v (trapezoidal update)
+                in = out;
+            }
+            return (1.0f - mMixZ) * x + mMixZ * in;
         }
         case kTremolo:
         {
-            const float target = 1.0f - depth * (0.5f + 0.5f * lfo);
+            // Stereo width, per shape: sine/triangle use the LFO phase offset (the
+            // quadrature throb -- already baked into `lfo` via `off`). Square/S&H
+            // read the LFO IN PHASE (off forced to 0 in process()) and instead get
+            // an amplitude AUTO-PAN: the R channel crossfades to anti-phase as Width
+            // rises (0 = mono, 1 = full L/R ping-pong), so a chop pans cleanly
+            // instead of lurching.
+            float wMod = lfo;
+            if ((mUserWave == Lfo::Square || mUserWave == Lfo::SampleHold) && ch == 1)
+                wMod = lfo * (1.0f - 2.0f * mWidth);
+            // LUT-waveshape the modulator (odd-symmetric -> adds no DC) then apply
+            // the DC-offset-compensated gain law (kTremCenter/kTremTaper voiced by
+            // ear above).
+            const float target = tremGain(depth, tremLut(wMod), kTremCenter);
             float &gn = mTremG[(size_t)ch];
             gn += mTremCoef * (target - gn); // smoothing de-clicks square/S&H edges
             return (1.0f - mMixZ) * x + mMixZ * (x * gn);
         }
         case kVibrato:
         {
+            // Single-tap time-varying delay -> pure pitch vibrato. Read with the
+            // 6-point Lagrange interpolator: it is FIR (no recursive state), so the
+            // swept tap is a continuous function of the fractional delay and never
+            // clicks at integer-sample crossings -- unlike a recursive all-pass
+            // interpolator, whose state re-settles at each crossing and rings on
+            // fast/deep sweeps. Its 5th-order flatness keeps the magnitude steady
+            // enough that there's no audible Hermite-style brightness shimmer either.
+            // Extreme deepens the pitch sweep (wild seasick detune) by the shared
+            // kExtremeSweepWiden. Combined with the disjoint fast rate band above,
+            // Extreme vibrato is a fast, deep warble. Normal = 1.0 -> bit-identical.
+            const double widen = mExtreme ? (double)kExtremeSweepWiden : 1.0;
             const double sweepMs =
-                kVibBaseMs + (double)depth * kVibSpreadMs * (0.5 + 0.5 * (double)lfo);
+                kVibBaseMs + (double)depth * kVibSpreadMs * widen * (0.5 + 0.5 * (double)lfo);
             mLine[(size_t)ch].write(x);
-            float wet = mLine[(size_t)ch].readFrac(std::max(2.0, sweepMs * 0.001 * mFs));
+            float wet = mLine[(size_t)ch].readFrac6(std::max(3.0, sweepMs * 0.001 * mFs));
             wet = bbdColor(ch, wet);
             return (1.0f - mMixZ) * x + mMixZ * wet;
         }
@@ -300,18 +741,52 @@ private:
             // (double the Width offset) so the sound throws across the field.
             const double rot = off * 2.0; // ~opposite L/R for the stereo throw
 
-            // --- tube power amp: clean at Drive 0, asymmetric growl when pushed.
-            // Pre-gain into a soft clip, then MAKEUP ~2.6/pre (not 1/pre, which
-            // collapsed the level) so driving compresses + thickens without
-            // getting quiet. Small bias adds the even-harmonic tube warmth. ---
-            float xd = x;
-            if (mRotDrive > 0.0f)
+            // --- tube power amp: an ALWAYS-ON voice (mid-focused breakup + output-
+            // transformer HF rolloff) layered with the Drive saturation. The
+            // makeup ~2.6/pre (not 1/pre, which collapsed the level) keeps the
+            // pushed level up; the warmth floor keeps a faint tube colour even
+            // clean. The saturation is ADAA anti-aliased so its harmonics don't
+            // fold back as digital fizz. ---
+            const float dEff = std::max(mRotDrive, kAmpWarmth);
+            // pre-emphasis: boost the mids INTO the clipper (they break up first)
+            float pe;
             {
-                const float pre = 1.0f + mRotDrive * 5.0f;
-                const float bias = 0.15f * mRotDrive;
-                const float sat = (std::tanh(x * pre + bias) - std::tanh(bias)) * (2.6f / pre);
-                xd = x + mRotDrive * (sat - x);
+                float &z1 = mApZ1[(size_t)ch], &z2 = mApZ2[(size_t)ch];
+                pe = mApB0 * x + z1;
+                z1 = mApB1 * x - mApA1 * pe + z2;
+                z2 = mApB2 * x - mApA2 * pe;
             }
+            // ADAA(tanh): F(u) = ln(cosh(pre*u+bias))/pre - tanh(bias)*u is the
+            // antiderivative of the shaper; y = (F(pe)-F(pe1))/(pe-pe1) (first-order
+            // antiderivative anti-aliasing), falling back to the direct curve when
+            // the step is tiny.
+            const float pre = 1.0f + dEff * 5.0f;
+            const float bias = 0.15f * dEff;
+            const float tb = std::tanh(bias);
+            float &pe1 = mAmpX1[(size_t)ch];
+            float &F1 = mAmpF1[(size_t)ch];
+            const float Fc = std::log(std::cosh(pe * pre + bias)) / pre - tb * pe;
+            const float dpe = pe - pe1;
+            const float shaped = (std::abs(dpe) > 1.0e-4f)
+                                     ? (Fc - F1) / dpe
+                                     : (std::tanh(pe * pre + bias) - tb);
+            pe1 = pe;
+            F1 = Fc;
+            const float sat = shaped * (2.6f / pre); // makeup: compress + thicken
+            // de-emphasis: cut the mids back out (nulls the pre when undriven)
+            float de;
+            {
+                float &z1 = mAqZ1[(size_t)ch], &z2 = mAqZ2[(size_t)ch];
+                de = mAqB0 * sat + z1;
+                z1 = mAqB1 * sat - mAqA1 * de + z2;
+                z2 = mAqB2 * sat - mAqA2 * de;
+            }
+            // Drive blends the amped signal over the clean input (always >= warmth)
+            const float amped = x + dEff * (de - x);
+            // output-transformer bandwidth: gentle always-on HF rolloff (shelf)
+            float &tl = mAmpToneLp[(size_t)ch];
+            tl += mAmpToneCoef * (amped - tl);
+            const float xd = tl + kAmpToneHf * (amped - tl);
 
             // --- 800 Hz crossover ---
             float &xo = mXoverLp[(size_t)ch];
@@ -329,6 +804,15 @@ private:
             const float dir = face * face;         // peaked -> the "wom" pulse
             horn *= 1.0f - 0.80f * depth * (1.0f - dir);
 
+            // angle-dependent tone (CCRMA): highs roll off as the horn turns away.
+            // One-pole split (low band = tlp), then re-add the high band scaled by
+            // hornTiltGain(face,depth) -> a high-shelf that brightens facing the
+            // mic and darkens pointing away. gHf in [1-kRotHornTiltDepth, 1] so the
+            // high band is only ever attenuated -> always bounded.
+            float &tlp = mHornTiltLp[(size_t)ch];
+            tlp += mHornTiltCoef * (horn - tlp);
+            horn = tlp + hornTiltGain(face, depth) * (horn - tlp);
+
             // --- bass drum: high-pass the deep lows, slow amplitude throb ---
             float &dlp = mDrumLp[(size_t)ch];
             dlp += mDrumLpCoef * (lowB - dlp);
@@ -336,8 +820,14 @@ private:
             const float cosD = std::cos(6.2831853f * (float)(mRotDrumPhase + rot));
             const float drum = drumIn * (1.0f - 0.45f * depth * (0.5f - 0.5f * cosD));
 
-            // --- wooden cabinet: low-mid resonant body (peaking biquad, TDF2) ---
-            float wet = horn + drum;
+            // --- horn/drum balance: neutral at 0.5 (both unity, bit-exact), fades
+            // the opposite rotor out toward each extreme (horn solo / drum solo) ---
+            float wet = rotorBalance(mHornDrumZ, true) * horn
+                      + rotorBalance(mHornDrumZ, false) * drum;
+
+            // --- cabinet body voicing (angle-independent "H0"): wooden-body
+            // resonance (~250 Hz) then horn-throat presence (~1.6 kHz), two RBJ
+            // peaking biquads in series (TDF2) ---
             {
                 float &z1 = mCabZ1[(size_t)ch], &z2 = mCabZ2[(size_t)ch];
                 const float y = mCabB0 * wet + z1;
@@ -345,45 +835,189 @@ private:
                 z2 = mCabB2 * wet - mCabA2 * y;
                 wet = y;
             }
+            {
+                float &z1 = mThZ1[(size_t)ch], &z2 = mThZ2[(size_t)ch];
+                const float y = mThB0 * wet + z1;
+                z1 = mThB1 * wet - mThA1 * y + z2;
+                z2 = mThB2 * wet - mThA2 * y;
+                wet = y;
+            }
             return (1.0f - mMixZ) * x + mMixZ * wet;
         }
         case kUniVibe:
         {
-            // staggered allpass centres + hardwired resonance. The vibe's throb
-            // comes from an ASYMMETRIC (skewed) lamp sweep + a touch of amplitude.
+            // 4-stage opto phaser, rebuilt on the same ZDF/TPT all-pass solver as
+            // the Bi-Phase phasor6 but with PER-STAGE alpha_i for the staggered
+            // photocell centres ({0.5,1,1.8,3.2}x400 Hz). Each TPT all-pass is
+            // affine in its input (ap_i = alpha_i*in + beta_i, alpha_i = 2G_i-1,
+            // beta_i = 2(1-G_i)*s_i), so the cascade collapses to y = A*u + B with
+            //   A = prod(alpha_i)          (vs the phaser's alpha^4)
+            //   B = nested products         (B <- alpha_i*B + beta_i, stage order)
+            // and the positive feedback loop resolves zero-delay (no mFbState lag):
+            //   u = (x + fb*B)/(1 - fb*A);  denom >= 0.7 for fb 0.3 -> always stable.
+            //
+            // The sweep is the AUTHENTIC photocell warp, not a static curve bend:
+            // the lamp filament heats faster than it cools (asymmetric one-pole)
+            // so the bright/dark dwell is lopsided -- and more so the faster you
+            // sweep, exactly like the hardware -- and the LDR maps light to stage
+            // frequency through a power law (fc ~ light^gamma).
             static const double mult[kPhaserStages] = {0.5, 1.0, 1.8, 3.2};
-            const float g01 = 0.5f + 0.5f * lfo;
-            const float skew = std::pow(g01, 1.8f);
-            const float ulfo = skew * 2.0f - 1.0f;
-            float v = x + kUniFeedback * mFbState[(size_t)ch];
+
+            // lamp + photocell: asymmetric thermal envelope -> power-law transfer
+            const float w = uniVibeWarp(ch, lfo);    // warped sweep control [-1,1]
+            const float cell = 0.5f * (w + 1.0f);    // back to [0,1] for the AM term
+            // depth floored so the knob-down position still breathes (no dead-static);
+            // Extreme uses a HIGH floor so it can never sound subtle/tame.
+            const float uFloor = mExtreme ? kUniDepthMinExtreme : kUniDepthMin;
+            const float uDepth = uFloor + depth * (1.0f - uFloor);
+
+            // per-stage ZDF/TPT all-pass: gather alpha_i/G_i/beta_i, build A and B
+            ApState *ap = &mAllpass[(size_t)(ch * kPhaserStages)];
+            float alpha[kPhaserStages], G[kPhaserStages], beta[kPhaserStages];
+            float A = 1.0f, B = 0.0f;
             for (int s = 0; s < kPhaserStages; ++s)
             {
+                // Extreme widens the (otherwise ~+-1 octave) sweep for a deeper throb.
+                const double widen = mExtreme ? (double)kUniExtremeWiden : 1.0;
                 const double fc = std::min(
                     0.45 * mFs,
-                    kUniCenterHz * mult[s] * std::pow(2.0, (double)ulfo * (double)depth));
-                const double tanw = std::tan(3.14159265358979323846 * fc / mFs);
-                const float a = (float)((tanw - 1.0) / (tanw + 1.0));
-                auto &st = mAllpass[(size_t)(ch * kPhaserStages + s)];
-                const float y = a * v + st.x1 - a * st.y1;
-                st.x1 = v;
-                st.y1 = y;
-                v = y;
+                    std::max(20.0, mult[s] * kUniCenterHz
+                                       * std::pow(2.0, (double)w * (double)uDepth * (double)mSweepWidth * widen)));
+                const double g = std::tan(3.14159265358979323846 * fc / mFs);
+                G[s] = (float)(g / (1.0 + g));
+                alpha[s] = 2.0f * G[s] - 1.0f;
+                beta[s] = 2.0f * (1.0f - G[s]) * ap[s].s;
+                A *= alpha[s];              // A = product of alpha_i
+                B = alpha[s] * B + beta[s]; // B = nested products (forward accumulation)
             }
-            mFbState[(size_t)ch] = v;
-            v *= 1.0f - 0.12f * depth * skew; // subtle lamp amplitude movement
-            return (1.0f - mMixZ) * x + mMixZ * v;
+
+            const float fb = mExtreme ? kUniFeedbackExtreme : kUniFeedback; // Extreme = more resonant vibe
+            const float u = (x + fb * B) / (1.0f - fb * A); // positive feedback, zero-delay
+
+            // single pass: true stage outputs + TPT integrator updates
+            float in = u;
+            for (int s = 0; s < kPhaserStages; ++s)
+            {
+                const float out = alpha[s] * in + beta[s];
+                const float v = (in - ap[s].s) * G[s];
+                ap[s].s += 2.0f * v; // s_new = s + 2v (trapezoidal update)
+                in = out;
+            }
+            in *= 1.0f - kUniAmDepth * uDepth * cell; // subtle photocell amplitude ripple
+            return (1.0f - mMixZ) * x + mMixZ * in;
         }
         case kHarmTrem:
         {
-            float &lp = mXoverLp[(size_t)ch];
-            lp += mXoverCoef * (x - lp);
-            const float low = lp, high = x - lp;
+            // Linkwitz-Riley 4th-order crossover at kHarmXoverHz: two cascaded
+            // Butterworth (Q=1/sqrt2) sections per band = 24 dB/oct with a
+            // phase-coherent LP+HP sum (flat magnitude), so the two bands are
+            // cleanly separated AND recombine without colouring the dry tone.
+            // Complementary LFO AM: the two band gains sum to a constant, so this
+            // is a spectral PAN (bass<->treble) rather than a volume tremolo --
+            // which is why it now chops to full depth without a level dip.
+            const size_t c = (size_t)ch;
+            float lo = biquadTDF2(x, mHtLpB0, mHtLpB1, mHtLpB2, mHtLpA1, mHtLpA2,
+                                  mHtLp1Z1[c], mHtLp1Z2[c]);
+            lo = biquadTDF2(lo, mHtLpB0, mHtLpB1, mHtLpB2, mHtLpA1, mHtLpA2,
+                            mHtLp2Z1[c], mHtLp2Z2[c]);
+            float hi = biquadTDF2(x, mHtHpB0, mHtHpB1, mHtHpB2, mHtHpA1, mHtHpA2,
+                                  mHtHp1Z1[c], mHtHp1Z2[c]);
+            hi = biquadTDF2(hi, mHtHpB0, mHtHpB1, mHtHpB2, mHtHpA1, mHtHpA2,
+                            mHtHp2Z1[c], mHtHp2Z2[c]);
             const float g = 0.5f + 0.5f * lfo;
-            const float wet = low * (1.0f - depth * g) + high * (1.0f - depth * (1.0f - g));
+            const float wet = lo * (1.0f - depth * g) + hi * (1.0f - depth * (1.0f - g));
             return (1.0f - mMixZ) * x + mMixZ * wet;
+        }
+        case kBiPhase:
+        {
+            // Mu-Tron Bi-Phase: two 6-stage ZDF phasors. Core A is swept by Sweep
+            // Gen 1 (mLfo), Core B by Sweep Gen 2 (mLfo2 = Gen1 x P2Ratio) -- two
+            // detuned LFOs give the complex, non-repeating motion. Series/parallel
+            // is a smoothed crossfade (mSeriesZ) applied to BOTH Core B's input and
+            // the output combine, so toggling the routing never steps the states ->
+            // no click. In parallel the two cores pan opposite (A/B stereo split)
+            // by Width; mono at Width 0. Shared Feedback, 50/50 mix (notch effect).
+            const float fb = extremeFb(kBiPhaseFbMax, kBiPhaseFbExtMax); // Normal safe band / Extreme wild band
+            // Depth knob remapped to [min..1] so the sweep never sits dead-static,
+            // then scaled by the rate-dependent width guardrail. Core A uses Gen 1's
+            // width (mSweepWidth); Core B uses Gen 2's own width (mSweepWidthB), so
+            // each core is guardrailed against its own sweep rate.
+            const float bpBase = kBiPhaseDepthMin + depth * (1.0f - kBiPhaseDepthMin);
+            const float bpDepthA = bpBase * mSweepWidth;
+            const float bpDepthB = bpBase * mSweepWidthB;
+            const float a = phasor6(mBiA[(size_t)ch], x, mLfo.value(off), bpDepthA, fb);
+            const float bIn = (1.0f - mSeriesZ) * x + mSeriesZ * a; // parallel(x) -> series(A(x))
+            const float b = phasor6(mBiB[(size_t)ch], bIn, mLfo2.value(off), bpDepthB, fb);
+            const float w = mWidth;
+            const float panA = (ch == 0) ? 0.5f + 0.5f * w : 0.5f - 0.5f * w;
+            const float panB = (ch == 0) ? 0.5f - 0.5f * w : 0.5f + 0.5f * w;
+            const float parallelWet = panA * a + panB * b;
+            const float wet = (1.0f - mSeriesZ) * parallelWet + mSeriesZ * b;
+            return (1.0f - mMixZ) * x + mMixZ * wet;
+        }
+        case kRingMod:
+        {
+            // True (balanced) ring modulation y = x * carrier, done at 4x via RingOS
+            // so the f+fc products are band-limited before they fold. The carrier
+            // phase advances per OVERSAMPLED subsample (k); off shifts L/R for a
+            // stereo carrier. Depth blends dry<->ring; the dry path is delayed by the
+            // oversampler latency so the blend stays phase-aligned (no comb).
+            const double PI = 3.14159265358979323846;
+            RingOS &os = mRingOS[(size_t)ch];
+            for (int k = 0; k < RingOS::I; ++k)
+            {
+                os.pushU(k == 0 ? x : 0.0f);                    // zero-stuff to the oversampled rate
+                const float up = (float)RingOS::I * os.convU(); // interpolated (x I restores zero-stuff loss)
+                const double ph = mRingPhase + (double)k * mRingIncOS + off;
+                const float car = (float)std::sin(2.0 * PI * ph);
+                os.pushD(up * car);                             // the multiply, at 4x
+            }
+            const float wet = os.convD();                       // decimate back to fs
+
+            float *dly = mRingDry[(size_t)ch].data();
+            const float dry = dly[kRingLatency - 1];            // x[n - latency], aligned to the wet
+            for (int i = kRingLatency - 1; i > 0; --i) dly[i] = dly[i - 1];
+            dly[0] = x;
+            return (1.0f - depth) * dry + depth * wet;          // Depth = dry<->ring amount
         }
         }
         return x;
+    }
+
+    // One 6-stage ZDF/TPT phasor with zero-delay-resolved negative feedback (the
+    // Bi-Phase building block). beta[0] is the INPUT-side stage, so the forward
+    // Horner accumulation weights it by alpha^(N-1) -- matching the cascade, where
+    // stage 0's output passes through every later stage. fc is clamped on BOTH
+    // sides before tan() so a deep sweep can never cross Nyquist and NaN out.
+    float phasor6(PhasorCore &c, float x, float lfoVal, float depth, float fb)
+    {
+        double fc = kBiPhaseCenterHz *
+                    std::pow(2.0, (double)lfoVal * kBiPhaseOctaves * (double)depth);
+        fc = std::min(0.45 * mFs, std::max(20.0, fc));
+        const double g = std::tan(3.14159265358979323846 * fc / mFs);
+        const float G = (float)(g / (1.0 + g));
+        const float alpha = 2.0f * G - 1.0f;
+
+        float beta[kBiPhaseStages];
+        float B = 0.0f;
+        for (int i = 0; i < kBiPhaseStages; ++i)
+        {
+            beta[i] = 2.0f * (1.0f - G) * c.s[i];
+            B = alpha * B + beta[i]; // forward Horner: beta[0] ends up x alpha^(N-1)
+        }
+        const float a2 = alpha * alpha;
+        const float A = a2 * a2 * a2; // alpha^6
+
+        const float u = (x - fb * B) / (1.0f + fb * A); // negative feedback (Phase-90 notch), denom > 0
+        float in = u;
+        for (int i = 0; i < kBiPhaseStages; ++i)
+        {
+            const float out = alpha * in + beta[i];
+            const float v = (in - c.s[i]) * G;
+            c.s[i] += 2.0f * v; // TPT integrator update
+            in = out;
+        }
+        return in;
     }
 
     // Baked bucket-brigade colour for the delay-based types (chorus/flanger/
@@ -394,8 +1028,44 @@ private:
             return wet;
         float &z = mBbdLp[(size_t)ch];
         z += mBbdCoef * (wet - z);
-        const float soft = std::tanh(z * (1.0f + mBakedBbd * 0.5f));
+        // ADAA(tanh): the memoryless soft-clip bbdShape(z) aliases on bright/fast
+        // content. First-order antiderivative anti-aliasing: soft = (F(z)-F(z1))/(z-z1)
+        // with F = bbdAntideriv; fall back to the direct curve when the step is tiny
+        // (z barely moving). At steady state this is bit-identical to the old tanh.
+        float &z1 = mBbdX1[(size_t)ch];
+        float &F1 = mBbdF1[(size_t)ch];
+        const float Fc = bbdAntideriv(z, mBakedBbd);
+        const float dz = z - z1;
+        const float soft = (std::abs(dz) > 1e-4f) ? (Fc - F1) / dz
+                                                   : bbdShape(z, mBakedBbd);
+        z1 = z;
+        F1 = Fc;
         return wet + mBakedBbd * (soft - wet);
+    }
+
+    // Feedback range select for the Extreme switch. Normal scales the knob into
+    // the safe window [0, kModFbParamMax*normMul] (the existing behaviour);
+    // Extreme reassigns the WHOLE knob to the disjoint wild band [normCeil, extMax]
+    // (toward self-oscillation/whistle). normMul is the effect's Normal ceiling
+    // multiplier (kPhaserFbMax / kBiPhaseFbMax).
+    float extremeFb(float normMul, float extMax) const
+    {
+        if (!mExtreme) return mFeedback * normMul;
+        const float p = mFeedback / kModFbParamMax;     // knob proportion 0..1
+        const float normCeil = kModFbParamMax * normMul; // where Normal tops out
+        return normCeil + p * (extMax - normCeil);
+    }
+
+    // Linear-interpolated read of the tremolo gain-shape LUT for a bipolar
+    // modulator in [-1, 1]. Exact (== w) when the table is the identity taper.
+    float tremLut(float w) const
+    {
+        float p = 0.5f * (w + 1.0f) * (float)(kTremLutN - 1);
+        if (p < 0.0f) p = 0.0f;
+        int i = (int)p;
+        if (i > kTremLutN - 2) i = kTremLutN - 2;
+        const float f = p - (float)i;
+        return mTremLut[(size_t)i] + f * (mTremLut[(size_t)i + 1] - mTremLut[(size_t)i]);
     }
 
     static float coefForHz(double hz, double fs)
@@ -407,14 +1077,66 @@ private:
     {
         return 1.0f - (float)std::exp(-1.0 / ((double)std::max(0.05f, ms) * 0.001 * fs));
     }
+    // RBJ peaking-EQ biquad coefficients, normalised so a0 = 1 (TDF2-ready).
+    static void rbjPeaking(double fc, double Q, double gainDb, double fs,
+                           float &b0, float &b1, float &b2, float &a1, float &a2)
+    {
+        const double A = std::pow(10.0, gainDb / 40.0);
+        const double w0 = 2.0 * 3.14159265358979323846 * fc / fs;
+        const double cw = std::cos(w0), sw = std::sin(w0), al = sw / (2.0 * Q);
+        const double a0 = 1.0 + al / A;
+        b0 = (float)((1.0 + al * A) / a0);
+        b1 = (float)((-2.0 * cw) / a0);
+        b2 = (float)((1.0 - al * A) / a0);
+        a1 = (float)((-2.0 * cw) / a0);
+        a2 = (float)((1.0 - al / A) / a0);
+    }
+    // RBJ low-pass biquad, a0-normalised (TDF2-ready). Q = 1/sqrt(2) gives a
+    // 2nd-order Butterworth section -> two cascaded = a Linkwitz-Riley 4th-order.
+    static void rbjLowpass(double fc, double Q, double fs,
+                           float &b0, float &b1, float &b2, float &a1, float &a2)
+    {
+        const double w0 = 2.0 * 3.14159265358979323846 * fc / fs;
+        const double cw = std::cos(w0), sw = std::sin(w0), al = sw / (2.0 * Q);
+        const double a0 = 1.0 + al;
+        b0 = (float)(((1.0 - cw) * 0.5) / a0);
+        b1 = (float)((1.0 - cw) / a0);
+        b2 = b0;
+        a1 = (float)((-2.0 * cw) / a0);
+        a2 = (float)((1.0 - al) / a0);
+    }
+    // RBJ high-pass biquad, a0-normalised (TDF2-ready). Butterworth at Q=1/sqrt(2).
+    static void rbjHighpass(double fc, double Q, double fs,
+                            float &b0, float &b1, float &b2, float &a1, float &a2)
+    {
+        const double w0 = 2.0 * 3.14159265358979323846 * fc / fs;
+        const double cw = std::cos(w0), sw = std::sin(w0), al = sw / (2.0 * Q);
+        const double a0 = 1.0 + al;
+        b0 = (float)(((1.0 + cw) * 0.5) / a0);
+        b1 = (float)(-(1.0 + cw) / a0);
+        b2 = b0;
+        a1 = (float)((-2.0 * cw) / a0);
+        a2 = (float)((1.0 - al) / a0);
+    }
+    // Transposed-Direct-Form-II biquad step (a0-normalised coeffs). Advances the
+    // two state words in place. Shared by the harm-trem LR4 crossover sections.
+    static float biquadTDF2(float x, float b0, float b1, float b2, float a1, float a2,
+                            float &z1, float &z2)
+    {
+        const float y = b0 * x + z1;
+        z1 = b1 * x - a1 * y + z2;
+        z2 = b2 * x - a2 * y;
+        return y;
+    }
 
     void flushDenormals()
     {
         for (auto &st : mAllpass)
-        {
-            if (std::abs(st.x1) < 1.0e-30f) st.x1 = 0.0f;
-            if (std::abs(st.y1) < 1.0e-30f) st.y1 = 0.0f;
-        }
+            if (std::abs(st.s) < 1.0e-30f) st.s = 0.0f;
+        for (auto *bank : {&mBiA, &mBiB})
+            for (auto &c : *bank)
+                for (auto &v : c.s)
+                    if (std::abs(v) < 1.0e-30f) v = 0.0f;
         for (auto &f : mFbState)
             if (std::abs(f) < 1.0e-30f) f = 0.0f;
         for (auto &f : mXoverLp)
@@ -431,27 +1153,104 @@ private:
             if (std::abs(f) < 1.0e-30f) f = 0.0f;
         for (auto &f : mCabZ2)
             if (std::abs(f) < 1.0e-30f) f = 0.0f;
+        for (auto &f : mThZ1)
+            if (std::abs(f) < 1.0e-30f) f = 0.0f;
+        for (auto &f : mThZ2)
+            if (std::abs(f) < 1.0e-30f) f = 0.0f;
+        for (auto &f : mHornTiltLp)
+            if (std::abs(f) < 1.0e-30f) f = 0.0f;
+        for (auto *bank : {&mApZ1, &mApZ2, &mAqZ1, &mAqZ2, &mAmpToneLp,
+                           &mHtLp1Z1, &mHtLp1Z2, &mHtLp2Z1, &mHtLp2Z2,
+                           &mHtHp1Z1, &mHtHp1Z2, &mHtHp2Z1, &mHtHp2Z2})
+            for (auto &f : *bank)
+                if (std::abs(f) < 1.0e-30f) f = 0.0f;
     }
 
-    struct ApState { float x1 = 0.0f, y1 = 0.0f; };
+    // s = TPT integrator state, shared by the ZDF Phaser and the Uni-Vibe
+    // all-passes (Direct-Form x1/y1 retired when Uni-Vibe moved to ZDF/TPT).
+    struct ApState { float s = 0.0f; };
 
     double mFs = 48000.0;
     Type mType = kChorus;
     Lfo mLfo;
+    Lfo mLfo2; // Bi-Phase Sweep Generator 2
+    std::array<PhasorCore, 2> mBiA{}, mBiB{}; // Bi-Phase cores A/B, per channel
     std::array<FracDelayLine, 2> mLine;
     std::array<ApState, 2 * kPhaserStages> mAllpass{};
     std::array<float, 2> mFbState{};
     std::array<float, 2> mFbLp{};            // flanger feedback tone state
-    std::array<float, 2> mXoverLp{};         // harmonic-trem / rotary crossover state
+    std::array<float, 2> mXoverLp{};         // rotary 800 Hz crossover state (one-pole)
+    // Harmonic-tremolo LR4 crossover: two cascaded Butterworth biquads per band.
+    // Coeffs are fixed (corner = kHarmXoverHz), computed in prepare().
+    float mHtLpB0 = 1.0f, mHtLpB1 = 0.0f, mHtLpB2 = 0.0f, mHtLpA1 = 0.0f, mHtLpA2 = 0.0f;
+    float mHtHpB0 = 1.0f, mHtHpB1 = 0.0f, mHtHpB2 = 0.0f, mHtHpA1 = 0.0f, mHtHpA2 = 0.0f;
+    std::array<float, 2> mHtLp1Z1{}, mHtLp1Z2{}, mHtLp2Z1{}, mHtLp2Z2{}; // LP cascade state
+    std::array<float, 2> mHtHp1Z1{}, mHtHp1Z2{}, mHtHp2Z1{}, mHtHp2Z2{}; // HP cascade state
     std::array<float, 2> mBbdLp{};           // BBD HF-rolloff state
+    std::array<float, 2> mBbdX1{}, mBbdF1{}; // BBD soft-clip ADAA: prev input + prev antiderivative (non-recursive)
+
+    // 4x FIR oversampler for the ring-mod carrier multiply (JUCE-free). Zero-stuff
+    // interpolation + decimation through a shared windowed-sinc lowpass (cutoff at
+    // the original Nyquist), so the f+fc products the multiply creates are
+    // band-limited before they fold. Linear-phase FIR -> fixed group delay
+    // (kRingLatency input samples), which the dry path is aligned to.
+    struct RingOS
+    {
+        static constexpr int I = 4;   // oversampling factor
+        static constexpr int L = 128; // prototype FIR taps (sharp transition near Nyquist)
+        float h[L]{};                // lowpass prototype (sum = 1)
+        float uline[L]{};            // upsampler delay line (zero-stuffed input; newest at [0])
+        float dline[L]{};            // downsampler delay line (oversampled products)
+        void design()
+        {
+            const double PI = 3.14159265358979323846;
+            const double fc = 0.5 / (double)I * 0.98; // pass to ~original Nyquist (small margin)
+            const double c = 0.5 * (double)(L - 1);
+            double sum = 0.0;
+            for (int n = 0; n < L; ++n)
+            {
+                const double t = (double)n - c;
+                const double s = (std::abs(t) < 1e-9) ? 2.0 * fc
+                                                      : std::sin(2.0 * PI * fc * t) / (PI * t);
+                const double w = 0.54 - 0.46 * std::cos(2.0 * PI * (double)n / (double)(L - 1)); // Hamming
+                h[n] = (float)(s * w);
+                sum += (double)h[n];
+            }
+            for (int n = 0; n < L; ++n) h[n] = (float)((double)h[n] / sum); // DC gain = 1
+        }
+        void reset()
+        {
+            for (int i = 0; i < L; ++i) { uline[i] = 0.0f; dline[i] = 0.0f; }
+        }
+        void pushU(float s) { for (int i = L - 1; i > 0; --i) uline[i] = uline[i - 1]; uline[0] = s; }
+        void pushD(float s) { for (int i = L - 1; i > 0; --i) dline[i] = dline[i - 1]; dline[0] = s; }
+        float convU() const { float a = 0.0f; for (int i = 0; i < L; ++i) a += h[i] * uline[i]; return a; }
+        float convD() const { float a = 0.0f; for (int i = 0; i < L; ++i) a += h[i] * dline[i]; return a; }
+    };
+    RingOS mRingOS[2];
+    double mRingPhase = 0.0;       // carrier phase in cycles [0,1); advanced once per input sample in process()
+    double mRingCarrierInc = 0.0;  // carrier cycles per INPUT sample (per block)
+    double mRingIncOS = 0.0;       // carrier cycles per OVERSAMPLED subsample
+    float mRingCarrierHz = 0.0f;   // for inspection
+    std::array<std::array<float, kRingLatency>, 2> mRingDry{}; // dry path delayed to the oversampler latency
+    std::array<float, 2> mUniLamp{};         // uni-vibe lamp thermal envelope (per ch)
     std::array<float, 2> mTremG{1.0f, 1.0f}; // smoothed tremolo gain (de-click)
+    std::array<float, kTremLutN> mTremLut{}; // tremolo gain-shape LUT (built in prepare)
     float mDepth = 0.5f, mFeedback = 0.0f, mMix = 0.5f;
     float mDepthZ = 0.5f, mMixZ = 0.5f, mSmoothK = 0.01f;
+    float mManual = 0.3f, mManualZ = 0.3f; // Flanger Manual (static comb position)
+    float mHornDrum = 0.5f, mHornDrumZ = 0.5f; // Rotary horn/drum balance (0.5 = neutral)
+    bool mInvert = false;                  // Flanger phase-invert switch
+    float mP2Ratio = 1.5f;                 // Bi-Phase Sweep Gen 2 rate ratio
+    bool mSeries = false;                  // Bi-Phase series (true) / parallel (false)
+    bool mExtreme = false;                 // per-slot Extreme switch (wild ranges unlocked)
+    float mSeriesZ = 0.0f;                 // smoothed routing crossfade (de-click)
     float mWidth = 1.0f;
     int mUserWave = 0;                          // Tremolo's Shape choice
     float mBakedBbd = 0.0f;                     // per-block, from bakedBbd(type)
     float mBbdCoef = 1.0f, mXoverCoef = 0.1f;   // per-block filter coeffs
     float mTremCoef = 1.0f, mFbLpCoef = 1.0f;   // tremolo de-click, flanger fb tone
+    float mUniHeatCoef = 1.0f, mUniCoolCoef = 1.0f; // uni-vibe lamp heat/cool one-poles
     double mRotHornPhase = 0.0, mRotDrumPhase = 0.0;                     // Leslie rotor phases
     double mHornInc = 0.0, mDrumInc = 0.0;                              // per-sample increments
     float mRotHornSpeed = kRotSlowHz, mRotDrumSpeed = kRotSlowHz * 0.78f; // ramping Hz (inertia)
@@ -462,19 +1261,120 @@ private:
     std::array<float, 2> mCabZ1{}, mCabZ2{};                 // cabinet biquad state
     float mHornLpCoef = 1.0f, mDrumLpCoef = 0.1f;            // per-block driver coeffs
     float mCabB0 = 1.0f, mCabB1 = 0.0f, mCabB2 = 0.0f, mCabA1 = 0.0f, mCabA2 = 0.0f;
+    float mThB0 = 1.0f, mThB1 = 0.0f, mThB2 = 0.0f, mThA1 = 0.0f, mThA2 = 0.0f; // horn-throat EQ
+    std::array<float, 2> mThZ1{}, mThZ2{};                   // throat biquad state
+    std::array<float, 2> mHornTiltLp{};                      // angle-shelf one-pole state
+    float mHornTiltCoef = 1.0f;                              // angle-shelf split corner coef
+    // Tube-amp stages: pre-emphasis biquad, de-emphasis biquad, ADAA saturation
+    // state (prev pre-emphasised input + its antiderivative), transformer shelf.
+    float mApB0 = 1.0f, mApB1 = 0.0f, mApB2 = 0.0f, mApA1 = 0.0f, mApA2 = 0.0f; // amp pre-emphasis
+    float mAqB0 = 1.0f, mAqB1 = 0.0f, mAqB2 = 0.0f, mAqA1 = 0.0f, mAqA2 = 0.0f; // amp de-emphasis
+    std::array<float, 2> mApZ1{}, mApZ2{}, mAqZ1{}, mAqZ2{}; // emphasis biquad state
+    std::array<float, 2> mAmpX1{}, mAmpF1{};                 // ADAA: prev input + prev antiderivative
+    std::array<float, 2> mAmpToneLp{};                       // transformer-rolloff shelf state
+    float mAmpToneCoef = 1.0f;                               // transformer-rolloff corner coef
     float mFreeRateHz = 1.0f;
+    float mSweepWidth = 1.0f;  // per-block rate-dependent sweep-width scale (Gen 1 / Core A / phaser / uni-vibe)
+    float mSweepWidthB = 1.0f; // per-block sweep-width scale for Bi-Phase Core B (Gen 2's rate)
     double mBpm = 120.0;
     int mSyncIndex = 0;
     bool mPrepared = false;
 };
 
+// Section loudness-lock. Keeps the modulation section's output at the same
+// perceived level as its input no matter which effect/parameter changed -- the
+// fix for "tweaking a knob changes the volume". It tracks slow RMS-power
+// envelopes of the section IN vs OUT and applies a makeup gain = sqrt(in/out).
+//
+// Two properties make it well-behaved:
+//   * It's a RATIO (out/in), so it ignores the player's dynamics -- a louder
+//     strum raises in and out together and the gain doesn't budge. It only
+//     removes the steady level OFFSET the effects introduce.
+//   * The envelopes are slow (kTauMs, well above any musical LFO period), so
+//     tremolo/rotary/harm-trem amplitude modulation passes through untouched --
+//     only the long-term level is locked, never the pulse.
+// Clamped to +-6 dB and gated at a silence floor so it can't run away or
+// amplify the noise floor / effect tails. JUCE-free + unit-testable.
+struct ModLevelLock
+{
+    static constexpr float kTauMs = 700.0f;  // envelope TC (>> musical AM periods)
+    static constexpr float kMinGain = 0.5f;  // -6 dB makeup floor
+    static constexpr float kMaxGain = 2.0f;  // +6 dB makeup ceiling
+    static constexpr float kFloor = 1.0e-6f; // input-power gate (below -> hold unity)
+
+    static float onePoleCoef(float ms, double fs) // one-pole smoothing coef for a TC in ms
+    {
+        return 1.0f - (float)std::exp(-1.0 / ((double)std::max(0.05f, ms) * 0.001 * fs));
+    }
+    void prepare(double fs)
+    {
+        mEnvCoef = onePoleCoef(kTauMs, fs);
+        mGainCoef = onePoleCoef(15.0f, fs); // de-zipper the applied gain
+        reset();
+    }
+    void reset()
+    {
+        mInPow = mOutPow = 0.0f;
+        mGainZ = 1.0f;
+    }
+    void setEnabled(bool e) { mEnabled = e; }
+    bool enabled() const { return mEnabled; }
+    float gain() const { return mGainZ; }
+
+    // Advance the input-power envelope over the section's dry input (call before
+    // the effects run). Slow TC means the one-block lead over applyOutput is
+    // negligible, so no input copy is needed.
+    void observeInput(const float *l, const float *r, int n)
+    {
+        if (!mEnabled) return;
+        const bool stereo = (l != r);
+        for (int i = 0; i < n; ++i)
+        {
+            float p = l[i] * l[i];
+            if (stereo) p += r[i] * r[i];
+            mInPow += mEnvCoef * (p - mInPow);
+        }
+        if (mInPow < 1.0e-30f) mInPow = 0.0f;
+    }
+    // Advance the output-power envelope over the processed buffer and apply the
+    // smoothed makeup gain in place.
+    void applyOutput(float *l, float *r, int n)
+    {
+        if (!mEnabled) return;
+        const bool stereo = (l != r);
+        for (int i = 0; i < n; ++i)
+        {
+            float p = l[i] * l[i];
+            if (stereo) p += r[i] * r[i];
+            mOutPow += mEnvCoef * (p - mOutPow);
+            float target = 1.0f;
+            if (mInPow > kFloor && mOutPow > kFloor)
+            {
+                target = std::sqrt(mInPow / mOutPow);
+                target = std::min(kMaxGain, std::max(kMinGain, target));
+            }
+            mGainZ += mGainCoef * (target - mGainZ);
+            l[i] *= mGainZ;
+            if (stereo) r[i] *= mGainZ;
+        }
+        if (mOutPow < 1.0e-30f) mOutPow = 0.0f;
+    }
+
+    float mEnvCoef = 0.0f, mGainCoef = 0.0f;
+    float mInPow = 0.0f, mOutPow = 0.0f, mGainZ = 1.0f;
+    bool mEnabled = true;
+};
+
 // The modulation SECTION: kSlots voices chained in series. Each slot has its
 // own type/rate/sync/wet-dry mix/width and its own bypass. Presented to
-// RigChain as a single StereoBlock (RigChain is unchanged).
+// RigChain as a single StereoBlock (RigChain is unchanged). A section-level
+// ModLevelLock keeps the output level steady across any effect/param change.
 class ModBlock : public StereoBlock
 {
 public:
     static constexpr int kSlots = 3;
+
+    ModBlock() { mPost.setBypassed(true); } // post effect off until explicitly enabled
 
     const char *name() const override { return "Modulation"; }
 
@@ -482,18 +1382,107 @@ public:
     {
         for (auto &v : mVoice)
             v.prepare(ctx);
+        mPost.prepare(ctx); // end-of-section post effect (e.g. rotary "speaker")
+        mLock.prepare(ctx.sampleRate);
+        mSmoothK = 1.0f - std::exp((float)(-1.0 / (0.010 * ctx.sampleRate))); // 10 ms blend de-zip
+        const size_t cap = (size_t)std::max(1, ctx.maxBlockSize);
+        mDryL.assign(cap, 0.0f);
+        mDryR.assign(cap, 0.0f);
+        for (int s = 0; s < kSlots; ++s)
+        {
+            mBranchL[(size_t)s].assign(cap, 0.0f);
+            mBranchR[(size_t)s].assign(cap, 0.0f);
+        }
+        reset();
     }
     void reset() override
     {
         for (auto &v : mVoice)
             v.reset();
+        mPost.reset();
+        mLock.reset();
+        for (auto &w : mWz) w = 1.0f / (float)kSlots;
+        mModMixZ = mModMix;
     }
 
     void process(float *left, float *right, int numSamples) override
     {
-        for (auto &v : mVoice)
-            if (!v.isBypassed())
-                v.process(left, right, numSamples);
+        bool anyFront = false;
+        for (int s = 0; s < kSlots; ++s)
+            if (slotAudible(s)) { anyFront = true; break; }
+        // Solo is a dial-in tool: it mutes the post effect too, so you hear the
+        // soloed front slot in isolation.
+        const bool postOn = !mPost.isBypassed() && !anySolo();
+        if (!anyFront && !postOn) return; // section idle -> fully transparent (no level-lock)
+
+        mLock.observeInput(left, right, numSamples); // dry section input (intact at entry)
+        if (anyFront)
+        {
+            if (mParallel)
+                processParallel(left, right, numSamples);
+            else
+                for (int pos = 0; pos < kSlots; ++pos) // SERIES: slots chained in place, in chain order
+                {
+                    const int s = mOrder[pos];
+                    if (slotAudible(s))
+                        mVoice[(size_t)s].process(left, right, numSamples);
+                }
+        }
+        if (postOn) // POST: end-of-section effect runs on the combined output
+            mPost.process(left, right, numSamples);
+        mLock.applyOutput(left, right, numSamples);   // lock to the input level
+    }
+
+    // Section loudness-lock (default on). Disable for raw effect levels or for
+    // bit-exact series tests.
+    void setLevelLock(bool on) { mLock.setEnabled(on); }
+    bool levelLock() const { return mLock.enabled(); }
+
+    // Section routing: false = SERIES (slots chained), true = PARALLEL (each slot
+    // runs on the dry input into its own branch, blended by the pad, then ONE
+    // global Mod Mix vs dry so dry is counted once). NOTE: distinct from the
+    // per-slot Bi-Phase series/parallel (setSeries) -- this is the whole section.
+    void setParallel(bool p) { mParallel = p; }
+    bool parallel() const { return mParallel; }
+    void setPad(float x, float y) { mPadX = x; mPadY = y; } // parallel blend puck (0..1 each)
+    void setModMix(float m) { mModMix = m; }                // parallel: mod-bus vs dry (1 = full bus)
+
+    // SERIES chain order: mOrder[pos] = the slot processed at that position.
+    // a/b/c must be a permutation of 0..kSlots-1; a malformed order (duplicate or
+    // out-of-range slot) is rejected and the identity {0,1,2} is kept, so a bad
+    // value can never drop or double a slot. Default identity = bit-exact to the
+    // old fixed-order series loop. Ignored in parallel (branches are summed).
+    void setChainOrder(int a, int b, int c)
+    {
+        const int in[kSlots] = {a, b, c};
+        bool seen[kSlots] = {false, false, false};
+        for (int k = 0; k < kSlots; ++k)
+        {
+            if (in[k] < 0 || in[k] >= kSlots || seen[in[k]])
+                return; // not a permutation -> keep existing order
+            seen[in[k]] = true;
+        }
+        for (int k = 0; k < kSlots; ++k) mOrder[k] = in[k];
+    }
+    int chainOrder(int pos) const { return mOrder[idx(pos)]; }
+
+    // Cartesian blend pad -> kSlots normalised slot weights. Barycentric over a
+    // triangle (slot0 top-centre, slot1 bottom-left, slot2 bottom-right): inside
+    // the triangle the weights sum to 1 so the blend is inherently level-
+    // consistent; outside, the puck clamps to the nearest edge. The section Level
+    // Lock then holds the absolute loudness as the puck moves (pad picks the
+    // blend, lock holds the level).
+    static void padWeights(float x, float y, float w[kSlots])
+    {
+        w[0] = y;                   // top-centre node weight = height
+        w[1] = 1.0f - x - 0.5f * y; // bottom-left
+        w[2] = x - 0.5f * y;        // bottom-right
+        float sum = 0.0f;
+        for (int k = 0; k < kSlots; ++k) { if (w[k] < 0.0f) w[k] = 0.0f; sum += w[k]; }
+        if (sum > 1.0e-12f)
+            for (int k = 0; k < kSlots; ++k) w[k] /= sum;
+        else
+            for (int k = 0; k < kSlots; ++k) w[k] = 1.0f / (float)kSlots;
     }
 
     double latencySamples() const override
@@ -501,7 +1490,7 @@ public:
         double s = 0.0;
         for (auto &v : mVoice)
             s += v.latencySamples();
-        return s;
+        return s + mPost.latencySamples();
     }
 
     // ---- per-slot controls (slot 0..kSlots-1) ----
@@ -515,16 +1504,132 @@ public:
     void setWidth(int s, float w) { mVoice[idx(s)].setWidth(w); }
     void setDrive(int s, float d) { mVoice[idx(s)].setDrive(d); }
     void setRotFast(int s, bool f) { mVoice[idx(s)].setRotFast(f); }
+    void setHornDrum(int s, float b) { mVoice[idx(s)].setHornDrum(b); }
+    void setManual(int s, float m) { mVoice[idx(s)].setManual(m); }
+    void setInvert(int s, bool inv) { mVoice[idx(s)].setInvert(inv); }
+    void setP2Ratio(int s, float r) { mVoice[idx(s)].setP2Ratio(r); }
+    void setSeries(int s, bool ser) { mVoice[idx(s)].setSeries(ser); }
+    void setExtreme(int s, bool e) { mVoice[idx(s)].setExtreme(e); }
     void setSlotBypassed(int s, bool b) { mVoice[idx(s)].setBypassed(b); }
+    // Momentary solo (dial-in): if ANY slot is soloed, only soloed slots are
+    // audible (solo overrides bypass); otherwise the normal per-slot bypass
+    // applies. Works in both Series and Parallel.
+    void setSlotSolo(int s, bool on) { mSolo[idx(s)] = on; }
+
+    // ---- POST block: a dedicated end-of-section effect (rotary / tremolo /
+    // harm-trem "speaker/amp" stage) that runs on the combined output of the
+    // three front slots, in both Series and Parallel, inside the Level Lock. ----
+    void setPostType(int t) { mPost.setType(t); }
+    void setPostWaveform(int w) { mPost.setWaveform(w); }
+    void setPostSyncIndex(int i) { mPost.setSyncIndex(i); }
+    void setPostRateHz(float hz) { mPost.setRateHz(hz); }
+    void setPostDepth(float d) { mPost.setDepth(d); }
+    void setPostFeedback(float f) { mPost.setFeedback(f); }
+    void setPostMix(float m) { mPost.setMix(m); }
+    void setPostWidth(float w) { mPost.setWidth(w); }
+    void setPostDrive(float d) { mPost.setDrive(d); }
+    void setPostRotFast(bool f) { mPost.setRotFast(f); }
+    void setPostHornDrum(float b) { mPost.setHornDrum(b); }
+    void setPostManual(float m) { mPost.setManual(m); }
+    void setPostInvert(bool inv) { mPost.setInvert(inv); }
+    void setPostP2Ratio(float r) { mPost.setP2Ratio(r); }
+    void setPostSeries(bool s) { mPost.setSeries(s); }
+    void setPostBypassed(bool b) { mPost.setBypassed(b); }
+
     void setBpm(double bpm)
     {
         for (auto &v : mVoice)
             v.setBpm(bpm);
+        mPost.setBpm(bpm);
     }
 
 private:
     static size_t idx(int s) { return (size_t)std::min(std::max(s, 0), kSlots - 1); }
+    bool anySolo() const { return mSolo[0] || mSolo[1] || mSolo[2]; }
+    // A slot is audible if it's soloed (when any solo is active, solo overrides
+    // bypass) or, with no solo active, simply not bypassed.
+    bool slotAudible(int s) const
+    {
+        return anySolo() ? mSolo[(size_t)s] : !mVoice[(size_t)s].isBypassed();
+    }
+
+    // PARALLEL routing: each active slot processes a copy of the dry input into
+    // its own branch; the branches are summed by the (bypass-aware, smoothed) pad
+    // weights, then one global Mod Mix blends the mod-bus against the dry input.
+    void processParallel(float *left, float *right, int n)
+    {
+        const bool stereo = (left != right);
+        const size_t N = (size_t)n;
+        // 1) capture the dry section input
+        for (size_t i = 0; i < N; ++i)
+        {
+            mDryL[i] = left[i];
+            mDryR[i] = stereo ? right[i] : left[i];
+        }
+        // 2) each active slot -> its own fully-processed branch from the dry input
+        for (int s = 0; s < kSlots; ++s)
+        {
+            if (!slotAudible(s)) continue;
+            for (size_t i = 0; i < N; ++i)
+            {
+                mBranchL[(size_t)s][i] = mDryL[i];
+                mBranchR[(size_t)s][i] = mDryR[i];
+            }
+            float *bl = mBranchL[(size_t)s].data();
+            float *br = stereo ? mBranchR[(size_t)s].data() : bl;
+            mVoice[(size_t)s].process(bl, br, n);
+        }
+        // 3) target blend weights from the pad, with bypassed nodes removed
+        float wT[kSlots];
+        padWeights(mPadX, mPadY, wT);
+        float sum = 0.0f;
+        for (int s = 0; s < kSlots; ++s)
+        {
+            if (!slotAudible(s)) wT[s] = 0.0f;
+            sum += wT[s];
+        }
+        if (sum > 1.0e-12f)
+        {
+            for (int s = 0; s < kSlots; ++s) wT[s] /= sum;
+        }
+        else // puck sat on inactive node(s): spread evenly over the audible slots
+        {
+            int act = 0;
+            for (int s = 0; s < kSlots; ++s) act += slotAudible(s) ? 1 : 0;
+            for (int s = 0; s < kSlots; ++s)
+                wT[s] = slotAudible(s) ? 1.0f / (float)std::max(1, act) : 0.0f;
+        }
+        // 4) blend the branches (smoothed weights) + one global mod-mix vs dry
+        for (size_t i = 0; i < N; ++i)
+        {
+            for (int s = 0; s < kSlots; ++s) mWz[(size_t)s] += mSmoothK * (wT[s] - mWz[(size_t)s]);
+            mModMixZ += mSmoothK * (mModMix - mModMixZ);
+            float busL = 0.0f, busR = 0.0f;
+            for (int s = 0; s < kSlots; ++s)
+            {
+                if (!slotAudible(s)) continue;
+                busL += mWz[(size_t)s] * mBranchL[(size_t)s][i];
+                busR += mWz[(size_t)s] * mBranchR[(size_t)s][i];
+            }
+            left[i] = (1.0f - mModMixZ) * mDryL[i] + mModMixZ * busL;
+            if (stereo) right[i] = (1.0f - mModMixZ) * mDryR[i] + mModMixZ * busR;
+        }
+    }
+
     std::array<ModVoice, kSlots> mVoice;
+    ModVoice mPost; // dedicated end-of-section post effect (rotary/tremolo/harm-trem)
+    ModLevelLock mLock; // section-level output loudness match
+    bool mSolo[kSlots] = {false, false, false}; // momentary dial-in solo (not a param)
+    // ---- section routing state ----
+    int mOrder[kSlots] = {0, 1, 2};          // series chain order (mOrder[pos] = slot)
+    bool mParallel = false;                  // false = series, true = parallel
+    float mPadX = 0.5f, mPadY = 1.0f / 3.0f; // blend puck (default = centroid = equal blend)
+    float mModMix = 1.0f;                    // parallel: mod-bus vs dry (1 = full bus)
+    float mSmoothK = 1.0f;                   // per-sample de-zip for weights + mod-mix
+    float mWz[kSlots] = {1.0f / 3.0f, 1.0f / 3.0f, 1.0f / 3.0f}; // smoothed weights
+    float mModMixZ = 1.0f;
+    std::vector<float> mDryL, mDryR;                          // dry-input scratch
+    std::array<std::vector<float>, kSlots> mBranchL, mBranchR; // per-slot branch scratch
 };
 
 } // namespace nam_rig

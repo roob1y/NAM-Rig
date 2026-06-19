@@ -11,7 +11,9 @@ namespace nam_rig
     class PresetManager;
 }
 
-class NamRigProcessor : public juce::AudioProcessor
+class NamRigProcessor : public juce::AudioProcessor,
+                        private juce::AudioProcessorValueTreeState::Listener,
+                        private juce::AsyncUpdater
 {
 public:
     NamRigProcessor();
@@ -106,7 +108,41 @@ public:
     int uiSelectedBlock = 2; // strip selection, default AMP
     int uiWidth = 0;         // last editor width, 0 = use default
 
+    // Momentary mod-slot solo (dial-in tool; not a parameter -> not saved, not
+    // automated). When any slot is soloed, only soloed slots are heard. Set by
+    // the editor's solo buttons, read in updateChainParameters.
+    std::atomic<bool> modSolo[nam_rig::ModBlock::kSlots]{};
+    void setModSolo(int slot, bool on)
+    {
+        if (slot >= 0 && slot < nam_rig::ModBlock::kSlots)
+            modSolo[(size_t)slot].store(on);
+    }
+    bool getModSolo(int slot) const
+    {
+        return slot >= 0 && slot < nam_rig::ModBlock::kSlots && modSolo[(size_t)slot].load();
+    }
+
+    // State-load guard (used by setStateInformation + PresetManager): while set,
+    // a mod-slot type change does NOT reset that slot's knobs (so loading a
+    // preset keeps its saved knob values). Cleared asynchronously so it also
+    // covers JUCE's deferred parameter-attachment updates.
+    void beginStateLoad() { mSuppressTypeReset.store(true); }
+    void endStateLoadDeferred()
+    {
+        juce::MessageManager::callAsync([sp = juce::WeakReference<NamRigProcessor>(this)] {
+            if (auto *self = sp.get()) self->mSuppressTypeReset.store(false);
+        });
+    }
+
 private:
+    // On a USER mod-slot type change, reset that slot's knobs to the new type's
+    // defaults (so stale values don't carry across effects). Done via a parameter
+    // listener -> AsyncUpdater (message thread); suppressed during state loads.
+    void parameterChanged(const juce::String &paramID, float newValue) override;
+    void handleAsyncUpdate() override;
+
+    std::atomic<bool> mSuppressTypeReset{false};
+    std::atomic<int> mPendingTypeReset{0}; // bitmask of slots awaiting a knob reset
     void updateLatency();
     int requestedFactorNow(int rig) const; // per-rig oversample param + offline bump
 
@@ -140,5 +176,6 @@ private:
 
     double mSampleRate = 48000.0;
 
+    JUCE_DECLARE_WEAK_REFERENCEABLE(NamRigProcessor)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(NamRigProcessor)
 };

@@ -21,6 +21,21 @@ namespace colors
     inline const juce::Colour meterLo     {0xff5fcf6e};
     inline const juce::Colour meterMid    {0xffffb13d};
     inline const juce::Colour meterHi     {0xffe85d4a};
+    inline const juce::Colour scopeBg     {0xff13161f}; // mod-lane scope canvas
+    inline const juce::Colour post        {0xffc79be6}; // post-lane (OUT) accent (violet)
+
+    // Per-slot accent for the 3 front mod slots: ties each lane's scope trace to
+    // its node on the Cartesian blend pad. slot 0 = amber, 1 = teal, 2 = violet.
+    inline juce::Colour laneColour(int slot)
+    {
+        switch (slot)
+        {
+        case 0: return juce::Colour(0xffeb9b43);
+        case 1: return juce::Colour(0xff45c4b0);
+        case 2: return juce::Colour(0xff9a6fd0);
+        default: return post; // post lane / fallback
+        }
+    }
 }
 
 class RigLookAndFeel : public juce::LookAndFeel_V4
@@ -77,7 +92,11 @@ public:
             juce::Path value;
             value.addCentredArc(centre.x, centre.y, arcR, arcR, 0.0f,
                                 juce::jmin(fillFrom, angle), juce::jmax(fillFrom, angle), true);
-            g.setColour(enabled ? colors::accent : colors::accentDim);
+            // Per-knob fill colour (mod lanes tint their arcs); else the global accent.
+            const juce::Colour fill = slider.isColourSpecified(juce::Slider::rotarySliderFillColourId)
+                                          ? slider.findColour(juce::Slider::rotarySliderFillColourId)
+                                          : colors::accent;
+            g.setColour(enabled ? fill : fill.withMultipliedSaturation(0.6f).darker(0.4f));
             g.strokePath(value, juce::PathStrokeType(lineW, juce::PathStrokeType::curved,
                                                      juce::PathStrokeType::rounded));
         }
@@ -88,6 +107,54 @@ public:
         p.addRoundedRectangle(-lineW * 0.5f, -innerR, lineW, innerR * 0.55f, lineW * 0.4f);
         g.setColour(enabled ? colors::text : colors::textDim);
         g.fillPath(p, juce::AffineTransform::rotation(angle).translated(centre.x, centre.y));
+    }
+
+    // Buttons flagged with a "pill" property draw as a filled/outlined pill with
+    // centred text (the mod-lane On / S toggles) instead of a checkbox + label.
+    void drawToggleButton(juce::Graphics &g, juce::ToggleButton &b,
+                          bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override
+    {
+        const bool pill = b.getProperties()["pill"].equals(true);
+        if (!pill && b.getButtonText().isEmpty())
+        {
+            // Caption-less checkbox (bi-phase Series, label drawn above): a small
+            // CENTRED box -- filled accent when on, outlined when off (no tick).
+            auto a = b.getLocalBounds().toFloat();
+            const float sz = juce::jmin(15.0f, a.getWidth() - 2.0f, a.getHeight() - 2.0f);
+            auto box = juce::Rectangle<float>(sz, sz).withCentre(a.getCentre());
+            const bool on = b.getToggleState();
+            g.setColour(on ? colors::accent : colors::tile);
+            g.fillRoundedRectangle(box, 3.0f);
+            g.setColour(on ? colors::accent : colors::outline);
+            g.drawRoundedRectangle(box, 3.0f, 1.0f);
+            return;
+        }
+        if (!pill)
+        {
+            LookAndFeel_V4::drawToggleButton(g, b, shouldDrawButtonAsHighlighted, shouldDrawButtonAsDown);
+            return;
+        }
+        auto r = b.getLocalBounds().toFloat().reduced(1.0f);
+        const bool on = b.getToggleState();
+        // Optional per-button tint via TextButton::buttonOnColourId; default = accent.
+        const juce::Colour onCol = b.isColourSpecified(juce::TextButton::buttonOnColourId)
+                                       ? b.findColour(juce::TextButton::buttonOnColourId)
+                                       : colors::accent;
+        if (on)
+        {
+            g.setColour(shouldDrawButtonAsHighlighted ? onCol.brighter(0.08f) : onCol);
+            g.fillRoundedRectangle(r, 5.0f);
+        }
+        else
+        {
+            g.setColour(shouldDrawButtonAsHighlighted ? colors::tileSel : colors::tile);
+            g.fillRoundedRectangle(r, 5.0f);
+            g.setColour(colors::outline);
+            g.drawRoundedRectangle(r, 5.0f, 1.0f);
+        }
+        g.setColour(on ? colors::bg : colors::textDim);
+        g.setFont(RigLookAndFeel::withHeight(12.0f));
+        g.drawText(b.getButtonText(), b.getLocalBounds(), juce::Justification::centred);
     }
 
     void drawLinearSlider(juce::Graphics &g, int x, int y, int width, int height,
