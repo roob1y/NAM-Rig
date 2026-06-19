@@ -383,6 +383,189 @@ private:
 };
 
 // ===========================================================================
+// PlateFdn — v2 FDN plate (the rearchitected capture engine, voiced for guitar).
+// 32-line FWHT FDN: a WIDEBAND 2-pole driver feeds the tank (the pick transient
+// passes bright), the per-line HF damping lives in the DECAY so the tail darkens
+// over time (dark, smooth wash), and a decorrelated Hadamard output gives a wide,
+// clean (no anti-phase) stereo image. No modulation, no bright early reflections
+// (those added grain + phasing). Tone = brightness (drives both the driver and the
+// tail damping, dark<->bright). Decay = T60. Renders WET only. Built from the
+// fdnplate prototype Robbie A/B-approved; tune by ear.
+// ===========================================================================
+class PlateFdn
+{
+public:
+    static constexpr int kNumLines = 32;
+    // prime-ish line lengths (ms @ size 1.0), ~6.5..65 ms -> dense plate modes
+    static constexpr std::array<double, kNumLines> kLineMs = {
+        6.5,  7.9,  9.2, 10.6, 12.1, 13.7, 15.2, 16.8, 18.5, 20.1, 21.8,
+        23.6, 25.3, 27.1, 29.0, 30.8, 32.7, 34.6, 36.6, 38.5, 40.5, 42.6,
+        44.7, 46.8, 49.0, 51.2, 53.4, 55.7, 58.0, 60.4, 62.8, 65.3};
+    static constexpr std::array<double, 6> kDiffMs = {0.5, 0.9, 1.5, 2.3, 3.3, 4.7}; // SHORT -> low group delay -> immediate onset
+    // per-line in-loop dispersion allpasses (incommensurate short delays): frequency-
+    // dependent group delay that ACCUMULATES each pass = the dense, silky plate texture
+    static constexpr std::array<double, kNumLines> kDispMs = {
+        0.7, 1.0, 1.3, 1.6, 0.8, 1.1, 1.4, 1.7, 0.9, 1.2, 1.5, 1.8, 2.1, 2.4, 2.0, 2.3,
+        2.6, 2.9, 1.9, 2.2, 2.5, 2.8, 3.1, 3.4, 2.7, 3.0, 3.3, 1.5, 1.8, 2.1, 2.4, 2.7};
+    static constexpr float kDispG = 0.62f;
+    // second dispersion stage (more upper-mid smearing -> closer to a real plate)
+    static constexpr std::array<double, kNumLines> kDispMs2 = {
+        1.9, 2.3, 1.1, 2.7, 1.5, 3.1, 1.3, 2.9, 1.7, 2.5, 1.0, 3.3, 1.4, 2.1, 2.8, 1.2,
+        3.0, 1.6, 2.4, 1.8, 3.2, 1.5, 2.6, 2.0, 1.1, 3.4, 1.9, 2.2, 1.3, 2.7, 1.6, 3.1};
+    static constexpr float kDispG2 = 0.55f;
+    static constexpr float kMinSize = 0.8f, kMaxSize = 1.6f;
+
+    void prepare(double fs)
+    {
+        mFs = fs;
+        for (int i = 0; i < kNumLines; ++i)
+            mLine[(size_t)i].prepare((int)std::ceil(kLineMs[(size_t)i] * kMaxSize * 0.001 * mFs) + 8);
+        for (size_t i = 0; i < mDiff.size(); ++i)
+            mDiff[i].prepare((int)std::ceil(kDiffMs[i] * kMaxSize * 0.001 * mFs) + 8);
+        for (int i = 0; i < kNumLines; ++i)
+        {
+            mDisp[(size_t)i].prepare((int)std::ceil(kDispMs[(size_t)i] * 0.001 * mFs) + 8);
+            mDisp2[(size_t)i].prepare((int)std::ceil(kDispMs2[(size_t)i] * 0.001 * mFs) + 8);
+        }
+        mPredelay.prepare((int)std::ceil(0.2 * mFs) + 8);
+        hadamardRow(1, mSignL); hadamardRow(2, mSignR); hadamardRow(13, mInj);
+        updateGeometry();
+        reset();
+        mPrepared = true;
+    }
+
+    void reset()
+    {
+        for (auto &l : mLine) l.reset();
+        for (auto &d : mDiff) d.reset();
+        for (auto &d : mDisp) d.reset();
+        for (auto &d : mDisp2) d.reset();
+        mPredelay.reset();
+        std::fill(mDampState.begin(), mDampState.end(), 0.0f);
+        mBw1 = mBw2 = 0.0f; mLcL = mLcR = 0.0f;
+    }
+
+    void setSize(float s) { s = std::clamp(s, kMinSize, kMaxSize); if (s != mSize) { mSize = s; if (mPrepared) updateGeometry(); } }
+    void setDecaySeconds(float t60) { t60 = std::max(0.1f, t60); if (t60 != mT60) { mT60 = t60; if (mPrepared) updateGeometry(); } }
+    void setDampHz(float hz) { if (hz != mDampHz) { mDampHz = hz; if (mPrepared) updateGeometry(); } }
+    void setPredelayMs(float ms) { mPredelayMs = std::clamp(ms, 0.0f, 200.0f); }
+    void setFreeze(bool f) { mFreeze = f; }
+
+    void process(float *left, float *right, int numSamples)
+    {
+        using namespace reverb_detail;
+        const bool stereo = (left != right);
+        const int pre = (int)std::round((double)mPredelayMs * 0.001 * mFs);
+        const float inGain = mFreeze ? 0.0f : 1.0f;
+        const float invsq = 1.0f / std::sqrt((float)kNumLines); // unitary FWHT normalisation
+
+        for (int n = 0; n < numSamples; ++n)
+        {
+            const float dryL = left[n];
+            const float dryR = stereo ? right[n] : dryL;
+
+            mPredelay.write(0.5f * (dryL + dryR));
+            float x = inGain * mPredelay.readInt(std::max(1, pre));
+            // 2-pole driver bandwidth (bright but band-limited transient)
+            mBw1 += mDrvK * (x - mBw1); mBw2 += mDrvK * (mBw1 - mBw2); x = mBw2;
+            // light input diffusion (instant-diffuse onset; no discrete ER)
+            for (size_t a = 0; a < mDiff.size(); ++a)
+                x = allpassInt(mDiff[a], mDiffLen[a], 0.62f, x);
+
+            std::array<float, kNumLines> o;
+            for (int i = 0; i < kNumLines; ++i)
+            {
+                float r = mLine[(size_t)i].readInt(mLen[(size_t)i]);
+                if (mDampOn) { auto &z = mDampState[(size_t)i]; z += mDampK * (r - z); r = z; } // HF damping = in the decay
+                o[(size_t)i] = r;
+            }
+
+            // decorrelated L/R from two orthogonal Hadamard rows
+            float wetL = 0.0f, wetR = 0.0f;
+            for (int i = 0; i < kNumLines; ++i) { wetL += mSignL[i] * o[(size_t)i]; wetR += mSignR[i] * o[(size_t)i]; }
+            const float early = mEarly * x; // immediate dense attack (diffused input, centred/mono-safe)
+            float oL = invsq * wetL + early, oR = invsq * wetR + early;
+            // plate low-cut (one-pole HPF): plates don't radiate deep sub
+            mLcL += mLcK * (oL - mLcL); oL -= mLcL;
+            mLcR += mLcK * (oR - mLcR); oR -= mLcR;
+            left[n] = oL;
+            if (stereo) right[n] = oR;
+
+            // feedback: per-line decay gain (or 1 in freeze) -> FWHT -> inject
+            std::array<float, kNumLines> fb;
+            for (int i = 0; i < kNumLines; ++i)
+            {
+                float v = (mFreeze ? 1.0f : mGain[(size_t)i]) * o[(size_t)i];
+                v = allpassInt(mDisp[(size_t)i], mDispLen[(size_t)i], kDispG, v);   // in-loop dispersion (silky plate texture)
+                v = allpassInt(mDisp2[(size_t)i], mDispLen2[(size_t)i], kDispG2, v);
+                fb[(size_t)i] = v;
+            }
+            fwhtN(fb.data());
+            const float injIn = 0.5f * x;
+            for (int i = 0; i < kNumLines; ++i)
+                mLine[(size_t)i].write(invsq * fb[(size_t)i] + (float)mInj[i] * injIn);
+        }
+        for (auto &z : mDampState) reverb_detail::flush(z);
+        reverb_detail::flush(mBw1); reverb_detail::flush(mBw2);
+    }
+
+private:
+    // in-place fast Walsh-Hadamard transform over kNumLines (power of two)
+    static void fwhtN(float *a)
+    {
+        for (int len = 1; len < kNumLines; len <<= 1)
+            for (int i = 0; i < kNumLines; i += len << 1)
+                for (int j = i; j < i + len; ++j)
+                { const float x = a[j], y = a[j + len]; a[j] = x + y; a[j + len] = x - y; }
+    }
+    static void hadamardRow(int row, int *out)
+    {
+        for (int i = 0; i < kNumLines; ++i)
+        { int b = 0, m = row & i; while (m) { b ^= 1; m &= m - 1; } out[i] = b ? -1 : 1; }
+    }
+    void updateGeometry()
+    {
+        using namespace reverb_detail;
+        for (int i = 0; i < kNumLines; ++i)
+        {
+            int len = (int)std::round(kLineMs[(size_t)i] * (double)mSize * 0.001 * mFs);
+            len |= 1;
+            mLen[(size_t)i] = std::max(3, len);
+            mDispLen[(size_t)i] = std::max(1, (int)std::round(kDispMs[(size_t)i] * 0.001 * mFs));
+            mDispLen2[(size_t)i] = std::max(1, (int)std::round(kDispMs2[(size_t)i] * 0.001 * mFs));
+            // include the in-loop allpass delays in the gain so T60 stays accurate
+            const int loopLen = mLen[(size_t)i] + mDispLen[(size_t)i] + mDispLen2[(size_t)i];
+            mGain[(size_t)i] = (float)std::pow(10.0, -3.0 * (double)loopLen / ((double)mT60 * mFs));
+        }
+        for (size_t a = 0; a < mDiff.size(); ++a)
+            mDiffLen[a] = std::max(2, (int)std::round(kDiffMs[a] * (double)mSize * 0.001 * mFs));
+        // Tone -> brightness: the tank damping cutoff IS the Tone knob; the driver
+        // sits well above it so the transient stays brighter than the tail.
+        mDampOn = mDampHz < 15500.0f;
+        mDampK = onePole(mDampHz, mFs);
+        const double drv = std::clamp((double)mDampHz * 1.4 + 2500.0, 4000.0, 13000.0);
+        mDrvK = onePole(drv, mFs);
+        mLcK = onePole(80.0, mFs);
+    }
+
+    double mFs = 48000.0;
+    std::array<FracDelayLine, kNumLines> mLine;
+    std::array<FracDelayLine, 6> mDiff;
+    std::array<FracDelayLine, kNumLines> mDisp, mDisp2;
+    FracDelayLine mPredelay;
+    std::array<int, kNumLines> mLen{};
+    std::array<int, 6> mDiffLen{};
+    std::array<int, kNumLines> mDispLen{}, mDispLen2{};
+    std::array<float, kNumLines> mGain{};
+    std::array<float, kNumLines> mDampState{};
+    int mSignL[kNumLines]{}, mSignR[kNumLines]{}, mInj[kNumLines]{};
+    float mBw1 = 0.0f, mBw2 = 0.0f, mLcL = 0.0f, mLcR = 0.0f;
+    float mDrvK = 1.0f, mDampK = 1.0f, mLcK = 0.0f, mEarly = 0.30f; // mEarly: immediate-attack mix
+    float mSize = 1.2f, mT60 = 2.0f, mDampHz = 6000.0f, mPredelayMs = 0.0f;
+    bool mDampOn = true, mPrepared = false, mFreeze = false;
+};
+
+// ===========================================================================
 // SpringReverb — studio spring-voiced studio spring (FDN realization, 2026-06-19 rework).
 // Matched to the studio spring reference IRs via the offline optimizer + ear
 // voicing ("41_tone-fix"), then ported faithfully to real time: a single dense
@@ -1026,6 +1209,7 @@ public:
         mFdn.prepare(ctx.sampleRate);
         mSmallRoom.prepare(ctx.sampleRate);
         mPlate.prepare(ctx.sampleRate);
+        mPlateFdn.prepare(ctx.sampleRate);
         mSpring.prepare(ctx.sampleRate);
         mShimmer.prepare(ctx.sampleRate);
         mMixer.prepare(ctx.sampleRate);
@@ -1040,7 +1224,7 @@ public:
 
     void reset() override
     {
-        mFdn.reset(); mPlate.reset(); mSpring.reset(); mShimmer.reset(); mSmallRoom.reset();
+        mFdn.reset(); mPlate.reset(); mPlateFdn.reset(); mSpring.reset(); mShimmer.reset(); mSmallRoom.reset();
         mMixer.reset();
         mMixer.snapMix(mPrepared ? effMix() : 0.0f);
     }
@@ -1081,7 +1265,7 @@ public:
 
         switch (mType)
         {
-        case kPlate: mPlate.process(left, right, numSamples); break;
+        case kPlate: mPlateFdn.process(left, right, numSamples); break; // v2 FDN plate (old Dattorro mPlate kept, unrouted)
         case kSpring: mSpring.process(left, right, numSamples); break;
         case kShimmer: mShimmer.process(left, right, numSamples); break;
         case kRoom: mSmallRoom.process(left, right, numSamples); break;
@@ -1106,7 +1290,7 @@ private:
     {
         switch (mType)
         {
-        case kPlate: mPlate.reset(); break;
+        case kPlate: mPlateFdn.reset(); break;
         case kSpring: mSpring.reset(); break;
         case kShimmer: mShimmer.reset(); break;
         case kRoom: mSmallRoom.reset(); break;
@@ -1174,9 +1358,9 @@ private:
     {
         switch (mType)
         {
-        case kPlate:
-            mPlate.setDecaySeconds(effT60()); mPlate.setDampHz(mDampHz);
-            mPlate.setPredelayMs(mPredelayMs); mPlate.setModDepth(mMod); mPlate.setFreeze(mFreeze);
+        case kPlate: // v2 FDN plate (no modulation -> no setModDepth)
+            mPlateFdn.setDecaySeconds(effT60()); mPlateFdn.setDampHz(mDampHz);
+            mPlateFdn.setPredelayMs(mPredelayMs); mPlateFdn.setFreeze(mFreeze);
             break;
         case kSpring:
             mSpring.setDecaySeconds(effT60()); mSpring.setDampHz(mDampHz);
@@ -1214,7 +1398,8 @@ private:
 
     FdnReverb mFdn;
     SmallRoomFdn mSmallRoom;
-    PlateReverb mPlate;
+    PlateReverb mPlate;       // old Dattorro plate (kept for reference/A-B; no longer routed)
+    PlateFdn mPlateFdn;       // v2 FDN plate -> kPlate
     SpringReverb mSpring;
     ShimmerReverb mShimmer;
     GuardMixer mMixer;
