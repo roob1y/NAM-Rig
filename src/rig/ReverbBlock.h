@@ -631,7 +631,7 @@ public:
 
     void setDecaySeconds(float t60) { mT60 = std::max(0.1f, t60); mDirty = true; }
     void setDampHz(float hz) { mDampHz = std::clamp(hz, 600.0f, 16000.0f); mDirty = true; } // Tone = brightness
-    void setTension(float t) { mTension = std::clamp(t, 0.0f, 1.0f); }                       // = bloom amount
+    void setTension(float t) { mTension = std::clamp(t, 0.0f, 1.0f); }                       // 0 = loose (max bloom/sag), 1 = tight (no bloom)
     void setFreeze(bool f) { mFreeze = f; }
 
     void process(float *left, float *right, int numSamples)
@@ -640,7 +640,7 @@ public:
         if (mDirty) recompute();
         const bool stereo = (left != right);
         const float inGain = mFreeze ? 0.0f : 1.0f;
-        const float bloomMix = 0.72f * mTension;
+        const float bloomMix = 0.72f * (1.0f - mTension);   // Tension UP = tighter spring = less bloom
         const float modS = (float)(kModMs * 0.001 * mFs);
         const int bloomLen = std::max(1, (int)std::round(kBloomDelMs * 0.001 * mFs));
         for (int n = 0; n < numSamples; ++n)
