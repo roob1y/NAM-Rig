@@ -178,3 +178,29 @@ route (FLAMO/RIR2FDN, PyTorch) is the rigorous joint optimiser when needed.
 - **diff-fdn-colorless** — colorless matrix/gain optimisation.
 - **fdnToolbox** (Schlecht) — FDN reference (MATLAB).
 - License diligence required before any commercial use of the above.
+
+---
+
+## Decay SHAPE is per-band, and it's convex (added 2026-06-20, from the Spring/studio spring work)
+
+**Full-band EDC match is a TRAP — it hides per-band shape mismatches.** Matching the overall
+energy decay to −15/−40/−60 dB at the right times can be a perfect average while every individual
+frequency band decays *wrong*. ALWAYS verify with two diagnostics, not the full-band number:
+
+1. **Difference EDR map** = `EDR(ours) − EDR(ref)` on a common time–freq grid, diverging colormap
+   (red = ours too hot, blue = ours missing energy). Glaring gaps light up instantly.
+2. **Per-band Schroeder decay overlays** = plot ref vs ours EDC for ~6 bands (lows→air) on the
+   same axes. Compare the *shape* of each curve, not the endpoints.
+
+**KEY CHARACTER TRUTH:** a real spring/plate (the studio spring) is **CONVEX in EVERY band** — a fast initial
+drop, then a long, SHALLOW, low-level tail that lingers to the full decay length, at *all* frequencies
+including the highs. The "linger everywhere at low level" is a core part of what the ear reads as the
+real unit's character/"springiness". A single FDN decays **linearly** per band (one timescale) and
+**structurally cannot sustain HF** over a long tail (an FDN's highs die early no matter the damping —
+proven: 8 kHz dies ~3.8 s even full-bandwidth + integer-delay). So a single FDN can NEVER reproduce
+the convex-everywhere shape.
+
+**To get convex-everywhere you need parallel, NON-MIXING multi-timescale components across the whole
+spectrum**: a fast diffuse body + a long diffuse bed + long-ringing low-level resonant fill that keeps
+the MIDS and HIGHS alive to full length (not just the lows). Frequency-zone them (modal lows / diffuse
+mids / HF rolloff) per the reference's own EDR zones. See [[reverb-spring-bx20-voicing]].
