@@ -592,7 +592,7 @@ public:
     static constexpr double kPresenceHz = 2550.0;  // -2.5 dB presence dip
     static constexpr double kPresenceDb = -2.5;
     static constexpr double kPresenceQ  = 1.0;
-    static constexpr double kTiltDampHz = 11000.0; // feedback HF damping -> lows ring longest (tuned vs 41)
+    static constexpr double kTiltDampHz = 20000.0; // feedback HF damping -> lows ring longest (eased: HF rings longer over the long tail, ear-approved)
     static constexpr double kCutMul     = 1.60;    // output band-limit = Tone * this (2nd-order)
     static constexpr double kModMs      = 0.4;     // subtle spring sag
     static constexpr double kDecayComp  = 1.05;    // gain T60 vs knob (offsets feedback damping)
@@ -1150,7 +1150,7 @@ public:
     // their window (clamp at the caps); Tone (0..1, dark->bright) maps across the window. Engine setters
     // stay literal; the host layer maps raw->window via mapped*(). Outer ranges == APVTS
     // (single source of truth, referenced by PluginProcessor).
-    static constexpr float kDecayMin = 0.15f,   kDecayMax = 8.0f;      // s
+    static constexpr float kDecayMin = 0.15f,   kDecayMax = 9.0f;      // s (Spring extended to long studio spring-style tails)
     static constexpr float kDampMin  = 600.0f,  kDampMax  = 16000.0f;  // Hz (Room Tone goes to 600)
     static constexpr float kPreMin   = 0.0f,    kPreMax   = 160.0f;    // ms
     static constexpr float kMixMax   = 0.70f;                          // wet cap (Mix is universal)
@@ -1162,7 +1162,7 @@ public:
         case kRoom:     return {0.15f, 0.8f}; // small room: dead booth -> small room, reads true RT60
         case kHall:     return {0.8f, 6.0f};
         case kPlate:    return {0.5f, 5.5f};   // real vintage plate spec
-        case kSpring:   return {1.0f, 4.0f};
+        case kSpring:   return {1.0f, 9.0f}; // long studio-spring tails (studio spring rings ~8s)
         case kShimmer:  return {1.5f, 8.0f};
         case kAmbience: return {0.3f, 1.2f};
         case kBloom:    return {2.5f, 8.0f};
@@ -1275,7 +1275,7 @@ public:
         GuardMixer::Config c;
         c.mix = effMix();
         c.hpfHz = inputFilterExposed(mType) ? mInputFilterHz : hpfForType(mType);
-        c.makeup = makeupForType(mType, effT60());
+        c.makeup = makeupForType(mType, effT60()) * levelTrim(mType);
         c.duckAmt = duckForType(mType);
         c.width = mWidth;
         c.swellRate = (mType == kBloom) ? swellRate() : 0.0f;
@@ -1306,7 +1306,7 @@ private:
         case kRoom: return std::min(mT60, 3.0f);
         case kAmbience: return std::min(mT60, 1.2f);
         case kBloom: return std::max(mT60, 2.5f);
-        case kSpring: return std::min(mT60, 6.0f); // studio spring-style long studio spring
+        case kSpring: return std::min(mT60, 15.0f); // uncapped: reach the real studio spring long tail (~8s)
         case kShimmer: return std::max(mT60, 1.5f);
         default: return mT60;
         }
@@ -1346,6 +1346,22 @@ private:
     static float makeupForType(Type, float t60)
     {
         return std::clamp(std::sqrt(2.0f / std::max(0.2f, t60)), 0.8f, 1.25f);
+    }
+    // per-character wet-LEVEL match (measured wet RMS vs Plate): the engines output very
+    // different intrinsic levels (Spring was ~+20dB, Hall ~-5dB), so equalise them so the
+    // Mix knob means the same loudness on every character. Verified to ~±0.2dB across types.
+    static float levelTrim(Type t)
+    {
+        switch (t) {
+        case kRoom:     return 0.80f;
+        case kHall:     return 1.69f;
+        case kPlate:    return 1.00f;   // reference
+        case kSpring:   return 0.103f;  // Spring was ~+20dB hot -> big cut
+        case kShimmer:  return 1.02f;
+        case kAmbience: return 0.85f;
+        case kBloom:    return 1.40f;
+        default:        return 1.00f;
+        }
     }
     float swellRate() const
     {
