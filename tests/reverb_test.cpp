@@ -356,7 +356,7 @@ int main()
         CHECK(std::fabs(atMin - pr.lo) < 1e-4f && std::fabs(atMax - pr.hi) < 1e-4f,
               "T22 mapToRange spans the window (%.2f..%.2f)", atMin, atMax);
         CHECK(std::fabs(pr.lo - 0.5f) < 1e-4f && std::fabs(pr.hi - 5.5f) < 1e-4f,
-              "T22 Plate decay window is the vintage plate 0.5-5.5 s (%.2f..%.2f)", pr.lo, pr.hi);
+              "T22 Plate decay window is 0.5-5.5 s (%.2f..%.2f)", pr.lo, pr.hi);
         // Decay knob -> APPROXIMATELY-true RENDERED T60 (engines track within ~+/-20%, not literal
         // exact-seconds), and it must clamp at the window caps. We measure the real decaying tail
         // (not just the knob readout) so a wrong/non-tracking decay is caught.

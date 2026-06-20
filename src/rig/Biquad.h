@@ -59,6 +59,27 @@ struct Biquad
         return q;
     }
 
+    // RBJ high-shelf (shelf slope S; S=1 is steepest non-resonant). Used by the
+    // plate's length-scaled multiband absorptive damping (PlateFdn).
+    static Biquad highshelf(double fs, double f0, double gainDb, double S = 0.7)
+    {
+        if (gainDb == 0.0)
+            return identity();
+        const double A = std::pow(10.0, gainDb / 40.0);
+        const double w = 2.0 * kPi * f0 / fs;
+        const double cosw = std::cos(w);
+        const double alpha = std::sin(w) / 2.0 * std::sqrt((A + 1.0 / A) * (1.0 / S - 1.0) + 2.0);
+        const double sa = 2.0 * std::sqrt(A) * alpha;
+        const double a0 = (A + 1.0) - (A - 1.0) * cosw + sa;
+        Biquad q;
+        q.b0 = (float)(A * ((A + 1.0) + (A - 1.0) * cosw + sa) / a0);
+        q.b1 = (float)(-2.0 * A * ((A - 1.0) + (A + 1.0) * cosw) / a0);
+        q.b2 = (float)(A * ((A + 1.0) + (A - 1.0) * cosw - sa) / a0);
+        q.a1 = (float)(2.0 * ((A - 1.0) - (A + 1.0) * cosw) / a0);
+        q.a2 = (float)(((A + 1.0) - (A - 1.0) * cosw - sa) / a0);
+        return q;
+    }
+
     static Biquad highpass(double fs, double f0, double Q = 0.70710678118654752)
     {
         const double w = 2.0 * kPi * f0 / fs;

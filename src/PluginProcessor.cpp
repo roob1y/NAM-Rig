@@ -457,7 +457,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("revPitch", 1), "Reverb Shimmer Pitch",
         juce::StringArray{"Octave", "+2 Oct", "Fifth+Oct"}, 0));
-    // Plate Input Filter (vintage plate/studio-style wet low-cut at the plate amp). Plate-only
+    // Plate Input Filter (studio-style wet low-cut at the plate amp). Plate-only
     // in the UI via ReverbBlock::inputFilterExposed; default 95 Hz = prior hardwired
     // Plate low-cut, so existing Plate sessions are unchanged. Appended last.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(

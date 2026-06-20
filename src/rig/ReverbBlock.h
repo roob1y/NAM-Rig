@@ -289,7 +289,7 @@ public:
         if (mDirty) recompute();
         const bool stereo = (left != right);
         const int pre = (int)std::round((double)mPredelayMs * 0.001 * mFs);
-        const float excSamp = mFreeze ? 0.0f : (float)(mMod * 0.00005 * mFs); // subtle, vintage plate-cents-scale wobble (was 0.0008 = a giant sweep); tunable
+        const float excSamp = mFreeze ? 0.0f : (float)(mMod * 0.00005 * mFs); // subtle, cents-scale wobble (was 0.0008 = a giant sweep); tunable
         const float decay = mFreeze ? 1.0f : mDecay;
         const float inGain = mFreeze ? 0.0f : 1.0f;
 
@@ -314,7 +314,7 @@ public:
                 mDelA[0].write(a); a = mDelA[0].readInt(mDelALen[0]);
                 { mDamp[0] += mDampK * (a - mDamp[0]); a = mDamp[0]; } // damp always (freeze too)
                 a *= decay;
-                mBloom[0] += mBloomK * (a - mBloom[0]); a += mBloomGain * mBloom[0]; // low-mid bloom: lows ring longer (vintage plate character)
+                mBloom[0] += mBloomK * (a - mBloom[0]); a += mBloomGain * mBloom[0]; // low-mid bloom: lows ring longer (vintage-plate character)
                 a = allpassInt(mAp2[0], mAp2Len[0], -kDecayDiff2, a);
                 mDelB[0].write(a); mTank[0] = mDelB[0].readInt(mDelBLen[0]);
             }
@@ -353,7 +353,7 @@ private:
         using namespace reverb_detail;
         const double loopMs = (mDelALen[0] + mAp2Len[0] + mDelBLen[0]) / mFs * 1000.0;
         mDecay = (float)std::clamp(std::pow(10.0, -1.5 * loopMs / ((double)mT60 * 1000.0)), 0.0, 0.997);
-        const double loopSec = loopMs / 1000.0, dN = std::clamp(((double)mDampHz - 1000.0) / 15000.0, 0.0, 1.0), t60HF = std::min(0.35 + dN * 0.85, (double)mT60), rHF = std::pow(10.0, -1.5 * loopSec * (1.0 / t60HF - 1.0 / (double)mT60)); mDampK = (float)std::clamp(2.0 * rHF / (1.0 + rHF), 1.0e-4, 1.0); // Jot-style: damping designed to a TARGET HF decay (vintage plate highs-die-fast ~0.5-1.8s set by the Damping knob = dark<->bright); HF clamped <= mid -> stable
+        const double loopSec = loopMs / 1000.0, dN = std::clamp(((double)mDampHz - 1000.0) / 15000.0, 0.0, 1.0), t60HF = std::min(0.35 + dN * 0.85, (double)mT60), rHF = std::pow(10.0, -1.5 * loopSec * (1.0 / t60HF - 1.0 / (double)mT60)); mDampK = (float)std::clamp(2.0 * rHF / (1.0 + rHF), 1.0e-4, 1.0); // Jot-style: damping designed to a TARGET HF decay (highs-die-fast ~0.5-1.8s set by the Damping knob = dark<->bright); HF clamped <= mid -> stable
         const double lfMult = std::clamp(1.15 + 0.18 * (double)mT60, 1.15, 1.9); // bloom tilt grows w/ decay, bounded
         const double gLF = std::pow(10.0, -1.5 * loopSec / ((double)mT60 * lfMult));
         const double gMax = 0.998 / std::max(1.0e-4, (double)mDecay);
@@ -383,37 +383,41 @@ private:
 };
 
 // ===========================================================================
-// PlateFdn — v2 FDN plate (the rearchitected capture engine, voiced for guitar).
-// 32-line FWHT FDN: a WIDEBAND 2-pole driver feeds the tank (the pick transient
-// passes bright), the per-line HF damping lives in the DECAY so the tail darkens
-// over time (dark, smooth wash), and a decorrelated Hadamard output gives a wide,
-// clean (no anti-phase) stereo image. No modulation, no bright early reflections
-// (those added grain + phasing). Tone = brightness (drives both the driver and the
-// tail damping, dark<->bright). Decay = T60. Renders WET only. Built from the
-// fdnplate prototype Robbie A/B-approved; tune by ear.
+// PlateFdn — v3 FDN plate, voiced to a vintage studio steel-plate reverb. 32-line
+// FWHT FDN with a LENGTH-SCALED MULTIBAND absorptive damping in the feedback
+// (broadband gain + two RBJ high-shelves per line, fit to the target decay-vs-
+// frequency curve): the lows ring LONGEST and the HF plateaus (keeps air) — a real
+// plate's decay signature, which a single damping pole cannot make. A 2-pole driver
+// passes a bright transient; an input low-mid resonance fills the plate body; an
+// output presence bell + plate low-cut shape the balance; a decorrelated early tap
+// gives an immediate, wide, mono-safe onset. No modulation. Tone = brightness (the
+// driver cutoff; the matched damping stays fixed so the decay match is robust across
+// the knob). Decay = the ~1 kHz T60 in true seconds (scales the whole matched curve).
+// Renders WET only. Voiced via the offline metric battery against the plate reference.
 // ===========================================================================
 class PlateFdn
 {
 public:
     static constexpr int kNumLines = 32;
-    // prime-ish line lengths (ms @ size 1.0), ~6.5..65 ms -> dense plate modes
     static constexpr std::array<double, kNumLines> kLineMs = {
         6.5,  7.9,  9.2, 10.6, 12.1, 13.7, 15.2, 16.8, 18.5, 20.1, 21.8,
         23.6, 25.3, 27.1, 29.0, 30.8, 32.7, 34.6, 36.6, 38.5, 40.5, 42.6,
         44.7, 46.8, 49.0, 51.2, 53.4, 55.7, 58.0, 60.4, 62.8, 65.3};
-    static constexpr std::array<double, 6> kDiffMs = {0.5, 0.9, 1.5, 2.3, 3.3, 4.7}; // SHORT -> low group delay -> immediate onset
-    // per-line in-loop dispersion allpasses (incommensurate short delays): frequency-
-    // dependent group delay that ACCUMULATES each pass = the dense, silky plate texture
+    static constexpr std::array<double, 6> kDiffMs = {0.5, 0.9, 1.5, 2.3, 3.3, 4.7};
     static constexpr std::array<double, kNumLines> kDispMs = {
         0.7, 1.0, 1.3, 1.6, 0.8, 1.1, 1.4, 1.7, 0.9, 1.2, 1.5, 1.8, 2.1, 2.4, 2.0, 2.3,
         2.6, 2.9, 1.9, 2.2, 2.5, 2.8, 3.1, 3.4, 2.7, 3.0, 3.3, 1.5, 1.8, 2.1, 2.4, 2.7};
     static constexpr float kDispG = 0.62f;
-    // second dispersion stage (more upper-mid smearing -> closer to a real plate)
     static constexpr std::array<double, kNumLines> kDispMs2 = {
         1.9, 2.3, 1.1, 2.7, 1.5, 3.1, 1.3, 2.9, 1.7, 2.5, 1.0, 3.3, 1.4, 2.1, 2.8, 1.2,
         3.0, 1.6, 2.4, 1.8, 3.2, 1.5, 2.6, 2.0, 1.1, 3.4, 1.9, 2.2, 1.3, 2.7, 1.6, 3.1};
     static constexpr float kDispG2 = 0.55f;
     static constexpr float kMinSize = 0.8f, kMaxSize = 1.6f;
+    // damping shape (dB per sample of loop delay) least-squares fit to the target plate T60(f)
+    static constexpr double kDampBb = -2.4367e-4;                 // broadband (lows ceiling ~5 s)
+    static constexpr double kDampG1 = -1.8362e-4, kDampF1 = 355.0;  // high-shelf 1
+    static constexpr double kDampG2 = -4.1266e-4, kDampF2 = 3600.0; // high-shelf 2
+    static constexpr double kDampS  = 0.7, kRef1kT60 = 2.92;        // shelf slope; Decay knob ref (1 kHz)
 
     void prepare(double fs)
     {
@@ -428,6 +432,8 @@ public:
             mDisp2[(size_t)i].prepare((int)std::ceil(kDispMs2[(size_t)i] * 0.001 * mFs) + 8);
         }
         mPredelay.prepare((int)std::ceil(0.2 * mFs) + 8);
+        mEarlyApR.prepare((int)std::ceil(7.0 * 0.001 * mFs) + 8);
+        mEarlyLenR = std::max(2, (int)std::round(3.7 * 0.001 * mFs));
         hadamardRow(1, mSignL); hadamardRow(2, mSignR); hadamardRow(13, mInj);
         updateGeometry();
         reset();
@@ -440,14 +446,16 @@ public:
         for (auto &d : mDiff) d.reset();
         for (auto &d : mDisp) d.reset();
         for (auto &d : mDisp2) d.reset();
-        mPredelay.reset();
-        std::fill(mDampState.begin(), mDampState.end(), 0.0f);
+        for (auto &b : mHs1) b.reset();
+        for (auto &b : mHs2) b.reset();
+        mLmEq.reset(); mPresL.reset(); mPresR.reset();
+        mPredelay.reset(); mEarlyApR.reset();
         mBw1 = mBw2 = 0.0f; mLcL = mLcR = 0.0f;
     }
 
     void setSize(float s) { s = std::clamp(s, kMinSize, kMaxSize); if (s != mSize) { mSize = s; if (mPrepared) updateGeometry(); } }
     void setDecaySeconds(float t60) { t60 = std::max(0.1f, t60); if (t60 != mT60) { mT60 = t60; if (mPrepared) updateGeometry(); } }
-    void setDampHz(float hz) { if (hz != mDampHz) { mDampHz = hz; if (mPrepared) updateGeometry(); } }
+    void setDampHz(float hz) { if (hz != mDampHz) { mDampHz = hz; if (mPrepared) updateGeometry(); } } // Tone = brightness
     void setPredelayMs(float ms) { mPredelayMs = std::clamp(ms, 0.0f, 200.0f); }
     void setFreeze(bool f) { mFreeze = f; }
 
@@ -457,7 +465,7 @@ public:
         const bool stereo = (left != right);
         const int pre = (int)std::round((double)mPredelayMs * 0.001 * mFs);
         const float inGain = mFreeze ? 0.0f : 1.0f;
-        const float invsq = 1.0f / std::sqrt((float)kNumLines); // unitary FWHT normalisation
+        const float invsq = 1.0f / std::sqrt((float)kNumLines);
 
         for (int n = 0; n < numSamples; ++n)
         {
@@ -466,37 +474,31 @@ public:
 
             mPredelay.write(0.5f * (dryL + dryR));
             float x = inGain * mPredelay.readInt(std::max(1, pre));
-            // 2-pole driver bandwidth (bright but band-limited transient)
-            mBw1 += mDrvK * (x - mBw1); mBw2 += mDrvK * (mBw1 - mBw2); x = mBw2;
-            // light input diffusion (instant-diffuse onset; no discrete ER)
+            x = mLmEq.processSample(x);                 // input low-mid body (plate resonance)
+            mBw1 += mDrvK * (x - mBw1); mBw2 += mDrvK * (mBw1 - mBw2); x = mBw2; // 2-pole driver (Tone)
             for (size_t a = 0; a < mDiff.size(); ++a)
                 x = allpassInt(mDiff[a], mDiffLen[a], 0.62f, x);
 
             std::array<float, kNumLines> o;
             for (int i = 0; i < kNumLines; ++i)
-            {
-                float r = mLine[(size_t)i].readInt(mLen[(size_t)i]);
-                if (mDampOn) { auto &z = mDampState[(size_t)i]; z += mDampK * (r - z); r = z; } // HF damping = in the decay
-                o[(size_t)i] = r;
-            }
+                o[(size_t)i] = mLine[(size_t)i].readInt(mLen[(size_t)i]);
 
-            // decorrelated L/R from two orthogonal Hadamard rows
             float wetL = 0.0f, wetR = 0.0f;
             for (int i = 0; i < kNumLines; ++i) { wetL += mSignL[i] * o[(size_t)i]; wetR += mSignR[i] * o[(size_t)i]; }
-            const float early = mEarly * x; // immediate dense attack (diffused input, centred/mono-safe)
-            float oL = invsq * wetL + early, oR = invsq * wetR + early;
-            // plate low-cut (one-pole HPF): plates don't radiate deep sub
-            mLcL += mLcK * (oL - mLcL); oL -= mLcL;
+            const float eR = allpassInt(mEarlyApR, mEarlyLenR, 0.6f, x); // decorrelated R early -> wide, mono-safe
+            float oL = invsq * wetL + mEarly * x, oR = invsq * wetR + mEarly * eR;
+            oL = mPresL.processSample(oL); oR = mPresR.processSample(oR);  // output presence bell
+            mLcL += mLcK * (oL - mLcL); oL -= mLcL;     // plate low-cut (no deep sub)
             mLcR += mLcK * (oR - mLcR); oR -= mLcR;
             left[n] = oL;
             if (stereo) right[n] = oR;
 
-            // feedback: per-line decay gain (or 1 in freeze) -> FWHT -> inject
             std::array<float, kNumLines> fb;
             for (int i = 0; i < kNumLines; ++i)
             {
                 float v = (mFreeze ? 1.0f : mGain[(size_t)i]) * o[(size_t)i];
-                v = allpassInt(mDisp[(size_t)i], mDispLen[(size_t)i], kDispG, v);   // in-loop dispersion (silky plate texture)
+                if (!mFreeze) { v = mHs1[(size_t)i].processSample(v); v = mHs2[(size_t)i].processSample(v); } // multiband absorptive damping
+                v = allpassInt(mDisp[(size_t)i], mDispLen[(size_t)i], kDispG, v);
                 v = allpassInt(mDisp2[(size_t)i], mDispLen2[(size_t)i], kDispG2, v);
                 fb[(size_t)i] = v;
             }
@@ -505,12 +507,11 @@ public:
             for (int i = 0; i < kNumLines; ++i)
                 mLine[(size_t)i].write(invsq * fb[(size_t)i] + (float)mInj[i] * injIn);
         }
-        for (auto &z : mDampState) reverb_detail::flush(z);
+        for (auto &z : mDampStateUnused) reverb_detail::flush(z);
         reverb_detail::flush(mBw1); reverb_detail::flush(mBw2);
     }
 
 private:
-    // in-place fast Walsh-Hadamard transform over kNumLines (power of two)
     static void fwhtN(float *a)
     {
         for (int len = 1; len < kNumLines; len <<= 1)
@@ -526,6 +527,7 @@ private:
     void updateGeometry()
     {
         using namespace reverb_detail;
+        const double dec = std::max(0.1, (double)mT60 / kRef1kT60); // scales the matched curve; ~true 1 kHz seconds
         for (int i = 0; i < kNumLines; ++i)
         {
             int len = (int)std::round(kLineMs[(size_t)i] * (double)mSize * 0.001 * mFs);
@@ -533,36 +535,41 @@ private:
             mLen[(size_t)i] = std::max(3, len);
             mDispLen[(size_t)i] = std::max(1, (int)std::round(kDispMs[(size_t)i] * 0.001 * mFs));
             mDispLen2[(size_t)i] = std::max(1, (int)std::round(kDispMs2[(size_t)i] * 0.001 * mFs));
-            // include the in-loop allpass delays in the gain so T60 stays accurate
-            const int loopLen = mLen[(size_t)i] + mDispLen[(size_t)i] + mDispLen2[(size_t)i];
-            mGain[(size_t)i] = (float)std::pow(10.0, -3.0 * (double)loopLen / ((double)mT60 * mFs));
+            const double loopLen = mLen[(size_t)i] + mDispLen[(size_t)i] + mDispLen2[(size_t)i];
+            const double s = loopLen / dec; // per-line dB-shape scale (length-scaled so all lines share one T60(f))
+            mGain[(size_t)i] = (float)std::pow(10.0, s * kDampBb / 20.0);
+            mHs1[(size_t)i] = Biquad::highshelf(mFs, kDampF1, s * kDampG1, kDampS);
+            mHs2[(size_t)i] = Biquad::highshelf(mFs, kDampF2, s * kDampG2, kDampS);
         }
         for (size_t a = 0; a < mDiff.size(); ++a)
             mDiffLen[a] = std::max(2, (int)std::round(kDiffMs[a] * (double)mSize * 0.001 * mFs));
-        // Tone -> brightness: the tank damping cutoff IS the Tone knob; the driver
-        // sits well above it so the transient stays brighter than the tail.
-        mDampOn = mDampHz < 15500.0f;
-        mDampK = onePole(mDampHz, mFs);
-        const double drv = std::clamp((double)mDampHz * 1.4 + 2500.0, 4000.0, 13000.0);
+        mLmEq = Biquad::peaking(mFs, 160.0, 0.7, 5.0);     // low-mid body
+        mPresL = Biquad::peaking(mFs, 2800.0, 0.6, 3.0);   // presence
+        mPresR = mPresL;
+        // Tone -> driver brightness (the matched damping stays fixed)
+        const double drv = std::clamp((double)mDampHz * 0.5 + 3300.0, 4000.0, 10000.0);
         mDrvK = onePole(drv, mFs);
-        mLcK = onePole(80.0, mFs);
+        mLcK = onePole(100.0, mFs);
     }
 
     double mFs = 48000.0;
     std::array<FracDelayLine, kNumLines> mLine;
     std::array<FracDelayLine, 6> mDiff;
     std::array<FracDelayLine, kNumLines> mDisp, mDisp2;
-    FracDelayLine mPredelay;
+    FracDelayLine mPredelay, mEarlyApR;
+    std::array<Biquad, kNumLines> mHs1, mHs2;   // per-line multiband damping
+    Biquad mLmEq, mPresL, mPresR;               // input body + output presence
     std::array<int, kNumLines> mLen{};
     std::array<int, 6> mDiffLen{};
     std::array<int, kNumLines> mDispLen{}, mDispLen2{};
     std::array<float, kNumLines> mGain{};
-    std::array<float, kNumLines> mDampState{};
+    std::array<float, 1> mDampStateUnused{};    // (kept for denormal-flush symmetry)
+    int mEarlyLenR = 180;
     int mSignL[kNumLines]{}, mSignR[kNumLines]{}, mInj[kNumLines]{};
     float mBw1 = 0.0f, mBw2 = 0.0f, mLcL = 0.0f, mLcR = 0.0f;
-    float mDrvK = 1.0f, mDampK = 1.0f, mLcK = 0.0f, mEarly = 0.30f; // mEarly: immediate-attack mix
-    float mSize = 1.2f, mT60 = 2.0f, mDampHz = 6000.0f, mPredelayMs = 0.0f;
-    bool mDampOn = true, mPrepared = false, mFreeze = false;
+    float mDrvK = 1.0f, mLcK = 0.0f, mEarly = 0.30f;
+    float mSize = 1.25f, mT60 = 2.92f, mDampHz = 5250.0f, mPredelayMs = 0.0f;
+    bool mPrepared = false, mFreeze = false;
 };
 
 // ===========================================================================
@@ -573,7 +580,7 @@ private:
 // a transient smears into the descending chirp the ear reads as a spring. K is
 // derived from a TIME constant (not a fixed sample count) so the chirp tone is
 // identical at 44.1 / 48 / 96 kHz. The number of ACTIVE stages = boing amount,
-// so 0 stages == bypass == the exact pre-boing (studio spring) signal. Ported faithfully
+// so 0 stages == bypass == the exact pre-boing signal. Ported faithfully
 // from spring_tuner.html (APk: K=4 @48 kHz, coef 0.62, 120-stage cascade).
 // ===========================================================================
 class DispersionChain
@@ -618,16 +625,16 @@ private:
 };
 
 // ===========================================================================
-// SpringReverb — studio spring-voiced studio spring (FDN realization, 2026-06-19 rework).
-// Matched to the studio spring reference IRs via the offline optimizer + ear
+// SpringReverb — studio-spring-voiced reverb (FDN realization, 2026-06-19 rework).
+// Matched to a studio-spring reference via the offline optimizer + ear
 // voicing ("41_tone-fix"), then ported faithfully to real time: a single dense
 // 8-line Householder FDN (same mixing/feedback as the offline model) fed by a
 // DELAYED low-band injection so the low-mids BLOOM ~50-80 ms after the immediate
 // highs (the "alive" swell). RAW (pre-damp) line reads go to the output so the
 // attack keeps its highs; the feedback path is HF-damped so the highs decay
-// faster than the lows (the studio spring lows-ring-longest tilt). Voicing: 110 Hz low-cut
+// faster than the lows (the studio-spring lows-ring-longest tilt). Voicing: 110 Hz low-cut
 // + Tone-driven input darkening + a 2.5 kHz presence dip + a 2nd-order output
-// band-limit give the studio spring's warm, mid-focused tone. Stereo = Python sign-pattern
+// band-limit give the spring's warm, mid-focused tone. Stereo = Python sign-pattern
 // decorrelation with a width blend. Decay = RT60, Tone = brightness, Tension =
 // bloom amount. Renders WET only. (Old parallel-spring engine kept in git history.)
 // ===========================================================================
@@ -638,7 +645,7 @@ public:
     // line lengths (ms): fdn_base 16.39 * (1 + (ratio-1)*spread), spread 0.831
     static constexpr std::array<double, kLines> kLineMs = {
         16.39, 18.84, 21.43, 23.74, 26.33, 28.78, 31.65, 34.24};
-    static constexpr double kLowCutHz   = 110.0;   // input low-cut (sub the studio spring lacks)
+    static constexpr double kLowCutHz   = 110.0;   // input low-cut (sub the spring lacks)
     static constexpr double kBloomFc    = 422.0;   // split: lows delayed, highs immediate
     static constexpr double kBloomDelMs = 52.0;    // low-band injection delay -> the bloom
     static constexpr double kPresenceHz = 2550.0;  // -2.5 dB presence dip
@@ -722,7 +729,7 @@ public:
                 auto &z = mDamp[(size_t)i]; z += mDampK * (D[(size_t)i] - z); V[(size_t)i] = z; // damped -> feedback
             }
             // output: width blend of common + sign-decorrelated (Python _stereo)
-            float wetL = 0.0f, wetR = 0.0f;   // interleaved half-sums: decorrelated (studio spring-wide) yet
+            float wetL = 0.0f, wetR = 0.0f;   // interleaved half-sums: decorrelated (wide) yet
             for (int i = 0; i < kLines; ++i) { if (i & 1) wetR += D[(size_t)i]; else wetL += D[(size_t)i]; } // sum-preserving (keeps low-mid body + bloom, unlike zero-sum rows)
             // feedback: Householder mix of damped V, scalar g, inject fdnIn equally
             std::array<float, kLines> fbv;
@@ -1355,7 +1362,7 @@ public:
     static bool tensionExposed(Type t) { return t == kSpring; }
     static bool boingExposed(Type t) { return t == kSpring; } // dispersion/sproing amount, Spring only
     static bool swellExposed(Type t) { return t == kBloom; }
-    static bool inputFilterExposed(Type t) { return t == kPlate; } // vintage plate/studio-style wet low-cut on the plate amp
+    static bool inputFilterExposed(Type t) { return t == kPlate; } // studio-style wet low-cut on the plate amp
     static bool freezeExposed(Type t) { return t == kHall || t == kShimmer || t == kBloom; } // infinite-sustain pad only makes sense on the lush/evolving characters
     static const char *toneCaption(Type) { return "Tone"; }
 
@@ -1366,7 +1373,7 @@ public:
     // their window (clamp at the caps); Tone (0..1, dark->bright) maps across the window. Engine setters
     // stay literal; the host layer maps raw->window via mapped*(). Outer ranges == APVTS
     // (single source of truth, referenced by PluginProcessor).
-    static constexpr float kDecayMin = 0.15f,   kDecayMax = 9.0f;      // s (Spring extended to long studio spring-style tails)
+    static constexpr float kDecayMin = 0.15f,   kDecayMax = 9.0f;      // s (Spring extended to long studio-spring tails)
     static constexpr float kDampMin  = 600.0f,  kDampMax  = 16000.0f;  // Hz (Room Tone goes to 600)
     static constexpr float kPreMin   = 0.0f,    kPreMax   = 160.0f;    // ms
     static constexpr float kMixMax   = 0.70f;                          // wet cap (Mix is universal)
@@ -1377,8 +1384,8 @@ public:
         switch (t) {
         case kRoom:     return {0.15f, 0.8f}; // small room: dead booth -> small room, reads true RT60
         case kHall:     return {0.8f, 6.0f};
-        case kPlate:    return {0.5f, 5.5f};   // real vintage plate spec
-        case kSpring:   return {1.0f, 9.0f}; // long studio-spring tails (studio spring rings ~8s)
+        case kPlate:    return {0.5f, 5.5f};   // vintage plate spec
+        case kSpring:   return {1.0f, 9.0f}; // long studio-spring tails (rings ~8s)
         case kShimmer:  return {1.5f, 8.0f};
         case kAmbience: return {0.3f, 1.2f};
         case kBloom:    return {2.5f, 8.0f};
@@ -1526,7 +1533,7 @@ private:
         case kRoom: return std::min(mT60, 3.0f);
         case kAmbience: return std::min(mT60, 1.2f);
         case kBloom: return std::max(mT60, 2.5f);
-        case kSpring: return std::min(mT60, 15.0f); // uncapped: reach the real studio spring long tail (~8s)
+        case kSpring: return std::min(mT60, 15.0f); // uncapped: reach the long studio-spring tail (~8s)
         case kShimmer: return std::max(mT60, 1.5f);
         default: return mT60;
         }
@@ -1576,7 +1583,7 @@ private:
         switch (t) {
         case kRoom:     return 0.88f;
         case kHall:     return 1.62f; // dispersion-FDN hall (re-measured at default Tone 3500, balanced wet/dry)
-        case kPlate:    return 1.39f;
+        case kPlate:    return 1.16f;  // v3 multiband plate ~1.6 dB hotter than v2; trimmed to keep the Mix knob level-matched (re-verify by ear)
         case kSpring:   return 0.138f;  // Spring intrinsically ~+20dB hot -> big cut
         case kShimmer:  return 1.82f;
         case kAmbience: return 1.81f;

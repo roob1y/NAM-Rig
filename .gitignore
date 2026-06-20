@@ -8,6 +8,9 @@ plate_proto/plate_rebuild_demos_v*/
 hall_ref/
 hall_v9/
 plate_proto/*.f32
+plate_proto/
+plate_v9/
+docs/PLATE_vintage plate_*.md
 
 # python / compiled / binary artifacts (never commit)
 __pycache__/
