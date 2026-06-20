@@ -1163,6 +1163,149 @@ private:
 };
 
 // ===========================================================================
+// HallReverb - dense dispersion-FDN concert hall (Plate-family engine, hall-voiced).
+// Lush via strong in-loop HF damping (sparse distinct modes -> high modal depth);
+// C80 clarity via an early-energy tap; bass-mono + 2.7kHz presence voicing; Tone ->
+// HF damping (warm = lusher, bright = more present). Built from the dispersion-FDN
+// that powers the Plate (Robbie's approved smooth engine), scaled/voiced to match
+// the averaged real-hall metrics (Usina del Arte) + Bricasti Gold. Renders WET only.
+// ===========================================================================
+class HallReverb {
+public:
+    static constexpr int kNumLines = 32;
+    // hall line lengths (ms @ size 1.0) ~9.75..98 ms (plate set x1.5) -> dense hall modes
+    static constexpr std::array<double,kNumLines> kLineMs = {
+        9.75,11.85,13.8,15.9,18.15,20.55,22.8,25.2,27.75,30.15,32.7,35.4,37.95,40.65,43.5,46.2,
+        49.05,51.9,54.9,57.75,60.75,63.9,67.05,70.2,73.5,76.8,80.1,83.55,87.0,90.6,94.2,97.95};
+    static constexpr std::array<double,6> kDiffMs = {0.7,1.3,2.1,3.1,4.3,5.9}; // immediate dense onset (Plate-style)
+    static constexpr std::array<double,kNumLines> kDispMs = {
+        0.7,1.0,1.3,1.6,0.8,1.1,1.4,1.7,0.9,1.2,1.5,1.8,2.1,2.4,2.0,2.3,
+        2.6,2.9,1.9,2.2,2.5,2.8,3.1,3.4,2.7,3.0,3.3,1.5,1.8,2.1,2.4,2.7};
+    static constexpr float kDispG = 0.62f;
+    static constexpr std::array<double,kNumLines> kDispMs2 = {
+        1.9,2.3,1.1,2.7,1.5,3.1,1.3,2.9,1.7,2.5,1.0,3.3,1.4,2.1,2.8,1.2,
+        3.0,1.6,2.4,1.8,3.2,1.5,2.6,2.0,1.1,3.4,1.9,2.2,1.3,2.7,1.6,3.1};
+    static constexpr float kDispG2 = 0.55f;
+    static constexpr float kMinSize = 0.7f, kMaxSize = 1.5f;
+
+    void prepare(double fs){
+        mFs=fs;
+        for(int i=0;i<kNumLines;++i) mLine[(size_t)i].prepare((int)std::ceil(kLineMs[(size_t)i]*kMaxSize*0.001*fs)+16);
+        for(size_t i=0;i<mDiff.size();++i) mDiff[i].prepare((int)std::ceil(kDiffMs[i]*kMaxSize*0.001*fs)+8);
+        for(int i=0;i<kNumLines;++i){ mDisp[(size_t)i].prepare((int)std::ceil(kDispMs[(size_t)i]*0.001*fs)+8);
+            mDisp2[(size_t)i].prepare((int)std::ceil(kDispMs2[(size_t)i]*0.001*fs)+8); }
+        mPredelay.prepare((int)std::ceil(0.2*fs)+8);
+        mLfoA.prepare(fs); mLfoA.setRateHz(0.43f); mLfoB.prepare(fs); mLfoB.setRateHz(0.67f);
+        hadamardRow(1,mSignL); hadamardRow(2,mSignR); hadamardRow(13,mInj);
+        updateGeometry(); reset(); mPrepared=true;
+    }
+    void reset(){
+        for(auto&l:mLine)l.reset(); for(auto&d:mDiff)d.reset(); for(auto&d:mDisp)d.reset(); for(auto&d:mDisp2)d.reset();
+        mPredelay.reset(); std::fill(mDamp.begin(),mDamp.end(),0.0f); std::fill(mLf.begin(),mLf.end(),0.0f);
+        mBw1=mBw2=0; mLcL=mLcR=0; mLfoA.reset(); mLfoB.reset(); mSideHp=0; for(auto&v:mPzL)v=0; for(auto&v:mPzR)v=0;
+    }
+    void setSize(float s){ s=std::clamp(s,kMinSize,kMaxSize); if(s!=mSize){mSize=s; if(mPrepared)updateGeometry();} }
+    void setDecaySeconds(float t){ t=std::max(0.1f,t); if(t!=mT60){mT60=t; if(mPrepared)updateGeometry();} }
+    void setDampHz(float hz){ if(hz!=mDampHz){mDampHz=hz; if(mPrepared)updateGeometry();} }
+    void setPredelayMs(float ms){ mPredelayMs=std::clamp(ms,0.0f,200.0f); }
+    void setModDepth(float d){ mModSamp=std::clamp(d,0.0f,1.0f)*6.0f; } // 0..6 sample excursion
+    void setFreeze(bool f){ mFreeze=f; }
+    int lineLengthSamples(int i) const { return mLoopLen[(size_t)i]; } // full loop length (incl. dispersion)
+    float lineGain(int i) const { return mGain[(size_t)i]; }
+
+    void process(float* left,float* right,int n){
+        using namespace reverb_detail;
+        const bool stereo=(left!=right);
+        const int pre=(int)std::round((double)mPredelayMs*0.001*mFs);
+        const float inGain=mFreeze?0.0f:1.0f;
+        const float invsq=1.0f/std::sqrt((float)kNumLines);
+        const float modS=mFreeze?0.0f:mModSamp;
+        for(int s=0;s<n;++s){
+            const float dryL=left[s], dryR=stereo?right[s]:dryL;
+            mPredelay.write(0.5f*(dryL+dryR));
+            float x=inGain*mPredelay.readInt(std::max(1,pre));
+            mBw1+=mDrvK*(x-mBw1); mBw2+=mDrvK*(mBw1-mBw2); x=mBw2;     // 2-pole wideband driver
+            for(size_t a=0;a<mDiff.size();++a) x=allpassInt(mDiff[a],mDiffLen[a],0.62f,x); // input diffusion
+            std::array<float,kNumLines> o;
+            for(int i=0;i<kNumLines;++i){
+                float r;
+                if(modS>0.0f){ const float m=modS*(0.6f*mLfoA.value((double)i*0.033)+0.4f*mLfoB.value((double)i*0.051+0.02));
+                              r=mLine[(size_t)i].readFrac((double)mLen[(size_t)i]+(double)m); }
+                else r=mLine[(size_t)i].readInt(mLen[(size_t)i]);
+                if(!mFreeze){ auto&z=mDamp[(size_t)i]; z+=mCornerK*(r-z); r-=mShelfG[(size_t)i]*(r-z);   // in-loop high-shelf HF damping
+                              mLf[(size_t)i]+=mLfK*(r-mLf[(size_t)i]); r-=mLfDamp*mLf[(size_t)i]; } // LF damping -> hall arch
+                else { auto&z=mDamp[(size_t)i]; z+=mFreezeK*(r-z); r=z; } // freeze: gentle damping -> stable infinite-ish sustain
+                o[(size_t)i]=r;
+            }
+            float wetL=0,wetR=0; for(int i=0;i<kNumLines;++i){ wetL+=mSignL[i]*o[(size_t)i]; wetR+=mSignR[i]*o[(size_t)i]; }
+            const float early=mEarly*x;
+            float oL=invsq*wetL+early, oR=invsq*wetR+early;
+            mLcL+=mLcK*(oL-mLcL); oL-=mLcL; mLcR+=mLcK*(oR-mLcR); oR-=mLcR; // low-cut
+            // presence peak (per channel, RBJ biquad DF1)
+            { float y=pb0*oL+pb1*mPzL[0]+pb2*mPzL[1]-pa1*mPzL[2]-pa2*mPzL[3]; mPzL[1]=mPzL[0];mPzL[0]=oL;mPzL[3]=mPzL[2];mPzL[2]=y; oL=y; }
+            { float y=pb0*oR+pb1*mPzR[0]+pb2*mPzR[1]-pa1*mPzR[2]-pa2*mPzR[3]; mPzR[1]=mPzR[0];mPzR[0]=oR;mPzR[3]=mPzR[2];mPzR[2]=y; oR=y; }
+            // bass-mono: high-pass the side so deep lows collapse to centre (real-hall diffuse-field signature)
+            if(stereo){ float mid=0.5f*(oL+oR),sd=0.5f*(oL-oR); mSideHp+=mSideHpK*(sd-mSideHp); float sh=sd-mSideHp; oL=mid+sh; oR=mid-sh; }
+            left[s]=mOutGain*oL; if(stereo) right[s]=mOutGain*oR;
+            std::array<float,kNumLines> fb;
+            for(int i=0;i<kNumLines;++i){
+                float v=(mFreeze?1.0f:mGain[(size_t)i])*o[(size_t)i];
+                v=allpassInt(mDisp[(size_t)i],mDispLen[(size_t)i],kDispG*mDispScale,v);    // in-loop dispersion (silky density)
+                v=allpassInt(mDisp2[(size_t)i],mDispLen2[(size_t)i],kDispG2*mDispScale,v);
+                fb[(size_t)i]=v;
+            }
+            fwhtN(fb.data());
+            const float injIn=0.5f*x;
+            for(int i=0;i<kNumLines;++i) mLine[(size_t)i].write(invsq*fb[(size_t)i]+(float)mInj[i]*injIn);
+            mLfoA.advance(); mLfoB.advance();
+        }
+        for(auto&z:mDamp)flush(z); for(auto&z:mLf)flush(z); flush(mBw1); flush(mBw2);
+    }
+private:
+    static void fwhtN(float*a){ for(int len=1;len<kNumLines;len<<=1) for(int i=0;i<kNumLines;i+=len<<1) for(int j=i;j<i+len;++j){const float x=a[j],y=a[j+len];a[j]=x+y;a[j+len]=x-y;} }
+    static void hadamardRow(int row,int*out){ for(int i=0;i<kNumLines;++i){int b=0,m=row&i;while(m){b^=1;m&=m-1;}out[i]=b?-1:1;} }
+    void updateGeometry(){
+        using namespace reverb_detail;
+        for(int i=0;i<kNumLines;++i){
+            int len=(int)std::round(kLineMs[(size_t)i]*(double)mSize*0.001*mFs); len|=1; mLen[(size_t)i]=std::max(3,len);
+            mDispLen[(size_t)i]=std::max(1,(int)std::round(kDispMs[(size_t)i]*0.001*mFs));
+            mDispLen2[(size_t)i]=std::max(1,(int)std::round(kDispMs2[(size_t)i]*0.001*mFs));
+            const int loopLen=mLen[(size_t)i]+mDispLen[(size_t)i]+mDispLen2[(size_t)i]; mLoopLen[(size_t)i]=loopLen;
+            mGain[(size_t)i]=(float)std::pow(10.0,-3.0*(double)loopLen/((double)mT60*mFs));
+            const double hfT=std::clamp(0.7+((double)mDampHz-2000.0)/10000.0*2.0,0.7,7.0); // Tone -> HF damping (warm<->bright)
+            { const double t60HF=std::min(hfT,(double)mT60);
+              const double rHF=std::pow(10.0,-3.0*(double)loopLen*(1.0/t60HF-1.0/(double)mT60)/mFs);
+              mShelfG[(size_t)i]=(float)std::clamp(1.0-rHF,0.0,0.985); } // high-shelf HF attenuation per pass (warm tail = lush)
+        }
+        for(size_t a=0;a<mDiff.size();++a) mDiffLen[a]=std::max(2,(int)std::round(kDiffMs[a]*(double)mIDiff*(double)mSize*0.001*mFs));
+        mDampOn=true; mCornerK=reverb_detail::onePole(1800.0,mFs); // shelf corner
+        const double drv=std::clamp((double)mDampHz*(double)mDrvMul+2500.0,4000.0,13000.0); mDrvK=reverb_detail::onePole(drv,mFs);
+        mLfK=reverb_detail::onePole(130.0,mFs); mLcK=reverb_detail::onePole(80.0,mFs); mOutGain=1.0f;
+        mSideHpK=reverb_detail::onePole(250.0,mFs); mFreezeK=reverb_detail::onePole(20000.0,mFs); // bass-mono corner; freeze damping
+        { const double f=2700.0,q=0.8,g=3.0; // +3dB presence voicing
+          const double A=std::pow(10.0,g/40.0),w=2*reverb_detail::kPi*f/mFs,al=std::sin(w)/(2*q),c=std::cos(w),a0=1+al/A;
+          pb0=(float)((1+al*A)/a0);pb1=(float)((-2*c)/a0);pb2=(float)((1-al*A)/a0);pa1=(float)((-2*c)/a0);pa2=(float)((1-al/A)/a0); }
+    }
+    double mFs=48000.0;
+    std::array<FracDelayLine,kNumLines> mLine,mDisp,mDisp2;
+    std::array<FracDelayLine,6> mDiff;
+    FracDelayLine mPredelay;
+    Lfo mLfoA,mLfoB;
+    std::array<int,kNumLines> mLen{},mDispLen{},mDispLen2{},mLoopLen{};
+    std::array<int,6> mDiffLen{};
+    std::array<float,kNumLines> mGain{},mDamp{},mLf{},mShelfG{};
+    float mCornerK=0;
+    int mSignL[kNumLines]{},mSignR[kNumLines]{},mInj[kNumLines]{};
+    float mBw1=0,mBw2=0,mLcL=0,mLcR=0;
+    // output voicing: 2.7kHz presence peak (per ch) + bass-mono (HP the side)
+    float mPzL[4]{},mPzR[4]{}; float pb0=1,pb1=0,pb2=0,pa1=0,pa2=0;
+    float mSideHp=0,mSideHpK=0,mFreezeK=0;
+    float mDrvK=1,mDampK=1,mLfK=0,mLcK=0,mLfDamp=0.30f,mEarly=0.6f,mDrvMul=0.6f,mIDiff=1.3f,mOutGain=1.0f;
+    float mSize=1.0f,mT60=2.0f,mDampHz=6000.0f,mPredelayMs=20.0f,mHfT60=1.25f,mModSamp=3.0f,mDispScale=1.0f,mDecayVar=0.0f;
+    bool mDampOn=true,mPrepared=false,mFreeze=false;
+};
+
+// ===========================================================================
 // ReverbBlock — character selector + shared guardrail mixer.
 // ===========================================================================
 class ReverbBlock : public StereoBlock
@@ -1274,6 +1417,7 @@ public:
     {
         mFdn.prepare(ctx.sampleRate);
         mSmallRoom.prepare(ctx.sampleRate);
+        mHall.prepare(ctx.sampleRate);
         mPlate.prepare(ctx.sampleRate);
         mPlateFdn.prepare(ctx.sampleRate);
         mSpring.prepare(ctx.sampleRate);
@@ -1290,7 +1434,7 @@ public:
 
     void reset() override
     {
-        mFdn.reset(); mPlate.reset(); mPlateFdn.reset(); mSpring.reset(); mShimmer.reset(); mSmallRoom.reset();
+        mFdn.reset(); mPlate.reset(); mPlateFdn.reset(); mSpring.reset(); mShimmer.reset(); mSmallRoom.reset(); mHall.reset();
         mMixer.reset();
         mMixer.snapMix(mPrepared ? effMix() : 0.0f);
     }
@@ -1315,8 +1459,8 @@ public:
     void setPitch(int p) { mPitch = std::clamp(p, 0, 2); if (mPrepared) pushParams(); }
     void setFreeze(bool f) { mFreeze = f && freezeExposed(mType); if (mPrepared) pushParams(); } // Freeze is gated to Hall/Shimmer/Bloom; inert on other characters even if the param/MIDI is on
 
-    int lineLengthSamples(int i) const { return mFdn.lineLengthSamples(i); }
-    float lineGain(int i) const { return mFdn.lineGain(i); }
+    int lineLengthSamples(int i) const { return mType == kHall ? mHall.lineLengthSamples(i) : mFdn.lineLengthSamples(i); }
+    float lineGain(int i) const { return mType == kHall ? mHall.lineGain(i) : mFdn.lineGain(i); }
 
     void process(float *left, float *right, int numSamples) override
     {
@@ -1336,6 +1480,7 @@ public:
         case kSpring: mSpring.process(left, right, numSamples); break;
         case kShimmer: mShimmer.process(left, right, numSamples); break;
         case kRoom: mSmallRoom.process(left, right, numSamples); break;
+        case kHall: mHall.process(left, right, numSamples); break; // dedicated dispersion-FDN hall
         default: mFdn.process(left, right, numSamples); break;
         }
 
@@ -1361,6 +1506,7 @@ private:
         case kSpring: mSpring.reset(); break;
         case kShimmer: mShimmer.reset(); break;
         case kRoom: mSmallRoom.reset(); break;
+        case kHall: mHall.reset(); break;
         default: mFdn.reset(); break;
         }
     }
@@ -1422,7 +1568,7 @@ private:
     {
         switch (t) {
         case kRoom:     return 0.88f;
-        case kHall:     return 2.37f;
+        case kHall:     return 1.49f; // dispersion-FDN hall (re-measured for the new engine)
         case kPlate:    return 1.39f;
         case kSpring:   return 0.138f;  // Spring intrinsically ~+20dB hot -> big cut
         case kShimmer:  return 1.82f;
@@ -1473,7 +1619,13 @@ private:
             mSmallRoom.setSize(mSize); mSmallRoom.setPredelayMs(mPredelayMs);
             mSmallRoom.setModDepth(mMod); mSmallRoom.setFreeze(mFreeze);
             break;
-        default: // FDN family
+        case kHall: // dedicated dispersion-FDN concert hall (lush, voiced to real-hall metrics)
+            mHall.setDecaySeconds(effT60()); mHall.setDampHz(mDampHz);
+            mHall.setSize(mSize); mHall.setModDepth(mMod);
+            mHall.setPredelayMs(10.0f + (mSize - kMinSize) * 60.0f); // Hall folds predelay into Size
+            mHall.setFreeze(mFreeze);
+            break;
+        default: // FDN family (Ambience, Bloom)
         {
             float size, mod, pre, diff;
             switch (mType)
@@ -1481,7 +1633,6 @@ private:
             case kAmbience: size = 0.45f; mod = 0.25f; pre = 0.0f;  diff = 0.78f; break;
             // Bloom hardwires a long predelay; Hall folds predelay into Size.
             case kBloom:    size = 1.45f; mod = std::max(0.45f, mMod); pre = mPredelayMs; diff = 0.60f; break;
-            case kHall:
             default:        size = mSize; mod = mMod;  pre = 10.0f + (mSize - kMinSize) * 60.0f; diff = 0.65f; break;
             }
             mFdn.setSize(size); mFdn.setModDepth(mod); mFdn.setPredelayMs(pre);
@@ -1494,6 +1645,7 @@ private:
 
     FdnReverb mFdn;
     SmallRoomFdn mSmallRoom;
+    HallReverb mHall;       // dedicated dispersion-FDN hall -> kHall
     PlateReverb mPlate;       // old Dattorro plate (kept for reference/A-B; no longer routed)
     PlateFdn mPlateFdn;       // v2 FDN plate -> kPlate
     SpringReverb mSpring;
