@@ -9,6 +9,7 @@
 // target curve) scaled by m_i:  loopLoss_dB(f) = -60 * m_i / (SR * T60(f)).
 // We realise that shape with a broadband gain (sets DC/bloom decay) followed by
 // a gentle cascade of RBJ high-shelf + peak biquads carving the rising HF loss.
+#define _USE_MATH_DEFINES   // MSVC needs this for M_PI (no-op on g++/clang)
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>

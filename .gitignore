@@ -1,6 +1,22 @@
 build/
 build-*/
 *.log
-plate_proto/ir/ 
-plate_proto/plate_rebuild_demos_v*/ 
-plate_proto/*.f32 
+plate_proto/ir/
+plate_proto/plate_rebuild_demos_v*/
+plate_proto/*.f32
+
+# python / compiled / binary artifacts (never commit)
+__pycache__/
+*.pyc
+*.exe
+*.obj
+*.npz
+
+# reverb-capture / optimizer dev artifacts (kept local)
+plate_proto/bx20.wav
+plate_proto/joint_*.json
+plate_proto/jc_*.txt
+plate_proto/py
+
+# spring dev + research demos/harness (kept local, like the old spring_dev)
+spring/
