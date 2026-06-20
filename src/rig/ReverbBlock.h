@@ -1022,10 +1022,15 @@ public:
                 wL *= mSwell; wR *= mSwell;
             }
 
-            const float g = mMixZ;
-            left[n] = (1.0f - g) * dryL[n] + g * wL;
+            // Equal-power crossfade: the wet is decorrelated from the dry, so a
+            // linear blend dips ~3 dB mid-sweep; sqrt gains keep perceived loudness
+            // flat across the knob. g==0 -> exactly dry (mix=0 stays bit-exact).
+            const float g = std::clamp(mMixZ, 0.0f, 1.0f);
+            const float gWet = std::sqrt(g);
+            const float gDry = std::sqrt(1.0f - g);
+            left[n] = gDry * dryL[n] + gWet * wL;
             if (stereo)
-                right[n] = (1.0f - g) * dryR[n] + g * wR;
+                right[n] = gDry * dryR[n] + gWet * wR;
         }
         reverb_detail::flush(mHpL); reverb_detail::flush(mHpR); reverb_detail::flush(mDuckEnv);
     }
@@ -1409,20 +1414,21 @@ private:
     {
         return std::clamp(std::sqrt(2.0f / std::max(0.2f, t60)), 0.8f, 1.25f);
     }
-    // per-character wet-LEVEL match (measured wet RMS vs Plate): the engines output very
-    // different intrinsic levels (Spring was ~+20dB, Hall ~-5dB), so equalise them so the
-    // Mix knob means the same loudness on every character. Verified to ~±0.2dB across types.
+    // per-character wet-LEVEL match, ANCHORED TO THE DRY (measured 100%-wet RMS vs the
+    // dry guitar at default decay): every character hits ~the dry guitar's loudness at
+    // 100% wet, so with the equal-power crossfade the Mix knob is a true balance that
+    // sounds equally loud on every character and doesn't jump level as you sweep it.
     static float levelTrim(Type t)
     {
         switch (t) {
-        case kRoom:     return 0.80f;
-        case kHall:     return 1.69f;
-        case kPlate:    return 1.00f;   // reference
-        case kSpring:   return 0.103f;  // Spring was ~+20dB hot -> big cut
-        case kShimmer:  return 1.02f;
-        case kAmbience: return 0.85f;
-        case kBloom:    return 1.40f;
-        default:        return 1.00f;
+        case kRoom:     return 0.88f;
+        case kHall:     return 2.37f;
+        case kPlate:    return 1.39f;
+        case kSpring:   return 0.138f;  // Spring intrinsically ~+20dB hot -> big cut
+        case kShimmer:  return 1.82f;
+        case kAmbience: return 1.81f;
+        case kBloom:    return 3.10f;
+        default:        return 1.39f;
         }
     }
     float swellRate() const
