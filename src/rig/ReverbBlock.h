@@ -1195,6 +1195,10 @@ public:
         for(int i=0;i<kNumLines;++i){ mDisp[(size_t)i].prepare((int)std::ceil(kDispMs[(size_t)i]*0.001*fs)+8);
             mDisp2[(size_t)i].prepare((int)std::ceil(kDispMs2[(size_t)i]*0.001*fs)+8); }
         mPredelay.prepare((int)std::ceil(0.2*fs)+8);
+        mErApL.prepare((int)std::ceil(7.3*0.001*fs)+8); mErApLenL=(int)std::round(7.3*0.001*fs);
+        mErApR.prepare((int)std::ceil(11.9*0.001*fs)+8); mErApLenR=(int)std::round(11.9*0.001*fs);
+        mErApL2.prepare((int)std::ceil(3.1*0.001*fs)+8); mErApLenL2=(int)std::round(3.1*0.001*fs);
+        mErApR2.prepare((int)std::ceil(4.7*0.001*fs)+8); mErApLenR2=(int)std::round(4.7*0.001*fs);
         mLfoA.prepare(fs); mLfoA.setRateHz(0.43f); mLfoB.prepare(fs); mLfoB.setRateHz(0.67f);
         hadamardRow(1,mSignL); hadamardRow(2,mSignR); hadamardRow(13,mInj);
         updateGeometry(); reset(); mPrepared=true;
@@ -1202,6 +1206,7 @@ public:
     void reset(){
         for(auto&l:mLine)l.reset(); for(auto&d:mDiff)d.reset(); for(auto&d:mDisp)d.reset(); for(auto&d:mDisp2)d.reset();
         mPredelay.reset(); std::fill(mDamp.begin(),mDamp.end(),0.0f); std::fill(mLf.begin(),mLf.end(),0.0f);
+        mErApL.reset(); mErApR.reset(); mErApL2.reset(); mErApR2.reset();
         mBw1=mBw2=0; mLcL=mLcR=0; mLfoA.reset(); mLfoB.reset(); mSideHp=0; for(auto&v:mPzL)v=0; for(auto&v:mPzR)v=0;
     }
     void setSize(float s){ s=std::clamp(s,kMinSize,kMaxSize); if(s!=mSize){mSize=s; if(mPrepared)updateGeometry();} }
@@ -1238,8 +1243,9 @@ public:
                 o[(size_t)i]=r;
             }
             float wetL=0,wetR=0; for(int i=0;i<kNumLines;++i){ wetL+=mSignL[i]*o[(size_t)i]; wetR+=mSignR[i]*o[(size_t)i]; }
-            const float early=mEarly*x;
-            float oL=invsq*wetL+early, oR=invsq*wetR+early;
+            float eL=allpassInt(mErApL,mErApLenL,0.6f,x), eR=allpassInt(mErApR,mErApLenR,0.6f,x);
+            eL=allpassInt(mErApL2,mErApLenL2,0.6f,eL); eR=allpassInt(mErApR2,mErApLenR2,0.6f,eR); // 2-stage decorrelation -> wide early field (matches real-hall stereo)
+            float oL=invsq*wetL+mEarly*eL, oR=invsq*wetR+mEarly*eR;
             mLcL+=mLcK*(oL-mLcL); oL-=mLcL; mLcR+=mLcK*(oR-mLcR); oR-=mLcR; // low-cut
             // presence peak (per channel, RBJ biquad DF1)
             { float y=pb0*oL+pb1*mPzL[0]+pb2*mPzL[1]-pa1*mPzL[2]-pa2*mPzL[3]; mPzL[1]=mPzL[0];mPzL[0]=oL;mPzL[3]=mPzL[2];mPzL[2]=y; oL=y; }
@@ -1279,17 +1285,18 @@ private:
         }
         for(size_t a=0;a<mDiff.size();++a) mDiffLen[a]=std::max(2,(int)std::round(kDiffMs[a]*(double)mIDiff*(double)mSize*0.001*mFs));
         mDampOn=true; mCornerK=reverb_detail::onePole(1800.0,mFs); // shelf corner
-        const double drv=std::clamp((double)mDampHz*(double)mDrvMul+2500.0,4000.0,13000.0); mDrvK=reverb_detail::onePole(drv,mFs);
-        mLfK=reverb_detail::onePole(130.0,mFs); mLcK=reverb_detail::onePole(80.0,mFs); mOutGain=1.0f;
-        mSideHpK=reverb_detail::onePole(250.0,mFs); mFreezeK=reverb_detail::onePole(20000.0,mFs); // bass-mono corner; freeze damping
-        { const double f=2700.0,q=0.8,g=3.0; // +3dB presence voicing
+        const double drv=std::clamp((double)mDampHz*(double)mDrvMul+1800.0,3000.0,13000.0); mDrvK=reverb_detail::onePole(drv,mFs);
+        mLfK=reverb_detail::onePole(130.0,mFs); mLcK=reverb_detail::onePole(55.0,mFs); mOutGain=1.0f;
+        mSideHpK=reverb_detail::onePole(120.0,mFs); mFreezeK=reverb_detail::onePole(20000.0,mFs); // bass-mono corner (mono lows only); freeze damping
+        { const double f=2700.0,q=0.8,g=1.5; // +1.5dB presence voicing (articulation, not bright)
           const double A=std::pow(10.0,g/40.0),w=2*reverb_detail::kPi*f/mFs,al=std::sin(w)/(2*q),c=std::cos(w),a0=1+al/A;
           pb0=(float)((1+al*A)/a0);pb1=(float)((-2*c)/a0);pb2=(float)((1-al*A)/a0);pa1=(float)((-2*c)/a0);pa2=(float)((1-al/A)/a0); }
     }
     double mFs=48000.0;
     std::array<FracDelayLine,kNumLines> mLine,mDisp,mDisp2;
     std::array<FracDelayLine,6> mDiff;
-    FracDelayLine mPredelay;
+    FracDelayLine mPredelay, mErApL, mErApR, mErApL2, mErApR2;
+    int mErApLenL=0, mErApLenR=0, mErApLenL2=0, mErApLenR2=0;
     Lfo mLfoA,mLfoB;
     std::array<int,kNumLines> mLen{},mDispLen{},mDispLen2{},mLoopLen{};
     std::array<int,6> mDiffLen{};
@@ -1300,7 +1307,7 @@ private:
     // output voicing: 2.7kHz presence peak (per ch) + bass-mono (HP the side)
     float mPzL[4]{},mPzR[4]{}; float pb0=1,pb1=0,pb2=0,pa1=0,pa2=0;
     float mSideHp=0,mSideHpK=0,mFreezeK=0;
-    float mDrvK=1,mDampK=1,mLfK=0,mLcK=0,mLfDamp=0.30f,mEarly=0.6f,mDrvMul=0.6f,mIDiff=1.3f,mOutGain=1.0f;
+    float mDrvK=1,mDampK=1,mLfK=0,mLcK=0,mLfDamp=0.12f,mEarly=0.6f,mDrvMul=0.45f,mIDiff=1.3f,mOutGain=1.0f;
     float mSize=1.0f,mT60=2.0f,mDampHz=6000.0f,mPredelayMs=20.0f,mHfT60=1.25f,mModSamp=3.0f,mDispScale=1.0f,mDecayVar=0.0f;
     bool mDampOn=true,mPrepared=false,mFreeze=false;
 };
@@ -1382,7 +1389,7 @@ public:
     {
         switch (t) {
         case kRoom:     return {600.0f, 3500.0f}; // Tone = input darkening (warm small room)
-        case kHall:     return {2000.0f, 12000.0f};
+        case kHall:     return {2000.0f, 7000.0f}; // warm default (30%% knob = 3500 Hz) - the voiced lush hall
         case kPlate:    return {1500.0f, 14000.0f}; // voiced dark<->bright span
         case kSpring:   return {1500.0f,  8000.0f};
         case kShimmer:  return {3000.0f, 16000.0f};
@@ -1568,7 +1575,7 @@ private:
     {
         switch (t) {
         case kRoom:     return 0.88f;
-        case kHall:     return 1.49f; // dispersion-FDN hall (re-measured for the new engine)
+        case kHall:     return 1.62f; // dispersion-FDN hall (re-measured at default Tone 3500, balanced wet/dry)
         case kPlate:    return 1.39f;
         case kSpring:   return 0.138f;  // Spring intrinsically ~+20dB hot -> big cut
         case kShimmer:  return 1.82f;
