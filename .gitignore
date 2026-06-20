@@ -3,6 +3,10 @@ build-*/
 *.log
 plate_proto/ir/
 plate_proto/plate_rebuild_demos_v*/
+
+# reverb voicing scratch (reference IRs, demos, analyzer) — local only, don't ship
+hall_ref/
+hall_v9/
 plate_proto/*.f32
 
 # python / compiled / binary artifacts (never commit)
