@@ -504,6 +504,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         }
     }
 
+    // Spring "Boing" = dispersion / sproing amount (0..1). Spring-only in the UI
+    // via ReverbBlock::boingExposed; a touch is baked in by default (0.30) so
+    // Spring sproings out of the box. Appended last for automation-index stability.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("revBoing", 1), "Reverb Boing",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.20f, pct()));
+
     return {params.begin(), params.end()};
 }
 
@@ -931,6 +938,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.reverb.setMix(apvts.getRawParameterValue("revMix")->load());
     mChain.reverb.setShimmer(apvts.getRawParameterValue("revShimmer")->load());
     mChain.reverb.setTension(apvts.getRawParameterValue("revTension")->load());
+    mChain.reverb.setBoing(apvts.getRawParameterValue("revBoing")->load());
     mChain.reverb.setWidth(apvts.getRawParameterValue("revWidth")->load());
     mChain.reverb.setSwell(apvts.getRawParameterValue("revSwell")->load());
     mChain.reverb.setPitch((int)apvts.getRawParameterValue("revPitch")->load());

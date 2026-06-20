@@ -2344,6 +2344,7 @@ public:
         mMod = std::make_unique<LabeledKnob>(apvts, juce::String(RB0::paramId("Mod", RB0::kHall)), "Mod");
         mShimmer = std::make_unique<LabeledKnob>(apvts, "revShimmer", "Shimmer");
         mTension = std::make_unique<LabeledKnob>(apvts, "revTension", "Tension");
+        mBoing = std::make_unique<LabeledKnob>(apvts, "revBoing", "Boing");
         mSwell = std::make_unique<LabeledKnob>(apvts, "revSwell", "Swell");
         mWidth = std::make_unique<LabeledKnob>(apvts, "revWidth", "Width");
         mMix = std::make_unique<LabeledKnob>(apvts, "revMix", "Mix");
@@ -2358,6 +2359,7 @@ public:
         addChildComponent(*mMod);
         addChildComponent(*mShimmer);
         addChildComponent(*mTension);
+        addChildComponent(*mBoing);
         addChildComponent(*mSwell);
 
         refresh();
@@ -2381,6 +2383,7 @@ public:
         mMod->setVisible(RB::modExposed(t));
         mShimmer->setVisible(RB::shimmerExposed(t));
         mTension->setVisible(RB::tensionExposed(t));
+        mBoing->setVisible(RB::boingExposed(t));
         mSwell->setVisible(RB::swellExposed(t));
         mPitch.setVisible(RB::pitchExposed(t));
         mFreeze.setVisible(RB::freezeExposed(t));
@@ -2422,6 +2425,7 @@ public:
                                    (juce::Component *)mPredelay.get(), (juce::Component *)mInputFilter.get(),
                                    (juce::Component *)mTone.get(),
                                    (juce::Component *)mMod.get(), (juce::Component *)mTension.get(),
+                                   (juce::Component *)mBoing.get(),
                                    (juce::Component *)mShimmer.get(), (juce::Component *)mSwell.get(),
                                    (juce::Component *)mWidth.get(), (juce::Component *)mMix.get()})
             if (k->isVisible())
@@ -2445,7 +2449,7 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt, mPitchAtt;
     juce::ToggleButton mFreeze;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mFreezeAtt;
-    std::unique_ptr<LabeledKnob> mDecay, mSize, mPredelay, mTone, mMod, mShimmer, mTension, mSwell, mWidth, mMix, mInputFilter;
+    std::unique_ptr<LabeledKnob> mDecay, mSize, mPredelay, mTone, mMod, mShimmer, mTension, mBoing, mSwell, mWidth, mMix, mInputFilter;
 };
 
 //==============================================================================

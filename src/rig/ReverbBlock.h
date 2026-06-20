@@ -566,6 +566,58 @@ private:
 };
 
 // ===========================================================================
+// DispersionChain — the spring "boing" / sproing. A cascade of first-order
+// STRETCHED allpasses A(z^K) applied to the INPUT, OUTSIDE the FDN feedback loop
+// (dispersion INSIDE the loop always rings metallic — tested repeatedly). Each
+// stage's K-sample internal delay makes the group delay frequency-dependent, so
+// a transient smears into the descending chirp the ear reads as a spring. K is
+// derived from a TIME constant (not a fixed sample count) so the chirp tone is
+// identical at 44.1 / 48 / 96 kHz. The number of ACTIVE stages = boing amount,
+// so 0 stages == bypass == the exact pre-boing (studio spring) signal. Ported faithfully
+// from spring_tuner.html (APk: K=4 @48 kHz, coef 0.62, 120-stage cascade).
+// ===========================================================================
+class DispersionChain
+{
+public:
+    static constexpr int kMaxStages = 200;  // full cascade length (longer = more developed chirp train)
+    static constexpr int kMaxK      = 96;   // K-sample cap (>= stretchSec * 192 kHz)
+
+    void prepare(double fs, double stretchSec, float coef)
+    {
+        mK    = std::clamp((int)std::lround(stretchSec * fs), 1, kMaxK);
+        mCoef = coef;
+        reset();
+    }
+    void reset()
+    {
+        for (auto &s : mStage) { s.xb.fill(0.0f); s.yb.fill(0.0f); s.w = 0; }
+    }
+    // nStages = active cascade length (clamped 0..kMaxStages); 0 -> passthrough.
+    inline float process(float x, int nStages)
+    {
+        const int m = std::clamp(nStages, 0, kMaxStages);
+        const float a = mCoef;
+        const int k = mK;
+        for (int i = 0; i < m; ++i)
+        {
+            Stage &s = mStage[(size_t)i];
+            const float xk = s.xb[(size_t)s.w], yk = s.yb[(size_t)s.w];
+            const float y = a * x + xk - a * yk;   // A(z^K) = (a + z^-K)/(1 + a z^-K)
+            s.xb[(size_t)s.w] = x;  s.yb[(size_t)s.w] = y;
+            if (++s.w >= k) s.w = 0;
+            x = y;
+        }
+        return x;
+    }
+
+private:
+    struct Stage { std::array<float, kMaxK> xb{}, yb{}; int w = 0; };
+    std::array<Stage, kMaxStages> mStage{};
+    int   mK    = 4;
+    float mCoef = 0.62f;
+};
+
+// ===========================================================================
 // SpringReverb — studio spring-voiced studio spring (FDN realization, 2026-06-19 rework).
 // Matched to the studio spring reference IRs via the offline optimizer + ear
 // voicing ("41_tone-fix"), then ported faithfully to real time: a single dense
@@ -597,6 +649,8 @@ public:
     static constexpr double kModMs      = 0.4;     // subtle spring sag
     static constexpr double kDecayComp  = 1.05;    // gain T60 vs knob (offsets feedback damping)
     static constexpr double kDarkScale  = 1.10;    // input dark cutoff vs Tone knob
+    static constexpr double kDispStretchSec = 16.0 / 48000.0; // K=16 @48k (333us) — dense in-band chirp streaks, SR-independent
+    static constexpr float  kDispCoef       = 0.62f;          // chirp depth (tuner apa default)
 
     void prepare(double fs)
     {
@@ -614,6 +668,7 @@ public:
         nrm = std::sqrt(nrm); for (int i = 0; i < kLines; ++i) mU[(size_t)i] = uv[i]/nrm;
         designFilters();
         updateGeometry();
+        mDisp.prepare(mFs, kDispStretchSec, kDispCoef);
         reset();
         mPrepared = true;
     }
@@ -626,12 +681,14 @@ public:
         std::fill(mDamp.begin(), mDamp.end(), 0.0f);
         for (auto &z : mPresL) z = 0.0f; for (auto &z : mPresR) z = 0.0f;
         for (auto &z : mCutL)  z = 0.0f; for (auto &z : mCutR)  z = 0.0f;
+        mDisp.reset();
         mLfo.reset();
     }
 
     void setDecaySeconds(float t60) { mT60 = std::max(0.1f, t60); mDirty = true; }
     void setDampHz(float hz) { mDampHz = std::clamp(hz, 600.0f, 16000.0f); mDirty = true; } // Tone = brightness
     void setTension(float t) { mTension = std::clamp(t, 0.0f, 1.0f); }                       // 0 = loose (max bloom/sag), 1 = tight (no bloom)
+    void setBoing(float b) { mBoing = std::clamp(b, 0.0f, 1.0f); }                            // 0 = none .. 1 = full sproing (input dispersion)
     void setFreeze(bool f) { mFreeze = f; }
 
     void process(float *left, float *right, int numSamples)
@@ -641,6 +698,7 @@ public:
         const bool stereo = (left != right);
         const float inGain = mFreeze ? 0.0f : 1.0f;
         const float bloomMix = 0.72f * (1.0f - mTension);   // Tension UP = tighter spring = less bloom
+        const int dispStages = (int)std::lround(mBoing * (float)DispersionChain::kMaxStages); // boing -> cascade depth
         const float modS = (float)(kModMs * 0.001 * mFs);
         const int bloomLen = std::max(1, (int)std::round(kBloomDelMs * 0.001 * mFs));
         for (int n = 0; n < numSamples; ++n)
@@ -650,6 +708,7 @@ public:
             float x = 0.5f * (dryL + dryR);
             mInHp += mHpK * (x - mInHp); x = x - mInHp;          // one-pole high-pass (low-cut)
             mInLp += mDarkK * (x - mInLp); x = mInLp;            // one-pole low-pass (Tone/dark)
+            x = mDisp.process(x, dispStages);                   // input-side dispersion = the boing (outside the FDN loop)
             mLowLp += mBloomK * (x - mLowLp);                    // split at bloomFc
             const float lo = mLowLp, hi = x - lo;
             mBloomDelay.write(lo);
@@ -726,6 +785,7 @@ private:
     double mFs = 48000.0;
     std::array<FracDelayLine, kLines> mLine;
     FracDelayLine mBloomDelay, mDecL, mDecR;
+    DispersionChain mDisp;
     int mDecLLen=350, mDecRLen=629;
     Lfo mLfo;
     std::array<int, kLines> mLen{};
@@ -736,7 +796,7 @@ private:
     std::array<float,4> mPresL{}, mPresR{}, mCutL{}, mCutR{};
     float mInHp=0, mInLp=0, mLowLp=0;
     float mHpK=0.01f, mBloomK=0.05f, mDampK=0.3f, mDarkK=0.4f;
-    float mT60=3.0f, mDampHz=3871.0f, mTension=0.5f, mOutGain=2.0f;
+    float mT60=3.0f, mDampHz=3871.0f, mTension=0.5f, mBoing=0.20f, mOutGain=2.0f;
     bool mPrepared=false, mDirty=true, mFreeze=false;
 };
 
@@ -1138,6 +1198,7 @@ public:
     static bool shimmerExposed(Type t) { return t == kShimmer; }
     static bool pitchExposed(Type t) { return t == kShimmer; }
     static bool tensionExposed(Type t) { return t == kSpring; }
+    static bool boingExposed(Type t) { return t == kSpring; } // dispersion/sproing amount, Spring only
     static bool swellExposed(Type t) { return t == kBloom; }
     static bool inputFilterExposed(Type t) { return t == kPlate; } // vintage plate/studio-style wet low-cut on the plate amp
     static bool freezeExposed(Type t) { return t == kHall || t == kShimmer || t == kBloom; } // infinite-sustain pad only makes sense on the lush/evolving characters
@@ -1242,6 +1303,7 @@ public:
     void setMod(float d) { mMod = std::clamp(d, 0.0f, 1.0f); if (mPrepared) pushParams(); }
     void setShimmer(float s) { mShimmerAmt = std::clamp(s, 0.0f, 1.0f); if (mPrepared) pushParams(); }
     void setTension(float t) { mTension = std::clamp(t, 0.0f, 1.0f); if (mPrepared) pushParams(); }
+    void setBoing(float b) { mBoing = std::clamp(b, 0.0f, 1.0f); if (mPrepared) pushParams(); } // Spring dispersion/sproing
     void setWidth(float w) { mWidth = std::clamp(w, 0.0f, 1.0f); }
     void setInputFilterHz(float hz) { mInputFilterHz = std::clamp(hz, 20.0f, 400.0f); } // Plate Input Filter (wet low-cut corner)
     void setSwell(float s) { mSwell = std::clamp(s, 0.0f, 1.0f); }
@@ -1379,9 +1441,21 @@ private:
             mPlateFdn.setPredelayMs(mPredelayMs); mPlateFdn.setFreeze(mFreeze);
             break;
         case kSpring:
-            mSpring.setDecaySeconds(effT60()); mSpring.setDampHz(mDampHz);
-            mSpring.setTension(mTension); mSpring.setFreeze(mFreeze);
+        {
+            // Tension as a "tightness" macro, CENTERED at 50% (default sound unchanged):
+            // up = tighter (faster decay + brighter + less bloom), down = looser.
+            const float tt = (mTension - 0.5f) * 2.0f;                       // -1 (loose) .. +1 (tight)
+            mSpring.setDecaySeconds(effT60() * (1.0f - 0.20f * tt));         // +/-20% decay
+            mSpring.setDampHz(std::clamp(mDampHz * (1.0f + 0.45f * tt), 1500.0f, 12000.0f)); // brighter when tight
+            mSpring.setTension(mTension);                                   // bloom inversion (tight = less bloom)
+            // Boing = the dedicated knob PLUS extra dispersion from Tension's LOOSE end
+            // (a looser/longer spring sproings more; tightening removes it). At the
+            // default Tension (50%) the loose term is 0, so the Boing knob acts alone.
+            const float looseBoing = std::max(0.0f, -tt) * 0.30f;
+            mSpring.setBoing(std::clamp(mBoing + looseBoing, 0.0f, 1.0f));
+            mSpring.setFreeze(mFreeze);
             break;
+        }
         case kShimmer:
             mShimmer.setDecaySeconds(effT60()); mShimmer.setDampHz(mDampHz);
             mShimmer.setPredelayMs(30.0f); // hardwired (folded out of the UI)
@@ -1423,7 +1497,7 @@ private:
 
     Type mType = kHall;
     float mSize = 1.0f, mT60 = 2.0f, mDampHz = 6000.0f, mPredelayMs = 0.0f, mMix = 0.25f;
-    float mMod = 0.3f, mShimmerAmt = 0.5f, mTension = 0.5f, mWidth = 1.0f, mSwell = 0.4f;
+    float mMod = 0.3f, mShimmerAmt = 0.5f, mTension = 0.5f, mBoing = 0.20f, mWidth = 1.0f, mSwell = 0.4f;
     float mInputFilterHz = 95.0f; // Plate Input Filter corner (20-400 Hz); 95 = prior hardwired Plate low-cut
     int mPitch = 0;
     bool mFreeze = false, mPrepared = false;
