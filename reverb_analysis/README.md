@@ -12,9 +12,13 @@ engine. Don't over-chase metrics once the ear is happy.
 ## What's here
 - `reverb_battery.py` — the battery. Profiles our render (`.f32` stereo) vs a
   reference IR (`.wav` stereo) across the full metric set and saves graphs.
-- `platefdn_driver.cpp` — standalone, **no-JUCE** offline render of the committed
-  `PlateFdn` engine (verbatim copy of the engine + `FracDelayLine` + helpers from
-  `src/rig/ReverbBlock.h` / `Lfo.h`). Lets you render our plate without a DAW.
+- `render_character.cpp` — **the general offline renderer.** Compiles the real
+  `ReverbBlock` (with a tiny JUCE stub) and renders ANY character to a stereo `.f32`
+  IR, so it never drifts from the shipped engine:
+  `./render_character <room|hall|plate|spring|shimmer> in.f32 out.f32`
+  (env: `RV_T60`, `RV_DAMP`, `RV_SIZE`, `RV_PRE`, `RV_TENSION`, `RV_SHIMMER`, `RV_PITCH`).
+- `platefdn_driver.cpp` — legacy **no-JUCE**, plate-only renderer (verbatim v2 engine
+  copy). Lighter to build, but superseded by `render_character.cpp` for the plate.
 - `make_demos_template.py` — builds loudness-matched A/B guitar demos
   (reference-convolved vs our render), folder-per-version, identical filenames.
 - `wavutil.py` — numpy-only float/int WAV read/write (no scipy/soundfile needed).
@@ -45,12 +49,15 @@ python3 reverb_battery.py --ours wet.f32 --ref "ir/<your reference>.wav" --label
 Driver env knobs: `FDN_T60` (decay s), `FDN_DAMP` (tone Hz), `FDN_SIZE` (0.8–1.6),
 `FDN_PRE` (predelay ms), `FDN_NFRAMES` (extra tail frames).
 
-## Adapting to other engines (Spring / Hall / Room / Shimmer)
-The battery is engine-agnostic — it only needs an `.f32` render + a reference
-`.wav`. To profile a different character, make an analogous offline driver:
-copy that engine class + `FracDelayLine` + `reverb_detail` out of
-`src/rig/ReverbBlock.h` into a `*_driver.cpp` (same pattern as the plate one),
-render its impulse, then point `reverb_battery.py` at it.
+## Profiling another character (Spring / Hall / Room / Shimmer)
+No per-engine copy needed — use the general driver, which renders the live engine:
+```bash
+g++ -std=c++17 -O2 -I../src -Istub render_character.cpp -o render_character
+RV_T60=2.9 ./render_character spring impulse.f32 wet.f32
+python3 reverb_battery.py --ours wet.f32 --ref "ir/<reference>.wav" --label 2.9 --out .
+```
+Then log findings in `RESULTS_<character>.md` (same shape as `RESULTS_plate.md`).
+(The battery itself is engine-agnostic: it only needs an `.f32` render + a reference `.wav`.)
 
 ## Calibration gotcha learned on the plate
 A reference IR's filename decay label is often the **unit's decay control**, not

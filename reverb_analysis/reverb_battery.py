@@ -4,6 +4,22 @@
 #
 # usage: python3 reverb_battery.py --ours wet_plate_2.0.f32 \
 #          --ref "ir/<your reference>.wav" --label 2.0 --out ../../outputs
+#
+# READING THE VERDICT (full detail in METRICS.md / IR_MATCHING_PLAYBOOK.md):
+#   1. Decay-vs-frequency (T30/EDT per band) is THE defining trait. Match its
+#      SHAPE after aligning the 1 kHz point. A single damping pole gives ONE tilt
+#      shape and cannot make lows-ring-longest + keep HF air + match brightness
+#      at once -> use length-scaled MULTIBAND damping fit to the measured curve.
+#   2. modal depth = the lush-vs-digital discriminator; EDR/RT60 are BLIND to it.
+#      Too flat (low) = metallic/digital; fix with MORE in-loop HF damping
+#      (warmer = sparser distinct modes = lusher), NOT corrective output EQ.
+#   3. Match THROUGHOUT (per-band curves + the EDR surface), never whole-IR averages.
+#   4. A reference IR's filename decay label is the unit's KNOB, not measured RT60
+#      -- always measure (a "2.0s"-labelled plate measured ~2.9 s @1 kHz).
+#   5. Loudness-match BEFORE any A/B, and compare vs the IR CONVOLUTION of the same
+#      dry (a plate/spring IR is 100% wet -- there is no direct/dry path).
+#   6. Measure the band EDGES too (sub <80 Hz, air >10 k) as broadband integrals.
+#   7. Ears are the final judge: relax brittle asserts rather than contort the engine.
 import numpy as np, argparse, os
 from wavutil import read_wav
 
