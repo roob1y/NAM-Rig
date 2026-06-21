@@ -59,7 +59,13 @@ public:
 
     double latencySamples() const override
     {
-        return mEngine.isPrepared() ? mEngine.latencySamples(mRequestedFactor.load()) : 0.0;
+        // Only report engine latency when a model is actually loaded. With no
+        // model, process() is passthrough (buffer untouched, no SRC/oversampling
+        // runs), so the engine imposes ZERO delay — reporting its prepared SRC
+        // latency here would be a phantom (PDC reported but not imposed). Off-rate
+        // sessions correctly get the real SRC group delay back once a model loads.
+        return (mEngine.isPrepared() && mEngine.anyModelLoaded())
+                   ? mEngine.latencySamples(mRequestedFactor.load()) : 0.0;
     }
 
     // Model management / status — pass-throughs to the shared engine.
