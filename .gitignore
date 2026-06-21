@@ -20,3 +20,13 @@ plate_proto/py
 
 # spring dev + research demos/harness (kept local, like the old spring_dev)
 spring/
+
+# reverb_analysis toolkit: track the code + docs, ignore reference IRs, renders,
+# compiled drivers and the JUCE build stub (all local / regenerable)
+reverb_analysis/ir/
+reverb_analysis/*.f32
+reverb_analysis/stub/
+reverb_analysis/platefdn_driver
+reverb_analysis/render_character
+reverb_analysis/*.png
+reverb_analysis/demos/
