@@ -37,3 +37,19 @@ reverb_analysis/platefdn_driver
 reverb_analysis/render_character
 reverb_analysis/*.png
 reverb_analysis/demos/
+
+# --- repo tidy: local voicing scratch (kept on disk, never shipped) ---
+plate_*_demos/
+/outputs/
+/CHECKPOINT_*/
+
+# reverb_analysis: keep code (.py/.cpp) + docs (.md/.txt); ignore renders, demo
+# wavs, compiled drivers and frozen engine-snapshot headers (all local/regenerable)
+reverb_analysis/*.wav
+reverb_analysis/render_fit
+reverb_analysis/render_plate_plugin
+reverb_analysis/*.bak
+reverb_analysis/*.csv
+reverb_analysis/plate_proto_ReverbBlock_*.h
+plate_onset_release/*.wav
+plate_onset_release/*.f32

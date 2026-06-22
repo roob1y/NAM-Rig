@@ -1,0 +1,333 @@
+# Residual B locked geometry (2026-06-21) - seed 837575, mag 0.06, dispG=0.40, dispG2=0.40
+kLineMs = {6.16, 7.53, 9.0, 10.47, 12.16, 13.32, 14.71, 17.02, 18.7, 20.69, 22.45, 24.48, 26.47, 27.91, 28.63, 30.19, 32.19, 36.45, 35.57, 38.02, 40.61, 43.36, 45.47, 46.48, 51.68, 50.44, 51.93, 57.03, 55.21, 60.92, 65.38, 68.49};
+kDispG = 0.40
+kDispG2 = 0.40
+
+# STEP 2 voicing re-fit to the locked modes (2026-06-21):
+# mEReso1 (250 peak) gain 6.8 -> 5.5
+# mEReso2 (500 dip)  gain -3.8 -> -5.2
+# (mEReso3 125 unchanged at -2.2)
+# Result @anchor: C80 maxdev 1.03->0.70 (125/250 +0.01/-0.30), tonal unchanged, side/mid <=0.25
+#   except 125(+0.43), T30err 0.047, modal 6.9, EDT plateau still closed (2.55/2.62/2.59/2.51).
+
+# STEP 3 across-knob validation (2026-06-21): the decay-scaling/damping rebuild STILL HOLDS with the
+# new modal-pocket geometry. T30(all) per knob 0.5..4.5: 0.08/0.11/0.11/0.05/0.16/0.14/0.25/0.41/0.52/
+# 0.60 (vs shipped 0.08/0.09/0.09/0.05/0.17/0.13/0.20/0.44/0.58/0.55 - within noise, 3.5/4.0 better).
+# 180-8k(audible) 0.05-0.29. Centroid tracks ref at every knob (4.5: 3347 vs 3405). Knob match preserved.
+
+# STEP 4b — PARALLEL DIFFUSE HF TAIL (2026-06-21): new structure to add the non-exponential HF 'knee'
+# the real plate has (diagnosed via Schroeder shape: ref HF decays steep then bends to a long shallow
+# toe; ours was a straight exponential). 8-line mini-FDN, 2-pole high-pass input, orthonormal Hadamard
+# (stable, loop gain<1), low-level decorrelated sum. Env-tunable: HFT_LV/HFT_FB/HFT_HP/HFT_LP/HFT_PRE.
+# Baked conservative default: LV=0.22, FB=0.980, HP=5500(2-pole), LP=20000, predelay 6ms; lines (ms)
+# {7.3,9.7,11.9,13.1,15.7,17.3,19.9,23.3}. PROVEN: the knee FORMS (4k now tracks the reference knee
+# closely; 8k partially). Anchor held: T30err 0.039, EDT plateau 2.55/2.62/2.59/2.51, centroid 4540,
+# stable (peak 0.032). LIMIT: a single broadband high-passed tail has a FALLING spectrum (energy at
+# 2-4k); the reference's tail RISES (8-11k ring longest = the shimmer = Residual A). Pushing the tail
+# to reach 8-11k overshoots 2-4k + lifts T30. FULL HF match needs a RISING/multi-band tail (separate
+# 4k/8k/11k tail bands with increasing level) or an HF-emphasized tail decay = the next iteration.
+
+# STEP 4c — RISING HF SHIMMER (8-11k) attempt (2026-06-21): tried to make the parallel tail's spectrum
+# RISE (top rings longest) to match the reference's 8-11k late tail. Approaches tried + measured:
+#   (a) in-loop high-TILT (subtract LP component, 1- then 2-pole) -> top rings, lows die. RESULT: adds
+#       HF EARLY (centroid 4530->5030) but does NOT sustain a tail at 8-11k (8k stayed ~1.55 vs ref 2.39).
+#   (b) expand HF FDN 8->16 lines (more modal density). RESULT: no change at 8-11k (still 1.55).
+# DIAGNOSIS: sustaining a dense, LOW-LEVEL (-35dB), RISING shimmer that rings 2.5s at 8-11k needs
+# near-unity loop gain at the very top with a near-vertical transition to loss one octave below, at the
+# stability edge, WITHOUT brightening the early sound. A tilt/FDN-damping can't do that sharp a split.
+# = research-level sub-problem (dedicated dense rising-HF late-field / velvet-noise or short-HF-conv).
+# BANKED instead: the CONSERVATIVE 8-line LP-damped tail (LV0.22/FB0.98/HP5500/LP20000, tilt off) which
+# safely adds the 4-8k knee (4k late-tail 1.72->1.86) with T30err 0.039, cent 4540, stable. The 8-11k
+# rising shimmer (= Residual A) remains the one open item; tail level is an EARS-decide param (HFT_LV).
+
+# STEP 5 — LOW-BAND MONO TIGHTENING (2026-06-21): the modal-pocket geometry decorrelated the LOW modes,
+# making ours ~0.5dB wider in the lows than the real plate (125Hz side/mid -0.70 vs ref -1.14; real
+# plates have tight/mono lows). Added a bass-mono: low-pass the side signal (~140Hz) and collapse it.
+# Env: BASSMONO / BASSMONOHZ. Baked default BASSMONO=0.13, BASSMONOHZ=140 -> 125Hz side/mid -1.16 (ref
+# -1.14, matched), broadband side/mid +0.23->+0.18, corr -0.021 (healthy), mono -3.10dB. Decay/tonal/
+# plateau UNCHANGED (T30err 0.039, cent 4540, modal 6.70, EDT plateau 2.55/2.62/2.59/2.51). Not
+# artificially wide (corr near 0, not anti-phase); this just matches the plate's natural low-end width.
+
+# LOW/HIGH ENERGY-BALANCE CHECK (2026-06-21): confirmed the lows are NOT over-long. LOW band (100-700Hz)
+# Schroeder overlays the reference exactly. The "lows dominate" look on the EDR is purely the flip side
+# of the HF deficit: low-minus-high energy runs ~2-4dB above the reference in the 1.4-2.2s window because
+# the HIGHS are under-present there (the 6-12kHz shimmer shelf), not because the lows are too long.
+# => the SINGLE open item is the 6-12kHz rising shimmer shelf (research spike); everything else
+# (EDT plateau, 4-8k knee, low-end width, low decay) matches the real plate.
+
+# HF-SHELF FORENSICS (2026-06-21): tested whether the 6-12k shelf is a POST high-end boost (EQ/exciter)
+# vs genuine plate diffusion. VERDICT = genuine dense plate diffusion, NOT EQ:
+#  - late-tail 5-13kHz is a DENSE continuum (~hundreds of closely-spaced components), not a few discrete
+#    resonances -> not a resonant EQ/exciter emulatable with a handful of filters.
+#  - the 6-12k level relative to 1-2k is HIGHER late (-7.2dB) than early (-8.5dB) -> HF genuinely PERSISTS
+#    (slow HF decay = time-domain/physical), which a static high-shelf boost cannot produce.
+# => the top-end shimmer is real dense, slow-decaying plate diffusion. RESEARCH SPIKE correctly scoped:
+#    a DENSE slow-decaying HF late-field (velvet-noise / sparse-convolution / very-high-order diffusion),
+#    NOT a few resonators and NOT an FDN-damping tweak. This is THE one remaining open item.
+
+# ===== TOP-END DIFFUSION (the one remaining plate characteristic) — VELVET-NOISE BREAKTHROUGH 2026-06-21 =====
+# Forensics said it's a DENSE slow HF field (not EQ/resonators). Prototyped a VELVET-NOISE HF late-field
+# OFFLINE (added to the render) to prove the character before building real-time:
+#   velvet = sparse +-1 impulses (density ~3000/s), exp-decay envelope (t60~2.4s), band-passed 6-13k with a
+#   gentle -6dB/oct rolloff above ~8.5k, decorrelated L/R (2 seeds), added at low level (~1.6e-4 of unit-RMS).
+# RESULT: the dense slow HF SHELF FORMS at 8k & 11k (Schroeder bends at -35dB into a shallow shelf, EDR
+# top-right 6-12k fills out to ~2.5s) - which NO FDN approach (tilt, 16 lines) could do. T30 preserved
+# (8k ~1.78), centroid only mildly up (4793). THE CHARACTER IS ACHIEVABLE via velvet noise.
+# TUNING TODO: (a) velvet flattens into its own floor (-52..-58) instead of continuing to decay -> shorten
+#   t60/length or shape the envelope; (b) 11k slightly overshoots -> steeper velvet rolloff above 8k to
+#   balance the 6-12k shelf; (c) match level so 8k lands ~2.39.
+# REAL-TIME TODO: velvet is SPARSE (cheap) -> implement as a sparse-tap convolution / velvet-feedback HF
+#   late-field in the engine, fed by the decaying signal, summed at low level. This is the build for task #4.
+
+# INTRINSIC COUPLING EXPERIMENT (2026-06-21): tested the "weak/structured coupling + HF-retentive block"
+# critique (mode-coupling/scattering as the physical mechanism). Added a parameterized FDN coupling
+# (env COUPLING: 1.0=full Hadamard -> cross-block butterfly stages len>=8 scaled by gamma -> block-
+# diagonal; COUPLING=1 reproduces current build byte-exact) + an HF-retentive block (env HFBLOCK scales
+# mHs2 HF damping on lines 0-7). RESULT:
+#  - reducing coupling did NOT go metallic: modal depth HELD/improved (6.70 -> 6.87 at COUPLING 0.25) ->
+#    validates that block-structured coupling helps texture, not harms it.
+#  - BUT HF SUSTAIN gain is MARGINAL: best stable (COUPLING 0.25, HFBLOCK 0.1) -> 8k->-55 only 1.64->1.73,
+#    11k 1.59->1.70 (ref 2.39/2.50; velvet reached ~1.9-2.5). Pushing harder just brightens cent (4802)
+#    + lifts T30. The block stays lossy at the broadband rate, so an HF-retentive sub-block can't ring its
+#    TOP to 2.5s without over-blooming/destabilizing.
+# CONCLUSION: the physical critique is right about real plates + weaker coupling DOES help texture, but
+# our FDN can't cheaply realize the intrinsic HF energy SUSTAIN. For the dominant gap (the HF shelf) the
+# VELVET dense late-field is the effective mechanism. Possible synthesis: slight coupling-reduction for
+# texture + velvet for HF sustain. COUPLING/HFBLOCK left in proto (env, default 1.0/inert = banked build).
+
+# PARTIAL-COUPLING M(alpha) EXPERIMENT v2 (2026-06-21): ran the critique's EXACT controlled experiment -
+# orthonormal M(alpha): ALL butterfly stages scaled by alpha (env COUPLING; alpha=1 -> full Hadamard ==
+# current build byte-exact; alpha=0 -> identity/independent lines). Plus HF-retentive lines (HFEVERY/
+# HFBRIGHT or HFBLOCK lines 0-7). FINDINGS:
+#  - HYPOTHESIS VALIDATED: reducing alpha preserves lifetime contrast. Pure coupling cut: modal depth
+#    6.70 -> 7.12 (a=0.1), 6.97 (a=0.5) -> toward ref 7.42 (TEXTURE improves, NOT metallic by the metric,
+#    stable peak 0.061). With HF-retentive lines + a=0.1: HF SUSTAINS (8k 1.65->1.94, 11k ->1.90), modal
+#    7.37-7.48 (matches ref!). => the late shelf IS a heterogeneous-LIFETIME signature, and full Hadamard
+#    was averaging it away. Mechanism = lifetime distribution, NOT low->high replenishment (we REDUCED
+#    low->high coupling yet HF still sustained via the retentive lines).
+#  - COST (not free): reducing coupling RE-OPENS the whole banked match - everything was fit at full
+#    coupling. At a=0.5: EDT plateau FLATTENS (2.55/2.62/2.59/2.51 -> 2.43/2.47/2.46/2.45, loses the
+#    reference hump), C80 maxdev 0.70->1.13, T30err 0.039->0.066. So partial coupling = a multi-session
+#    REBUILD (re-fit geometry+voicing at the new alpha), not a bolt-on. And the knee tension (HF sustain
+#    vs T30/centroid lengthening) persists intrinsically.
+# STRATEGIC FORK for the top-end-diffusion characteristic:
+#  (A) INTRINSIC partial-coupling: physically faithful, ALSO fixes texture/modal-depth, but re-opens the
+#      entire match (re-fit at new alpha) + partial HF shelf + knee tension = big rebuild.
+#  (B) VELVET dense HF late-field: effective HF shelf, does NOT touch the banked match, but non-physical
+#      + doesn't fix texture.
+#  (C) SYNTHESIS: pick a modest alpha for the texture win, re-fit, THEN velvet/HF-tail for the shelf.
+# COUPLING/HFEVERY/HFBRIGHT/HFBLOCK all left in proto (env, default = banked build at alpha=1).
+
+# ===== INTRINSIC RE-FIT at alpha=0.25 (Robbie chose the physical route) - IN PROGRESS 2026-06-21 =====
+# Step 1 (re-close geometry at alpha=0.25): re-ran search_geom with COUPLING=0.25 (47 cands). BEST geometry:
+#   seed 976606, mag 0.06, dispG=0.62, dispG2=0.55 -> EDT plateau RE-CLOSED (edterr 0.025), modal 7.03
+#   (up from 6.70 at alpha=1 -> texture toward ref 7.42), cent 4540, T30err 0.055, corr -0.019, stable.
+#   (regen lines: BASE*(1+0.06*np.random.default_rng(976606).uniform(-1,1,32)); BASE = shipped 6.5..65.3)
+# HF-retentive test at alpha=0.25 + this geometry: MODEST shelf only - 4 lines bright0.05 -> 8k 1.79
+#   (ref 2.39), T30_8k 1.86 (over), cent 4837 (bright). The knee tension persists and the shelf stays far
+#   short. Strong intrinsic shelf (8k ~1.94) needs alpha~0.1 (radical/metallic risk).
+# ASSESSMENT: the alpha=0.25 re-fit banks a real TEXTURE win (modal 6.7->7.0) + keeps the plateau, but
+# does NOT fully deliver the HF shelf. Likely end-state = SYNTHESIS: moderate alpha for texture + velvet/
+# HF-tail for the shelf; OR accept radical alpha~0.1 (needs ear check for metallic). TODO to finish the
+# re-fit: (2) re-fit voicing (C80/side-mid/bass-mono) at alpha=0.25+seed976606; (3) decide final alpha vs
+# shelf mechanism; (4) validate all knobs; (5) ear A/B; (6) port to live. alpha=1 banked build untouched
+# (snapshot: plate_proto_ReverbBlock_SNAPSHOT.h). COUPLING env default still 1.0 = banked.
+
+# Step 2 (voicing re-fit at alpha=0.25 + seed976606) DONE 2026-06-21: re-fit the drifted voicing -
+#   ER1 (250 C80 peak) 5.5 -> 7.5 (fixes C80_250 d -1.03 -> -0.13); BASSMONO 0.13 -> 0.0 (new geometry
+#   over-narrows lows, so no bass-mono needed). RESULT @ anchor: C80 maxdev 0.56 (vs 0.70 @ alpha=1),
+#   side/mid mostly <=0.3, tonal unchanged, EDT plateau closed (2.45/2.62/2.57/2.55), T30err 0.041,
+#   MODAL 6.90 (vs 6.70 @ alpha=1 = the texture win), cent 4531, corr -0.023, stable, mono-safe.
+#   => the alpha=0.25 re-fit now MATCHES the alpha=1 banked quality AND improves texture. Durable
+#   snapshot: reverb_analysis/plate_proto_ReverbBlock_ALPHA025_REFIT.h (proto no-env default = this build).
+# REMAINING for the intrinsic route: (3) HF shelf - modest intrinsically (8k ~1.79); plan = SYNTHESIS
+#   (this alpha=0.25 texture build + velvet/HF-tail for the 6-12k shelf) OR radical alpha~0.1 (ear-check
+#   metallic); (4) validate all 10 knobs at alpha=0.25; (5) ear A/B (esp. metallic check at new coupling);
+#   (6) port to live. TWO durable snapshots now: ALPHA1 (banked safe) + ALPHA025_REFIT (physical, better texture).
+
+# ===== TWO-SLOPE TEST - DEFINITIVE 2026-06-21: the HF shelf is a MISSING ENERGY RESERVOIR, not coupling =====
+# Measured the early(0..-35dB) vs late(-35..-55dB) Schroeder slope at 8k & 11k for reference / alpha=1 /
+# alpha=0.25, normalized:
+#   8k : ref slope -36.1 / -11.1 dB/s (RATIO 3.25)  | alpha=1 -36.3/-28.8 (1.26) | alpha=0.25 -35.8/-28.6 (1.25)
+#   11k: ref slope -37.1 /  -9.6 dB/s (RATIO 3.84)  | alpha=1 -37.3/-29.4 (1.27) | alpha=0.25 -36.8/-29.1 (1.27)
+# CONCLUSION (proven): the reference HF decay is genuinely TWO-SLOPE (late tail 3.3-3.8x SHALLOWER = a
+# long-lived energy reservoir). Both synthetic builds are ~single-exponential (ratio 1.26) and PARTIAL
+# COUPLING DID NOT MOVE THE LATE SLOPE (1.26->1.25, identical). => texture and sustain are SEPARABLE:
+# coupling fixed texture (modal 6.70->6.90), did NOTHING for the reservoir. The shelf is NOT a coupling/
+# homogenization problem; it's a MISSING SECOND DECAY PROCESS in the upper bands.
+# IMPLICATION: this VINDICATES the velvet MECHANISM (a second slow HF decay process is exactly what's
+# missing; velvet was the only thing that bent the late slope). Physical analog = weakly-damped high-Q
+# HF edge/boundary modes radiating after the main field decays = a parallel bank of long-tau low-level HF
+# resonators (velvet approximates this; a dedicated high-Q HF mode bank does it 'properly').
+# PLAN CONFIRMED = SYNTHESIS: keep alpha=0.25 partial coupling (texture, banked in ALPHA025_REFIT snapshot)
+# + add an explicit second long-tau HF reservoir (velvet / high-Q HF mode bank) for the 6-12k shelf.
+
+# Step 3 (HF RESERVOIR built onto the alpha=0.25 re-fit) DONE 2026-06-21 = the SYNTHESIS:
+#   re-tuned the parallel HF tail (mHfT*) as the second decay process the two-slope test proved is needed.
+#   Final: HFT_LV=0.13, FB=0.994 (long tau ~6s), HP=7000 (confines to the top -> minimal early-slope/T30
+#   cost), LP=22000, TILT=0. RESULT @ anchor: LATE SLOPE bent 8k -28.6 -> -14.6 (ref -11.1), 11k -29.1 ->
+#   -16.2 (ref -9.6) = the two-slope reservoir REPRODUCED (~60% of the way to full flattening), while
+#   centroid 4529, modal 6.88, EDT plateau, C80 maxdev 0.56, width all PRESERVED, mono-safe, stable
+#   (peak 0.056). COST: T30err 0.041 -> 0.061 (the inherent knee tension - a reservoir loud enough to fully
+#   flatten the late slope also lifts the early decay; HP=7000 minimizes it). Full flattening to -11 costs
+#   T30 ~0.10 - left as the LV knob (HFT_LV) = ears decide how much shelf.
+# STATE: partial coupling (texture) + HF reservoir (sustain) = BOTH separable problems addressed. 3 durable
+#   snapshots: ALPHA1 (banked), ALPHA025_REFIT (texture), SYNTHESIS (texture+reservoir). Shipped UNTOUCHED.
+# REMAINING: validate 10 knobs at alpha=0.25; EAR A/B (metallic check at the new coupling + reservoir
+#   naturalness; HFT_LV to taste); port to live header. Reservoir is currently a parallel FDN tail (dense
+#   enough at low level); a high-Q HF mode bank is the 'more physical' alternative if ears want it.
+
+# FIELD-FED RESERVOIR (2026-06-21): the critique's knee fix - populate the reservoir from the DECAYING
+# DIFFUSE FIELD (invsq*0.5*(wetL+wetR), no early tap) not the input: dR/dt = k*M(t) - lambda*R(t). Env
+# HFT_FIELD (default 1=field). RESULT: sharper knee (lower T30 for same shelf) AND afforded a BROADER
+# shelf. Final default: HFT_FIELD=1, LV=0.15, FB=0.994, HP=6500, LP=22000, TILT=0.
+#   @ anchor: LATE SLOPE 6k -11.1 (ref -11), 8k -13.1, 11k -14.4 (broad/uniform like ref, was ~-28);
+#   modal 7.06 (UP from 6.88 - the dense field-fed reservoir adds texture too, closest yet to ref 7.42);
+#   T30err 0.077, cent 4535, EDT plateau closed, width preserved, mono-safe, stable (peak 0.056).
+#   Knee tension residual: fully flat -10 across all top bands still costs T30 (broad reservoir reaches
+#   5.6k); HFT_LV/HFT_HP = ears-tunable. SYNTHESIS snapshot updated (field-fed). Shipped UNTOUCHED.
+
+# LIFETIME-GRADIENT FINDING (2026-06-21): measured the reference's late-slope vs frequency = a SMOOTH
+# RISING gradient: 3.5k -20.7 (dies fast) / 5k -16.1 / 8k -11.1 / 11k -9.6 dB/s (rings LONGEST). Our single
+# field-fed reservoir is BACKWARDS: 3.5k -8.5 (rings longest = the visible 'platform') ... 11k -14.4. A
+# single FDN reservoir naturally rings its low-HF + damps its top -> wrong direction. Per-line feedback
+# grade (HFT_FBLO/FBHI/RCOUP env, added) improved T30 0.077->0.047 but did NOT flip the gradient.
+# => the continuum needs Robbie's MULTI-BAND reservoir: parallel R1/R2/R3 with INCREASING HP corner AND
+#    T60 (e.g. R1 6k/1.8s, R2 8k/2.4s, R3 10k/3.2s, each weak) so the TOP rings longest = rising gradient,
+#    and the sum reads as a smooth continuum (no platform), low-mid (3-5k) dies fast like the reference.
+# This is the next build for the top-end characteristic. Current banked best = field-fed synthesis
+# (SYNTHESIS snapshot); graded env hooks left in (default inert). Shipped engine UNTOUCHED.
+
+# ===== TASK #5: MULTI-BAND HF RESERVOIR R1/R2/R3 — BUILT + TUNED + WALL RE-CONFIRMED (2026-06-21 pt2) =====
+# GOAL (Robbie's plan from the LIFETIME-GRADIENT FINDING): replace the single field-fed reservoir's
+# BACKWARDS gradient with 3 parallel reservoirs of increasing HP corner AND T60 so the TOP rings longest.
+# Reference late-slope target (dB/s, -35..-55 window): 3.5k -20.7 (dies) / 5k -16.1 / 8k -11.1 / 11k -9.6 (rings longest).
+#
+# ENV GOTCHA RE-HIT (handoff #5): the mount TRUNCATED the proto header mid-write TWICE (lost the tail:
+#   levelTrim..class close). Symptom: g++ errors at string.h/cstring + 'static float lev' / 'float mInputFilter'.
+#   ALSO: `cmd | head && echo $?` reports HEAD's exit, not g++'s -> a failed build looks green and you measure
+#   the STALE binary. FIX/RULE: (1) build with `g++ ...; echo G++=$?` (no pipe), confirm G++=0 BEFORE trusting any
+#   measurement; (2) the file-tool Edit AND python text-writes both trigger truncation -> after EVERY write check
+#   `wc -l`, `tail`, and brace-balance; (3) repair = splice the missing tail from a clean snapshot
+#   (plate_proto_ReverbBlock_SYNTHESIS.h) since truncation is always in the lower/unedited region.
+#
+# WHAT WAS BUILT (proto only; shipped src/rig/ReverbBlock.h UNTOUCHED, 0 multi-band refs, mtime 15:05):
+#   struct HfBand = one small 8-line field-fed FDN reservoir with:
+#     - INPUT: 4th-order Butterworth high-pass (flat passband, ~24dB/oct) -> confines the band, top passes full.
+#     - LOOP: per-line Butterworth high-pass at a LOW absolute corner (loop-HP) -> per-pass it barely touches the
+#       top (11k ~1.0) but discriminates lows (3.5k ~0.95); over the long tail this COMPOUNDS to suppress
+#       sub-band leak ~50dB WITHOUT an output filter. (This is the key fix: input/output filtering CANNOT beat
+#       the leak because the near-unity loop gain is +54dB at resonance; the discrimination must be IN the loop.)
+#   3 instances mHfB[0..2], env-gated by HFM=1 (HFM off -> single field-fed reservoir = SYNTHESIS, byte-reproduced).
+#   Env knobs: HFM, R{1,2,3}{HP,FB,LV,MS,LHP,SH}, HFMLP/HFMPRE/HFMLV. Baked HFM defaults =
+#     HP {5000,6500,8500}  FB {0.9897,0.9938,0.99668}  LV {0.0396,0.0357,0.0919}  LHP {50,1500,2200}  SH 0.7.
+#   Tools added (tracked): reverb_analysis/lateslope.py (freq-resolved late-slope vs ref) and opt_multiband.py
+#   (render-in-loop co-tuner: slopes + cent + T30err + obj). Durable snapshot: plate_proto_ReverbBlock_MULTIBAND.h.
+#
+# RESULT @ anchor (HFM on, baked defaults): EDT plateau PRESERVED (2.45/2.62/2.57/2.56 vs ref 2.48/2.59/2.52/2.47),
+#   T30err 0.067 (BETTER than synthesis 0.077), centroid 4648 (ref 4560), modal 6.9, corr -0.02, peak 0.055 STABLE.
+#   Late-slope gradient: 3.5k -20.5 (ref -20.7 = MATCHED!) / 5k -18.1 (ref -17.4) / 8k -19.0 (ref -14.0) /
+#   11k -21.1 (ref -12.7).
+#
+# THE WIN: the multi-band KILLS THE LOW-END PLATFORM. Single field-fed reservoir was BACKWARDS (3.5k -9.2 = a
+#   long low-HF ring) -> multi-band gives 3.5k -20.5, matching the reference's FAST 3.5-5k decay. The 3.5-5k
+#   region now tracks the reference, and the anchor is preserved/improved. This is a real, env-gated improvement.
+#
+# THE WALL (re-confirmed independently via the multi-band route): the reservoir STILL cannot produce the rising
+#   8-12k shimmer at LOW level. Two hard reasons, both measured:
+#   (1) FEED-STARVATION: the diffuse field is dark (centroid ~4540); R3 (corner 8.5k) is fed ~20dB less than R2
+#       (corner 6.5k), so R2's 8k tail always out-rings R3's 11k tail -> 11k stays MORE negative than 8k (the
+#       gradient HUMPS at 5-8k and FALLS at 11k; it never rises monotonically to the top like the reference).
+#   (2) LEVEL<->TAU<->BRIGHTNESS COUPLING: forcing 11k to the target -9.3 requires R3 so loud it becomes a bright
+#       broadband WASH (Butterworth-only R3 LV1.0 -> 11k -9.3 BUT centroid 6917, T30 0.72, 3.5k leak -4.7).
+#       The loop-HP fixes the leak but caps 11k tau (~-19). Co-tuning all 3 (opt_multiband, ~40 cands) finds the
+#       anchor-safe optimum at exactly the flat -19..-21 hump above; -11/-9.6 is unreachable without wrecking cent/T30.
+#   => SAME conclusion as STEP 4c + the coupling experiments + the two-slope test: a shared-feedback FDN cannot
+#      cheaply sustain a dense, low-level, RISING HF shimmer to 6s at 11k. The proven mechanism for that shelf
+#      remains the VELVET-NOISE dense HF late-field (see the VELVET-NOISE BREAKTHROUGH note above).
+#
+# RECOMMENDATION / NEXT: (a) EARS A/B the multi-band (HFM=1 baked) vs synthesis (HFM off) — the platform fix may
+#   already sound more like the reference even without the top shelf (it's an ears call per the voicing method).
+#   (b) For the actual 8-12k shimmer, build the velvet-noise late-field (task #4 in the VELVET note: sparse-tap
+#   convolution / velvet-feedback HF field, fed by the decaying field, summed low) -> that is the path that MOVED
+#   the top shelf where no FDN variant could. The multi-band + velvet could COMBINE (multi-band fixes low platform
+#   + 3-8k body; velvet adds the 8-12k rising shelf). (c) If multi-band ships, port struct HfBand to the live
+#   CRLF header at BYTE level and re-verify the anchor.
+
+# ===== HYBRID PROOF: multi-band + VELVET HF late-field CLOSES the top octave (2026-06-21 pt2) =====
+# Offline proof (numpy, like the original velvet breakthrough) that the 6-12k rising shimmer the FDN
+# provably can't make IS supplied by an additive velvet field on top of the multi-band IR.
+# velvet = sparse +-1 taps (~3000/s) x per-sub-band EXP envelope with INCREASING t60, band-limited,
+#   decorrelated L/R (2 seeds), summed at LOW level. 3 sub-bands (lo,hi,t60,rms-level):
+#   (6500,8200,4.6s, 0.60e-5) (8200,10000,5.4s, 0.85e-5) (9800,12500,6.3s, 0.60e-5).  [tools: velvet_proof.py]
+# RESULT @ anchor (multi-band HFM=1 + velvet) vs the SAME-HARNESS reference late-slopes:
+#   3.5k -20.3 (ref -21.1) / 5k -17.6 (ref -17.4) / 8k -15.2 (ref -14.0) / 11k -13.0 (ref -12.7)
+#   = within ~1dB everywhere AND the gradient now RISES (top rings longest), matching the reference.
+#   Anchor PRESERVED: T30err 0.077 (= synthesis baseline), centroid 4684 (ref 4560, +124 only), modal 6.92,
+#   corr -0.02. (Velvet is FIR/additive so the top t60 is set by the envelope -> NO stability/feed-starvation
+#   limit; that's exactly the dilemma the FDN couldn't escape.) Figures: reverb_analysis/edr_hybrid.png (EDR
+#   surfaces ref/multiband/hybrid + diff maps + gradient) and edr_compare.png (the multiband-vs-synthesis story).
+# NB the doc LIFETIME-GRADIENT "target" (11k -9.6) is the slightly-more-aggressive value; the same-harness
+#   onset-aligned REF measures 11k -12.7 here -> match the REF column (apples-to-apples). Either way: SOLVED offline.
+# DECOMPOSITION CONFIRMED end-to-end: (FDN multi-band) owns 3-8k decay geometry + the low end (kills the
+#   backwards platform); (velvet late-field) owns the dense slow rising 8-12k shimmer at the correct low level.
+# REAL-TIME TODO (the build): port velvet as a sparse-tap convolution / velvet-feedback HF field in the engine
+#   (cheap: sparse), fed by the decaying diffuse field, 3 sub-bands w/ rising t60, decorrelated, summed low,
+#   env level = ears knob. Then ear A/B the full hybrid and the multi-band-alone vs the reference convolution.
+
+# ===== RESIDUAL CRITIQUE TESTS: floor-margin + Rayleigh/diffuse (2026-06-21 pt2) =====
+# Two falsification tests on the reference HF residual (tool: test_residual.py, fig residual_test.png).
+# (1) NOISE-FLOOR MARGIN (is the -55dB band point real signal or capture floor?):
+#   ANCHOR 1.5: 8k +23.3dB, 11k +16.8dB ABOVE floor -> the top-octave residual is REAL at usable settings.
+#   LONG 4.5:   8k -1.5dB, 11k -1.3dB  -> the -55dB band point sits AT the -91dB pre-onset capture floor.
+#   => the extreme-long-knob top-octave ring (the old "Residual A") is PARTLY NOISE FLOOR; do NOT chase the
+#      4.5 top below ~-50dB, and velvet level should not exceed what the plate shows above its floor at long knobs.
+# (2) RAYLEIGH / DIFFUSE test (envelope CV vs Rayleigh 0.523, whitened excess-kurtosis vs Gaussian 0,
+#     envelope autocorr beating, late-spectrum prominence):
+#   REF 1.5  8k: CV 0.528 kurt +0.07 ac2 0.05 | 11k: CV 0.530 kurt +0.09 ac2 0.04
+#   REF 4.5  8k: CV 0.533 kurt +0.16        | 11k: CV 0.531 (floor-contaminated but still Gaussian = noise is Gaussian too)
+#   CONTROL velvet: CV 0.519-0.526 ; CONTROL multiband-FDN: CV 0.519-0.526  (both Rayleigh)
+#   specProm ~19-22dB for REF, VELVET, and MULTIBAND alike -> 20dB is just the extreme-value stat of a finite
+#   RANDOM spectrum, NOT discrete lines. No beating in any autocorr.
+# VERDICT: the 6-12k residual is a FULLY DIFFUSE Gaussian field (Rayleigh envelope, ~0 excess kurtosis, no
+#   beating, no discrete lines). There is NO localized/discrete mode structure to capture. Therefore VELVET NOISE
+#   IS the physically correct (maximum-entropy) model of this high-modal-overlap field -- a localization-scaled
+#   high-Q resonator bank would be OBSERVATIONALLY IDENTICAL and buys nothing. Ship velvet with a clear conscience.
+#   The decomposition is validated: real residual at the anchor + diffuse statistics => additive low-level velvet
+#   field is correct, not a hack. (Refinement: scale velvet vs the decay knob so the long-knob top stays at/above
+#   its own floor, not above the reference's noise floor.)
+
+# ===== REAL-TIME VELVET HF FIELD: BUILT IN THE PROTO ENGINE (2026-06-21 pt2) =====
+# Ported the offline velvet result into the live engine as struct VelvetBand (proto only; shipped UNTOUCHED).
+# Design: 3 parallel sub-band reservoirs, each an 8-line PURE-GAIN FWHT FDN (decay set EXACTLY by t60 via
+# g=10^(-3*meanDelay/t60); NO loop loss filter -> NO top-damping, so the top rings as long as t60 says),
+# 4th-order Butterworth INPUT bandpass to confine the band, decorrelated L/R (kHfSign rows), summed low.
+# KEY: fed from the BRIGHT full-band input tap (xWide = pre-driver predelay output), NOT the dark post-driver
+# field -> no feed-starvation (the failure mode of the FDN reservoir). Env-gated VLV=1; STACKS on multi-band (HFM).
+# Baked defaults: bands lo/hi {6500-8500, 8000-10200, 9800-12500}Hz; t60 = mT60 * {1.878,2.204,2.571}
+# (SCALES with the decay knob; = 4.6/5.4/6.3s at the 2.45 anchor); levels {0.012,0.015,0.020} (graded: less at
+# 8k, more at 11k). Env: VLV, V{1,2,3}{LO,HI,T,LV}, VLVLV, VDT. Snapshot: plate_proto_ReverbBlock_HYBRID.h.
+#
+# RESULT (HFM+VLV):
+#  - ANCHOR 2.45: gradient 3.5k -20.3 / 5k -17.6 / 8k -15.6 / 11k -12.0 vs ref -21.1/-17.4/-14.0/-12.7 (within ~1.6dB,
+#    RISING). cent 4675 (ref 4560,+115), modal 6.94, corr -0.02, peak 0.055 STABLE. EDT plateau hump preserved
+#    (2.59/2.71/2.62/2.58 vs ref 2.48/2.59/2.52/2.47 -- ~0.1s high; a fixed velvet-onset shift, NOT level-dependent,
+#    NOT low-mid leak; minor). T30err 0.100 (vs multiband 0.067) = the documented knee tension (velvet rings from t=0).
+#  - VELVET TAIL IS RAYLEIGH/DIFFUSE: CV 0.528(8k)/0.522(11k) vs Rayleigh 0.523, kurt ~0, no beating -> statistically
+#    identical to the reference field => confirms velvet (not a high-Q bank) is the right realization, as the residual tests predicted.
+#  - VLV off reproduces the multi-band byte-for-byte (T30err 0.067, cent 4648).
+#
+# DECAY-KNOB SCALING + CROSS-KNOB (the floor finding applied): velvet t60 SCALES with mT60, and a shared HF-tail
+# taper v_dt=clamp((mT60-0.6)/1.0,0,1) shrinks the ADDED tail (BOTH multiband reservoir AND velvet) at short decay.
+# WHY: cross-knob exposed that the WHOLE HF-tail family (single reservoir, multi-band, velvet) was anchor-only and
+# didn't scale -> overshot the top at short knobs (the ref HF-tail LENGTH tracks the knob). After the taper, across
+# knobs 0.5..4.5 (8k ours/ref): 0.5 -29.0/-32.0, 0.7 -18.6/-24.1, 1.0 -17.5/-18.0, 1.5 -15.6/-14.0, 3.0 -9.8/-5.3,
+# 4.5 -7.7/-2.9. cent tracks ref at EVERY knob (6068/6242 .. 3607/3405); stable (peak <=0.074). NOTE: at long knobs
+# (3.0-4.5) the ref top is NOISE-FLOOR-limited (~-5dB/s = floor, per the floor test) -> ours stays a real decaying
+# shimmer and correctly does NOT chase the floor. Minor residual: knobs 0.7-1.0 still ~5dB long at 5k (the taper
+# curve could be sharpened, or the multiband 5k band re-tuned per-knob) -- a fine-tune, not a structural gap.
+#
+# REMAINING (the follow-up pass): (1) optional EDT-onset trim (a few-ms velvet predelay to remove the 0.1s low-mid
+# EDT shift + soften the knee/T30 cost). (2) LIVE PORT: VelvetBand + VLV wiring into the CRLF src/rig/ReverbBlock.h
+# at BYTE level, keep reverb_test green, re-verify anchor. (3) EAR A/B: bare vs +multiband vs +velvet vs ref-convolution
+# (HFM/VLV/HFMLV/VLVLV/VDT as ears knobs). Figures: edr_hybrid.png (real-time), residual_test.png.
