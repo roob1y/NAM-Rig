@@ -1,8 +1,0 @@
-FDN_N=64
-FDN_SIZE=1.5
-FDN_DC60=4.9989
-FDN_BRIGHT=9000
-FDN_AIR=0
-FDN_LOWCUT=25
-FDN_ER_MIX=0.0
-# matrix: FDN_MATRIX=fit_matrix.txt  gains: FDN_GUNIT=fit_gunit.txt  Q: FDN_QVEC=fit_qvec.txt

@@ -29,6 +29,8 @@ juce_add_plugin(NAM_Rig
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE
 )
 
+juce_add_binary_data(NAM_RigData SOURCES resources/plate_early_kernel.wav)
+
 target_sources(NAM_Rig PRIVATE
     src/PluginProcessor.cpp
     src/PluginEditor.cpp
@@ -54,6 +56,7 @@ target_compile_definitions(NAM_Rig PUBLIC
 )
 
 target_link_libraries(NAM_Rig PRIVATE
+    NAM_RigData
     nam_aa_core
     juce::juce_audio_utils
     juce::juce_dsp

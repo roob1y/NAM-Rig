@@ -8,10 +8,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
 {
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
     // 0..1 knobs that read best as a percentage (Tone, Mix, Mod, Shimmer, etc.).
-    auto pct = [] {
+    auto knob10 = [](float lo, float hi) {
         return juce::AudioParameterFloatAttributes()
-            .withStringFromValueFunction([](float v, int) { return juce::String(juce::roundToInt(v * 100.0f)) + "%"; })
-            .withValueFromStringFunction([](const juce::String &t) { return t.getFloatValue() * 0.01f; });
+            .withStringFromValueFunction([lo, hi](float v, int) { return juce::String(juce::roundToInt(9.0f * (v - lo) / (hi - lo)) + 1); })
+            .withValueFromStringFunction([lo, hi](const juce::String &t) { return juce::jlimit(lo, hi, lo + (hi - lo) * (t.getFloatValue() - 1.0f) / 9.0f); });
+    };
+    auto mix100 = [](float lo, float hi) {
+        return juce::AudioParameterFloatAttributes()
+            .withStringFromValueFunction([lo, hi](float v, int) { return juce::String(juce::roundToInt(100.0f * (v - lo) / (hi - lo))); })   // 0..wetcap -> "0".."100"
+            .withValueFromStringFunction([lo, hi](const juce::String &t) { return juce::jlimit(lo, hi, lo + (hi - lo) * t.getFloatValue() * 0.01f); });
     };
 
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
@@ -343,7 +348,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     // rebinds the knobs to the active character's params (see ui/Panels.h). Mix stays global.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("revMix", 1), "Reverb Mix",
-        juce::NormalisableRange<float>(0.0f, nam_rig::ReverbBlock::kMixMax, 0.01f, 0.6f), 0.25f, pct()));
+        juce::NormalisableRange<float>(0.0f, nam_rig::ReverbBlock::kMixMax, 0.01f, 0.6f), 0.25f, mix100(0.0f, nam_rig::ReverbBlock::kMixMax)));
 
     // --- Input calibration + output normalization (NAM-AA parity; see CalNorm.h).
     // Both are metadata-driven and unity when disabled / metadata absent.
@@ -441,23 +446,23 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     }
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("revShimmer", 1), "Reverb Shimmer",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f, pct()));
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f, knob10(0.0f, 1.0f)));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("revTension", 1), "Reverb Tension",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f, pct()));
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f, knob10(0.0f, 1.0f)));
 
     // Reverb guardrail + extra controls (see rig/ReverbBlock.h). Width and Freeze
     // are global; Swell is Bloom-only; Pitch is Shimmer-only. Appended last.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("revWidth", 1), "Reverb Width",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f, pct()));
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f, knob10(0.0f, 1.0f)));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("revSwell", 1), "Reverb Swell",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.4f, pct()));
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.4f, knob10(0.0f, 1.0f)));
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("revPitch", 1), "Reverb Shimmer Pitch",
         juce::StringArray{"Octave", "+2 Oct", "Fifth+Oct"}, 0));
-    // Plate Input Filter (vintage plate/studio-style wet low-cut at the plate amp). Plate-only
+    // Plate Input Filter (studio-style wet low-cut at the plate amp). Plate-only
     // in the UI via ReverbBlock::inputFilterExposed; default 95 Hz = prior hardwired
     // Plate low-cut, so existing Plate sessions are unchanged. Appended last.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
@@ -481,7 +486,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
                 juce::AudioParameterFloatAttributes().withLabel("s")));
             params.push_back(std::make_unique<juce::AudioParameterFloat>(
                 juce::ParameterID(juce::String(RB::paramId("Tone", t)), 1), nm + " Tone",
-                juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.4f, pct()));
+                juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), (T == RB::kPlate ? 0.2f : 0.4f), knob10(0.0f, 1.0f)));
             if (RB::predelayExposed(T))
             {
                 const auto pr = RB::predelayRange(T);
@@ -493,7 +498,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
             if (RB::modExposed(T))
                 params.push_back(std::make_unique<juce::AudioParameterFloat>(
                     juce::ParameterID(juce::String(RB::paramId("Mod", t)), 1), nm + " Modulation",
-                    juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.3f, pct()));
+                    juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.3f, knob10(0.0f, 1.0f)));
             if (RB::sizeExposed(T))
                 params.push_back(std::make_unique<juce::AudioParameterFloat>(
                     juce::ParameterID(juce::String(RB::paramId("Size", t)), 1), nm + " Size",
@@ -503,6 +508,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
                     juce::ParameterID(juce::String(RB::paramId("Freeze", t)), 1), nm + " Freeze", false));
         }
     }
+
+    // Spring "Boing" = dispersion / sproing amount (0..1). Spring-only in the UI
+    // via ReverbBlock::boingExposed; a touch is baked in by default (0.30) so
+    // Spring sproings out of the box. Appended last for automation-index stability.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("revBoing", 1), "Reverb Boing",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.20f, knob10(0.0f, 1.0f)));
 
     return {params.begin(), params.end()};
 }
@@ -931,6 +943,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.reverb.setMix(apvts.getRawParameterValue("revMix")->load());
     mChain.reverb.setShimmer(apvts.getRawParameterValue("revShimmer")->load());
     mChain.reverb.setTension(apvts.getRawParameterValue("revTension")->load());
+    mChain.reverb.setBoing(apvts.getRawParameterValue("revBoing")->load());
     mChain.reverb.setWidth(apvts.getRawParameterValue("revWidth")->load());
     mChain.reverb.setSwell(apvts.getRawParameterValue("revSwell")->load());
     mChain.reverb.setPitch((int)apvts.getRawParameterValue("revPitch")->load());
