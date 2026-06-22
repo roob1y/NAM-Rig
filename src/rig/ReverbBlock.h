@@ -1637,7 +1637,7 @@ public:
         switch (t) {
         case kRoom:     return {600.0f, 3500.0f}; // Tone = input darkening (warm small room)
         case kHall:     return {2000.0f, 7000.0f}; // warm default (30%% knob = 3500 Hz) - the voiced lush hall
-        case kPlate:    return {1500.0f, 14000.0f}; // full span; plate uses LOG mapping so knob 5 ~= 4000 Hz (warm) with full sweep
+        case kPlate:    return {1500.0f, 14000.0f}; // full span; linear. Tone value 0.2 = 4000 Hz (warm); knob10c shows that as 5
         case kSpring:   return {1500.0f,  8000.0f};
         case kShimmer:  return {3000.0f, 16000.0f};
         case kAmbience: return {3000.0f, 13000.0f};
@@ -1662,7 +1662,7 @@ public:
     }
     // Convenience mappers for the active character (host/UI layer calls these).
     float mappedDecay(float rawSec)   const { const Range r = decayRange(mType); return std::clamp(rawSec, r.lo, r.hi); } // exact seconds in-window, clamp at caps
-    float mappedTone(float t01)       const { const Range r = dampRange(mType); t01 = std::clamp(t01, 0.0f, 1.0f); return (mType == kPlate) ? (float)(r.lo * std::pow((double)r.hi / r.lo, (double)t01)) : r.lo + t01 * (r.hi - r.lo); } // Tone: plate=LOG (knob5=warm, full sweep), others linear
+    float mappedTone(float t01)       const { const Range r = dampRange(mType); return r.lo + std::clamp(t01, 0.0f, 1.0f) * (r.hi - r.lo); } // Tone: 0=dark .. 1=bright -> character Hz window (linear; knob readout centres the warm default)
     float mappedPredelay(float rawMs) const { const Range r = predelayRange(mType); return std::clamp(rawMs, r.lo, r.hi); } // exact ms in-window, clamp at caps
 
     const char *name() const override { return "Reverb"; }
