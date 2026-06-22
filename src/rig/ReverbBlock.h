@@ -508,7 +508,7 @@ public:
                 x = allpassInt(mDiff[a], mDiffLen[a], 0.62f, x);
             if (mVDiffOn) { float xd=mVDiff.process(x); x=(1.0f-mVDiffMix)*x+mVDiffMix*xd; }   // instant-dense velvet pre-diffuser (blend)
 
-            const float pmod = (float)(2.0 * 0.001 * mFs); // 2ms per-line modulation -> smooths the static low-mid modes (HF loss compensated by reduced kDampG2)
+            const float pmod = (float)(0.5 * 0.001 * mFs); // 0.5ms LIGHT modulation -> matches the reference lushness (modal_depth ~7.5 vs ref 7.4); set 0.0 for max lushness. Heavier smears the modes flat = thin.
             std::array<float, kNumLines> o;
             for (int i = 0; i < kNumLines; ++i) {
                 const float mo = pmod * (0.6f*mPLfoA.value((double)i*0.0625) + 0.4f*mPLfoB.value((double)i*0.11+0.03));
@@ -1182,7 +1182,7 @@ private:
     std::array<double, 2> mGrain{0.0, 0.0};
     float mShimZ = 0.0f, mShimCoef = 0.1f;
     Pitch mPitch = kOctaveUp;
-    float mT60 = 4.0f, mDampHz = 7000.0f, mPredelayMs = 30.0f, mMix = 0.3f, mShimmer = 0.5f, mMod = 0.4f;
+    float mT60 = 4.0f, mDampHz = 7000.0f, mPredelayMs = 30.0f, mShimmer = 0.5f, mMod = 0.4f; [[maybe_unused]] float mMix = 0.3f;
     float mDampK = 1.0f;
     bool mPrepared = false, mFreeze = false;
 };
@@ -1554,8 +1554,8 @@ private:
     // output voicing: 2.7kHz presence peak (per ch) + bass-mono (HP the side)
     float mPzL[4]{},mPzR[4]{}; float pb0=1,pb1=0,pb2=0,pa1=0,pa2=0;
     float mSideHp=0,mSideHpK=0,mFreezeK=0;
-    float mDrvK=1,mDampK=1,mLfK=0,mLcK=0,mLfDamp=0.12f,mEarly=0.6f,mDrvMul=0.45f,mIDiff=1.3f,mOutGain=1.0f;
-    float mSize=1.0f,mT60=2.0f,mDampHz=6000.0f,mPredelayMs=20.0f,mHfT60=1.25f,mModSamp=3.0f,mDispScale=1.0f,mDecayVar=0.0f;
+    float mDrvK=1,mLfK=0,mLcK=0,mLfDamp=0.12f,mEarly=0.6f,mDrvMul=0.45f,mIDiff=1.3f,mOutGain=1.0f; [[maybe_unused]] float mDampK=1;
+    float mSize=1.0f,mT60=2.0f,mDampHz=6000.0f,mPredelayMs=20.0f,mModSamp=3.0f,mDispScale=1.0f; [[maybe_unused]] float mHfT60=1.25f, mDecayVar=0.0f;
     bool mDampOn=true,mPrepared=false,mFreeze=false;
 };
 
@@ -1637,7 +1637,7 @@ public:
         switch (t) {
         case kRoom:     return {600.0f, 3500.0f}; // Tone = input darkening (warm small room)
         case kHall:     return {2000.0f, 7000.0f}; // warm default (30%% knob = 3500 Hz) - the voiced lush hall
-        case kPlate:    return {1500.0f, 14000.0f}; // voiced dark<->bright span
+        case kPlate:    return {1500.0f, 14000.0f}; // full span; plate uses LOG mapping so knob 5 ~= 4000 Hz (warm) with full sweep
         case kSpring:   return {1500.0f,  8000.0f};
         case kShimmer:  return {3000.0f, 16000.0f};
         case kAmbience: return {3000.0f, 13000.0f};
@@ -1662,7 +1662,7 @@ public:
     }
     // Convenience mappers for the active character (host/UI layer calls these).
     float mappedDecay(float rawSec)   const { const Range r = decayRange(mType); return std::clamp(rawSec, r.lo, r.hi); } // exact seconds in-window, clamp at caps
-    float mappedTone(float t01)       const { const Range r = dampRange(mType); return r.lo + std::clamp(t01, 0.0f, 1.0f) * (r.hi - r.lo); } // Tone: 0=dark .. 1=bright -> character Hz window
+    float mappedTone(float t01)       const { const Range r = dampRange(mType); t01 = std::clamp(t01, 0.0f, 1.0f); return (mType == kPlate) ? (float)(r.lo * std::pow((double)r.hi / r.lo, (double)t01)) : r.lo + t01 * (r.hi - r.lo); } // Tone: plate=LOG (knob5=warm, full sweep), others linear
     float mappedPredelay(float rawMs) const { const Range r = predelayRange(mType); return std::clamp(rawMs, r.lo, r.hi); } // exact ms in-window, clamp at caps
 
     const char *name() const override { return "Reverb"; }
@@ -1677,6 +1677,9 @@ public:
 #ifdef NAM_PLATE_EARLY_CONV
         mPlateEarly.prepare(ctx.sampleRate, ctx.maxBlockSize, 2);
         mPlateFdn.setEarlyTap(0.45f);   // convolver supplies the onset; keep a little FDN early for continuity (tunable)
+        mFsRB = ctx.sampleRate;
+        { const int ring = (int)(0.001 * 200.0 * ctx.sampleRate) + std::max(16, ctx.maxBlockSize) + 4;
+          mEpL.assign((size_t)ring, 0.0f); mEpR.assign((size_t)ring, 0.0f); mEpW = 0; }
 #endif
         mSpring.prepare(ctx.sampleRate);
         mShimmer.prepare(ctx.sampleRate);
@@ -1695,6 +1698,7 @@ public:
         mFdn.reset(); mPlate.reset(); mPlateFdn.reset(); mSpring.reset(); mShimmer.reset(); mSmallRoom.reset(); mHall.reset();
 #ifdef NAM_PLATE_EARLY_CONV
         mPlateEarly.reset();
+        std::fill(mEpL.begin(), mEpL.end(), 0.0f); std::fill(mEpR.begin(), mEpR.end(), 0.0f); mEpW = 0;
 #endif
         mMixer.reset();
         mMixer.snapMix(mPrepared ? effMix() : 0.0f);
@@ -1740,7 +1744,11 @@ public:
         case kPlate:
             mPlateFdn.process(left, right, numSamples); // FDN tail
 #ifdef NAM_PLATE_EARLY_CONV
-            mPlateEarly.addEarly(mDryL.data(), mDryR.data(), left, right, numSamples, 0.14f); // dense bloom onset (gain calibrated to FDN early level -> continuous, no cliff)
+            { const int pre = (int)std::round((double)mPredelayMs * 0.001 * mFsRB); const int R = (int)mEpL.size();
+              if ((int)mEpoL.size() < numSamples) { mEpoL.resize((size_t)numSamples); mEpoR.resize((size_t)numSamples); }
+              for (int n = 0; n < numSamples; ++n) { mEpL[(size_t)mEpW] = mDryL[(size_t)n]; mEpR[(size_t)mEpW] = mDryR[(size_t)n];
+                  int rd = mEpW - pre; if (rd < 0) rd += R; mEpoL[(size_t)n] = mEpL[(size_t)rd]; mEpoR[(size_t)n] = mEpR[(size_t)rd]; if (++mEpW >= R) mEpW = 0; }
+              mPlateEarly.addEarly(mEpoL.data(), mEpoR.data(), left, right, numSamples, 0.14f); } // predelayed dry -> kernel onset tracks predelay (matches FDN)
 #endif
             break;
         case kSpring: mSpring.process(left, right, numSamples); break;
@@ -1921,6 +1929,7 @@ private:
     ShimmerReverb mShimmer;
     GuardMixer mMixer;
     std::vector<float> mDryL, mDryR;
+    std::vector<float> mEpL, mEpR, mEpoL, mEpoR; int mEpW = 0; double mFsRB = 48000.0; // plate kernel predelay ring
 
     Type mType = kHall;
     float mSize = 1.0f, mT60 = 2.0f, mDampHz = 6000.0f, mPredelayMs = 0.0f, mMix = 0.25f;
