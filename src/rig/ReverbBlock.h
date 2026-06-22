@@ -417,8 +417,8 @@ public:
     static constexpr float kMinSize = 0.8f, kMaxSize = 1.6f;
     // damping shape (dB per sample of loop delay) least-squares fit to the target plate T60(f)
     static constexpr double kDampBb = -2.82e-4;                  // broadband (shorten the slightly-long lows, T30+EDT)
-    static constexpr double kDampG1 = -1.46e-4, kDampF1 = 355.0;    // high-shelf 1 (re-fit: relengthen mids after the low nudge)
-    static constexpr double kDampG2 = -3.20e-4, kDampF2 = 3600.0;   // high-shelf 2 (keep the top dark: centroid/modal vs 4k length balance)
+    static constexpr double kDampG1 = -1.15e-4, kDampF1 = 355.0;    // high-shelf 1 (re-fit: relengthen mids after the low nudge)
+    static constexpr double kDampG2 = -0.38e-4, kDampF2 = 3600.0;   // high-shelf 2 (keep the top dark: centroid/modal vs 4k length balance)
     static constexpr double kDampS  = 0.7, kRef1kT60 = 2.92;        // shelf slope; Decay knob ref (1 kHz)
     // LOW-bloom damping (decay-dependent, dd=T60-2.45, ZERO at the 2.45 anchor; long side only):
     //   rB   = kBloomB1*dd^2 + kBloomC1*max(0,dd-1)^2 -> extends the broadband(low) ring as decay grows
@@ -455,6 +455,7 @@ public:
         mHfTpre.prepare((int)std::ceil(0.03*mFs)+8);
         for (auto &b : mVlv) b.prepare(mFs);
         mVDiff.prepare(mFs);
+        mPLfoA.prepare(mFs); mPLfoA.setRateHz(0.5f); mPLfoB.prepare(mFs); mPLfoB.setRateHz(0.83f);
         updateGeometry();
         reset();
         mPrepared = true;
@@ -507,9 +508,13 @@ public:
                 x = allpassInt(mDiff[a], mDiffLen[a], 0.62f, x);
             if (mVDiffOn) { float xd=mVDiff.process(x); x=(1.0f-mVDiffMix)*x+mVDiffMix*xd; }   // instant-dense velvet pre-diffuser (blend)
 
+            const float pmod = (float)(2.0 * 0.001 * mFs); // 2ms per-line modulation -> smooths the static low-mid modes (HF loss compensated by reduced kDampG2)
             std::array<float, kNumLines> o;
-            for (int i = 0; i < kNumLines; ++i)
-                o[(size_t)i] = mLine[(size_t)i].readInt(mLen[(size_t)i]);
+            for (int i = 0; i < kNumLines; ++i) {
+                const float mo = pmod * (0.6f*mPLfoA.value((double)i*0.0625) + 0.4f*mPLfoB.value((double)i*0.11+0.03));
+                o[(size_t)i] = mLine[(size_t)i].readFrac((double)mLen[(size_t)i] + (double)mo);
+            }
+            mPLfoA.advance(); mPLfoB.advance();
 
             float wetL = 0.0f, wetR = 0.0f;
             for (int i = 0; i < kNumLines; ++i) { wetL += mSignL[i] * o[(size_t)i]; wetR += mSignR[i] * o[(size_t)i]; }
@@ -762,7 +767,8 @@ private:
             oL+=level*nrm*bL; oR+=level*nrm*bR;
         }
     };
-    std::array<VelvetBand,3> mVlv; bool mVelvet=false;  // velvet HF field (env VLV=1; stacks on multi-band)
+    std::array<VelvetBand,3> mVlv; bool mVelvet=false;
+    Lfo mPLfoA, mPLfoB;   // per-line modal-smoothing modulation (de-bands the 1-3k low-mid modal field)  // velvet HF field (env VLV=1; stacks on multi-band)
     // ---- instant-dense VELVET PRE-DIFFUSER: collapse echo-density buildup (~9ms -> ~0ms) ----
     // Short dense velvet FIR on the tank input -> diffuse from sample 0 (real plate), energy-preserving
     // (1/sqrt(K)) so the matched Schroeder decay/tone is untouched. Every transient gets an instant bloom.
@@ -1670,7 +1676,7 @@ public:
         mPlateFdn.prepare(ctx.sampleRate);
 #ifdef NAM_PLATE_EARLY_CONV
         mPlateEarly.prepare(ctx.sampleRate, ctx.maxBlockSize, 2);
-        mPlateFdn.setEarlyTap(0.15f);   // convolver supplies the onset; keep a little FDN early for continuity (tunable)
+        mPlateFdn.setEarlyTap(0.45f);   // convolver supplies the onset; keep a little FDN early for continuity (tunable)
 #endif
         mSpring.prepare(ctx.sampleRate);
         mShimmer.prepare(ctx.sampleRate);
@@ -1734,7 +1740,7 @@ public:
         case kPlate:
             mPlateFdn.process(left, right, numSamples); // FDN tail
 #ifdef NAM_PLATE_EARLY_CONV
-            mPlateEarly.addEarly(mDryL.data(), mDryR.data(), left, right, numSamples, 0.18f); // dense bloom onset (gain calibrated to FDN early level -> continuous, no cliff)
+            mPlateEarly.addEarly(mDryL.data(), mDryR.data(), left, right, numSamples, 0.14f); // dense bloom onset (gain calibrated to FDN early level -> continuous, no cliff)
 #endif
             break;
         case kSpring: mSpring.process(left, right, numSamples); break;
