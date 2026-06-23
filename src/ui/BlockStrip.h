@@ -15,18 +15,19 @@ public:
     void paintButton(juce::Graphics &g, bool highlighted, bool) override
     {
         auto b = getLocalBounds().toFloat();
-        const float d = juce::jmin(b.getWidth(), b.getHeight()) - 2.0f;
+        const float d = juce::jmin(b.getWidth(), b.getHeight()) - 4.0f;
         auto circle = juce::Rectangle<float>(d, d).withCentre(b.getCentre());
         const bool on = getToggleState();
-        g.setColour(on ? colors::accent : colors::ledOff);
-        g.fillEllipse(circle);
         if (on)
         {
-            g.setColour(colors::accent.withAlpha(0.35f));
-            g.fillEllipse(circle.expanded(2.5f)); // glow
-            g.setColour(colors::accent);
-            g.fillEllipse(circle);
+            g.setColour(colors::accent.withAlpha(0.30f));
+            g.fillEllipse(circle.expanded(3.0f)); // glow
         }
+        g.setColour(on ? colors::accent : colors::ledOff);
+        g.fillEllipse(circle);
+        // Bezel ring around the jewel (design: 2px #1a1d22 border).
+        g.setColour(juce::Colour(0xff1a1d22));
+        g.drawEllipse(circle, 2.0f);
         if (highlighted && isEnabled())
         {
             g.setColour(colors::text.withAlpha(0.5f));
@@ -76,20 +77,20 @@ public:
     {
         auto b = getLocalBounds().toFloat().reduced(0.5f);
         g.setColour(mSelected ? colors::tileSel : colors::tile);
-        g.fillRoundedRectangle(b, 7.0f);
+        g.fillRoundedRectangle(b, 9.0f);
         g.setColour(mSelected ? colors::accent : colors::outline);
-        g.drawRoundedRectangle(b, 7.0f, mSelected ? 1.5f : 1.0f);
+        g.drawRoundedRectangle(b, 9.0f, mSelected ? 1.5f : 1.0f);
 
         const bool engaged = mLed == nullptr || mLed->getToggleState();
         g.setColour(mFuture ? colors::textDim
                             : (engaged ? colors::text : colors::textDim));
-        g.setFont(RigLookAndFeel::withHeight(14.0f).boldened());
+        g.setFont(fonts::archivo(13.0f, fonts::Bold, 0.04f));
         auto textArea = getLocalBounds().reduced(4);
         if (mFuture)
         {
             g.drawText(mName, textArea.removeFromTop(getHeight() * 6 / 10),
                        juce::Justification::centredBottom);
-            g.setFont(RigLookAndFeel::withHeight(10.0f));
+            g.setFont(fonts::archivo(10.0f));
             g.drawText("soon", textArea, juce::Justification::centredTop);
         }
         else
@@ -101,8 +102,8 @@ public:
     void resized() override
     {
         if (mLed != nullptr)
-            mLed->setBounds(getLocalBounds().removeFromTop(16).removeFromRight(16)
-                                .withSizeKeepingCentre(12, 12).translated(-2, 2));
+            mLed->setBounds(getLocalBounds().removeFromTop(19).removeFromRight(19)
+                                .withSizeKeepingCentre(15, 15).translated(-2, 2));
     }
 
 private:
@@ -182,7 +183,7 @@ public:
 
     void paint(juce::Graphics &g) override
     {
-        g.setColour(colors::textDim);
+        g.setColour(juce::Colour(0xff3a414c)); // branch lines
         const float yC = (float)getHeight() * 0.5f;
         auto cy = [](BlockTile &t) { return (float)t.getBounds().getCentreY(); };
 
@@ -196,6 +197,7 @@ public:
                (float)mTiles[5]->getRight(), cy(*mTiles[6]), (float)mTiles[5]->getRight());
 
         // Flow chevrons between adjacent same-lane tiles.
+        g.setColour(juce::Colour(0xff5d646f));
         chevron(g, *mTiles[0], *mTiles[1]);   // GATE -> COMP
         chevron(g, *mTiles[1], *mTiles[2]);   // COMP -> DRIVE
         chevron(g, *mTiles[3], *mTiles[4]);   // AMP A -> EQ A

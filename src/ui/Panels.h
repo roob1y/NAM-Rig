@@ -1,6 +1,7 @@
 #pragma once
 #include "PluginProcessor.h"
 #include "ui/RigLookAndFeel.h"
+#include "ui/Meter.h"
 #include "ui/GrMeter.h"
 #include "ui/CompMeter.h"
 #include "ui/CompCurve.h"
@@ -10,59 +11,76 @@
 namespace nam_rig::ui
 {
 
-// Rotary knob + caption + value box, attached to one APVTS parameter.
-class LabeledKnob : public juce::Component
+// Rotary knob with a caption above and a mono value readout below, attached to
+// one APVTS parameter. Caption + value are drawn by the component (the rotary
+// itself comes from the LookAndFeel); the readout turns accent while dragging.
+class LabeledKnob : public juce::Component, private juce::Slider::Listener
 {
 public:
     LabeledKnob(juce::AudioProcessorValueTreeState &apvts, const juce::String &paramId,
                 const juce::String &caption)
+        : mCaption(caption.toUpperCase())
     {
-        mLabel.setText(caption, juce::dontSendNotification);
-        mLabel.setJustificationType(juce::Justification::centred);
-        mLabel.setColour(juce::Label::textColourId, colors::textDim);
-        addAndMakeVisible(mLabel);
-
         mSlider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
-        mSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 64, 16);
+        mSlider.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
         addAndMakeVisible(mSlider);
         mAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
             apvts, paramId, mSlider);
         if (auto *param = apvts.getParameter(paramId)) // double-click = default
             mSlider.setDoubleClickReturnValue(
                 true, param->convertFrom0to1(param->getDefaultValue()));
+        mSlider.addListener(this);
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        const juce::Colour acc = mSlider.isColourSpecified(juce::Slider::rotarySliderFillColourId)
+                                     ? mSlider.findColour(juce::Slider::rotarySliderFillColourId)
+                                     : colors::accent;
+        const float ga = isEnabled() ? 1.0f : 0.45f;
+
+        g.setColour(colors::textDim.withMultipliedAlpha(ga));
+        g.setFont(fonts::archivo(juce::jmin(10.0f, (float)mCaptionH - 2.0f), fonts::SemiBold, 0.08f));
+        g.drawText(mCaption, mCaptionRect, juce::Justification::centred);
+
+        if (mShowValue)
+        {
+            g.setColour((mDragging ? acc : colors::text2).withMultipliedAlpha(ga));
+            g.setFont(fonts::mono(11.0f, fonts::Medium));
+            g.drawText(mSlider.getTextFromValue(mSlider.getValue()), mValueRect,
+                       juce::Justification::centred);
+        }
     }
 
     void resized() override
     {
         auto b = getLocalBounds();
-        mLabel.setBounds(b.removeFromTop(mCaptionH));
-        mSlider.setBounds(b);
+        mCaptionRect = b.removeFromTop(mCaptionH);
+        if (mShowValue)
+            mValueRect = b.removeFromBottom(mValueH);
+        const int d = juce::jmin(b.getWidth(), b.getHeight());
+        mSlider.setBounds(b.withSizeKeepingCentre(d, d));
     }
 
-    // Shrink the caption row (and thus its font, via the LookAndFeel) so longer
-    // captions fit the narrower mod-lane knobs without truncating.
-    void setCaptionHeight(int h) { mCaptionH = h; resized(); }
+    // Shrink the caption row so longer captions fit narrower mod-lane knobs.
+    void setCaptionHeight(int h) { mCaptionH = h; resized(); repaint(); }
 
     juce::Slider &slider() { return mSlider; }
-    void setCaption(const juce::String &c) { mLabel.setText(c, juce::dontSendNotification); }
+    void setCaption(const juce::String &c)
+    {
+        mCaption = c.toUpperCase();
+        repaint();
+    }
 
     // Tint the value arc (per-lane mod colour). The LookAndFeel reads this colour
     // id and falls back to the global accent when it isn't set.
     void setAccent(juce::Colour c) { mSlider.setColour(juce::Slider::rotarySliderFillColourId, c); }
 
-    // Drop the numeric readout (the rotary then fills the freed space -> a bigger
-    // knob). Used for the mod lanes, where the value box reads as clutter.
-    void hideValue() { mSlider.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0); }
+    // Drop the numeric readout (the rotary then fills the freed space).
+    void hideValue() { mShowValue = false; resized(); repaint(); }
 
-    // (setCaption above is the runtime relabel used by the mod flanger Width/Spread
-    // + uni-vibe Speed/Intensity + ring-mod Freq/Amount captions.)
-
-    // Show the value box as a 0..top reading of the knob's ROTATION (pedal-style,
-    // "everything goes to 10") instead of raw parameter units -- so a lane of
-    // mixed params (Hz, 0..1, ratios) all read on one friendly scale. Display
-    // only: the underlying parameter, presets and automation are untouched. Reads
-    // the slider's live range/skew, so a per-effect Speed cap still maps full
-    // rotation to the top of the scale. Call updateReadout() after a range change.
+    // Read the value box as a 0..top reading of the knob's ROTATION (pedal-style,
+    // "everything goes to 10") instead of raw parameter units. Display only.
     void setRotationReadout(double top = 10.0)
     {
         auto *s = &mSlider;
@@ -73,11 +91,11 @@ public:
             return s->proportionOfLengthToValue(juce::jlimit(0.0, 1.0, t.getDoubleValue() / top));
         };
         mSlider.updateText();
+        repaint();
     }
-    void updateReadout() { mSlider.updateText(); }
+    void updateReadout() { mSlider.updateText(); repaint(); }
 
-    // Re-point this knob at a different parameter (used by the drive pedal to
-    // give each pedal TYPE its own Drive/Tone/Level instead of sharing one set).
+    // Re-point this knob at a different parameter (drive pedals rebind per TYPE).
     void rebind(juce::AudioProcessorValueTreeState &apvts, const juce::String &paramId)
     {
         mAtt.reset(); // destroy the old attachment before making the new one
@@ -86,13 +104,20 @@ public:
         if (auto *param = apvts.getParameter(paramId))
             mSlider.setDoubleClickReturnValue(
                 true, param->convertFrom0to1(param->getDefaultValue()));
+        repaint();
     }
 
 private:
-    juce::Label mLabel;
+    void sliderValueChanged(juce::Slider *) override { repaint(); }
+    void sliderDragStarted(juce::Slider *) override { mDragging = true; repaint(); }
+    void sliderDragEnded(juce::Slider *) override { mDragging = false; repaint(); }
+
+    juce::String mCaption;
     juce::Slider mSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mAtt;
-    int mCaptionH = 16;
+    juce::Rectangle<int> mCaptionRect, mValueRect;
+    int mCaptionH = 15, mValueH = 16;
+    bool mShowValue = true, mDragging = false;
 };
 
 // Horizontal knob in a rounded bordered box: knob on the left, caption + value
@@ -125,9 +150,9 @@ public:
 
         auto txt = mTextArea;
         g.setColour(colors::textDim);
-        g.setFont(RigLookAndFeel::withHeight(11.0f));
+        g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.06f));
         auto cap = txt.removeFromTop(txt.getHeight() * 0.5f);
-        g.drawText(mCaption, cap.toNearestInt(), juce::Justification::centred);
+        g.drawText(mCaption.toUpperCase(), cap.toNearestInt(), juce::Justification::centred);
         // Value box: fixed width, centred under the caption.
         const float vbw = juce::jmin(txt.getWidth(), 48.0f);
         auto vb = juce::Rectangle<float>(vbw, juce::jmin(txt.getHeight(), 18.0f)).withCentre(txt.getCentre());
@@ -136,6 +161,7 @@ public:
         g.setColour(colors::outline);
         g.drawRoundedRectangle(vb, 4.0f, 1.0f);
         g.setColour(colors::text);
+        g.setFont(fonts::mono(11.0f, fonts::Medium));
         const double v = mSlider.valueToProportionOfLength(mSlider.getValue()) * 10.0;
         g.drawText(juce::String(v, 1), vb.toNearestInt(), juce::Justification::centred);
     }
@@ -157,36 +183,260 @@ private:
     juce::Rectangle<float> mTextArea;
 };
 
-// Common panel chrome: rounded body + title strip; content laid out by subclass.
+// Segmented mode selector (design "pill" buttons): one accent-filled active pill
+// + outlined inactive pills, bound to a choice parameter via a hidden ComboBox so
+// it tracks automation / presets. Content-sized; ask idealWidth() to lay it out.
+class SegmentedControl : public juce::Component
+{
+public:
+    std::function<void(int)> onChange;
+
+    SegmentedControl(juce::AudioProcessorValueTreeState &apvts, const juce::String &paramId,
+                     juce::StringArray options)
+        : mOptions(std::move(options))
+    {
+        mCombo.addItemList(mOptions, 1);
+        addChildComponent(mCombo); // invisible: just the parameter bridge
+        mAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, paramId, mCombo);
+        mCombo.onChange = [this] { repaint(); if (onChange) onChange(index()); };
+    }
+
+    int index() const { return juce::jmax(0, mCombo.getSelectedItemIndex()); }
+    void setEnabledIndex(int i) { mCombo.setSelectedItemIndex(i); }
+
+    int idealWidth() const
+    {
+        auto f = fonts::archivo(12.0f, fonts::SemiBold);
+        int w = 0;
+        for (auto &o : mOptions)
+            w += (int)std::ceil(juce::GlyphArrangement::getStringWidth(f, o)) + 26 + mGap;
+        return juce::jmax(0, w - mGap);
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        auto f = fonts::archivo(12.0f, fonts::SemiBold);
+        g.setFont(f);
+        const int active = index();
+        int x = 0;
+        for (int i = 0; i < mOptions.size(); ++i)
+        {
+            const int w = (int)std::ceil(juce::GlyphArrangement::getStringWidth(f, mOptions[i])) + 26;
+            auto r = juce::Rectangle<float>((float)x, 0.0f, (float)w, (float)getHeight());
+            const bool on = i == active;
+            g.setColour(on ? colors::accent : colors::tile);
+            g.fillRoundedRectangle(r, 7.0f);
+            g.setColour(on ? colors::accent : colors::outline);
+            g.drawRoundedRectangle(r.reduced(0.5f), 7.0f, 1.0f);
+            g.setColour(on ? colors::bg : colors::textDim);
+            g.drawText(mOptions[i], r, juce::Justification::centred);
+            x += w + mGap;
+        }
+    }
+
+    void mouseUp(const juce::MouseEvent &e) override
+    {
+        auto f = fonts::archivo(12.0f, fonts::SemiBold);
+        int x = 0;
+        for (int i = 0; i < mOptions.size(); ++i)
+        {
+            const int w = (int)std::ceil(juce::GlyphArrangement::getStringWidth(f, mOptions[i])) + 26;
+            if (e.x >= x && e.x < x + w) { mCombo.setSelectedItemIndex(i); return; }
+            x += w + mGap;
+        }
+    }
+
+private:
+    juce::StringArray mOptions;
+    juce::ComboBox mCombo;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mAtt;
+    int mGap = 8;
+};
+
+// A small toggle "switch" (rounded track + sliding knob), bound to a bool param.
+// Optional left caption is drawn by the host; this is just the switch.
+class ToggleSwitch : public juce::Component
+{
+public:
+    std::function<void(bool)> onChange;
+
+    ToggleSwitch(juce::AudioProcessorValueTreeState &apvts, const juce::String &paramId)
+    {
+        mBtn.setClickingTogglesState(true);
+        addChildComponent(mBtn);
+        mAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            apvts, paramId, mBtn);
+        mBtn.onClick = [this] { repaint(); if (onChange) onChange(mBtn.getToggleState()); };
+    }
+
+    bool state() const { return mBtn.getToggleState(); }
+
+    void mouseUp(const juce::MouseEvent &e) override
+    {
+        if (getLocalBounds().contains(e.getPosition()))
+            mBtn.setToggleState(!mBtn.getToggleState(), juce::sendNotificationSync);
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        auto r = getLocalBounds().toFloat().withSizeKeepingCentre(
+            juce::jmin((float)getWidth(), 42.0f), juce::jmin((float)getHeight(), 24.0f));
+        const bool on = mBtn.getToggleState();
+        g.setColour(on ? colors::accent : colors::tile);
+        g.fillRoundedRectangle(r, r.getHeight() * 0.5f);
+        g.setColour(on ? colors::accent : colors::outline);
+        g.drawRoundedRectangle(r.reduced(0.5f), r.getHeight() * 0.5f, 1.0f);
+        const float d = r.getHeight() - 4.0f;
+        const float kx = on ? r.getRight() - d - 2.0f : r.getX() + 2.0f;
+        g.setColour(on ? colors::bg : colors::text2);
+        g.fillEllipse(kx, r.getY() + 2.0f, d, d);
+    }
+
+private:
+    juce::ToggleButton mBtn;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mAtt;
+};
+
+// Common panel chrome: rounded #1d2027 body + 46px header row (title left, an
+// optional right-aligned caption, bottom divider). Content laid out by subclass.
 class BlockPanel : public juce::Component
 {
 public:
+    static constexpr int kHeaderH = 46;
+
     explicit BlockPanel(const juce::String &title) : mTitle(title) {}
 
     void paint(juce::Graphics &g) override
     {
         auto b = getLocalBounds().toFloat().reduced(0.5f);
         g.setColour(colors::panel);
-        g.fillRoundedRectangle(b, 8.0f);
+        g.fillRoundedRectangle(b, 11.0f);
         g.setColour(colors::outline);
-        g.drawRoundedRectangle(b, 8.0f, 1.0f);
+        g.drawRoundedRectangle(b, 11.0f, 1.0f);
 
-        // Section title: spaced orange caps (matches the design mockup), centred
-        // vertically in the header band (panel top -> first content row).
-        g.setColour(juce::Colour(0xffeb9b43));
-        g.setFont(RigLookAndFeel::withHeight(13.0f).withExtraKerningFactor(0.14f));
-        g.drawText(mTitle.toUpperCase(), getLocalBounds().removeFromTop(contentArea().getY()).reduced(16, 0),
-                   juce::Justification::centredLeft);
+        auto header = getLocalBounds().removeFromTop(kHeaderH);
+        // Header bottom divider.
+        g.setColour(colors::divider);
+        g.fillRect(header.getX() + 1, header.getBottom() - 1, header.getWidth() - 2, 1);
+
+        // Panel title: amber spaced caps, vertically centred in the header band.
+        g.setColour(colors::titleAccent);
+        g.setFont(fonts::archivo(13.0f, fonts::Bold, 0.15f));
+        g.drawText(mTitle.toUpperCase(), header.reduced(22, 0), juce::Justification::centredLeft);
+
+        if (mHeaderRight.isNotEmpty())
+        {
+            g.setColour(colors::caption);
+            g.setFont(fonts::mono(11.0f, fonts::Medium));
+            g.drawText(mHeaderRight, header.reduced(22, 0), juce::Justification::centredRight);
+        }
+    }
+
+    void setTitle(const juce::String &t) { mTitle = t; repaint(); }
+    void setHeaderRight(const juce::String &t)
+    {
+        if (mHeaderRight != t) { mHeaderRight = t; repaint(); }
     }
 
 protected:
-    juce::Rectangle<int> contentArea() const
+    // 46px header band, inset by the standard 22px horizontal padding.
+    juce::Rectangle<int> headerArea() const
     {
-        return getLocalBounds().withTrimmedTop(34).reduced(16, 6);
+        return getLocalBounds().removeFromTop(kHeaderH).reduced(22, 0);
+    }
+    // Everything below the header (subclasses apply their own padding).
+    juce::Rectangle<int> bodyArea() const { return getLocalBounds().withTrimmedTop(kHeaderH); }
+    // Legacy default content rect (header + standard padding).
+    juce::Rectangle<int> contentArea() const { return bodyArea().reduced(24, 14); }
+
+private:
+    juce::String mTitle, mHeaderRight;
+};
+
+//==============================================================================
+// Horizontal reduction analyser: a luminous area that fills DOWNWARD from the
+// top as reduction grows, over a faint dB grid, with a live readout pill. Used
+// for the compressor GR display and the gate's live-activity meter.
+class GrAnalyser : public juce::Component
+{
+public:
+    static constexpr int N = 260;
+
+    void setAccent(juce::Colour c) { mAccent = c; repaint(); }
+    void setLabel(const juce::String &l) { mLabel = l; repaint(); }
+    void setSpanDb(float d) { mMaxDb = d; }
+
+    void push(float grDb, float dt)
+    {
+        grDb = juce::jlimit(0.0f, mMaxDb, grDb);
+        mHist[(size_t)mW] = grDb;
+        mW = (mW + 1) % N;
+        mCur = juce::jmax(grDb, mCur - 60.0f * dt);
+        repaint();
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        auto r = getLocalBounds().toFloat();
+        RigLookAndFeel::drawWell(g, r.reduced(0.5f));
+        auto in = r.reduced(2.0f);
+
+        const int step = (int)(mMaxDb / 4.0f);
+        for (int d = step; d < (int)mMaxDb; d += step)
+        {
+            const float y = in.getY() + ((float)d / mMaxDb) * in.getHeight();
+            g.setColour(juce::Colours::white.withAlpha(0.045f));
+            g.fillRect(in.getX(), y, in.getWidth(), 1.0f);
+            auto lbl = juce::Rectangle<float>(in.getX() + 6.0f, y - 6.0f, 30.0f, 12.0f);
+            g.setColour(juce::Colour(0xff0f121a).withAlpha(0.55f));
+            g.fillRoundedRectangle(lbl, 3.0f);
+            g.setColour(colors::textDim);
+            g.setFont(fonts::mono(8.5f, fonts::SemiBold));
+            g.drawText("-" + juce::String(d), lbl, juce::Justification::centred);
+        }
+
+        juce::Path line;
+        for (int k = 0; k < N; ++k)
+        {
+            const float v = mHist[(size_t)((mW + k) % N)];
+            const float x = in.getX() + ((float)k / (float)(N - 1)) * in.getWidth();
+            const float y = in.getY() + (v / mMaxDb) * in.getHeight();
+            if (k == 0) line.startNewSubPath(x, y);
+            else        line.lineTo(x, y);
+        }
+        juce::Path area = line;
+        area.lineTo(in.getRight(), in.getY());
+        area.lineTo(in.getX(), in.getY());
+        area.closeSubPath();
+        juce::ColourGradient fill(mAccent.withAlpha(0.40f), in.getX(), in.getY(),
+                                  mAccent.withAlpha(0.02f), in.getX(), in.getBottom(), false);
+        g.setGradientFill(fill);
+        g.fillPath(area);
+        g.setColour(mAccent);
+        g.strokePath(line, juce::PathStrokeType(1.6f));
+
+        auto pill = juce::Rectangle<float>(86.0f, 20.0f).withPosition(in.getRight() - 92.0f, in.getY() + 7.0f);
+        g.setColour(juce::Colour(0xff0f121a).withAlpha(0.72f));
+        g.fillRoundedRectangle(pill, 6.0f);
+        g.setColour(colors::cardBorder);
+        g.drawRoundedRectangle(pill, 6.0f, 1.0f);
+        auto pc = pill.reduced(9.0f, 0.0f);
+        g.setColour(colors::caption);
+        g.setFont(fonts::archivo(9.0f, fonts::Bold, 0.12f));
+        g.drawText(mLabel, pc, juce::Justification::centredLeft);
+        g.setColour(mAccent);
+        g.setFont(fonts::mono(11.0f, fonts::Medium));
+        g.drawText((mCur < 0.05f ? juce::String("0.0") : "-" + juce::String(mCur, 1)) + " dB",
+                   pc, juce::Justification::centredRight);
     }
 
 private:
-    juce::String mTitle;
+    std::array<float, N> mHist{};
+    int mW = 0;
+    float mCur = 0.0f, mMaxDb = 14.0f;
+    juce::Colour mAccent = colors::accent;
+    juce::String mLabel = "GR";
 };
 
 //==============================================================================
@@ -204,38 +454,97 @@ public:
             mKnobs.push_back(std::make_unique<LabeledKnob>(apvts, id, caption));
             addAndMakeVisible(*mKnobs.back());
         }
-        mHint.setText("Lookahead preserves pick attacks but adds latency - keep 0 when monitoring live.",
-                      juce::dontSendNotification);
-        mHint.setColour(juce::Label::textColourId, colors::textDim);
-        addAndMakeVisible(mHint);
 
-        mGrLabel.setText("GR", juce::dontSendNotification);
-        mGrLabel.setJustificationType(juce::Justification::centred);
-        mGrLabel.setColour(juce::Label::textColourId, colors::textDim);
-        addAndMakeVisible(mGrLabel);
-        addAndMakeVisible(mGrMeter);
+        mAnalyser.setLabel("ATTEN");
+        mAnalyser.setAccent(colors::green);
+        mAnalyser.setSpanDb(24.0f);
+        addAndMakeVisible(mAnalyser);
+
+        mDetail.setButtonText("DETAIL");
+        mDetail.getProperties().set("pill", true);
+        mDetail.setClickingTogglesState(true);
+        mDetail.onClick = [this] { resized(); repaint(); };
+        addAndMakeVisible(mDetail);
     }
 
-    GrMeter &grMeter() { return mGrMeter; }
+    // Editor timer feed: gate attenuation (>=0 dB). Drives the live meter + state.
+    void pushActivity(float redDb, float dt) { mCurDb = redDb; mAnalyser.push(redDb, dt); }
+
+    void setLowLatency(bool ll)
+    {
+        if (mLowLat == ll) return;
+        mLowLat = ll;
+        if (mKnobs.size() >= 6) mKnobs[5]->setEnabled(!ll);
+        repaint();
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        BlockPanel::paint(g);
+
+        // OPEN / CLOSED state pill (header-right). Fixed min-width so the dot
+        // never moves; label centred in the remaining slot.
+        const bool open = mCurDb < 1.5f;
+        auto pill = mStatePill.toFloat();
+        g.setColour(open ? colors::green.withAlpha(0.14f) : colors::tile);
+        g.fillRoundedRectangle(pill, 7.0f);
+        g.setColour(open ? colors::green.withAlpha(0.5f) : colors::outline);
+        g.drawRoundedRectangle(pill, 7.0f, 1.0f);
+        auto pc = pill.reduced(11.0f, 0.0f);
+        auto dot = juce::Rectangle<float>(7.0f, 7.0f).withCentre({pc.getX() + 3.5f, pc.getCentreY()});
+        g.setColour(open ? colors::green : colors::caption);
+        g.fillEllipse(dot);
+        g.setColour(open ? colors::green : colors::textDim);
+        g.setFont(fonts::archivo(10.0f, fonts::Bold, 0.12f));
+        g.drawText(open ? "OPEN" : "CLOSED", pc.withTrimmedLeft(10), juce::Justification::centred);
+
+        if (mDetail.getToggleState())
+        {
+            RigLookAndFeel::drawWell(g, mDetailWell.toFloat());
+            g.setColour(colors::text2);
+            g.setFont(fonts::mono(9.0f, fonts::SemiBold, 0.14f));
+            g.drawText("LAST TRIGGER", mDetailWell.reduced(12, 10).removeFromTop(12),
+                       juce::Justification::topLeft);
+            g.setColour(colors::captionDim);
+            g.setFont(fonts::mono(10.0f, fonts::Medium));
+            g.drawText("waiting for first trigger…", mDetailWell, juce::Justification::centred);
+        }
+    }
 
     void resized() override
     {
-        auto area = contentArea();
-        mHint.setBounds(area.removeFromBottom(20));
-        auto meterCol = area.removeFromRight(46);
-        mGrLabel.setBounds(meterCol.removeFromTop(16));
-        mGrMeter.setBounds(meterCol.reduced(16, 4));
-        area = area.withSizeKeepingCentre(area.getWidth(),
-                                          juce::jmin(area.getHeight(), 170));
-        const int w = area.getWidth() / (int)mKnobs.size();
+        auto hr = headerArea();
+        const int pillW = 90;
+        mStatePill = hr.removeFromRight(pillW).withSizeKeepingCentre(pillW, 24);
+        hr.removeFromRight(10);
+        mDetail.setBounds(hr.removeFromRight(58).withSizeKeepingCentre(58, 24));
+
+        auto area = bodyArea().reduced(24, 14);
+        auto knobRow = area.removeFromBottom(118);
+        area.removeFromBottom(12);
+
+        auto display = area;
+        if (mDetail.getToggleState())
+        {
+            mDetailWell = display.removeFromRight(juce::jmax(180, display.getWidth() / 3));
+            display.removeFromRight(14);
+        }
+        mAnalyser.setBounds(display);
+
+        auto row = knobRow.withSizeKeepingCentre(
+            juce::jmin(knobRow.getWidth(), 92 * (int)mKnobs.size()), knobRow.getHeight());
+        const int w = row.getWidth() / (int)mKnobs.size();
         for (auto &k : mKnobs)
-            k->setBounds(area.removeFromLeft(w).reduced(6, 0));
+            k->setBounds(row.removeFromLeft(w).reduced(4, 0));
     }
 
 private:
     std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
-    juce::Label mHint, mGrLabel;
-    GrMeter mGrMeter;
+    GrAnalyser mAnalyser;
+    juce::TextButton mDetail;
+    juce::Rectangle<int> mStatePill, mDetailWell;
+    float mCurDb = 0.0f;
+    bool mLowLat = false;
 };
 
 //==============================================================================
@@ -255,20 +564,10 @@ public:
             addAndMakeVisible(*mKnobs.back());
         }
 
-        mHint.setText("GR shows squash + history trail; IN/OUT track gain staging. Advanced adds the transfer curve.",
-                      juce::dontSendNotification);
-        mHint.setColour(juce::Label::textColourId, colors::textDim);
-        addAndMakeVisible(mHint);
-
-        addAndMakeVisible(mMeter);
-        addChildComponent(mCurve); // Advanced view only
-
-        // Live input level drives the transfer-curve operating dot.
-        mMeter.onInput = [this](float inDb) { mCurve.setInputDb(inDb); };
-
-        mAdvBtn.setClickingTogglesState(true);
-        mAdvBtn.onClick = [this] { setAdvanced(mAdvBtn.getToggleState()); };
-        addAndMakeVisible(mAdvBtn);
+        addAndMakeVisible(mGr);
+        addAndMakeVisible(mIn);
+        addAndMakeVisible(mOut);
+        addChildComponent(mCurve); // DETAIL view only
 
         // Sustain knob drives the curve's threshold marker.
         mKnobs[0]->slider().onValueChange = [this] {
@@ -277,97 +576,201 @@ public:
         mCurve.setSustain((float)mKnobs[0]->slider().getValue());
 
         // Voicing selector (Clean / OTA / Opto / FET) -> compMode param.
-        mModeBox.addItemList(juce::StringArray{"Clean", "OTA", "Opto", "FET"}, 1);
-        mModeBox.setJustificationType(juce::Justification::centred);
-        mModeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-            apvts, "compMode", mModeBox);
-        mModeBox.onChange = [this] { updateCurveShape(); };
-        addAndMakeVisible(mModeBox);
+        mModes = std::make_unique<SegmentedControl>(apvts, "compMode",
+                                                    juce::StringArray{"Clean", "OTA", "Opto", "FET"});
+        mModes->onChange = [this](int) { updateCurveShape(); };
+        addAndMakeVisible(*mModes);
         updateCurveShape();
 
-        setAdvanced(false);
+        mDetail.setButtonText("DETAIL");
+        mDetail.getProperties().set("pill", true);
+        mDetail.setClickingTogglesState(true);
+        mDetail.onClick = [this] { setDetail(mDetail.getToggleState()); };
+        addAndMakeVisible(mDetail);
+
+        setDetail(false);
     }
 
-    // Drop-in for the editor's existing comp line (CompMeter::push(grDb, dt)).
-    CompMeter &grMeter() { return mMeter; }
+    // Editor timer feeds: GR + IN + OUT.
+    void pushGr(float grDb, float dt) { mGr.push(grDb, dt); }
+    void pushIn(float db, float dt) { mIn.push(db, dt); mCurve.setInputDb(db); }
+    void pushOut(float db, float dt) { mOut.push(db, dt); }
+
+    void paint(juce::Graphics &g) override
+    {
+        BlockPanel::paint(g);
+        // IN / OUT captions + dB readouts around the mini-meters.
+        auto drawMeterLabels = [&](juce::Rectangle<int> col, const char *name, float db)
+        {
+            g.setColour(colors::caption);
+            g.setFont(fonts::archivo(9.0f, fonts::SemiBold, 0.08f));
+            g.drawText(name, col.removeFromTop(12), juce::Justification::centred);
+            g.setColour(colors::textDim);
+            g.setFont(fonts::mono(9.5f, fonts::Medium));
+            g.drawText(juce::String(db, 1), col.removeFromBottom(12), juce::Justification::centred);
+        };
+        drawMeterLabels(mInLabelCol, "IN", mIn.shownDb());
+        drawMeterLabels(mOutLabelCol, "OUT", mOut.shownDb());
+    }
 
     void resized() override
     {
-        auto area = contentArea();
+        // Header-right: mode pills + DETAIL toggle.
+        auto hr = headerArea();
+        mDetail.setBounds(hr.removeFromRight(62).withSizeKeepingCentre(62, 26));
+        hr.removeFromRight(10);
+        const int mw = juce::jmin(mModes->idealWidth(), hr.getWidth());
+        mModes->setBounds(hr.removeFromRight(mw).withSizeKeepingCentre(mw, 24));
 
-        auto bottom = area.removeFromBottom(22);
-        mAdvBtn.setBounds(bottom.removeFromRight(88).reduced(0, 2));
-        bottom.removeFromRight(8);
-        mModeBox.setBounds(bottom.removeFromLeft(96).reduced(0, 1));
-        bottom.removeFromLeft(8);
-        mHint.setBounds(bottom);
+        auto area = bodyArea().reduced(24, 14);
 
-        auto meterCol = area.removeFromRight(96); // GR + IN + OUT columns
-        mMeter.setBounds(meterCol.reduced(4, 2));
+        // Bottom: knob row (centre) + IN/OUT meters (right).
+        auto bottom = area.removeFromBottom(118);
+        auto ioCol = bottom.removeFromRight(96);
+        ioCol.removeFromLeft(18); // gap + (border drawn by divider look)
+        auto inC = ioCol.removeFromLeft(ioCol.getWidth() / 2);
+        mInLabelCol = inC.reduced(2, 0);
+        mIn.setBounds(inC.withSizeKeepingCentre(9, 74).translated(0, -1));
+        mOutLabelCol = ioCol.reduced(2, 0);
+        mOut.setBounds(ioCol.withSizeKeepingCentre(9, 74).translated(0, -1));
 
-        if (mAdvanced)
-        {
-            const int curveW = juce::jlimit(120, 210, area.getWidth() / 2);
-            mCurve.setBounds(area.removeFromLeft(curveW).reduced(2));
-        }
-
-        auto row = area.withSizeKeepingCentre(
-            juce::jmin(area.getWidth(), 120 * (int)mKnobs.size()),
-            juce::jmin(area.getHeight(), 170));
+        auto row = bottom.withSizeKeepingCentre(
+            juce::jmin(bottom.getWidth(), 104 * (int)mKnobs.size()), bottom.getHeight());
         const int w = row.getWidth() / (int)mKnobs.size();
         for (auto &k : mKnobs)
-            k->setBounds(row.removeFromLeft(w).reduced(6, 0));
+            k->setBounds(row.removeFromLeft(w).reduced(5, 0));
+
+        area.removeFromBottom(12);
+        // Top: optional transfer-curve well + GR analyser.
+        if (mDetail.getToggleState())
+        {
+            mCurve.setBounds(area.removeFromLeft(224));
+            area.removeFromLeft(16);
+        }
+        mGr.setBounds(area);
     }
 
 private:
-    void setAdvanced(bool adv)
+    void setDetail(bool on)
     {
-        mAdvanced = adv;
-        mCurve.setVisible(adv);
-        mAdvBtn.setButtonText(adv ? "Advanced" : "Simple");
-        mAdvBtn.setToggleState(adv, juce::dontSendNotification);
+        mCurve.setVisible(on);
+        mDetail.setToggleState(on, juce::dontSendNotification);
         resized();
     }
 
     void updateCurveShape()
     {
-        const int idx = juce::jmax(0, mModeBox.getSelectedItemIndex());
+        const int idx = mModes ? mModes->index() : 0;
         const auto v = nam_rig::CompBlock::voicingFor((nam_rig::CompBlock::Mode)idx);
         mCurve.setShape(v.ratio, v.kneeDb);
     }
 
     std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
-    juce::Label mHint;
-    CompMeter mMeter;
+    GrAnalyser mGr;
+    PeakMeter mIn, mOut;
+    juce::Rectangle<int> mInLabelCol, mOutLabelCol;
     CompCurve mCurve;
-    juce::TextButton mAdvBtn;
-    juce::ComboBox mModeBox;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mModeAtt;
-    bool mAdvanced = false;
+    std::unique_ptr<SegmentedControl> mModes;
+    juce::TextButton mDetail;
 };
 
 //==============================================================================
-// A round metal footswitch (toggles the pedal On/Off; ring lights amber on).
+// Metal footswitch: a hex-nut housing + chrome cap, with a soft accent glow
+// disc drawn BEHIND the housing when engaged (so the opaque housing never
+// covers it). Component is sized ~80px to give the glow room.
 class Footswitch : public juce::Button
 {
 public:
     Footswitch() : juce::Button({}) { setClickingTogglesState(true); }
+    void setAccent(juce::Colour c) { mAccent = c; repaint(); }
+    void setLit(bool l) { if (mLit != l) { mLit = l; repaint(); } }
+
     void paintButton(juce::Graphics &g, bool, bool down) override
     {
-        auto bb = getLocalBounds().toFloat();
-        const float dd = juce::jmin(bb.getWidth(), bb.getHeight());
-        auto c = juce::Rectangle<float>(dd, dd).withCentre(bb.getCentre()).reduced(2.0f);
-        g.setColour(getToggleState() ? colors::accent : colors::ledOff); // ring
-        g.fillEllipse(c);
-        auto cap = c.reduced(3.0f);
-        juce::ColourGradient grad(colors::text.withAlpha(0.80f), cap.getX(), cap.getY(),
-                                  colors::outline, cap.getX(), cap.getBottom(), false);
-        g.setGradientFill(grad);
+        auto b = getLocalBounds().toFloat();
+        const auto c = b.getCentre();
+
+        if (getToggleState() && mLit)
+        {
+            auto glow = juce::Rectangle<float>(80.0f, 80.0f).withCentre(c);
+            juce::ColourGradient rg(mAccent.withAlpha(0.55f), c.x, c.y,
+                                    mAccent.withAlpha(0.0f), c.x, c.y - 40.0f, true);
+            rg.addColour(0.42, mAccent.withAlpha(0.16f));
+            g.setGradientFill(rg);
+            g.fillEllipse(glow);
+        }
+
+        // Hex-nut housing (pointy-top hexagon).
+        const float hs = 52.0f;
+        auto hb = juce::Rectangle<float>(hs, hs).withCentre(c);
+        auto pt = [&](float fx, float fy) { return juce::Point<float>(hb.getX() + fx * hs, hb.getY() + fy * hs); };
+        juce::Path hex;
+        hex.startNewSubPath(pt(0.50f, 0.0f));
+        hex.lineTo(pt(0.93f, 0.25f)); hex.lineTo(pt(0.93f, 0.75f));
+        hex.lineTo(pt(0.50f, 1.0f));  hex.lineTo(pt(0.07f, 0.75f));
+        hex.lineTo(pt(0.07f, 0.25f)); hex.closeSubPath();
+        juce::ColourGradient hg(juce::Colour(0xff454c57), hb.getX(), hb.getY(),
+                                juce::Colour(0xff1b1f25), hb.getRight(), hb.getBottom(), false);
+        g.setGradientFill(hg);
+        g.fillPath(hex);
+
+        // Chrome cap.
+        const float cs = down ? 32.0f : 34.0f;
+        auto cap = juce::Rectangle<float>(cs, cs).withCentre(c);
+        juce::ColourGradient cg(juce::Colour(0xffd8dce2), c.x, cap.getY() + cs * 0.32f,
+                                juce::Colour(0xff565d67), c.x, cap.getBottom(), true);
+        g.setGradientFill(cg);
         g.fillEllipse(cap);
-        g.setColour(colors::bg.withAlpha(down ? 0.30f : 0.14f)); // dimple
-        g.fillEllipse(cap.reduced(cap.getWidth() * 0.30f));
+        g.setColour(juce::Colours::black.withAlpha(0.28f));
+        g.drawEllipse(cap.reduced(0.5f), 1.0f);
     }
+
+private:
+    juce::Colour mAccent = colors::accent;
+    bool mLit = false;
 };
+
+// Monochrome silkscreen art glyph per drive family, drawn from the design's
+// 64x48-viewBox paths, scaled/centred into box.
+inline void paintDriveGlyph(juce::Graphics &g, int type, juce::Rectangle<float> box, juce::Colour col)
+{
+    juce::Path p;
+    bool fill = false;
+    switch (type)
+    {
+    case 1: // Boost -> twin sparkle (filled)
+        p.startNewSubPath(28, 7);  p.quadraticTo(28, 23, 44, 23); p.quadraticTo(28, 23, 28, 39);
+        p.quadraticTo(28, 23, 12, 23); p.quadraticTo(28, 23, 28, 7); p.closeSubPath();
+        p.startNewSubPath(47, 9);  p.quadraticTo(47, 16, 54, 16); p.quadraticTo(47, 16, 47, 23);
+        p.quadraticTo(47, 16, 40, 16); p.quadraticTo(47, 16, 47, 9); p.closeSubPath();
+        fill = true; break;
+    case 2: // Overdrive -> smooth hill (stroked)
+        p.startNewSubPath(8, 33); p.cubicTo(19, 33, 23, 15, 32, 15); p.cubicTo(41, 15, 45, 33, 56, 33);
+        break;
+    case 3: // Distortion -> rodent (stroked)
+        p.startNewSubPath(53, 27); p.cubicTo(46, 21, 36, 20, 27, 22); p.cubicTo(18, 24, 12, 26, 12, 30);
+        p.cubicTo(12, 34, 19, 36, 28, 34); p.cubicTo(38, 33, 47, 32, 53, 27); p.closeSubPath();
+        p.startNewSubPath(36, 21); p.cubicTo(33, 13, 39, 8, 42, 10); p.cubicTo(45, 12, 46, 16, 44, 21);
+        p.startNewSubPath(14, 31); p.cubicTo(8, 33, 3, 31, 3, 25); p.cubicTo(3, 21, 5, 18, 8, 17);
+        break;
+    case 4: // Fuzz -> round wave (stroked)
+        p.startNewSubPath(4, 24); p.cubicTo(5, 14, 9, 13, 13, 13); p.lineTo(20, 13);
+        p.cubicTo(24, 13, 25, 35, 29, 35); p.lineTo(36, 35); p.cubicTo(40, 35, 41, 13, 45, 13);
+        p.lineTo(52, 13); p.cubicTo(56, 13, 58, 19, 60, 24);
+        p.applyTransform(juce::AffineTransform(0.82f, 0.0f, 5.76f, 0.0f, 1.0f, 0.0f));
+        break;
+    default: return;
+    }
+    const float s = juce::jmin(box.getWidth() / 64.0f, box.getHeight() / 48.0f);
+    p.applyTransform(juce::AffineTransform::scale(s)
+                         .translated(box.getCentreX() - 32.0f * s, box.getCentreY() - 24.0f * s));
+    g.setColour(col);
+    if (fill)
+        g.fillPath(p);
+    else
+        g.strokePath(p, juce::PathStrokeType(2.0f * s + 0.4f, juce::PathStrokeType::curved,
+                                             juce::PathStrokeType::rounded));
+}
 
 // One drive "stomp" in the pedalboard. Top-to-bottom: Type (category), a model
 // selector (when the category has several models), the model's descriptive
@@ -381,39 +784,36 @@ public:
     {
         const juce::String p = "drv" + juce::String(slot + 1);
 
+        // Hidden parameter bridges (the pill + menu drive these; they keep the
+        // params synced with host automation / presets).
         mType.addItemList({"Off", "Boost", "Overdrive", "Distortion", "Fuzz"}, 1);
-        mType.setJustificationType(juce::Justification::centred);
         mTypeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
             apvts, p + "Type", mType);
         mType.onChange = [this] { refresh(); };
-        addAndMakeVisible(mType);
+        addChildComponent(mType);
 
-        mModel.setJustificationType(juce::Justification::centred);
-        mModel.onChange = [this] { onModelPicked(); }; // manual sync (items are dynamic per category)
+        mModel.onChange = [this] { onModelPicked(); };
         addChildComponent(mModel);
 
-        mSub.setJustificationType(juce::Justification::centred);
-        mSub.setColour(juce::Label::textColourId, colors::textDim);
-        mSub.setFont(RigLookAndFeel::withHeight(10.5f));
-        addAndMakeVisible(mSub);
-
-        mRange.addItemList({"Treble", "Mid", "Full"}, 1);
-        mRange.setJustificationType(juce::Justification::centred);
-        mRangeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-            apvts, p + "bRange", mRange); // Range belongs to the Boost (treble booster) only
-        addChildComponent(mRange);
+        // Boost-only tonal Range (Treble/Mid/Full), shown when the model has one.
+        mRangeSeg = std::make_unique<SegmentedControl>(apvts, p + "bRange",
+                                                       juce::StringArray{"Treble", "Mid", "Full"});
+        addChildComponent(*mRangeSeg);
 
         mOnAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             apvts, p + "On", mOn);
         mOn.onClick = [this] { refresh(); };
-        addChildComponent(mOn);
+        addAndMakeVisible(mOn);
 
         mDrive = std::make_unique<LabeledKnob>(apvts, p + "oDrive", "Drive"); // rebound per type
         mTone  = std::make_unique<LabeledKnob>(apvts, p + "oTone", "Tone");
         mLevel = std::make_unique<LabeledKnob>(apvts, p + "oLevel", "Level");
-        addAndMakeVisible(*mDrive);
-        addAndMakeVisible(*mTone);
-        addAndMakeVisible(*mLevel);
+        for (auto *k : {mDrive.get(), mTone.get(), mLevel.get()})
+        {
+            k->setRotationReadout(10.0);
+            k->setCaptionHeight(13);
+            addAndMakeVisible(*k);
+        }
 
         refresh();
     }
@@ -426,13 +826,12 @@ public:
         if (type != mLastType)
             populateModels(type);
         const int count = nam_rig::DriveBlock::modelCount((nam_rig::DriveBlock::Kind)type);
-        // Model only applies to multi-model categories (Boost). Don't touch the
-        // boost model param when on a single-model type, or it'd reset on switch.
         int model = (count > 1) ? (int)mApvts.getRawParameterValue(pid + "bModel")->load() : 0;
         if (count > 1 && model >= count) { model = 0; setModelParam(0); }
         if (count > 1 && mModel.getSelectedItemIndex() != model)
             mModel.setSelectedItemIndex(juce::jmax(0, model), juce::dontSendNotification);
         mActive = (type != 0) && on;
+        mOn.setLit(mActive); // keep the footswitch glow in sync every tick
         if (type == mLastType && on == mLastOn && model == mLastModel) { repaint(); return; }
         mLastType = type; mLastOn = on; mLastModel = model;
         configure();
@@ -443,60 +842,143 @@ public:
     void paint(juce::Graphics &g) override
     {
         auto b = getLocalBounds().toFloat().reduced(1.0f);
-        juce::ColourGradient eg(colors::tile.brighter(0.05f), 0.0f, b.getY(),
-                                colors::tile.darker(0.18f), 0.0f, b.getBottom(), false);
-        g.setGradientFill(eg);
-        g.fillRoundedRectangle(b, 10.0f);
-        g.setColour(mActive ? colors::accent : colors::outline);
-        g.drawRoundedRectangle(b, 10.0f, mActive ? 1.6f : 1.1f);
-        auto screw = [&](float x, float y) {
-            g.setColour(colors::outline.brighter(0.35f));
-            g.fillEllipse(x - 3.0f, y - 3.0f, 6.0f, 6.0f);
-            g.setColour(colors::bg);
-            g.drawLine(x - 2.0f, y - 1.5f, x + 2.0f, y + 1.5f, 1.0f);
-        };
-        screw(12.0f, 12.0f); screw((float)getWidth() - 12.0f, 12.0f);
-        screw(12.0f, (float)getHeight() - 12.0f); screw((float)getWidth() - 12.0f, (float)getHeight() - 12.0f);
-        g.setColour(mActive ? colors::accent : colors::ledOff);
-        g.fillEllipse((float)getWidth() - 34.0f, 16.0f, 7.0f, 7.0f); // status LED
+        const auto pair = colors::driveAccent(accentIndex());
+        const juce::Colour tint = mActive ? pair.tint : juce::Colour(0xff343a43);
+
+        // Enclosure: neutral base + tint wash.
+        juce::ColourGradient base(juce::Colour(0xff262b33), 0.0f, b.getY(),
+                                  juce::Colour(0xff15181d), 0.0f, b.getBottom(), false);
+        g.setGradientFill(base);
+        g.fillRoundedRectangle(b, 16.0f);
+        juce::ColourGradient wash(tint.withAlpha(0.20f), 0.0f, b.getY(),
+                                  tint.withAlpha(0.05f), 0.0f, b.getBottom(), false);
+        g.setGradientFill(wash);
+        g.fillRoundedRectangle(b, 16.0f);
+        g.setColour(juce::Colours::white.withAlpha(0.05f));
+        g.drawRoundedRectangle(b.reduced(0.5f).withTrimmedBottom(b.getHeight() - 2.0f), 16.0f, 1.0f);
+        g.setColour(tint.withAlpha(mActive ? 0.55f : 0.34f));
+        g.drawRoundedRectangle(b, 16.0f, 1.5f);
+
+        // Header: kind label (left) + jewel LED (right).
+        g.setColour(mActive ? pair.accent : colors::caption);
+        g.setFont(fonts::archivo(10.0f, fonts::Bold, 0.13f));
+        g.drawText(mKindStr, mHeaderRect, juce::Justification::centredLeft);
+        auto jewel = juce::Rectangle<float>(13.0f, 13.0f).withCentre(
+            {(float)mHeaderRect.getRight() - 6.5f, (float)mHeaderRect.getCentreY()});
+        if (mActive) { g.setColour(pair.accent.withAlpha(0.45f)); g.fillEllipse(jewel.expanded(3.0f)); }
+        g.setColour(mActive ? pair.accent : juce::Colour(0xff2a2f37));
+        g.fillEllipse(jewel);
+
+        // Silkscreen art glyph.
+        if (mLastType != 0)
+            paintDriveGlyph(g, mLastType, mGlyphRect.toFloat(),
+                            mActive ? pair.accent.withAlpha(0.85f) : juce::Colour(0xff5a616b));
+
+        // Model-name pill + sub.
+        auto pill = mPillRect.toFloat();
+        g.setColour(mActive ? juce::Colours::white.withAlpha(0.06f) : juce::Colour(0xff22262d));
+        g.fillRoundedRectangle(pill, 12.0f);
+        g.setColour(tint.withAlpha(0.45f));
+        g.drawRoundedRectangle(pill, 12.0f, 1.0f);
+        g.setColour(colors::textBright);
+        g.setFont(fonts::archivo(23.0f, fonts::Bold));
+        g.drawText(mModelStr, pill, juce::Justification::centred);
+        g.setColour(juce::Colour(0xff7a808a));
+        g.setFont(fonts::mono(11.5f));
+        g.drawText(mSubStr, mSubRect, juce::Justification::centred);
+    }
+
+    void mouseUp(const juce::MouseEvent &e) override
+    {
+        if (mPillRect.contains(e.getPosition()))
+            showMenu();
     }
 
     void resized() override
     {
-        auto area = getLocalBounds().reduced(10, 9);
-        mType.setBounds(area.removeFromTop(24));
-        if (mModel.isVisible())
+        auto a = getLocalBounds().reduced(16, 18);
+        mHeaderRect = a.removeFromTop(16);
+        a.removeFromTop(14);
+        auto knobRow = a.removeFromTop(96);
+        a.removeFromTop(6);
+
+        auto fs = a.removeFromBottom(80);
+        mOn.setBounds(fs.withSizeKeepingCentre(80, 80));
+        a.removeFromBottom(4);
+        mGlyphRect = a.removeFromBottom(juce::jmin(64, juce::jmax(40, a.getHeight() / 2)));
+        a.removeFromBottom(4);
+
+        if (mRangeSeg->isVisible())
         {
-            area.removeFromTop(5);
-            mModel.setBounds(area.removeFromTop(24));
+            auto rr = a.removeFromTop(24);
+            const int rw = juce::jmin(mRangeSeg->idealWidth(), getWidth() - 40);
+            mRangeSeg->setBounds(rr.withSizeKeepingCentre(rw, 22));
+            a.removeFromTop(8);
         }
-        area.removeFromTop(3);
-        mSub.setBounds(area.removeFromTop(13));
-        if (mOn.isVisible())
-        {
-            auto bot = area.removeFromBottom(46);
-            mOn.setBounds(bot.withSizeKeepingCentre(42, 42));
-            area.removeFromBottom(2);
-        }
-        if (mRange.isVisible())
-        {
-            auto rr = area.removeFromBottom(24);
-            mRange.setBounds(rr.withSizeKeepingCentre(juce::jmin(rr.getWidth(), 150), 22));
-            area.removeFromBottom(6);
-        }
-        area.removeFromTop(6);
+
+        auto pillRow = a.removeFromTop(40);
+        const int pw = juce::jlimit(90, getWidth() - 24,
+            (int)std::ceil(juce::GlyphArrangement::getStringWidth(
+                fonts::archivo(23.0f, fonts::Bold), mModelStr.isEmpty() ? "Off" : mModelStr)) + 34);
+        mPillRect = pillRow.withSizeKeepingCentre(pw, 38);
+        a.removeFromTop(5);
+        mSubRect = a.removeFromTop(16);
+
         LabeledKnob *ks[3] = {mDrive.get(), mTone.get(), mLevel.get()};
         int nVis = 0;
         for (auto *k : ks) if (k->isVisible()) ++nVis;
-        if (nVis == 0) return;
-        const int kw = juce::jmin(86, juce::jmax(1, area.getWidth() / nVis));
-        auto grp = area.withSizeKeepingCentre(kw * nVis, juce::jmin(area.getHeight(), 104));
-        for (auto *k : ks)
-            if (k->isVisible())
-                k->setBounds(grp.removeFromLeft(kw).reduced(4, 0));
+        if (nVis > 0)
+        {
+            const int kw = juce::jmin(78, juce::jmax(1, knobRow.getWidth() / nVis));
+            auto grp = knobRow.withSizeKeepingCentre(kw * nVis, knobRow.getHeight());
+            for (auto *k : ks)
+                if (k->isVisible())
+                    k->setBounds(grp.removeFromLeft(kw).reduced(3, 0));
+        }
     }
 
 private:
+    int accentIndex() const // map drive type -> driveAccent palette index
+    {
+        switch (mLastType) { case 1: return 0; case 2: return 1; case 3: return 2; case 4: return 3; default: return 5; }
+    }
+    int curModel() const { return juce::jmax(0, mModel.getSelectedItemIndex()); }
+
+    void showMenu()
+    {
+        using DB = nam_rig::DriveBlock;
+        static const char *names[] = {"Off", "Boost", "Overdrive", "Distortion", "Fuzz"};
+        juce::PopupMenu m;
+        m.addItem(1, "Off", true, mType.getSelectedItemIndex() == 0);
+        for (int t = 1; t <= 4; ++t)
+        {
+            const auto cat = (DB::Kind)t;
+            const int n = DB::modelCount(cat);
+            if (n > 1)
+            {
+                juce::PopupMenu sub;
+                for (int i = 0; i < n; ++i)
+                    sub.addItem(t * 100 + i + 10, DB::modelName(cat, i), true,
+                                mType.getSelectedItemIndex() == t && curModel() == i);
+                m.addSubMenu(names[t], sub);
+            }
+            else
+                m.addItem(t * 100 + 10, DB::modelName(cat, 0), true, mType.getSelectedItemIndex() == t);
+        }
+        m.showMenuAsync(juce::PopupMenu::Options()
+                            .withTargetScreenArea(localAreaToGlobal(mPillRect))
+                            .withMinimumWidth(180),
+                        [this](int r)
+                        {
+                            if (r <= 0) return;
+                            if (r == 1) { mType.setSelectedItemIndex(0); return; }
+                            const int t = (r - 10) / 100, i = (r - 10) % 100;
+                            mType.setSelectedItemIndex(t);
+                            if (nam_rig::DriveBlock::modelCount((nam_rig::DriveBlock::Kind)t) > 1)
+                                mModel.setSelectedItemIndex(i);
+                        });
+    }
+
     void populateModels(int type)
     {
         const auto cat = (nam_rig::DriveBlock::Kind)type;
@@ -504,7 +986,6 @@ private:
         mModel.clear(juce::dontSendNotification);
         for (int i = 0; i < n; ++i)
             mModel.addItem(nam_rig::DriveBlock::modelName(cat, i), i + 1);
-        mModel.setVisible(type != 0 && n > 1); // only when there is a real choice
     }
     void onModelPicked()
     {
@@ -518,55 +999,60 @@ private:
     }
     void configure()
     {
+        static const char *names[] = {"DRIVE", "BOOST", "OVERDRIVE", "DISTORTION", "FUZZ"};
         const juce::String p = "drv" + juce::String(mSlot + 1);
         const int type = mType.getSelectedItemIndex();
         const int model = juce::jmax(0, mModel.getSelectedItemIndex());
         const auto cat = (nam_rig::DriveBlock::Kind)type;
-        // Re-point the shared knob widgets at the ACTIVE type's own parameters,
-        // so each pedal type keeps its own Drive/Tone/Level. Hidden knobs keep
-        // their last binding (harmless — the audio path reads params directly).
         switch (type)
         {
-        case 1: // Boost (one knob)
+        case 1:
             mDrive->rebind(mApvts, p + "bDrive"); mDrive->setCaption("Boost");
             mDrive->setVisible(true); mTone->setVisible(false); mLevel->setVisible(false);
             break;
-        case 2: // Overdrive
+        case 2:
             mDrive->rebind(mApvts, p + "oDrive"); mDrive->setCaption("Drive");
             mTone->rebind(mApvts, p + "oTone");   mTone->setCaption("Tone");
             mLevel->rebind(mApvts, p + "oLevel"); mLevel->setCaption("Level");
             mDrive->setVisible(true); mTone->setVisible(true); mLevel->setVisible(true);
             break;
-        case 3: // Distortion
-            mDrive->rebind(mApvts, p + "dDrive"); mDrive->setCaption("Distortion");
+        case 3:
+            mDrive->rebind(mApvts, p + "dDrive"); mDrive->setCaption("Dist");
             mTone->rebind(mApvts, p + "dTone");   mTone->setCaption("Filter");
             mLevel->rebind(mApvts, p + "dLevel"); mLevel->setCaption("Volume");
             mDrive->setVisible(true); mTone->setVisible(true); mLevel->setVisible(true);
             break;
-        case 4: // Fuzz (no tone)
+        case 4:
             mDrive->rebind(mApvts, p + "fDrive"); mDrive->setCaption("Fuzz");
             mLevel->rebind(mApvts, p + "fLevel"); mLevel->setCaption("Volume");
             mDrive->setVisible(true); mTone->setVisible(false); mLevel->setVisible(true);
             break;
-        default: // Off
+        default:
             mDrive->setVisible(false); mTone->setVisible(false); mLevel->setVisible(false);
             break;
         }
-        mSub.setText(type == 0 ? juce::String("select a pedal")
-                               : juce::String(nam_rig::DriveBlock::modelSub(cat, model)),
-                     juce::dontSendNotification);
-        mRange.setVisible(nam_rig::DriveBlock::modelHasRange(cat, model));
-        mOn.setVisible(type != 0);
+        for (auto *k : {mDrive.get(), mTone.get(), mLevel.get()})
+            k->setAccent(colors::driveAccent(accentIndex()).accent);
+        mModelStr = type == 0 ? juce::String("Off")
+                              : juce::String(nam_rig::DriveBlock::modelName(cat, model));
+        mKindStr = names[juce::jlimit(0, 4, type)];
+        mSubStr = type == 0 ? juce::String("select a pedal")
+                            : juce::String(nam_rig::DriveBlock::modelSub(cat, model));
+        mRangeSeg->setVisible(nam_rig::DriveBlock::modelHasRange(cat, model));
+        mOn.setAccent(colors::driveAccent(accentIndex()).accent);
+        mOn.setLit(mActive);
     }
 
     juce::AudioProcessorValueTreeState &mApvts;
     int mSlot;
-    juce::Label mSub;
-    juce::ComboBox mType, mModel, mRange;
+    juce::ComboBox mType, mModel;
+    std::unique_ptr<SegmentedControl> mRangeSeg;
     Footswitch mOn;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt, mRangeAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mOnAtt;
     std::unique_ptr<LabeledKnob> mDrive, mTone, mLevel;
+    juce::String mModelStr{"Off"}, mKindStr{"DRIVE"}, mSubStr{"select a pedal"};
+    juce::Rectangle<int> mHeaderRect, mGlyphRect, mPillRect, mSubRect;
     int mLastType = -1, mLastModel = -1;
     bool mLastOn = true, mActive = false;
 };
@@ -579,13 +1065,14 @@ class DrivePanel : public BlockPanel
 {
 public:
     explicit DrivePanel(juce::AudioProcessorValueTreeState &apvts)
-        : BlockPanel("DRIVE PEDALBOARD")
+        : BlockPanel("DRIVE")
     {
         for (int s = 0; s < nam_rig::DriveBlock::kSlots; ++s)
         {
             mPedals[(size_t)s] = std::make_unique<DrivePedal>(apvts, s);
             addAndMakeVisible(*mPedals[(size_t)s]);
         }
+        mAutoGain.getProperties().set("pill", true);
         mAutoGain.setButtonText("Auto Gain");
         addAndMakeVisible(mAutoGain);
         mAutoGainAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
@@ -601,49 +1088,43 @@ public:
     void paint(juce::Graphics &g) override
     {
         BlockPanel::paint(g);
-        g.setColour(colors::text);
-        g.setFont(RigLookAndFeel::withHeight(12.0f).boldened());
-        g.drawText("IN", (int)mInX - 44, (int)mFlowY - 9, 28, 18, juce::Justification::centredRight);
-        g.drawText("OUT", (int)mOutX + 18, (int)mFlowY - 9, 32, 18, juce::Justification::centredLeft);
-        g.setColour(colors::accentDim);
-        for (auto &c : mCables)
-            g.drawLine(c.getStartX(), c.getStartY(), c.getEndX(), c.getEndY(), 2.0f);
+        // Simple joiner lines between pedals (mid-height).
+        g.setColour(juce::Colour(0xff3a414c));
+        for (auto &c : mJoiners)
+            g.fillRect(c);
     }
 
     void resized() override
     {
-        auto area = contentArea();
-        auto bottom = area.removeFromBottom(22);
-        mAutoGain.setBounds(bottom.removeFromRight(110));
+        // Auto-Gain pill in the header-right.
+        auto hr = headerArea();
+        mAutoGain.setBounds(hr.removeFromRight(96).withSizeKeepingCentre(96, 26));
 
-        const int inM = 52, outM = 58, cable = 22;
-        area.removeFromLeft(inM);
-        area.removeFromRight(outM);
+        auto area = bodyArea().reduced(26, 24);
         const int n = nam_rig::DriveBlock::kSlots;
-        const int pedalW = juce::jmax(1, (area.getWidth() - cable * (n - 1)) / n);
-        mFlowY = (float)area.getCentreY();
-        mInX = (float)area.getX();
-        mCables.clear();
+        const int joiner = 40;
+        const int pedalW = juce::jmin(268, (area.getWidth() - joiner * (n - 1)) / n);
+        const int total = pedalW * n + joiner * (n - 1);
+        area = area.withSizeKeepingCentre(total, area.getHeight());
+        const float midY = (float)area.getCentreY();
+        mJoiners.clear();
         for (int s = 0; s < n; ++s)
         {
             mPedals[(size_t)s]->setBounds(area.removeFromLeft(pedalW));
             if (s < n - 1)
             {
-                auto gap = area.removeFromLeft(cable);
-                mCables.push_back({{(float)gap.getX(), mFlowY}, {(float)gap.getRight(), mFlowY}});
+                auto gap = area.removeFromLeft(joiner);
+                mJoiners.push_back(juce::Rectangle<float>((float)gap.getX() + 6.0f, midY - 1.0f,
+                                                          (float)gap.getWidth() - 12.0f, 2.0f));
             }
         }
-        mOutX = (float)area.getRight();
-        mCables.push_back({{mInX - 14.0f, mFlowY}, {mInX, mFlowY}});   // IN stub
-        mCables.push_back({{mOutX, mFlowY}, {mOutX + 14.0f, mFlowY}}); // OUT stub
     }
 
 private:
     std::array<std::unique_ptr<DrivePedal>, (size_t)nam_rig::DriveBlock::kSlots> mPedals;
     juce::ToggleButton mAutoGain;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mAutoGainAtt;
-    std::vector<juce::Line<float>> mCables;
-    float mFlowY = 0.0f, mInX = 0.0f, mOutX = 0.0f;
+    std::vector<juce::Rectangle<float>> mJoiners;
 };
 
 //==============================================================================
@@ -717,50 +1198,35 @@ public:
         : BlockPanel(rig == 0 ? "AMP A - NEURAL MODEL" : "AMP B - NEURAL MODEL"),
           mProc(proc), mRig(rig)
     {
-        addAndMakeVisible(mLoadBtn);
-        mLoadBtn.onClick = [this]
-        {
-            mChooser = std::make_unique<juce::FileChooser>("Select a NAM model",
-                                                           juce::File{}, "*.nam");
-            mChooser->launchAsync(juce::FileBrowserComponent::openMode |
-                                      juce::FileBrowserComponent::canSelectFiles,
-                                  [this](const juce::FileChooser &fc)
-                                  {
-                                      if (fc.getResult().existsAsFile())
-                                          mProc.loadModel(fc.getResult(), mRig);
-                                  });
-        };
+        setHeaderRight(rig == 0 ? "RIG A" : "RIG B");
 
-        mModelName.setColour(juce::Label::textColourId, colors::text);
+        mModelName.setFont(fonts::archivo(22.0f, fonts::Bold));
+        mModelName.setColour(juce::Label::textColourId, colors::textBright);
+        mModelName.setInterceptsMouseClicks(false, false);
         addAndMakeVisible(mModelName);
 
-        auto initCombo = [this](juce::ComboBox &box, juce::Label &label,
-                                const juce::StringArray &items, const char *paramId,
-                                const char *caption,
+        mInfo.setColour(juce::Label::textColourId, colors::textDim);
+        mInfo.setFont(fonts::mono(12.0f));
+        mInfo.setInterceptsMouseClicks(false, false);
+        mInfo.setJustificationType(juce::Justification::topLeft);
+        addAndMakeVisible(mInfo);
+
+        auto initCombo = [this](juce::ComboBox &box, const juce::StringArray &items,
+                                const char *paramId,
                                 std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> &att)
         {
-            label.setText(caption, juce::dontSendNotification);
-            label.setColour(juce::Label::textColourId, colors::textDim);
-            addAndMakeVisible(label);
             box.addItemList(items, 1); // must match the parameter StringArray order
             addAndMakeVisible(box);
             att = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
                 mProc.apvts, paramId, box);
         };
-        initCombo(mLiveAa, mLiveAaLabel, {"Off", "2x", "4x", "8x", "16x", "32x"},
-                  rig == 0 ? "oversample" : "oversampleB", "Live AA", mLiveAtt);
-        initCombo(mOfflineAa, mOfflineAaLabel, {"Same as live", "8x", "16x", "32x"},
-                  rig == 0 ? "offlineAA" : "offlineAAB", "Offline AA", mOfflineAtt);
+        initCombo(mLiveAa, {"Off", "2x", "4x", "8x", "16x", "32x"},
+                  rig == 0 ? "oversample" : "oversampleB", mLiveAtt);
+        initCombo(mOfflineAa, {"Same as live", "8x", "16x", "32x"},
+                  rig == 0 ? "offlineAA" : "offlineAAB", mOfflineAtt);
 
-        mInfo.setColour(juce::Label::textColourId, colors::textDim);
-        addAndMakeVisible(mInfo);
-
-        // --- Output normalization (NAM-AA parity; per-amp loudness). Input
-        //     calibration now lives in the global INPUT panel (header button). ---
-        mNormToggle.setButtonText("Normalize output (-18 dB)");
-        addAndMakeVisible(mNormToggle);
-        mNormToggleAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            mProc.apvts, "normalize", mNormToggle);
+        mNorm = std::make_unique<ToggleSwitch>(mProc.apvts, "normalize");
+        addAndMakeVisible(*mNorm);
     }
 
     // Called from the editor timer.
@@ -768,22 +1234,27 @@ public:
     {
         const bool loaded = mProc.isModelLoaded(mRig);
         const bool a2 = loaded && mProc.isA2Model(mRig);
+        if (loaded != mLoaded) { mLoaded = loaded; repaint(); }
+
+        // "Capped at 4x" note when Low Latency holds back a higher live AA setting.
+        const bool ll = mProc.apvts.getRawParameterValue("lowLatency")->load() >= 0.5f;
+        const int liveChoice = (int)mProc.apvts.getRawParameterValue(
+            mRig == 0 ? "oversample" : "oversampleB")->load();
+        const bool capped = ll && liveChoice > 2; // >4x
+        if (capped != mAaCapped) { mAaCapped = capped; repaint(); }
         mModelName.setText(loaded ? mProc.getModelName(mRig) : "No model loaded",
                            juce::dontSendNotification);
 
-        // AA only exists for A2 models (dilation-scaled copies); grey it out otherwise.
         const bool aaAvailable = !loaded || a2;
         mLiveAa.setEnabled(aaAvailable);
         mOfflineAa.setEnabled(aaAvailable);
-
-        // Normalization needs loudness metadata; grey out otherwise.
-        mNormToggle.setEnabled(mProc.hasLoudness());
+        mNorm->setEnabled(mProc.hasLoudness());
 
         juce::String info;
         if (!loaded)
             info = "Load a .nam model to bring the amp online.";
         else if (!a2)
-            info = "Standard model - anti-aliasing controls need an A2 model.";
+            info = "Standard model - anti-aliasing needs an A2 model.";
         else
         {
             const int engaged = mProc.engagedFactor(mRig);
@@ -791,54 +1262,146 @@ public:
                                : "Passthrough";
             info << "  |  PDC " << mProc.getLatencySamples() << " smp";
         }
-        // Surface the live cal/norm corrections (only when non-zero).
         const float calDb = mProc.calibrationGainDb(mRig);
         if (calDb != 0.0f)
             info << "  |  cal " << (calDb > 0 ? "+" : "") << juce::String(calDb, 1) << " dB";
         const float normDb = mProc.normalizationGainDb(mRig);
-        if (normDb != 0.0f)
+        mNormalized = (normDb != 0.0f);
+        if (mNormalized)
             info << "  |  norm " << (normDb > 0 ? "+" : "") << juce::String(normDb, 1) << " dB";
         if (info != mInfo.getText())
             mInfo.setText(info, juce::dontSendNotification);
     }
 
+    void mouseUp(const juce::MouseEvent &e) override
+    {
+        if (!mLoaderRect.contains(e.getPosition()))
+            return;
+        mChooser = std::make_unique<juce::FileChooser>("Select a NAM model", juce::File{}, "*.nam");
+        mChooser->launchAsync(juce::FileBrowserComponent::openMode |
+                                  juce::FileBrowserComponent::canSelectFiles,
+                              [this](const juce::FileChooser &fc)
+                              {
+                                  if (fc.getResult().existsAsFile())
+                                      mProc.loadModel(fc.getResult(), mRig);
+                              });
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        BlockPanel::paint(g);
+        auto sub = [&](juce::Rectangle<int> r, const juce::String &t)
+        {
+            g.setColour(colors::caption);
+            g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.12f));
+            g.drawText(t, r, juce::Justification::topLeft);
+        };
+
+        // Left column: caption + loader pill.
+        sub(mCaptionL, "NEURAL AMP MODEL");
+        auto lp = mLoaderRect.toFloat();
+        juce::ColourGradient lg(juce::Colour(0xff23272e), lp.getTopLeft(),
+                                juce::Colour(0xff1b1f25), lp.getBottomLeft(), false);
+        g.setGradientFill(lg);
+        g.fillRoundedRectangle(lp, 9.0f);
+        g.setColour(juce::Colour(0xff3a414c));
+        g.drawRoundedRectangle(lp, 9.0f, 1.0f);
+        auto dot = juce::Rectangle<float>(9.0f, 9.0f).withCentre({lp.getX() + 18.0f, lp.getCentreY()});
+        if (mLoaded) { g.setColour(colors::green.withAlpha(0.4f)); g.fillEllipse(dot.expanded(2.5f)); }
+        g.setColour(mLoaded ? colors::green : colors::caption);
+        g.fillEllipse(dot);
+        g.setColour(colors::text);
+        g.setFont(fonts::archivo(13.0f, fonts::SemiBold));
+        g.drawText(juce::String::fromUTF8("Load NAM model\xE2\x80\xA6"), lp.withTrimmedLeft(32).toNearestInt(),
+                   juce::Justification::centredLeft);
+
+        // Left column: tag pills.
+        auto tagPill = [&](juce::Rectangle<int> &row, const juce::String &t)
+        {
+            const int w = (int)std::ceil(juce::GlyphArrangement::getStringWidth(fonts::mono(11.0f), t)) + 22;
+            auto r = row.removeFromLeft(w).toFloat();
+            row.removeFromLeft(7);
+            g.setColour(juce::Colour(0xff191c21));
+            g.fillRoundedRectangle(r, 6.0f);
+            g.setColour(colors::cardBorder);
+            g.drawRoundedRectangle(r, 6.0f, 1.0f);
+            g.setColour(juce::Colour(0xff7a808a));
+            g.setFont(fonts::mono(11.0f));
+            g.drawText(t, r, juce::Justification::centred);
+        };
+        auto tags = mTagsRect;
+        if (mLoaded) tagPill(tags, mProc.isA2Model(mRig) ? "A2 model" : "standard");
+        if (mNormalized) tagPill(tags, "normalized");
+
+        // Right column: divider + caption + AA labels + normalize label.
+        g.setColour(colors::divider);
+        g.fillRect(mDivX, mCaptionR.getY(), 1, getHeight() - mCaptionR.getY() - 24);
+        sub(mCaptionR, juce::String::fromUTF8("ANTI-ALIAS \xC2\xB7 QUALITY"));
+        g.setColour(colors::textDim);
+        g.setFont(fonts::archivo(11.0f));
+        g.drawText("Live AA Oversampling", mLiveLabel, juce::Justification::centredLeft);
+        g.drawText("Offline (render) AA", mOffLabel, juce::Justification::centredLeft);
+        if (mAaCapped)
+        {
+            g.setColour(colors::accent);
+            g.setFont(fonts::mono(10.0f, fonts::Medium));
+            g.drawText(juce::String::fromUTF8("Capped at 4\xC3\x97 \xC2\xB7 Low Latency on"),
+                       juce::Rectangle<int>(mLiveAa.getX(), mLiveAa.getBottom() + 3,
+                                            mLiveAa.getWidth(), 13),
+                       juce::Justification::centredLeft);
+        }
+        g.setColour(colors::text);
+        g.setFont(fonts::archivo(12.5f));
+        g.drawText(juce::String::fromUTF8("Normalize output \xC2\xB7 \xE2\x88\x92" "18 LUFS"), mNormLabel,
+                   juce::Justification::centredLeft);
+    }
+
     void resized() override
     {
-        auto area = contentArea();
-        auto left = area.removeFromLeft(area.getWidth() / 2 - 10);
-        mLoadBtn.setBounds(left.removeFromTop(34).removeFromLeft(180));
-        left.removeFromTop(8);
-        mModelName.setBounds(left.removeFromTop(22));
-        left.removeFromTop(4);
-        mInfo.setBounds(left.removeFromTop(22));
+        auto area = bodyArea().reduced(26, 26);
+        auto left = area.removeFromLeft((int)(area.getWidth() * 0.52f));
+        area.removeFromLeft(34);
+        mDivX = area.getX() - 17;
+        auto right = area;
 
-        area.removeFromLeft(20);
-        auto comboRow = [&](juce::Label &l, juce::ComboBox &b)
-        {
-            auto r = area.removeFromTop(30);
-            l.setBounds(r.removeFromLeft(80));
-            b.setBounds(r.removeFromLeft(150));
-            area.removeFromTop(10);
-        };
-        comboRow(mLiveAaLabel, mLiveAa);
-        comboRow(mOfflineAaLabel, mOfflineAa);
+        // Left column.
+        mCaptionL = left.removeFromTop(14);
+        left.removeFromTop(12);
+        mLoaderRect = left.removeFromTop(44).removeFromLeft(208);
+        left.removeFromTop(18);
+        mModelName.setBounds(left.removeFromTop(30));
+        left.removeFromTop(6);
+        mInfo.setBounds(left.removeFromTop(40));
+        mTagsRect = left.removeFromBottom(26);
 
-        // Normalization sits below the AA combos in the right column.
-        area.removeFromTop(6);
-        mNormToggle.setBounds(area.removeFromTop(24));
+        // Right column.
+        mCaptionR = right.removeFromTop(14);
+        right.removeFromTop(16);
+        mLiveLabel = right.removeFromTop(16);
+        right.removeFromTop(6);
+        mLiveAa.setBounds(right.removeFromTop(36));
+        right.removeFromTop(18);
+        mOffLabel = right.removeFromTop(16);
+        right.removeFromTop(6);
+        mOfflineAa.setBounds(right.removeFromTop(36));
+        right.removeFromTop(22);
+        auto normRow = right.removeFromTop(24);
+        mNorm->setBounds(normRow.removeFromLeft(42));
+        normRow.removeFromLeft(12);
+        mNormLabel = normRow;
     }
 
 private:
     NamRigProcessor &mProc;
     int mRig = 0;
-    juce::TextButton mLoadBtn{"Load NAM model..."};
     juce::Label mModelName, mInfo;
     juce::ComboBox mLiveAa, mOfflineAa;
-    juce::Label mLiveAaLabel, mOfflineAaLabel;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mLiveAtt, mOfflineAtt;
-    juce::ToggleButton mNormToggle;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mNormToggleAtt;
+    std::unique_ptr<ToggleSwitch> mNorm;
     std::unique_ptr<juce::FileChooser> mChooser;
+    juce::Rectangle<int> mCaptionL, mLoaderRect, mTagsRect, mCaptionR, mLiveLabel, mOffLabel, mNormLabel;
+    int mDivX = 0;
+    bool mLoaded = false, mNormalized = false, mAaCapped = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AmpPanel)
 };
@@ -849,7 +1412,7 @@ class EqPanel : public BlockPanel
 public:
     EqPanel(juce::AudioProcessorValueTreeState &apvts, int rig)
         : BlockPanel(rig == 0 ? "GRAPHIC EQ A - PRE-CAB" : "GRAPHIC EQ B - PRE-CAB"),
-          mApvts(apvts)
+          mApvts(apvts), mRigB(rig != 0)
     {
         static const char *idsA[] = {"eq62", "eq125", "eq250", "eq500",
                                      "eq1k", "eq2k", "eq4k", "eq8k"};
@@ -864,19 +1427,13 @@ public:
         {
             auto slider = std::make_unique<juce::Slider>(juce::Slider::LinearVertical,
                                                          juce::Slider::NoTextBox);
-            slider->setPopupDisplayEnabled(true, true, this);
             slider->onValueChange = [this] { repaint(); }; // redraw response curve
             slider->setDoubleClickReturnValue(true, 0.0); // double-click = flat
-            addAndMakeVisible(*slider);
+            addChildComponent(*slider); // invisible: the nodes are the UI
             mAtts.push_back(std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
                 apvts, ids[b], *slider));
             mSliders.push_back(std::move(slider));
-
-            auto label = std::make_unique<juce::Label>(juce::String{}, captions[b]);
-            label->setJustificationType(juce::Justification::centred);
-            label->setColour(juce::Label::textColourId, colors::textDim);
-            addAndMakeVisible(*label);
-            mLabels.push_back(std::move(label));
+            mCaptions[b] = captions[b];
         }
 
         addAndMakeVisible(mFlatBtn);
@@ -894,81 +1451,147 @@ public:
 
     void resized() override
     {
-        auto area = contentArea();
-        mCurveArea = area.removeFromTop(54).reduced(0, 2);
-        mFlatBtn.setBounds(area.removeFromRight(64).withSizeKeepingCentre(56, 26));
-        area.removeFromRight(8);
-        const int w = area.getWidth() / (int)mSliders.size();
-        for (size_t i = 0; i < mSliders.size(); ++i)
-        {
-            auto col = area.removeFromLeft(w);
-            mLabels[i]->setBounds(col.removeFromBottom(16));
-            mSliders[i]->setBounds(col.withSizeKeepingCentre(juce::jmin(40, w), col.getHeight()));
-        }
+        auto hr = headerArea();
+        mFlatBtn.setBounds(hr.removeFromRight(64).withSizeKeepingCentre(64, 30));
+        hr.removeFromRight(14);
+        setHeaderRight(juce::String("RIG ") + (mRigB ? "B" : "A"));
+
+        mGraph = bodyArea().reduced(26, 18);
+        mGraph.removeFromBottom(24); // hint line
     }
+
+    // map a band's normalised slider position to a y inside the graph.
+    float bandY(int b) const
+    {
+        const float prop = (float)mSliders[(size_t)b]->valueToProportionOfLength(
+            mSliders[(size_t)b]->getValue());
+        return (float)mGraph.getBottom() - prop * (float)mGraph.getHeight();
+    }
+    float bandX(int b) const
+    {
+        return (float)mGraph.getX()
+               + ((float)b + 0.5f) / (float)mSliders.size() * (float)mGraph.getWidth();
+    }
+
+    void mouseDown(const juce::MouseEvent &e) override { dragBand(e); }
+    void mouseDrag(const juce::MouseEvent &e) override { dragBand(e); }
+
+    void dragBand(const juce::MouseEvent &e)
+    {
+        if (mDrag < 0)
+        {
+            // pick the nearest band by x within the graph.
+            float best = 1.0e9f;
+            for (int b = 0; b < (int)mSliders.size(); ++b)
+            {
+                const float dx = std::abs((float)e.x - bandX(b));
+                if (dx < best) { best = dx; mDrag = b; }
+            }
+            if (best > (float)mGraph.getWidth() / (float)mSliders.size()) { mDrag = -1; return; }
+        }
+        if (mDrag < 0) return;
+        const float prop = juce::jlimit(0.0f, 1.0f,
+            (float)(mGraph.getBottom() - e.y) / (float)mGraph.getHeight());
+        auto &s = *mSliders[(size_t)mDrag];
+        s.setValue(s.proportionOfLengthToValue(prop), juce::sendNotificationSync);
+    }
+    void mouseUp(const juce::MouseEvent &) override { mDrag = -1; }
 
     void paint(juce::Graphics &g) override
     {
         BlockPanel::paint(g);
+        RigLookAndFeel::drawWell(g, mGraph.toFloat());
+        auto in = mGraph.toFloat().reduced(1.0f);
 
-        // Combined response from the SAME RBJ designs the DSP runs (drawn at
-        // nominal 48 kHz; the actual rate only shifts the extreme HF end).
-        if (!mCurveArea.isEmpty())
+        // dB grid: +12 / 0 / −12 (design percentages).
+        struct Grid { float pct; juce::Colour c; const char *lbl; };
+        const Grid grid[] = {{0.0875f, juce::Colour(0xff21262d), "+12"},
+                             {0.50f,   juce::Colour(0xff363d47), "0 dB"},
+                             {0.9125f, juce::Colour(0xff21262d), "-12"}};
+        for (auto &gr : grid)
         {
-            const double fs = 48000.0;
-            std::array<Biquad, EqBlock::kNumBands> filters;
-            for (int b = 0; b < EqBlock::kNumBands; ++b)
-                filters[(size_t)b] = Biquad::peaking(fs, EqBlock::kBandHz[(size_t)b],
-                                                     EqBlock::kQ,
-                                                     mSliders[(size_t)b]->getValue());
+            const float y = in.getY() + gr.pct * in.getHeight();
+            g.setColour(gr.c);
+            g.fillRect(in.getX(), y, in.getWidth(), 1.0f);
+            g.setColour(juce::Colour(0xff5a616b));
+            g.setFont(fonts::mono(8.5f, fonts::SemiBold));
+            g.drawText(gr.lbl, juce::Rectangle<float>(in.getX() + 6.0f, y - 7.0f, 32.0f, 14.0f),
+                       juce::Justification::centredLeft);
+        }
 
-            g.setColour(colors::outline);
-            g.drawHorizontalLine(mCurveArea.getCentreY(), (float)mCurveArea.getX(),
-                                 (float)mCurveArea.getRight());
+        // Response curve from the SAME RBJ designs the DSP runs.
+        const double fs = 48000.0;
+        std::array<Biquad, EqBlock::kNumBands> filters;
+        for (int b = 0; b < EqBlock::kNumBands; ++b)
+            filters[(size_t)b] = Biquad::peaking(fs, EqBlock::kBandHz[(size_t)b], EqBlock::kQ,
+                                                 mSliders[(size_t)b]->getValue());
+        juce::Path curve;
+        const double fLo = 30.0, fHi = 16000.0;
+        const int n = juce::jmax(2, (int)in.getWidth());
+        for (int x = 0; x < n; ++x)
+        {
+            const double f = fLo * std::pow(fHi / fLo, (double)x / (double)(n - 1));
+            double db = 0.0;
+            for (auto &bi : filters)
+                if (!bi.isIdentity())
+                    db += 20.0 * std::log10(std::max(bi.magnitudeAt(fs, f), 1.0e-6));
+            const float y = juce::jlimit(in.getY(), in.getBottom(),
+                                         in.getCentreY() - (float)(db / 12.0) * in.getHeight() * 0.4125f);
+            const float px = in.getX() + (float)x;
+            if (x == 0) curve.startNewSubPath(px, y);
+            else curve.lineTo(px, y);
+        }
+        juce::Path area = curve;
+        area.lineTo(in.getRight(), in.getBottom());
+        area.lineTo(in.getX(), in.getBottom());
+        area.closeSubPath();
+        juce::ColourGradient fill(colors::accent.withAlpha(0.30f), in.getX(), in.getY(),
+                                  colors::accent.withAlpha(0.0f), in.getX(), in.getBottom(), false);
+        g.setGradientFill(fill);
+        g.fillPath(area);
+        g.setColour(colors::accent);
+        g.strokePath(curve, juce::PathStrokeType(2.4f, juce::PathStrokeType::curved));
 
-            juce::Path curve;
-            const double fLo = 30.0, fHi = 16000.0;
-            const int n = mCurveArea.getWidth();
-            for (int x = 0; x < n; ++x)
-            {
-                const double f = fLo * std::pow(fHi / fLo, (double)x / (double)(n - 1));
-                double db = 0.0;
-                for (auto &bi : filters)
-                    if (!bi.isIdentity())
-                        db += 20.0 * std::log10(std::max(bi.magnitudeAt(fs, f), 1.0e-6));
-                const float y = juce::jlimit(
-                    (float)mCurveArea.getY(), (float)mCurveArea.getBottom(),
-                    (float)mCurveArea.getCentreY()
-                        - (float)(db / (double)EqBlock::kMaxGainDb)
-                              * ((float)mCurveArea.getHeight() * 0.5f - 2.0f));
-                if (x == 0)
-                    curve.startNewSubPath((float)mCurveArea.getX(), y);
-                else
-                    curve.lineTo((float)(mCurveArea.getX() + x), y);
-            }
+        // Node handles + value + frequency labels.
+        for (int b = 0; b < (int)mSliders.size(); ++b)
+        {
+            const float x = bandX(b), y = juce::jlimit(in.getY(), in.getBottom(), bandY(b));
+            const float db = (float)mSliders[(size_t)b]->getValue();
+            g.setColour(colors::text);
+            g.setFont(fonts::mono(9.0f, fonts::SemiBold));
+            g.drawText((db >= 0 ? "+" : "") + juce::String(db, 1),
+                       juce::Rectangle<float>(x - 24.0f, y - 26.0f, 48.0f, 12.0f),
+                       juce::Justification::centred);
+            auto dot = juce::Rectangle<float>(13.0f, 13.0f).withCentre({x, y});
+            g.setColour(colors::accent.withAlpha(0.4f));
+            g.fillEllipse(dot.expanded(3.0f));
             g.setColour(colors::accent);
-            g.strokePath(curve, juce::PathStrokeType(1.8f, juce::PathStrokeType::curved));
+            g.fillEllipse(dot);
+            g.setColour(juce::Colour(0xff11141b));
+            g.drawEllipse(dot, 2.0f);
+            g.setColour(colors::caption);
+            g.setFont(fonts::archivo(9.5f, fonts::SemiBold, 0.03f));
+            g.drawText(mCaptions[b], juce::Rectangle<float>(x - 26.0f, in.getBottom() - 16.0f, 52.0f, 12.0f),
+                       juce::Justification::centred);
         }
 
-        // 0 dB line across the slider field
-        if (!mSliders.empty())
-        {
-            auto first = mSliders.front()->getBounds();
-            auto last = mSliders.back()->getBounds();
-            const float cy = (float)first.getCentreY();
-            g.setColour(colors::outline);
-            g.drawHorizontalLine((int)cy, (float)first.getX(), (float)last.getRight());
-        }
+        g.setColour(juce::Colour(0xff5a616b));
+        g.setFont(fonts::mono(11.0f));
+        g.drawText(juce::String::fromUTF8("Drag any band to shape the curve \xC2\xB7 8-band graphic EQ, pre-cab"),
+                   juce::Rectangle<int>(mGraph.getX(), mGraph.getBottom() + 6, mGraph.getWidth(), 18),
+                   juce::Justification::centredLeft);
     }
 
 private:
     juce::AudioProcessorValueTreeState &mApvts;
     const char *mBandIds[8]{};
+    juce::String mCaptions[8];
+    bool mRigB = false;
     std::vector<std::unique_ptr<juce::Slider>> mSliders;
-    std::vector<std::unique_ptr<juce::Label>> mLabels;
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> mAtts;
     juce::TextButton mFlatBtn{"Flat"};
-    juce::Rectangle<int> mCurveArea;
+    juce::Rectangle<int> mGraph;
+    int mDrag = -1;
 };
 
 //==============================================================================
@@ -978,6 +1601,11 @@ public:
     CabPanel(NamRigProcessor &proc, int rig)
         : BlockPanel(rig == 0 ? "CABINET A - IR" : "CABINET B - IR"), mProc(proc), mRig(rig)
     {
+        setHeaderRight(rig == 0 ? "RIG A" : "RIG B");
+        mHpfId = rig == 0 ? "cabHpf" : "rigBcabHpf";
+        mLpfId = rig == 0 ? "cabLpf" : "rigBcabLpf";
+
+        mLoadBtn.setButtonText(juce::String::fromUTF8("Load custom IR\xE2\x80\xA6"));
         addAndMakeVisible(mLoadBtn);
         mLoadBtn.onClick = [this]
         {
@@ -992,52 +1620,181 @@ public:
                                   });
         };
 
-        mIrName.setColour(juce::Label::textColourId, colors::text);
-        addAndMakeVisible(mIrName);
-
-        mHpf = std::make_unique<LabeledKnob>(mProc.apvts, rig == 0 ? "cabHpf" : "rigBcabHpf", "Low Cut");
-        mLpf = std::make_unique<LabeledKnob>(mProc.apvts, rig == 0 ? "cabLpf" : "rigBcabLpf", "High Cut");
+        mHpf = std::make_unique<LabeledKnob>(mProc.apvts, mHpfId, "Low Cut");
+        mLpf = std::make_unique<LabeledKnob>(mProc.apvts, mLpfId, "High Cut");
+        mHpf->slider().onValueChange = [this] { repaint(); };
+        mLpf->slider().onValueChange = [this] { repaint(); };
         addAndMakeVisible(*mHpf);
         addAndMakeVisible(*mLpf);
-
-        mHint.setText("Cuts sit post-cab (12 dB/oct). Knob extremes = filter off, bit-exact.",
-                      juce::dontSendNotification);
-        mHint.setColour(juce::Label::textColourId, colors::textDim);
-        addAndMakeVisible(mHint);
     }
 
     void refresh()
     {
-        mIrName.setText(mProc.isIrLoaded(mRig) ? mProc.getIrName(mRig)
-                                               : juce::String("No IR loaded - amp runs direct"),
-                        juce::dontSendNotification);
+        const bool loaded = mProc.isIrLoaded(mRig);
+        auto name = loaded ? mProc.getIrName(mRig) : juce::String::fromUTF8("No IR \xC2\xB7 amp runs direct");
+        if (loaded != mLoaded || name != mIrName) { mLoaded = loaded; mIrName = name; repaint(); }
     }
 
     void resized() override
     {
-        auto area = contentArea();
-        mHint.setBounds(area.removeFromBottom(20));
-
-        auto left = area.removeFromLeft(area.getWidth() / 2 - 10);
-        mLoadBtn.setBounds(left.removeFromTop(34).removeFromLeft(180));
-        left.removeFromTop(8);
-        mIrName.setBounds(left.removeFromTop(22));
-
+        auto area = bodyArea().reduced(24, 13);
+        mCard = area.removeFromLeft(330);
         area.removeFromLeft(20);
-        area = area.withSizeKeepingCentre(area.getWidth(),
-                                          juce::jmin(area.getHeight(), 170));
-        const int w = juce::jmin(130, area.getWidth() / 2);
-        mHpf->setBounds(area.removeFromLeft(w).reduced(6, 0));
-        mLpf->setBounds(area.removeFromLeft(w).reduced(6, 0));
+        mRight = area;
+
+        // IR library card: load button pinned to the bottom.
+        auto card = mCard.reduced(12);
+        mLoadBtn.setBounds(card.removeFromBottom(34));
+        mListRect = mCard.reduced(8).withTrimmedTop(64).withTrimmedBottom(46);
+
+        // Right column: response well on top, knobs + hint below.
+        auto right = mRight;
+        right.removeFromTop(22); // caption row
+        mRespRect = right.removeFromTop(juce::jmax(150, right.getHeight() - 122));
+        right.removeFromTop(10);
+        auto knobRow = right.removeFromTop(96);
+        mHpf->setBounds(knobRow.removeFromLeft(100).reduced(2, 0));
+        knobRow.removeFromLeft(14);
+        mLpf->setBounds(knobRow.removeFromLeft(100).reduced(2, 0));
+        mHintRect = knobRow;
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        BlockPanel::paint(g);
+        paintCard(g);
+        paintResponse(g);
     }
 
 private:
+    void paintCard(juce::Graphics &g)
+    {
+        auto c = mCard.toFloat();
+        g.setColour(juce::Colour(0xff181b21));
+        g.fillRoundedRectangle(c, 11.0f);
+        g.setColour(colors::cardBorder);
+        g.drawRoundedRectangle(c, 11.0f, 1.0f);
+
+        auto head = mCard.reduced(14, 0).withTop(mCard.getY() + 13).withHeight(16);
+        g.setColour(colors::caption);
+        g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.12f));
+        g.drawText("IR LIBRARY", head, juce::Justification::centredLeft);
+        g.setColour(colors::captionDim);
+        g.setFont(fonts::mono(10.0f));
+        g.drawText(mLoaded ? "1 cab" : "0 cabs", head, juce::Justification::centredRight);
+
+        // Search box (decorative).
+        auto search = mCard.reduced(12, 0).withTop(mCard.getY() + 36).withHeight(30).toFloat();
+        g.setColour(juce::Colour(0xff13161f));
+        g.fillRoundedRectangle(search, 8.0f);
+        g.setColour(colors::cardBorder);
+        g.drawRoundedRectangle(search, 8.0f, 1.0f);
+        g.setColour(colors::captionDim);
+        g.drawEllipse(search.getX() + 12.0f, search.getCentreY() - 5.0f, 10.0f, 10.0f, 1.5f);
+        g.setFont(fonts::archivo(12.0f));
+        g.drawText(juce::String::fromUTF8("Search cabinets\xE2\x80\xA6"), search.withTrimmedLeft(30), juce::Justification::centredLeft);
+
+        // List: the loaded IR (selected row) or an empty hint.
+        auto row = juce::Rectangle<int>(mListRect.getX(), mListRect.getY(), mListRect.getWidth(), 46).toFloat();
+        if (mLoaded)
+        {
+            g.setColour(colors::accent.withAlpha(0.10f));
+            g.fillRoundedRectangle(row, 9.0f);
+            g.setColour(colors::accent.withAlpha(0.5f));
+            g.drawRoundedRectangle(row, 9.0f, 1.0f);
+            auto dot = juce::Rectangle<float>(9.0f, 9.0f).withCentre({row.getX() + 17.0f, row.getCentreY()});
+            g.setColour(colors::green.withAlpha(0.4f)); g.fillEllipse(dot.expanded(2.5f));
+            g.setColour(colors::green); g.fillEllipse(dot);
+            auto txt = row.withTrimmedLeft(32).withTrimmedRight(46);
+            g.setColour(colors::text);
+            g.setFont(fonts::archivo(13.0f, fonts::SemiBold));
+            g.drawText(mIrName, txt.removeFromTop(22).toNearestInt(), juce::Justification::centredLeft, true);
+            g.setColour(colors::caption);
+            g.setFont(fonts::mono(10.5f));
+            g.drawText(juce::String::fromUTF8("custom \xC2\xB7 loaded"), txt.toNearestInt(), juce::Justification::centredLeft);
+            auto tag = juce::Rectangle<float>(30.0f, 18.0f).withCentre({row.getRight() - 24.0f, row.getCentreY()});
+            g.setColour(juce::Colour(0xff22262d)); g.fillRoundedRectangle(tag, 5.0f);
+            g.setColour(colors::cardBorder); g.drawRoundedRectangle(tag, 5.0f, 1.0f);
+            g.setColour(juce::Colour(0xff7a808a)); g.setFont(fonts::archivo(8.5f, fonts::SemiBold, 0.08f));
+            g.drawText("IR", tag, juce::Justification::centred);
+        }
+        else
+        {
+            g.setColour(colors::captionDim);
+            g.setFont(fonts::mono(11.0f));
+            g.drawText(juce::String::fromUTF8("No cabs yet \xE2\x80\x94 load a custom IR below"), mListRect,
+                       juce::Justification::centredTop);
+        }
+    }
+
+    void paintResponse(juce::Graphics &g)
+    {
+        // Caption row.
+        auto cap = juce::Rectangle<int>(mRight.getX(), mRight.getY(), mRight.getWidth(), 16);
+        g.setColour(colors::caption);
+        g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.12f));
+        g.drawText("FREQUENCY RESPONSE", cap, juce::Justification::centredLeft);
+        g.setColour(colors::text2);
+        g.setFont(fonts::mono(11.0f));
+        g.drawText(mLoaded ? mIrName : juce::String("direct"), cap, juce::Justification::centredRight);
+
+        RigLookAndFeel::drawWell(g, mRespRect.toFloat());
+        auto in = mRespRect.toFloat().reduced(2.0f);
+        g.setColour(juce::Colour(0xff262c34));
+        g.fillRect(in.getX(), in.getCentreY(), in.getWidth(), 1.0f);
+
+        const double fs = 48000.0;
+        const float hpf = (float)mProc.apvts.getRawParameterValue(mHpfId)->load();
+        const float lpf = (float)mProc.apvts.getRawParameterValue(mLpfId)->load();
+        const bool hpOn = hpf > 20.5f, lpOn = lpf < 19990.0f;
+        Biquad hp = hpOn ? Biquad::highpass(fs, hpf) : Biquad::identity();
+        Biquad lp = lpOn ? Biquad::lowpass(fs, lpf) : Biquad::identity();
+
+        juce::Path line;
+        const double fLo = 20.0, fHi = 20000.0;
+        const int n = juce::jmax(2, (int)in.getWidth());
+        for (int x = 0; x < n; ++x)
+        {
+            const double f = fLo * std::pow(fHi / fLo, (double)x / (double)(n - 1));
+            double db = 0.0;
+            if (hpOn) db += 20.0 * std::log10(std::max(hp.magnitudeAt(fs, f), 1.0e-6));
+            if (lpOn) db += 20.0 * std::log10(std::max(lp.magnitudeAt(fs, f), 1.0e-6));
+            const float y = juce::jlimit(in.getY(), in.getBottom(),
+                                         in.getCentreY() - (float)(db / 24.0) * in.getHeight());
+            const float px = in.getX() + (float)x;
+            if (x == 0) line.startNewSubPath(px, y);
+            else line.lineTo(px, y);
+        }
+        juce::Path area = line;
+        area.lineTo(in.getRight(), in.getBottom());
+        area.lineTo(in.getX(), in.getBottom());
+        area.closeSubPath();
+        juce::ColourGradient fill(colors::accent.withAlpha(0.20f), in.getX(), in.getY(),
+                                  colors::accent.withAlpha(0.0f), in.getX(), in.getBottom(), false);
+        g.setGradientFill(fill);
+        g.fillPath(area);
+        g.setColour(colors::accent);
+        g.strokePath(line, juce::PathStrokeType(2.4f, juce::PathStrokeType::curved));
+
+        g.setColour(juce::Colour(0xff4a515c));
+        g.setFont(fonts::mono(8.5f, fonts::SemiBold));
+        g.drawText("20 Hz", in.toNearestInt().reduced(8, 6), juce::Justification::bottomLeft);
+        g.drawText("20 kHz", in.toNearestInt().reduced(8, 6), juce::Justification::bottomRight);
+
+        g.setColour(juce::Colour(0xff5a616b));
+        g.setFont(fonts::mono(11.0f));
+        g.drawText(juce::String::fromUTF8("Post-cab cuts \xC2\xB7 12 dB/oct \xC2\xB7 knob extremes = off"),
+                   mHintRect, juce::Justification::centredRight);
+    }
+
     NamRigProcessor &mProc;
     int mRig = 0;
-    juce::TextButton mLoadBtn{"Load cab IR..."};
-    juce::Label mIrName, mHint;
+    juce::String mHpfId, mLpfId, mIrName{juce::String::fromUTF8("No IR \xC2\xB7 amp runs direct")};
+    juce::TextButton mLoadBtn;
     std::unique_ptr<LabeledKnob> mHpf, mLpf;
     std::unique_ptr<juce::FileChooser> mChooser;
+    juce::Rectangle<int> mCard, mRight, mListRect, mRespRect, mHintRect;
+    bool mLoaded = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(CabPanel)
 };
@@ -2250,7 +3007,8 @@ public:
         mSyncAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
             apvts, "delaySync", mSync);
 
-        mPingPong.setButtonText("Ping-pong");
+        mPingPong.setButtonText("Ping-Pong");
+        mPingPong.getProperties().set("pill", true);
         addAndMakeVisible(mPingPong);
         mPpAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             apvts, "delayPingPong", mPingPong);
@@ -2274,15 +3032,18 @@ public:
 
     void resized() override
     {
-        auto area = contentArea();
-        auto topRow = area.removeFromTop(30);
-        mSyncLabel.setBounds(topRow.removeFromLeft(50));
-        mSync.setBounds(topRow.removeFromLeft(110));
-        topRow.removeFromLeft(20);
-        mPingPong.setBounds(topRow.removeFromLeft(110));
-        area.removeFromTop(4);
-        area = area.withSizeKeepingCentre(area.getWidth(),
-                                          juce::jmin(area.getHeight(), 150));
+        // Sync + Ping-Pong in the header-right.
+        auto hr = headerArea();
+        mPingPong.setBounds(hr.removeFromRight(96).withSizeKeepingCentre(96, 26));
+        hr.removeFromRight(10);
+        mSync.setBounds(hr.removeFromRight(110).withSizeKeepingCentre(110, 28));
+        hr.removeFromRight(8);
+        mSyncLabel.setBounds(hr.removeFromRight(42).withSizeKeepingCentre(42, 20));
+        mSyncLabel.setJustificationType(juce::Justification::centredRight);
+
+        auto area = bodyArea().reduced(24, 14)
+                        .withSizeKeepingCentre(bodyArea().getWidth() - 48,
+                                               juce::jmin(bodyArea().getHeight() - 28, 170));
         const int w = area.getWidth() / (int)mKnobs.size();
         for (auto &k : mKnobs)
             k->setBounds(area.removeFromLeft(w).reduced(6, 0));
@@ -2296,6 +3057,233 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mSyncAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mPpAtt;
     std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
+};
+
+//==============================================================================
+// Reverb impulse sketch, read left-to-right: PRE-DELAY gap -> EARLY reflections
+// (discrete spikes, spread by Size) -> LATE diffuse FIELD (two accent envelopes:
+// ENERGY full-length + HIGHS dying faster as Tone darkens). Decay sets how far
+// right the tail reaches (max Decay == the right edge, no further); Pre-delay
+// slides the onset right; Mod ripples the tail outline. A dashed RT60 marker
+// sits at the tail end. The background is a dithered radial gradient (no banding).
+class ReverbField : public juce::Component
+{
+public:
+    // sizeFrac/preFrac/modFrac are pre-normalised 0..1 (the panel collapses the
+    // exposed/hidden knobs to a neutral default before calling). rtMax is THIS
+    // character's Decay knob maximum, so rt==rtMax lands the tail on the right edge.
+    void setParams(float rtSec, float rtMax, float tone01, float preFrac,
+                   float sizeFrac, float modFrac, bool frozen)
+    {
+        mRtMax  = juce::jmax(0.1f, rtMax);
+        mRt     = juce::jlimit(0.05f, mRtMax, rtSec);
+        mTone   = juce::jlimit(0.0f, 1.0f, tone01);
+        mPre    = juce::jlimit(0.0f, 1.0f, preFrac);
+        mSize   = juce::jlimit(0.0f, 1.0f, sizeFrac);
+        mMod    = juce::jlimit(0.0f, 1.0f, modFrac);
+        mFrozen = frozen;
+        repaint();
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        auto r = getLocalBounds().toFloat();
+
+        // Dithered radial gradient (cached) to defeat the 8-bit banding rings.
+        ensureBackground((int)std::ceil(r.getWidth()), (int)std::ceil(r.getHeight()));
+        if (mBg.isValid())
+        {
+            juce::Graphics::ScopedSaveState ss(g);
+            juce::Path clip;
+            clip.addRoundedRectangle(r, 13.0f);
+            g.reduceClipRegion(clip);
+            g.drawImageAt(mBg, 0, 0);
+        }
+        g.setColour(colors::cardBorder);
+        g.drawRoundedRectangle(r.reduced(0.5f), 13.0f, 1.0f);
+
+        auto in = r.reduced(14.0f, 16.0f);
+        const float cy = in.getCentreY();
+        const float halfH = in.getHeight() * 0.5f - 2.0f;
+        const float xL = in.getX();
+        const float xR = in.getRight();
+        const float fullW = xR - xL;
+
+        g.setColour(juce::Colour(0xff262c36));
+        g.fillRect(xL, cy, fullW, 1.0f);
+
+        // --- onset geometry ---------------------------------------------------
+        // Pre-delay slides the onset right; Size sets how far the early
+        // reflections spread before the diffuse tail starts. The tail then fills
+        // the remaining width as Decay -> rtMax (so max Decay reaches xR exactly).
+        const float onsetX = xL + mPre * fullW * 0.22f;            // pre-delay gap
+        const float earlyW = fullW * (0.05f + 0.16f * mSize);      // early spread (Size)
+        const float lateX0 = onsetX + earlyW;                      // diffuse tail start
+        const float rtFrac = mFrozen ? 1.0f : juce::jlimit(0.0f, 1.0f, mRt / mRtMax);
+        const float lateEndX = lateX0 + rtFrac * (xR - lateX0);
+
+        // --- pre-delay lead-in (dotted) so the gap reads as a delay -----------
+        if (mPre > 0.001f)
+        {
+            g.setColour(colors::accent.withAlpha(0.30f));
+            for (float xx = xL; xx < onsetX - 2.0f; xx += 5.0f)
+                g.fillRect(xx, cy - 0.75f, 2.5f, 1.5f);
+        }
+
+        // --- late diffuse field: two accent envelopes, Mod ripples the outline -
+        const float modDepth = 0.30f * mMod;
+        const float span = juce::jmax(1.0f, lateEndX - lateX0);
+        // Gentle visual decay (~3.5) so the tail BODY stays visible across its whole
+        // span and reaches the right edge at max Decay (a -60 dB curve would crush
+        // all the visible action into the first third). kDie<1 dies sooner (highs).
+        auto envAmp = [&](float u, float kDie, float cycles, float phase)
+        {
+            float a = std::exp(-3.5f * u / juce::jmax(0.05f, kDie));
+            a *= 1.0f + modDepth * std::sin(u * cycles * juce::MathConstants<float>::twoPi + phase);
+            return juce::jmax(0.0f, a);
+        };
+        auto spindle = [&](float scale, float kDie, float cycles, float phase)
+        {
+            juce::Path p;
+            const int N = 220;
+            for (int i = 0; i < N; ++i)
+            {
+                const float u = (float)i / (float)(N - 1);
+                const float a = halfH * scale * envAmp(u, kDie, cycles, phase);
+                const float x = lateX0 + u * span;
+                if (i == 0) p.startNewSubPath(x, cy - a);
+                else        p.lineTo(x, cy - a);
+            }
+            for (int i = N - 1; i >= 0; --i)
+            {
+                const float u = (float)i / (float)(N - 1);
+                const float a = halfH * scale * envAmp(u, kDie, cycles, phase);
+                p.lineTo(lateX0 + u * span, cy + a);
+            }
+            p.closeSubPath();
+            return p;
+        };
+        auto fill = [&](const juce::Path &p, float peak)
+        {
+            juce::ColourGradient grad(colors::accent.withAlpha(0.0f), 0.0f, cy - halfH,
+                                      colors::accent.withAlpha(0.0f), 0.0f, cy + halfH, false);
+            grad.addColour(0.5, colors::accent.withAlpha(peak));
+            g.setGradientFill(grad);
+            g.fillPath(p);
+        };
+        const float kEnergy = mFrozen ? 12.0f : 1.0f;                  // frozen ~= endless
+        const float kHi     = mFrozen ? 12.0f : (0.30f + 0.55f * mTone); // bright Tone -> highs ring longer
+        fill(spindle(1.0f, kEnergy, 5.0f, 0.0f), 0.22f);   // ENERGY (full length, faint)
+        fill(spindle(0.92f, kHi, 7.0f, 1.6f), 0.5f);       // HIGHS  (dies faster, brighter)
+
+        // --- early reflections: discrete spikes onsetX..lateX0, gaps shrinking
+        //     as they build into the tail; Size widens the whole cluster. -------
+        const int K = 6;
+        for (int k = 0; k < K; ++k)
+        {
+            const float f = (float)k / (float)(K - 1);
+            const float xx = onsetX + earlyW * (1.0f - (1.0f - f) * (1.0f - f)); // gaps shrink
+            const float h = halfH * (0.85f - 0.42f * f);
+            g.setColour(colors::accent.withAlpha(0.6f - 0.28f * f));
+            g.fillRect(xx - 0.9f, cy - h, 1.8f, 2.0f * h);
+        }
+
+        // --- RT60 marker (dashed) at the tail end -----------------------------
+        // Shown even at max Decay: pin it just inside the right edge and flip the
+        // "RT x.x s" label to the LEFT of the line when it nears that edge. Dashes
+        // start below the caption/legend row so they don't collide with it.
+        if (!mFrozen)
+        {
+            const float mx = juce::jmin(lateEndX, xR - 1.0f);
+            for (float yy = in.getY() + 16.0f; yy < in.getBottom() - 14.0f; yy += 6.0f)
+            {
+                g.setColour(juce::Colour(0xff5a616b));
+                g.fillRect(mx, yy, 1.0f, 3.0f);
+            }
+            g.setColour(colors::text2);
+            g.setFont(fonts::mono(9.0f, fonts::Medium));
+            const float lw = 64.0f;
+            const bool flip = mx + 5.0f + lw > xR;
+            g.drawText("RT " + juce::String(mRt, 1) + " s",
+                       flip ? juce::Rectangle<float>(mx - 5.0f - lw, in.getBottom() - 13.0f, lw, 12.0f)
+                            : juce::Rectangle<float>(mx + 5.0f, in.getBottom() - 13.0f, lw, 12.0f),
+                       flip ? juce::Justification::centredRight : juce::Justification::centredLeft);
+        }
+
+        // --- caption + legend (bigger swatches) -------------------------------
+        g.setColour(juce::Colour(0xff5a616b));
+        g.setFont(fonts::mono(9.0f, fonts::SemiBold, 0.1f));
+        g.drawText("PRE-DELAY \xE2\x86\x92 EARLY \xE2\x86\x92 LATE FIELD",
+                   in.toNearestInt().removeFromTop(12), juce::Justification::topLeft);
+        // Right-align the swatch glyphs + labels flush into the top-right corner.
+        const auto legendFont = fonts::mono(10.0f, fonts::SemiBold);
+        const float boxW = 13.0f, gapW = 5.0f, tailW = 6.0f;
+        auto txtW = [&](const char *t) { return juce::GlyphArrangement::getStringWidth(legendFont, t); };
+        auto entryW = [&](const char *t) { return boxW + gapW + txtW(t) + tailW; };
+        const float legW = mFrozen ? 80.0f : (entryW("ENERGY") + entryW("HIGHS"));
+        auto legend = juce::Rectangle<float>(in.getRight() - legW, in.getY(), legW, 16.0f);
+        auto swatch = [&](juce::Rectangle<float> &a, float alpha, const char *t)
+        {
+            auto box = a.removeFromLeft(boxW).withSizeKeepingCentre(12.0f, 12.0f);
+            g.setColour(colors::accent.withAlpha(alpha));
+            g.fillRoundedRectangle(box, 3.0f);
+            a.removeFromLeft(gapW);
+            g.setColour(colors::caption);
+            g.setFont(legendFont);
+            g.drawText(t, a.removeFromLeft(txtW(t) + tailW), juce::Justification::centredLeft);
+        };
+        if (mFrozen)
+        {
+            g.setColour(colors::accent);
+            g.setFont(fonts::mono(10.0f, fonts::Medium));
+            g.drawText("RT  frozen", legend, juce::Justification::centredRight);
+        }
+        else
+        {
+            swatch(legend, 0.45f, "ENERGY");
+            swatch(legend, 0.95f, "HIGHS");
+        }
+    }
+
+private:
+    // Build a per-pixel dithered radial gradient once per size. Adding ±1 LSB of
+    // noise before the 8-bit write breaks up the concentric banding rings that a
+    // plain juce::ColourGradient shows across these two near-black colours.
+    void ensureBackground(int w, int h)
+    {
+        w = juce::jmax(1, w);
+        h = juce::jmax(1, h);
+        if (mBg.isValid() && w == mBgW && h == mBgH)
+            return;
+        mBgW = w;
+        mBgH = h;
+        mBg = juce::Image(juce::Image::ARGB, w, h, false);
+        juce::Image::BitmapData bd(mBg, juce::Image::BitmapData::writeOnly);
+        const juce::Colour c1(0xff181c26), c2(0xff0e1118);
+        const float r1 = c1.getFloatRed(),   g1 = c1.getFloatGreen(),   b1 = c1.getFloatBlue();
+        const float r2 = c2.getFloatRed(),   g2 = c2.getFloatGreen(),   b2 = c2.getFloatBlue();
+        const float p1x = (float)w * 0.1f, p1y = (float)h * 0.5f; // inner (brighter)
+        const float p2x = (float)w,        p2y = (float)h;        // outer (darker)
+        const float rad = std::sqrt((p2x - p1x) * (p2x - p1x) + (p2y - p1y) * (p2y - p1y));
+        const float invRad = rad > 0.0f ? 1.0f / rad : 0.0f;
+        juce::Random rng(0x5eed1010); // fixed seed -> stable noise, no per-frame shimmer
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+            {
+                const float dx = (float)x - p1x, dy = (float)y - p1y;
+                const float d = juce::jlimit(0.0f, 1.0f, std::sqrt(dx * dx + dy * dy) * invRad);
+                const float dz = (rng.nextFloat() - 0.5f) * (2.2f / 255.0f); // ±~1 LSB dither
+                bd.setPixelColour(x, y, juce::Colour::fromFloatRGBA(
+                    juce::jlimit(0.0f, 1.0f, r1 + (r2 - r1) * d + dz),
+                    juce::jlimit(0.0f, 1.0f, g1 + (g2 - g1) * d + dz),
+                    juce::jlimit(0.0f, 1.0f, b1 + (b2 - b1) * d + dz), 1.0f));
+            }
+    }
+
+    float mRt = 2.2f, mRtMax = 6.0f, mTone = 0.5f, mPre = 0.0f, mSize = 0.45f, mMod = 0.0f;
+    bool mFrozen = false;
+    juce::Image mBg;
+    int mBgW = 0, mBgH = 0;
 };
 
 //==============================================================================
@@ -2314,11 +3302,11 @@ public:
         // Item IDs are 1-based and equal Type+1, matching the revType choice indices.
         for (int t = 0; t < nam_rig::ReverbBlock::kNumShipped; ++t)
             mType.addItem(nam_rig::ReverbBlock::typeName(t), t + 1);
-        addAndMakeVisible(mType);
+        addChildComponent(mType); // hidden parameter bridge; the cards drive it
         mTypeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
             apvts, "revType", mType);
         mType.onChange = [this] { refresh(); };
-        addAndMakeVisible(mIcon);
+        addChildComponent(mIcon);
 
         // Shimmer pitch interval (only shown for Shimmer).
         mPitch.addItemList({"Octave", "+2 Oct", "Fifth+Oct"}, 1);
@@ -2329,6 +3317,7 @@ public:
         // Freeze — infinite sustain. Only on the lush/evolving characters (Hall/Shimmer/
         // Bloom); hidden elsewhere via refresh() + RB::freezeExposed.
         mFreeze.setButtonText("Freeze");
+        mFreeze.getProperties().set("pill", true);
         addChildComponent(mFreeze);
         mFreezeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             apvts, juce::String(nam_rig::ReverbBlock::paramId("Freeze", nam_rig::ReverbBlock::kHall)), mFreeze);
@@ -2362,64 +3351,166 @@ public:
         addChildComponent(*mBoing);
         addChildComponent(*mSwell);
 
+        addAndMakeVisible(mField);
+        // Every knob that shapes the sketch refreshes it live. The sliders persist
+        // across character changes (only their attachments rebind), so these stick.
+        mDecay->slider().onValueChange = [this] { updateField(); };
+        mTone->slider().onValueChange = [this] { updateField(); };
+        mSize->slider().onValueChange = [this] { updateField(); };
+        mPredelay->slider().onValueChange = [this] { updateField(); };
+        mMod->slider().onValueChange = [this] { updateField(); };
+        mFreeze.onClick = [this] { updateField(); };
+
         refresh();
+    }
+
+    void updateField()
+    {
+        const float rtSec = (float)mDecay->slider().getValue();    // true seconds (per-character window)
+        const float rtMax = (float)mDecay->slider().getMaximum();  // this character's Decay cap -> right edge
+        const float tone = (float)mTone->slider().valueToProportionOfLength(mTone->slider().getValue());
+        const bool frozen = mFreeze.isVisible() && mFreeze.getToggleState();
+        // Only the knobs the active character actually exposes drive the sketch;
+        // hidden ones collapse to a neutral default (no pre-delay, mid spread, no mod).
+        float preFrac = 0.0f;
+        if (mPredelay->isVisible())
+        {
+            const double mx = mPredelay->slider().getMaximum();
+            preFrac = mx > 0.0 ? (float)(mPredelay->slider().getValue() / mx) : 0.0f;
+        }
+        const float sizeFrac = mSize->isVisible()
+            ? (float)mSize->slider().valueToProportionOfLength(mSize->slider().getValue())
+            : 0.45f;
+        const float modFrac = mMod->isVisible()
+            ? (float)mMod->slider().valueToProportionOfLength(mMod->slider().getValue())
+            : 0.0f;
+        mField.setParams(rtSec, rtMax, tone, preFrac, sizeFrac, modFrac, frozen);
     }
 
     void refresh()
     {
-        const int type = (int)mApvts.getRawParameterValue("revType")->load();
+        // Read the live selection from the combo (kept in sync with the param by
+        // its attachment) so a card click reliably updates the whole panel, with
+        // no read-before-write race against the parameter.
+        const int type = mType.getSelectedItemIndex();
         const bool on = mApvts.getRawParameterValue("reverbOn")->load() >= 0.5f;
         mIcon.setType(type);
         mIcon.setActive(on);
-        if (type == mLastType)
-            return;
-        mLastType = type;
 
-        using RB = nam_rig::ReverbBlock;
-        const auto t = (RB::Type)type;
-        mSize->setVisible(RB::sizeExposed(t));
-        mPredelay->setVisible(RB::predelayExposed(t));
-        mInputFilter->setVisible(RB::inputFilterExposed(t));
-        mMod->setVisible(RB::modExposed(t));
-        mShimmer->setVisible(RB::shimmerExposed(t));
-        mTension->setVisible(RB::tensionExposed(t));
-        mBoing->setVisible(RB::boingExposed(t));
-        mSwell->setVisible(RB::swellExposed(t));
-        mPitch.setVisible(RB::pitchExposed(t));
-        mFreeze.setVisible(RB::freezeExposed(t));
-        // rebind the shared knobs to THIS character's own params (own range + state)
-        mDecay->rebind(mApvts, juce::String(RB::paramId("Decay", type)));
-        mTone->rebind(mApvts, juce::String(RB::paramId("Tone", type)));
-        if (RB::sizeExposed(t)) mSize->rebind(mApvts, juce::String(RB::paramId("Size", type)));
-        if (RB::predelayExposed(t)) mPredelay->rebind(mApvts, juce::String(RB::paramId("Predelay", type)));
-        if (RB::modExposed(t)) mMod->rebind(mApvts, juce::String(RB::paramId("Mod", type)));
-        mFreezeAtt.reset(); // per-character Freeze: rebind the button to THIS character's own state
-        if (RB::freezeExposed(t))
-            mFreezeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-                mApvts, juce::String(RB::paramId("Freeze", type)), mFreeze);
-        mTone->setCaption(RB::toneCaption(t)); // "Damping" / "Tone" (spring)
-        resized();
+        if (type != mLastType)
+        {
+            mLastType = type;
+            using RB = nam_rig::ReverbBlock;
+            const auto t = (RB::Type)type;
+            mSize->setVisible(RB::sizeExposed(t));
+            mPredelay->setVisible(RB::predelayExposed(t));
+            mInputFilter->setVisible(RB::inputFilterExposed(t));
+            mMod->setVisible(RB::modExposed(t));
+            mShimmer->setVisible(RB::shimmerExposed(t));
+            mTension->setVisible(RB::tensionExposed(t));
+            mBoing->setVisible(RB::boingExposed(t));
+            mSwell->setVisible(RB::swellExposed(t));
+            mPitch.setVisible(RB::pitchExposed(t));
+            mFreeze.setVisible(RB::freezeExposed(t));
+            // rebind shared knobs to THIS character's own params (own range + state)
+            mDecay->rebind(mApvts, juce::String(RB::paramId("Decay", type)));
+            mTone->rebind(mApvts, juce::String(RB::paramId("Tone", type)));
+            if (RB::sizeExposed(t)) mSize->rebind(mApvts, juce::String(RB::paramId("Size", type)));
+            if (RB::predelayExposed(t)) mPredelay->rebind(mApvts, juce::String(RB::paramId("Predelay", type)));
+            if (RB::modExposed(t)) mMod->rebind(mApvts, juce::String(RB::paramId("Mod", type)));
+            mFreezeAtt.reset(); // per-character Freeze: rebind to THIS character's own state
+            if (RB::freezeExposed(t))
+                mFreezeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+                    mApvts, juce::String(RB::paramId("Freeze", type)), mFreeze);
+            mTone->setCaption(RB::toneCaption(t));
+            resized();
+            repaint(); // card highlight + character name/description
+        }
+        updateField(); // always — reflects live Decay/Tone and the newly-bound character
+    }
+
+    void mouseUp(const juce::MouseEvent &e) override
+    {
+        for (int i = 0; i < (int)mCardRects.size(); ++i)
+            if (mCardRects[(size_t)i].contains(e.getPosition()))
+            {
+                mType.setSelectedItemIndex(i);
+                return;
+            }
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        BlockPanel::paint(g);
+
+        g.setColour(colors::caption);
+        g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.12f));
+        g.drawText("CHARACTER", mCharCap, juce::Justification::topLeft);
+
+        for (int i = 0; i < (int)mCardRects.size(); ++i)
+        {
+            auto r = mCardRects[(size_t)i].toFloat();
+            const bool sel = (i == mLastType);
+            g.setColour(sel ? colors::accent.withAlpha(0.12f) : juce::Colour(0xff181b21));
+            g.fillRoundedRectangle(r, 10.0f);
+            g.setColour(sel ? colors::accent.withAlpha(0.55f) : colors::cardBorder);
+            g.drawRoundedRectangle(r, 10.0f, 1.0f);
+            // small concentric-arc glyph.
+            auto gly = juce::Rectangle<float>(22.0f, 22.0f).withCentre(
+                {r.getX() + 26.0f, r.getCentreY()});
+            g.setColour(sel ? colors::accent : colors::caption);
+            for (float rad : {4.0f, 8.0f, 11.0f})
+            {
+                juce::Path arc;
+                arc.addCentredArc(gly.getCentreX(), gly.getCentreY(), rad, rad, 0.0f,
+                                  juce::degreesToRadians(-65.0f), juce::degreesToRadians(65.0f), true);
+                g.strokePath(arc, juce::PathStrokeType(1.7f));
+            }
+            g.setColour(sel ? colors::textBright : colors::text2);
+            g.setFont(fonts::archivo(14.0f, fonts::SemiBold));
+            g.drawText(nam_rig::ReverbBlock::typeName(i), r.withTrimmedLeft(46),
+                       juce::Justification::centredLeft);
+        }
+
+        // Right column: character name (no description).
+        const int t = juce::jmax(0, mLastType);
+        g.setColour(colors::textBright);
+        g.setFont(fonts::archivo(18.0f, fonts::Bold));
+        g.drawText(nam_rig::ReverbBlock::typeName(t), mNameRect, juce::Justification::centredLeft);
     }
 
     void resized() override
     {
-        auto area = contentArea();
+        auto hr = headerArea();
+        mFreeze.setBounds(hr.removeFromRight(80).withSizeKeepingCentre(80, 30));
 
-        auto top = area.removeFromTop(50);
-        mIcon.setBounds(top.removeFromLeft(66).withSizeKeepingCentre(64, juce::jmin(top.getHeight(), 46)));
-        top.removeFromLeft(12);
-        mType.setBounds(top.removeFromLeft(160).withSizeKeepingCentre(160, 26));
-        mFreeze.setBounds(top.removeFromRight(78).withSizeKeepingCentre(78, 24)); // top-right
-        top.removeFromRight(10);
-        if (mPitch.isVisible())
+        auto body = bodyArea().reduced(24, 18);
+        auto left = body.removeFromLeft(166);
+        body.removeFromLeft(20);
+        auto right = body;
+
+        mCharCap = left.removeFromTop(14);
+        left.removeFromTop(8);
+        const int n = nam_rig::ReverbBlock::kNumShipped;
+        const int gap = 8;
+        const int ch = juce::jmax(34, (left.getHeight() - gap * (n - 1)) / n);
+        mCardRects.clear();
+        for (int i = 0; i < n; ++i)
         {
-            top.removeFromLeft(10);
-            mPitch.setBounds(top.removeFromLeft(118).withSizeKeepingCentre(118, 26));
+            mCardRects.push_back(left.removeFromTop(ch));
+            if (i < n - 1) left.removeFromTop(gap);
         }
-        area.removeFromTop(10);
 
-        // Lay out only the visible knobs, centered — the lineup changes per
-        // character so the panel never shows a control that does nothing.
+        auto nameRow = right.removeFromTop(24);
+        if (mPitch.isVisible())
+            mPitch.setBounds(nameRow.removeFromRight(124).withSizeKeepingCentre(124, 26));
+        mNameRect = nameRow;
+        right.removeFromTop(8);
+
+        auto fieldArea = right.removeFromTop(juce::jmax(150, right.getHeight() - 150));
+        mField.setBounds(fieldArea);
+        right.removeFromTop(10);
+
         std::vector<juce::Component *> vis;
         for (juce::Component *k : {(juce::Component *)mDecay.get(), (juce::Component *)mSize.get(),
                                    (juce::Component *)mPredelay.get(), (juce::Component *)mInputFilter.get(),
@@ -2430,15 +3521,13 @@ public:
                                    (juce::Component *)mWidth.get(), (juce::Component *)mMix.get()})
             if (k->isVisible())
                 vis.push_back(k);
-
         const int nk = (int)vis.size();
         if (nk == 0)
             return;
-        area = area.withSizeKeepingCentre(area.getWidth(), juce::jmin(area.getHeight(), 160));
-        const int w = juce::jmin(116, area.getWidth() / nk);
-        auto row = area.withSizeKeepingCentre(w * nk, area.getHeight());
+        const int w = juce::jmin(104, right.getWidth() / nk);
+        auto row = right.withSizeKeepingCentre(w * nk, juce::jmin(right.getHeight(), 116));
         for (auto *k : vis)
-            k->setBounds(row.removeFromLeft(w).reduced(6, 0));
+            k->setBounds(row.removeFromLeft(w).reduced(5, 0));
     }
 
 private:
@@ -2449,6 +3538,9 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt, mPitchAtt;
     juce::ToggleButton mFreeze;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mFreezeAtt;
+    ReverbField mField;
+    std::vector<juce::Rectangle<int>> mCardRects;
+    juce::Rectangle<int> mCharCap, mNameRect;
     std::unique_ptr<LabeledKnob> mDecay, mSize, mPredelay, mTone, mMod, mShimmer, mTension, mBoing, mSwell, mWidth, mMix, mInputFilter;
 };
 
@@ -2459,25 +3551,22 @@ private:
 class MixPanel : public BlockPanel
 {
 public:
-    explicit MixPanel(NamRigProcessor &proc) : BlockPanel("MIX - DUAL RIG"), mProc(proc)
+    explicit MixPanel(NamRigProcessor &proc) : BlockPanel("MIX"), mProc(proc)
     {
-        mModeLabel.setText("Mode", juce::dontSendNotification);
-        mModeLabel.setColour(juce::Label::textColourId, colors::textDim);
-        addAndMakeVisible(mModeLabel);
-        mMode.addItemList({"Solo A", "Solo B", "Dual"}, 1); // matches rigMode order
-        addAndMakeVisible(mMode);
-        mModeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-            mProc.apvts, "rigMode", mMode);
+        mModes = std::make_unique<SegmentedControl>(mProc.apvts, "rigMode",
+                                                    juce::StringArray{"Solo A", "Solo B", "Dual"});
+        addAndMakeVisible(*mModes);
 
-        auto rigTag = [this](juce::Label &l, const char *txt)
+        auto rigTag = [this](juce::Label &l, const char *txt, juce::Colour c)
         {
             l.setText(txt, juce::dontSendNotification);
-            l.setJustificationType(juce::Justification::centred);
-            l.setColour(juce::Label::textColourId, colors::accent);
+            l.setJustificationType(juce::Justification::centredLeft);
+            l.setColour(juce::Label::textColourId, c);
+            l.setFont(fonts::archivo(12.0f, fonts::Bold, 0.08f));
             addAndMakeVisible(l);
         };
-        rigTag(mALabel, "RIG A");
-        rigTag(mBLabel, "RIG B");
+        rigTag(mALabel, "RIG A", colors::titleAccent);
+        rigTag(mBLabel, "RIG B", colors::laneColour(1));
 
         mLevelA = std::make_unique<LabeledKnob>(mProc.apvts, "rigLevelA", "Level");
         mPanA = std::make_unique<LabeledKnob>(mProc.apvts, "rigPanA", "Pan");
@@ -2487,8 +3576,10 @@ public:
         for (auto *k : {mLevelA.get(), mPanA.get(), mLevelB.get(), mPanB.get(), mAlign.get()})
             addAndMakeVisible(*k);
 
-        mPolA.setButtonText("Invert");
-        mPolB.setButtonText("Invert");
+        mPolA.setButtonText(juce::String::fromUTF8("\xC3\xB8 Invert"));
+        mPolB.setButtonText(juce::String::fromUTF8("\xC3\xB8 Invert"));
+        mPolA.getProperties().set("pill", true);
+        mPolB.getProperties().set("pill", true);
         addAndMakeVisible(mPolA);
         addAndMakeVisible(mPolB);
         mPolAAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
@@ -2524,43 +3615,45 @@ public:
 
     void resized() override
     {
-        auto area = contentArea();
+        // Mode pills sit in the header-right.
+        auto hr = headerArea();
+        const int mw = juce::jmin(mModes->idealWidth(), hr.getWidth());
+        mModes->setBounds(hr.removeFromRight(mw).withSizeKeepingCentre(mw, 24));
 
-        auto modeRow = area.removeFromTop(30);
-        mModeLabel.setBounds(modeRow.removeFromLeft(50));
-        mMode.setBounds(modeRow.removeFromLeft(150));
-        area.removeFromTop(8);
+        auto area = bodyArea().reduced(24, 16);
 
         auto rigRow = [&](juce::Label &tag, LabeledKnob &lvl, LabeledKnob &pan,
                           juce::ToggleButton &pol)
         {
-            auto r = area.removeFromTop(96);
-            tag.setBounds(r.removeFromLeft(64).withSizeKeepingCentre(64, 20));
-            lvl.setBounds(r.removeFromLeft(96).reduced(6, 0));
-            pan.setBounds(r.removeFromLeft(96).reduced(6, 0));
-            pol.setBounds(r.removeFromLeft(90).withSizeKeepingCentre(90, 24));
-            area.removeFromTop(4);
+            auto r = area.removeFromTop(104);
+            tag.setBounds(r.removeFromLeft(66).withSizeKeepingCentre(56, 20));
+            lvl.setBounds(r.removeFromLeft(100).reduced(6, 0));
+            pan.setBounds(r.removeFromLeft(100).reduced(6, 0));
+            pol.setBounds(r.removeFromLeft(104).withSizeKeepingCentre(96, 26));
+            area.removeFromTop(6);
         };
         rigRow(mALabel, *mLevelA, *mPanA, mPolA);
         rigRow(mBLabel, *mLevelB, *mPanB, mPolB);
+        area.removeFromTop(6);
 
-        auto alignRow = area.removeFromTop(96);
-        mAlign->setBounds(alignRow.removeFromLeft(96).reduced(6, 0));
-        mAutoBtn.setBounds(alignRow.removeFromLeft(120).withSizeKeepingCentre(120, 28));
+        auto alignRow = area.removeFromTop(104);
+        alignRow.removeFromLeft(66);
+        mAlign->setBounds(alignRow.removeFromLeft(100).reduced(6, 0));
+        alignRow.removeFromLeft(12);
+        mAutoBtn.setBounds(alignRow.removeFromLeft(130).withSizeKeepingCentre(130, 30));
         alignRow.removeFromLeft(8);
-        mMatchBtn.setBounds(alignRow.removeFromLeft(120).withSizeKeepingCentre(120, 28));
-        alignRow.removeFromLeft(10);
-        mHint.setBounds(alignRow.withSizeKeepingCentre(alignRow.getWidth(), 40));
+        mMatchBtn.setBounds(alignRow.removeFromLeft(130).withSizeKeepingCentre(130, 30));
+        alignRow.removeFromLeft(12);
+        mHint.setBounds(alignRow.withSizeKeepingCentre(alignRow.getWidth(), 44));
     }
 
 private:
     NamRigProcessor &mProc;
-    juce::ComboBox mMode;
-    juce::Label mModeLabel, mALabel, mBLabel, mHint;
+    std::unique_ptr<SegmentedControl> mModes;
+    juce::Label mALabel, mBLabel, mHint;
     std::unique_ptr<LabeledKnob> mLevelA, mPanA, mLevelB, mPanB, mAlign;
     juce::ToggleButton mPolA, mPolB;
     juce::TextButton mAutoBtn{"Auto-align"}, mMatchBtn{"Match Levels"};
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mModeAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mPolAAtt, mPolBAtt;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MixPanel)

@@ -41,6 +41,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::ParameterID("offlineAA", 1), "Offline AA",
         juce::StringArray{"Same as live", "8x", "16x", "32x"}, 1)); // default 8x
 
+    // Low-latency monitoring: forces gate lookahead to 0 and caps LIVE amp
+    // oversampling at 4x (offline renders are unaffected). Lowest round-trip.
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("lowLatency", 1), "Low Latency", false));
+
     // Block bypasses (stub blocks are passthrough anyway; params reserved now
     // so automation indices stay stable as blocks gain DSP).
     for (const char *id : {"gateOn", "compOn", "eqOn", "cabOn", "modOn", "delayOn", "reverbOn"})
@@ -667,6 +672,9 @@ int NamRigProcessor::requestedFactorNow(int rig) const
     const char *offId = rig == 0 ? "offlineAA" : "offlineAAB";
     const int choice = static_cast<int>(apvts.getRawParameterValue(osId)->load());
     int requested = 1 << juce::jlimit(0, 5, choice); // Off..32x -> 1..32
+    // Low Latency caps LIVE oversampling at 4x (offline renders override below).
+    if (apvts.getRawParameterValue("lowLatency")->load() >= 0.5f)
+        requested = juce::jmin(requested, 4);
     const int offline = static_cast<int>(apvts.getRawParameterValue(offId)->load());
     if (isNonRealtime() && offline > 0 && ampFor(rig).engine().isA2())
         requested = juce::jmax(requested, 8 << (offline - 1)); // 8x / 16x / 32x
@@ -685,7 +693,8 @@ void NamRigProcessor::updateLatency()
         return;
     mChain.amp.setRequestedFactor(requestedFactorNow(0));
     mChain.ampB.setRequestedFactor(requestedFactorNow(1));
-    mChain.gate.setLookaheadMs(apvts.getRawParameterValue("gateLook")->load());
+    const bool lowLat = apvts.getRawParameterValue("lowLatency")->load() >= 0.5f;
+    mChain.gate.setLookaheadMs(lowLat ? 0.0f : apvts.getRawParameterValue("gateLook")->load());
     setLatencySamples((int)std::round(mChain.latencySamples()));
 }
 
@@ -737,7 +746,8 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.gate.setAttackMs(apvts.getRawParameterValue("gateAttack")->load());
     mChain.gate.setHoldMs(apvts.getRawParameterValue("gateHold")->load());
     mChain.gate.setReleaseMs(apvts.getRawParameterValue("gateRelease")->load());
-    const float gateLookMs = apvts.getRawParameterValue("gateLook")->load();
+    const bool lowLat = apvts.getRawParameterValue("lowLatency")->load() >= 0.5f;
+    const float gateLookMs = lowLat ? 0.0f : apvts.getRawParameterValue("gateLook")->load();
     if (gateLookMs != mLastGateLookMs)
     {
         mLastGateLookMs = gateLookMs;

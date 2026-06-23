@@ -53,3 +53,11 @@ reverb_analysis/*.csv
 reverb_analysis/plate_proto_ReverbBlock_*.h
 plate_onset_release/*.wav
 plate_onset_release/*.f32
+
+# UI dev/verification scratch (screenshots + capture script, local only)
+ui_shot.png
+frame_*.png
+*_crop.png
+drive_panel.png
+menu_region.png
+uishot.ps1

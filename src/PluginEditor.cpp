@@ -5,6 +5,8 @@ using namespace nam_rig::ui;
 NamRigEditor::NamRigEditor(NamRigProcessor &p)
     : juce::AudioProcessorEditor(&p), mProc(p),
       mPresetBar(p.presets()),
+      mInKnob(p.apvts, "inputGain", "IN"),
+      mOutKnob(p.apvts, "outputGain", "OUT"),
       mStrip(p.apvts),
       mGatePanel(p.apvts),
       mCompPanel(p.apvts),
@@ -33,53 +35,25 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
     mModPanel.getSolo = [this](int slot) { return mProc.getModSolo(slot); };
 
     // --- Header ---
-    mTitle.setFont(RigLookAndFeel::withHeight(22.0f).boldened());
-    mTitle.setColour(juce::Label::textColourId, colors::text);
-    mContent.addAndMakeVisible(mTitle);
+    mContent.addAndMakeVisible(mHeader); // behind the header widgets
     mContent.addAndMakeVisible(mPresetBar);
-
-    mStatus.setJustificationType(juce::Justification::centredRight);
-    mStatus.setColour(juce::Label::textColourId, colors::textDim);
-    mContent.addAndMakeVisible(mStatus);
-
-    for (auto *l : {&mInLabel, &mOutLabel})
-    {
-        l->setJustificationType(juce::Justification::centred);
-        l->setColour(juce::Label::textColourId, colors::textDim);
-        mContent.addAndMakeVisible(*l);
-    }
-    for (auto *s : {&mInGain, &mOutGain})
-    {
-        s->setPopupDisplayEnabled(true, true, this);
-        s->setDoubleClickReturnValue(true, 0.0); // double-click = 0 dB
-        mContent.addAndMakeVisible(*s);
-    }
-    mInAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        mProc.apvts, "inputGain", mInGain);
-    mOutAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        mProc.apvts, "outputGain", mOutGain);
+    mContent.addAndMakeVisible(mInKnob);
+    mContent.addAndMakeVisible(mOutKnob);
     mContent.addAndMakeVisible(mInMeter);
     mContent.addAndMakeVisible(mOutMeter);
+    mContent.addAndMakeVisible(mMenuBtn);
+    mMenuBtn.onClick = [this] { showSettingsMenu(); };
 
     // --- Strip + panels ---
     mContent.addAndMakeVisible(mStrip);
     for (auto *panel : mPanels)
         mContent.addChildComponent(*panel); // visibility driven by selection
 
-    // Global input-calibration overlay, toggled by the header INPUT button.
+    // Global input-calibration overlay, toggled from the Settings menu.
     mContent.addChildComponent(mCalPanel);
     mCalPanel.onClose = [this] { mCalPanel.setVisible(false); };
-    mContent.addAndMakeVisible(mCalBtn);
-    mCalBtn.onClick = [this]
-    {
-        const bool show = !mCalPanel.isVisible();
-        mCalPanel.setVisible(show);
-        if (show)
-            mCalPanel.toFront(true);
-    };
 
-    mStrip.onSelectionChanged = [this](int i)
-    { showPanel(i); };
+    mStrip.onSelectionChanged = [this](int i) { showPanel(i); };
     mStrip.select(juce::jlimit(0, (int)mPanels.size() - 1, mProc.uiSelectedBlock));
 
     mAmpPanelA.refresh();
@@ -93,7 +67,7 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
     // Uniform scaling: fixed aspect, remember the last size for this instance.
     setResizable(true, true);
     getConstrainer()->setFixedAspectRatio((double)kBaseW / kBaseH);
-    setResizeLimits(kBaseW * 7 / 10, kBaseH * 7 / 10, kBaseW * 2, kBaseH * 2);
+    setResizeLimits(kBaseW * 6 / 10, kBaseH * 6 / 10, kBaseW * 3 / 2, kBaseH * 3 / 2);
     const int w = mProc.uiWidth > 0 ? mProc.uiWidth : kBaseW;
     setSize(w, w * kBaseH / kBaseW);
 }
@@ -109,6 +83,37 @@ void NamRigEditor::showPanel(int selectableIndex)
     for (int i = 0; i < (int)mPanels.size(); ++i)
         mPanels[(size_t)i]->setVisible(i == selectableIndex);
     mProc.uiSelectedBlock = selectableIndex;
+}
+
+void NamRigEditor::showSettingsMenu()
+{
+    const bool lowLat = mProc.apvts.getRawParameterValue("lowLatency")->load() >= 0.5f;
+    juce::PopupMenu m;
+    m.addSectionHeader("SETTINGS");
+    m.addItem(1, "Input Calibration");
+    m.addItem(2, "Low Latency", true, lowLat);
+
+    mMenuBtn.open = true;
+    mMenuBtn.repaint();
+    m.showMenuAsync(juce::PopupMenu::Options()
+                        .withTargetScreenArea(mMenuBtn.getScreenBounds())
+                        .withMinimumWidth(220),
+                    [this](int r)
+                    {
+                        mMenuBtn.open = false;
+                        mMenuBtn.repaint();
+                        if (r == 1)
+                        {
+                            const bool show = !mCalPanel.isVisible();
+                            mCalPanel.setVisible(show);
+                            if (show) mCalPanel.toFront(true);
+                        }
+                        else if (r == 2)
+                        {
+                            if (auto *p = mProc.apvts.getParameter("lowLatency"))
+                                p->setValueNotifyingHost(p->getValue() < 0.5f ? 1.0f : 0.0f);
+                        }
+                    });
 }
 
 void NamRigEditor::timerCallback()
@@ -129,10 +134,11 @@ void NamRigEditor::timerCallback()
     mModPanel.refresh();
     mDelayPanel.refresh();
     mReverbPanel.refresh();
-    mGatePanel.grMeter().push(-mProc.gateGainDb(), dt);
-    mCompPanel.grMeter().push(mProc.compGrDb(), dt);
-    mCompPanel.grMeter().pushIn(mProc.compInDb(), dt);
-    mCompPanel.grMeter().pushOut(mProc.compOutDb(), dt);
+    mGatePanel.setLowLatency(mProc.apvts.getRawParameterValue("lowLatency")->load() >= 0.5f);
+    mGatePanel.pushActivity(-mProc.gateGainDb(), dt);
+    mCompPanel.pushGr(mProc.compGrDb(), dt);
+    mCompPanel.pushIn(mProc.compInDb(), dt);
+    mCompPanel.pushOut(mProc.compOutDb(), dt);
     mPresetBar.updateDirty();       // modified-asterisk on the preset name
     if (++mPresetRefreshTick >= 30) // rescan the preset folder ~every 2 s
     {
@@ -140,21 +146,15 @@ void NamRigEditor::timerCallback()
         mPresetBar.refresh();
     }
 
-    juce::String status;
-    if (!mProc.isModelLoaded())
-        status = "No model";
-    else
+    // Loaded-capture rows: Rig A / Rig B amp model names.
+    auto nameFor = [this](int rig) -> juce::String
     {
-        status = mProc.getModelName();
-        const int engaged = mProc.engagedFactor();
-        if (engaged > 1)
-            status << "  |  " << engaged << "x";
-        status << "  |  PDC " << mProc.getLatencySamples() << " smp";
-    }
-    if (mProc.isIrLoaded())
-        status << "  |  IR: " << mProc.getIrName();
-    if (status != mStatus.getText())
-        mStatus.setText(status, juce::dontSendNotification);
+        if (!mProc.isModelLoaded(rig)) return "No model";
+        auto n = mProc.getModelName(rig);
+        return n.isNotEmpty() ? n : "Loaded";
+    };
+    mHeader.setCaptures(nameFor(0), mProc.isModelLoaded(0),
+                        nameFor(1), mProc.isModelLoaded(1));
 }
 
 void NamRigEditor::paint(juce::Graphics &g)
@@ -170,43 +170,50 @@ void NamRigEditor::resized()
     mContent.setTopLeftPosition(0, 0);
     mProc.uiWidth = getWidth();
 
-    auto area = juce::Rectangle<int>(0, 0, kBaseW, kBaseH).reduced(12);
+    auto full = juce::Rectangle<int>(0, 0, kBaseW, kBaseH);
 
-    // --- Header (64 px): title | presets | status | IN + OUT knob/meter ---
-    auto header = area.removeFromTop(64);
-    mTitle.setBounds(header.removeFromLeft(130));
-    mPresetBar.setBounds(header.removeFromLeft(380).withSizeKeepingCentre(380, 26));
-    header.removeFromLeft(12);
-    mCalBtn.setBounds(header.removeFromLeft(60).withSizeKeepingCentre(58, 26));
-    header.removeFromLeft(12);
+    // --- Header (100px, full-bleed) ---
+    auto headerBounds = full.removeFromTop(100);
+    mHeader.setBounds(headerBounds);
 
-    auto ioCluster = header.removeFromRight(220);
-    auto laidOut = [&](juce::Label &label, juce::Slider &knob, PeakMeter &meter,
-                       juce::Rectangle<int> r)
+    auto h = headerBounds.reduced(24, 0);
+    auto wordmark = h.removeFromLeft(150);
+    h.removeFromLeft(20);
+    mPresetBar.setBounds(h.removeFromLeft(330).withSizeKeepingCentre(330, 30));
+    h.removeFromLeft(16);
+
+    mMenuBtn.setBounds(h.removeFromRight(34).withSizeKeepingCentre(34, 34));
+    h.removeFromRight(16);
+
+    auto ioCluster = h.removeFromRight(210);
+    auto io = ioCluster.reduced(0, 12);
+    auto layoutIO = [](LabeledKnob &knob, PeakMeter &meter, juce::Rectangle<int> r)
     {
-        meter.setBounds(r.removeFromRight(8).reduced(0, 6));
-        r.removeFromRight(4);
-        label.setBounds(r.removeFromTop(14));
-        knob.setBounds(r.withSizeKeepingCentre(juce::jmin(r.getWidth(), r.getHeight()),
-                                               juce::jmin(r.getWidth(), r.getHeight())));
+        auto m = r.removeFromRight(7);
+        meter.setBounds(m.withSizeKeepingCentre(7, juce::jmax(20, r.getHeight() - 22))
+                            .translated(0, -6));
+        r.removeFromRight(7);
+        knob.setBounds(r);
     };
-    auto inArea = ioCluster.removeFromLeft(ioCluster.getWidth() / 2);
-    laidOut(mInLabel, mInGain, mInMeter, inArea.reduced(10, 0));
-    laidOut(mOutLabel, mOutGain, mOutMeter, ioCluster.reduced(10, 0));
+    auto inGroup = io.removeFromLeft((io.getWidth() - 18) / 2);
+    io.removeFromLeft(18);
+    layoutIO(mInKnob, mInMeter, inGroup);
+    layoutIO(mOutKnob, mOutMeter, io);
 
-    header.removeFromRight(12);
-    mStatus.setBounds(header);
+    auto captures = h; // remaining middle band
+    mHeader.setLayout(wordmark, captures);
 
-    area.removeFromTop(8);
+    // --- Content area (padding 20 sides / 20 top / 22 bottom) ---
+    auto content = full.reduced(20, 0);
+    content.removeFromTop(20);
+    content.removeFromBottom(22);
 
-    // --- Chain strip ---
-    mStrip.setBounds(area.removeFromTop(76));
-    area.removeFromTop(12);
+    mStrip.setBounds(content.removeFromTop(108));
+    content.removeFromTop(18);
 
-    // --- Block panel ---
     for (auto *panel : mPanels)
-        panel->setBounds(area);
-    mCalPanel.setBounds(area); // overlay occupies the block-panel area
+        panel->setBounds(content);
+    mCalPanel.setBounds(content); // overlay occupies the block-panel area
 }
 
 juce::AudioProcessorEditor *NamRigProcessor::createEditor()
