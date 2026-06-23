@@ -27,8 +27,11 @@ public:
         mAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
             apvts, paramId, mSlider);
         if (auto *param = apvts.getParameter(paramId)) // double-click = default
+        {
             mSlider.setDoubleClickReturnValue(
                 true, param->convertFrom0to1(param->getDefaultValue()));
+            mUnit = param->getLabel(); // unit suffix (dB/ms/Hz/s/...) for the value readout
+        }
         mSlider.addListener(this);
     }
 
@@ -45,10 +48,12 @@ public:
 
         if (mShowValue)
         {
+            juce::String txt = mSlider.getTextFromValue(mSlider.getValue());
+            if (!mRotationReadout && mUnit.isNotEmpty()) // pedal-style 0..10 knobs stay unitless
+                txt << ' ' << mUnit;
             g.setColour((mDragging ? acc : colors::text2).withMultipliedAlpha(ga));
             g.setFont(fonts::mono(11.0f, fonts::Medium));
-            g.drawText(mSlider.getTextFromValue(mSlider.getValue()), mValueRect,
-                       juce::Justification::centred);
+            g.drawText(txt, mValueRect, juce::Justification::centred);
         }
     }
 
@@ -83,6 +88,7 @@ public:
     // "everything goes to 10") instead of raw parameter units. Display only.
     void setRotationReadout(double top = 10.0)
     {
+        mRotationReadout = true; // 0..10 rotation display -> suppress the unit suffix
         auto *s = &mSlider;
         mSlider.textFromValueFunction = [s, top](double v) {
             return juce::String(s->valueToProportionOfLength(v) * top, 1);
@@ -102,8 +108,11 @@ public:
         mAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
             apvts, paramId, mSlider);
         if (auto *param = apvts.getParameter(paramId))
+        {
             mSlider.setDoubleClickReturnValue(
                 true, param->convertFrom0to1(param->getDefaultValue()));
+            mUnit = param->getLabel();
+        }
         repaint();
     }
 
@@ -116,8 +125,9 @@ private:
     juce::Slider mSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mAtt;
     juce::Rectangle<int> mCaptionRect, mValueRect;
+    juce::String mUnit;
     int mCaptionH = 15, mValueH = 16;
-    bool mShowValue = true, mDragging = false;
+    bool mShowValue = true, mDragging = false, mRotationReadout = false;
 };
 
 // Horizontal knob in a rounded bordered box: knob on the left, caption + value
