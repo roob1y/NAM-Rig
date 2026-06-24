@@ -51,6 +51,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     for (const char *id : {"gateOn", "compOn", "eqOn", "cabOn", "modOn", "delayOn", "reverbOn"})
         params.push_back(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID(id, 1), juce::String(id).dropLastCharacters(2) + " Enable", true));
+    // Rig B's EQ + cab have their own bypass (Rig A uses eqOn / cabOn).
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("eqOnB", 1), "EQ B Enable", true));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("cabOnB", 1), "Cab B Enable", true));
+    // Master enable for the drive rack (on top of the per-pedal footswitches).
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("driveOn", 1), "Drive Enable", true));
 
     // --- Gate (see rig/GateBlock.h; verified by tests/gate_test.cpp) ---
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
@@ -806,7 +814,8 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         }
     }
     mChain.drive.setAutoGain(apvts.getRawParameterValue("driveAutoGain")->load() >= 0.5f);
-    mChain.drive.setBypassed(!mChain.drive.anyActive());
+    mChain.drive.setBypassed(apvts.getRawParameterValue("driveOn")->load() < 0.5f
+                             || !mChain.drive.anyActive());
     // Graphic EQ band gains (Rig A; zero latency; chain bypass via eqOn is safe).
     {
         static const char *ids[] = {"eq62", "eq125", "eq250", "eq500",
@@ -828,8 +837,10 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         for (int b = 0; b < nam_rig::EqBlock::kNumBands; ++b)
             mChain.eqB.setBandGainDb(b, apvts.getRawParameterValue(idsB[b])->load());
     }
+    mChain.eqB.setBypassed(apvts.getRawParameterValue("eqOnB")->load() < 0.5f);
     mChain.cabB.setHpfHz(apvts.getRawParameterValue("rigBcabHpf")->load());
     mChain.cabB.setLpfHz(apvts.getRawParameterValue("rigBcabLpf")->load());
+    mChain.cabB.setBypassed(apvts.getRawParameterValue("cabOnB")->load() < 0.5f);
 
     // ---- Dual-rig mixer (mode / per-rig level + pan + polarity + align) ----
     mChain.setLevelA(juce::Decibels::decibelsToGain(apvts.getRawParameterValue("rigLevelA")->load()));

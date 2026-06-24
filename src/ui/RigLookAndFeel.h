@@ -1,6 +1,8 @@
 #pragma once
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <array>
+#include <vector>
+#include <cmath>
 
 // Bundled UI typefaces (Archivo + JetBrains Mono, SIL OFL 1.1). Guarded so the
 // header still compiles in non-plugin targets that don't link the binary data.
@@ -157,6 +159,188 @@ namespace fonts
     }
 }
 
+// ---------------------------------------------------------------------------
+// Gradient dithering. JUCE's software renderer interpolates ColourGradients in
+// 8-bit with no dithering, so subtle dark gradients (wells, knob caps, the
+// header) show visible stair-step banding. Instead of a noise overlay (which
+// reads as grain), we render the gradient ourselves in floating point and add
+// an ordered (Bayer) +/-0.5 LSB dither BEFORE quantising to 8-bit -- true
+// dithering, so the bands dissolve with no perceptible grain. (Random noise
+// dither, as used on the reverb field background, is invisible on near-black
+// but reads as faint fuzz on lighter/saturated fills; the ordered pattern does
+// not.) Renders are cached
+// by geometry + colour, so repainting panels re-blit a prebuilt image instead
+// of looping over pixels every frame. Use the fill* helpers in place of
+// g.setGradientFill(grad) + g.fill<shape>().
+// ---------------------------------------------------------------------------
+namespace dither
+{
+    // Float colour of a gradient's stops at position t in [0,1].
+    inline void sampleStops(const juce::ColourGradient &grad, float t,
+                            float &r, float &g, float &b, float &a)
+    {
+        const int n = grad.getNumColours();
+        if (n <= 0) { r = g = b = a = 0.0f; return; }
+        auto set = [&](juce::Colour c) { r = c.getFloatRed(); g = c.getFloatGreen();
+                                         b = c.getFloatBlue(); a = c.getFloatAlpha(); };
+        if (t <= (float) grad.getColourPosition(0)) { set(grad.getColour(0)); return; }
+        for (int i = 1; i < n; ++i)
+        {
+            const float p1 = (float) grad.getColourPosition(i);
+            if (t <= p1)
+            {
+                const float p0 = (float) grad.getColourPosition(i - 1);
+                const float f  = p1 > p0 ? (t - p0) / (p1 - p0) : 0.0f;
+                const auto c0 = grad.getColour(i - 1), c1 = grad.getColour(i);
+                r = c0.getFloatRed()   + (c1.getFloatRed()   - c0.getFloatRed())   * f;
+                g = c0.getFloatGreen() + (c1.getFloatGreen() - c0.getFloatGreen()) * f;
+                b = c0.getFloatBlue()  + (c1.getFloatBlue()  - c0.getFloatBlue())  * f;
+                a = c0.getFloatAlpha() + (c1.getFloatAlpha() - c0.getFloatAlpha()) * f;
+                return;
+            }
+        }
+        set(grad.getColour(n - 1));
+    }
+
+    // Render `grad` into a dithered ARGB image covering `bounds` (pixel (0,0) ->
+    // bounds.getTopLeft()). Cached by geometry+colour; juce::Image is a cheap
+    // ref-counted handle so returning by value is fine.
+    inline juce::Image image(juce::ColourGradient grad, juce::Rectangle<float> bounds)
+    {
+        const int w = juce::jmax(1, (int) std::ceil(bounds.getWidth()));
+        const int h = juce::jmax(1, (int) std::ceil(bounds.getHeight()));
+
+        // Work in local space so the cache key is position-independent.
+        grad.point1 -= bounds.getTopLeft();
+        grad.point2 -= bounds.getTopLeft();
+
+        struct Entry { int w, h, n; bool radial; float p1x, p1y, p2x, p2y;
+                       float sp[6]; juce::uint32 sc[6]; juce::Image img; };
+        static std::vector<Entry> cache;
+
+        const int ns = juce::jmin(6, grad.getNumColours());
+        const bool radial = grad.isRadial;
+        auto matches = [&](const Entry &e)
+        {
+            if (e.w != w || e.h != h || e.n != ns || e.radial != radial) return false;
+            if (e.p1x != grad.point1.x || e.p1y != grad.point1.y
+                || e.p2x != grad.point2.x || e.p2y != grad.point2.y) return false;
+            for (int i = 0; i < ns; ++i)
+                if (e.sp[i] != (float) grad.getColourPosition(i)
+                    || e.sc[i] != grad.getColour(i).getARGB()) return false;
+            return true;
+        };
+        for (auto &e : cache)
+            if (matches(e)) return e.img;
+
+        juce::Image img(juce::Image::ARGB, w, h, true);
+        {
+            juce::Image::BitmapData bd(img, juce::Image::BitmapData::writeOnly);
+            const float ax = grad.point2.x - grad.point1.x;
+            const float ay = grad.point2.y - grad.point1.y;
+            const float len2 = juce::jmax(1.0e-6f, ax * ax + ay * ay);
+            const float radius = std::sqrt(len2);
+            // Ordered (Bayer 8x8) dither: an evenly-dispersed +/-0.5 LSB offset.
+            // Unlike random noise it has no clumps, so it dissolves banding with
+            // no perceptible grain (random dither reads as fuzz on mid-tones).
+            static constexpr int bayer8[8][8] = {
+                {  0, 32,  8, 40,  2, 34, 10, 42 },
+                { 48, 16, 56, 24, 50, 18, 58, 26 },
+                { 12, 44,  4, 36, 14, 46,  6, 38 },
+                { 60, 28, 52, 20, 62, 30, 54, 22 },
+                {  3, 35, 11, 43,  1, 33,  9, 41 },
+                { 51, 19, 59, 27, 49, 17, 57, 25 },
+                { 15, 47,  7, 39, 13, 45,  5, 37 },
+                { 63, 31, 55, 23, 61, 29, 53, 21 }};
+            for (int y = 0; y < h; ++y)
+                for (int x = 0; x < w; ++x)
+                {
+                    const float px = (float) x + 0.5f, py = (float) y + 0.5f;
+                    float t;
+                    if (radial)
+                        t = std::sqrt((px - grad.point1.x) * (px - grad.point1.x)
+                                      + (py - grad.point1.y) * (py - grad.point1.y)) / radius;
+                    else
+                        t = ((px - grad.point1.x) * ax + (py - grad.point1.y) * ay) / len2;
+                    t = juce::jlimit(0.0f, 1.0f, t);
+
+                    float r, gg, b, a;
+                    sampleStops(grad, t, r, gg, b, a);
+                    // Bayer value 0..63 -> centred offset in (-0.5,+0.5) LSB.
+                    const float dz = (((float) bayer8[y & 7][x & 7] + 0.5f) / 64.0f - 0.5f) / 255.0f;
+                    bd.setPixelColour(x, y, juce::Colour::fromFloatRGBA(
+                        juce::jlimit(0.0f, 1.0f, r + dz),
+                        juce::jlimit(0.0f, 1.0f, gg + dz),
+                        juce::jlimit(0.0f, 1.0f, b + dz),
+                        juce::jlimit(0.0f, 1.0f, a + dz)));
+                }
+        }
+
+        if (cache.size() >= 64) cache.clear(); // bound memory; geometry set is small
+        Entry e {}; e.w = w; e.h = h; e.n = ns; e.radial = radial;
+        e.p1x = grad.point1.x; e.p1y = grad.point1.y;
+        e.p2x = grad.point2.x; e.p2y = grad.point2.y;
+        for (int i = 0; i < ns; ++i) { e.sp[i] = (float) grad.getColourPosition(i);
+                                       e.sc[i] = grad.getColour(i).getARGB(); }
+        e.img = img;
+        cache.push_back(e);
+        return img;
+    }
+
+    // Fill helpers: drop-in for g.setGradientFill(grad) + g.fill<shape>().
+    inline void fillPath(juce::Graphics &g, const juce::ColourGradient &grad, const juce::Path &shape)
+    {
+        const auto b = shape.getBounds();
+        const auto img = image(grad, b);
+        juce::Graphics::ScopedSaveState s(g);
+        g.reduceClipRegion(shape);
+        g.drawImageAt(img, (int) std::floor(b.getX()), (int) std::floor(b.getY()));
+    }
+    inline void fillRect(juce::Graphics &g, const juce::ColourGradient &grad, juce::Rectangle<float> r)
+    {
+        const auto img = image(grad, r);
+        juce::Graphics::ScopedSaveState s(g);
+        g.reduceClipRegion(r.getSmallestIntegerContainer());
+        g.drawImageAt(img, (int) std::floor(r.getX()), (int) std::floor(r.getY()));
+    }
+    inline void fillRoundedRectangle(juce::Graphics &g, const juce::ColourGradient &grad,
+                                     juce::Rectangle<float> r, float radius)
+    {
+        juce::Path p;
+        p.addRoundedRectangle(r, radius);
+        fillPath(g, grad, p);
+    }
+    inline void fillEllipse(juce::Graphics &g, const juce::ColourGradient &grad, juce::Rectangle<float> r)
+    {
+        juce::Path p;
+        p.addEllipse(r);
+        fillPath(g, grad, p);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Soft glows. A real glow is a blurred copy of the lit shape (like a CSS
+// box-shadow), which fades off in every direction -- NOT a hard-edged expanded
+// shape or a flat translucent disc. Use a wide faint pass + a tight brighter
+// pass for a natural bloom. Shared so every glowing element matches.
+// ---------------------------------------------------------------------------
+namespace fx
+{
+    inline void glow(juce::Graphics &g, const juce::Path &shape, juce::Colour c,
+                     int wideRadius, float wideAlpha, int tightRadius, float tightAlpha)
+    {
+        juce::DropShadow(c.withAlpha(wideAlpha),  juce::jmax(1, wideRadius),  {}).drawForPath(g, shape);
+        juce::DropShadow(c.withAlpha(tightAlpha), juce::jmax(1, tightRadius), {}).drawForPath(g, shape);
+    }
+    inline void glowEllipse(juce::Graphics &g, juce::Rectangle<float> area, juce::Colour c,
+                            int wideRadius, float wideAlpha, int tightRadius, float tightAlpha)
+    {
+        juce::Path p;
+        p.addEllipse(area);
+        glow(g, p, c, wideRadius, wideAlpha, tightRadius, tightAlpha);
+    }
+}
+
 class RigLookAndFeel : public juce::LookAndFeel_V4
 {
 public:
@@ -243,8 +427,7 @@ public:
         auto cap = juce::Rectangle<float>(capR * 2.0f, capR * 2.0f).withCentre(c);
         juce::ColourGradient cg(juce::Colour(0xff262b33).withMultipliedAlpha(ga), cap.getTopLeft(),
                                 juce::Colour(0xff1b1f25).withMultipliedAlpha(ga), cap.getBottomRight(), false);
-        g.setGradientFill(cg);
-        g.fillEllipse(cap);
+        dither::fillEllipse(g, cg, cap);
         g.setColour(juce::Colours::white.withAlpha(0.05f * ga));
         g.drawEllipse(cap.reduced(0.5f), 1.0f);
 
@@ -253,20 +436,15 @@ public:
         const float pinW   = juce::jmax(2.4f, radius * 0.085f);
         const auto tf = juce::AffineTransform::rotation(angle).translated(c.x, c.y);
         const juce::Colour pinCol = enabled ? accentCol : juce::Colour(0xff5a616b);
-        if (enabled)
-        {
-            for (auto m : {3.2f, 2.0f})
-            {
-                juce::Path glow;
-                glow.addRoundedRectangle(-pinW * 0.5f * m, -pinLen, pinW * m, pinLen, pinW * 0.5f * m);
-                g.setColour(pinCol.withAlpha(m > 2.5f ? 0.10f : 0.18f));
-                g.fillPath(glow, tf);
-            }
-        }
         juce::Path pin;
         pin.addRoundedRectangle(-pinW * 0.5f, -pinLen, pinW, pinLen, pinW * 0.5f);
+        pin.applyTransform(tf);
+        if (enabled)
+            fx::glow(g, pin, pinCol,
+                     juce::roundToInt(juce::jmax(7.0f, radius * 0.42f)), 0.28f,
+                     juce::roundToInt(juce::jmax(3.0f, radius * 0.16f)), 0.48f);
         g.setColour(pinCol.withMultipliedAlpha(ga));
-        g.fillPath(pin, tf);
+        g.fillPath(pin);
     }
 
     // Toggle: "pill" property -> filled/outlined pill with centred text; caption-
@@ -412,8 +590,7 @@ public:
     {
         juce::ColourGradient grad(colors::wellTop, r.getTopLeft(),
                                   colors::wellBot, r.getBottomLeft(), false);
-        g.setGradientFill(grad);
-        g.fillRoundedRectangle(r, radius);
+        dither::fillRoundedRectangle(g, grad, r, radius);
         g.setColour(colors::cardBorder);
         g.drawRoundedRectangle(r.reduced(0.5f), radius, 1.0f);
     }

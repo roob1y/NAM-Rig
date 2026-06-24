@@ -62,7 +62,7 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
     mCabPanelB.refresh();
 
     mLastTimerMs = juce::Time::getMillisecondCounterHiRes();
-    startTimerHz(15);
+    startTimerHz(30); // gate scope reads smoothly at this rate; meters are dt-compensated
 
     // Uniform scaling: fixed aspect, remember the last size for this instance.
     setResizable(true, true);
@@ -135,12 +135,35 @@ void NamRigEditor::timerCallback()
     mDelayPanel.refresh();
     mReverbPanel.refresh();
     mGatePanel.setLowLatency(mProc.apvts.getRawParameterValue("lowLatency")->load() >= 0.5f);
-    mGatePanel.pushActivity(-mProc.gateGainDb(), dt);
+    mGatePanel.setBypassed(mProc.apvts.getRawParameterValue("gateOn")->load() < 0.5f);
+    mGatePanel.pushActivity(mProc.gateInDb(), mProc.gateGainDb(),
+                            mProc.apvts.getRawParameterValue("gateThresh")->load(), dt);
     mCompPanel.pushGr(mProc.compGrDb(), dt);
     mCompPanel.pushIn(mProc.compInDb(), dt);
     mCompPanel.pushOut(mProc.compOutDb(), dt);
+
+    // Per-block bypass scrim: each panel reads inactive when its block is off.
+    auto off = [this](const char *id) { return mProc.apvts.getRawParameterValue(id)->load() < 0.5f; };
+    // Solo routing: the un-soloed rig's whole path (amp/EQ/cab) is silent, so its
+    // panels read bypassed too. rigMode 0 = Solo A, 1 = Solo B, 2 = Dual.
+    const int rigMode = (int)mProc.apvts.getRawParameterValue("rigMode")->load();
+    const bool aOut = (rigMode == 1); // Solo B -> Rig A is bypassed
+    const bool bOut = (rigMode == 0); // Solo A -> Rig B is bypassed
+
+    mCompPanel.setBypassed(off("compOn"));
+    mDrivePanel.setBypassed(off("driveOn"));
+    mAmpPanelA.setBypassed(aOut);
+    mAmpPanelB.setBypassed(bOut);
+    mEqPanelA.setBypassed(aOut || off("eqOn"));
+    mCabPanelA.setBypassed(aOut || off("cabOn"));
+    mEqPanelB.setBypassed(bOut || off("eqOnB"));
+    mCabPanelB.setBypassed(bOut || off("cabOnB"));
+    mModPanel.setBypassed(off("modOn"));
+    mDelayPanel.setBypassed(off("delayOn"));
+    mReverbPanel.setBypassed(off("reverbOn"));
+
     mPresetBar.updateDirty();       // modified-asterisk on the preset name
-    if (++mPresetRefreshTick >= 30) // rescan the preset folder ~every 2 s
+    if (++mPresetRefreshTick >= 60) // rescan the preset folder ~every 2 s
     {
         mPresetRefreshTick = 0;
         mPresetBar.refresh();

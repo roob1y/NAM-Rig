@@ -67,8 +67,7 @@ public:
         auto b = getLocalBounds().toFloat();
         juce::ColourGradient grad(colors::headerTop, b.getTopLeft(),
                                   colors::headerBot, b.getBottomLeft(), false);
-        g.setGradientFill(grad);
-        g.fillRect(b);
+        dither::fillRect(g, grad, b);
         g.setColour(juce::Colour(0xff23262d));
         g.fillRect(0.0f, b.getBottom() - 1.0f, b.getWidth(), 1.0f);
 
@@ -87,8 +86,7 @@ private:
                         .withCentre({(float)r.getX() + 16.0f, (float)r.getCentreY()});
         juce::ColourGradient lg(colors::accent, logo.getTopLeft(),
                                 juce::Colour(0xffc77a1e), logo.getBottomRight(), false);
-        g.setGradientFill(lg);
-        g.fillRoundedRectangle(logo, 8.0f);
+        dither::fillRoundedRectangle(g, lg, logo, 8.0f);
 
         juce::Path ring;
         const float rad = 6.5f;

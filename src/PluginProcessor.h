@@ -92,6 +92,7 @@ public:
 
     // Live gain-reduction telemetry for the editor meters.
     float gateGainDb() const { return mChain.gate.currentGainDb(); }
+    float gateInDb() const { return mChain.gate.currentInDb(); }
     float compGrDb() const { return mChain.comp.grDb(); }
     float compInDb() const { return mChain.comp.inPeakDb(); }
     float compOutDb() const { return mChain.comp.outPeakDb(); }

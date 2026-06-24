@@ -14,15 +14,12 @@ public:
 
     void paintButton(juce::Graphics &g, bool highlighted, bool) override
     {
+        // NB: the lit glow is drawn by the parent BlockTile (this component is too
+        // small to hold the blur without clipping it). Here we draw only the jewel.
         auto b = getLocalBounds().toFloat();
         const float d = juce::jmin(b.getWidth(), b.getHeight()) - 4.0f;
         auto circle = juce::Rectangle<float>(d, d).withCentre(b.getCentre());
         const bool on = getToggleState();
-        if (on)
-        {
-            g.setColour(colors::accent.withAlpha(0.30f));
-            g.fillEllipse(circle.expanded(3.0f)); // glow
-        }
         g.setColour(on ? colors::accent : colors::ledOff);
         g.fillEllipse(circle);
         // Bezel ring around the jewel (design: 2px #1a1d22 border).
@@ -97,6 +94,15 @@ public:
         {
             g.drawText(mName, textArea, juce::Justification::centred);
         }
+
+        // Bypass-LED glow (drawn here, not in the tiny LED component, so the blur
+        // has room). Behind the jewel itself, which the child paints on top.
+        if (mLed != nullptr && mLed->getToggleState())
+        {
+            auto lc = mLed->getBounds().getCentre().toFloat();
+            fx::glowEllipse(g, juce::Rectangle<float>(11.0f, 11.0f).withCentre(lc),
+                            colors::accent, 9, 0.45f, 4, 0.38f);
+        }
     }
 
     void resized() override
@@ -113,6 +119,68 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mLedAtt;
 };
 
+// Vertical two-position switch that sits on the rig branch (between DRIVE and the
+// AMP A / AMP B split). Thumb UP = Single (one rig), thumb DOWN = Dual (both).
+// Writes rigMode: 0/1 = single (Solo A / Solo B), 2 = Dual. Going Single restores
+// the last-used solo rig. The Mix panel's A/B selector chooses which rig is single.
+class RigModeSwitch : public juce::Component, private juce::Timer
+{
+public:
+    explicit RigModeSwitch(juce::AudioProcessorValueTreeState &apvts) : mApvts(apvts)
+    {
+        const int m = mode();
+        if (m != 2) mLastSingle = m;
+        mLastDual = (m == 2);
+        startTimerHz(20);
+    }
+
+    void mouseUp(const juce::MouseEvent &e) override
+    {
+        if (!getLocalBounds().contains(e.getPosition())) return;
+        const bool wantDual = e.y > getHeight() / 2; // top half = Single, bottom = Dual
+        if (auto *p = mApvts.getParameter("rigMode"))
+            p->setValueNotifyingHost(p->convertTo0to1(wantDual ? 2.0f : (float)mLastSingle));
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        auto r = getLocalBounds().toFloat();
+        const bool dual = (mode() == 2);
+        const float bh = r.getHeight() * 0.5f;
+        const float rad = 6.0f;
+
+        auto cell = [&](juce::Rectangle<float> c, bool top, bool on, const juce::String &txt)
+        {
+            c = c.reduced(0.5f);
+            juce::Path p;
+            p.addRoundedRectangle(c.getX(), c.getY(), c.getWidth(), c.getHeight(), rad, rad,
+                                  top, top, !top, !top);
+            g.setColour(on ? colors::accent : colors::tile);
+            g.fillPath(p);
+            g.setColour(on ? colors::accent : colors::outline);
+            g.strokePath(p, juce::PathStrokeType(1.0f));
+            g.setColour(on ? colors::bg : colors::textDim);
+            g.setFont(fonts::archivo(7.5f, fonts::Bold, 0.02f));
+            g.drawText(txt, c, juce::Justification::centred);
+        };
+        cell(r.withHeight(bh), true, !dual, "SGL");                 // top = Single
+        cell(r.withTrimmedTop(bh), false, dual, "DUAL");            // bottom = Dual
+    }
+
+private:
+    int mode() const { return (int)mApvts.getRawParameterValue("rigMode")->load(); }
+    void timerCallback() override
+    {
+        const int m = mode();
+        if (m != 2) mLastSingle = m;
+        if ((m == 2) != mLastDual) { mLastDual = (m == 2); repaint(); }
+    }
+
+    juce::AudioProcessorValueTreeState &mApvts;
+    int mLastSingle = 0;
+    bool mLastDual = false;
+};
+
 // The dual-rig chain as a branched tile diagram: shared full-height tiles for
 // the mono pre (gate, comp) and stereo post (mix, mod, delay, verb), with the
 // two rig voices as parallel half-height lanes (Rig A top, Rig B bottom) that
@@ -127,17 +195,16 @@ public:
     {
         struct Slot { const char *name, *param; int col, lane; };
         // Order MUST match the editor's mPanels array (selectable index).
-        // Rig B's eq/cab have no per-rig bypass param -> no LED (always on).
         static const Slot slots[] = {
             {"GATE",  "gateOn",   0, Full},
             {"COMP",  "compOn",   1, Full},
-            {"DRIVE", "",         2, Full},
+            {"DRIVE", "driveOn",  2, Full},
             {"AMP A", "",         3, Top},
             {"EQ A",  "eqOn",     4, Top},
             {"CAB A", "cabOn",    5, Top},
             {"AMP B", "",         3, Bot},
-            {"EQ B",  "",         4, Bot},
-            {"CAB B", "",         5, Bot},
+            {"EQ B",  "eqOnB",    4, Bot},
+            {"CAB B", "cabOnB",   5, Bot},
             {"MIX",   "",         6, Full},
             {"MOD",   "modOn",    7, Full},
             {"DELAY", "delayOn",  8, Full},
@@ -152,6 +219,8 @@ public:
             mTiles.push_back(std::move(tile));
             mLayout.push_back({s.col, s.lane});
         }
+        mModeSwitch = std::make_unique<RigModeSwitch>(apvts);
+        addAndMakeVisible(*mModeSwitch);
     }
 
     void select(int selectableIndex)
@@ -166,18 +235,28 @@ public:
     void resized() override
     {
         const int gap = 10;
-        const int colW = juce::jmax(1, (getWidth() - gap * (kCols - 1)) / kCols);
+        // Extra-wide gutter at the DRIVE -> AMP A/B split to hold the Single/Dual
+        // switch. Tiles shrink slightly to absorb it (window width is fixed).
+        const int branchExtra = 30; // split gutter becomes gap + branchExtra (~40px) to fit the switch labels
+        const int colW = juce::jmax(1, (getWidth() - gap * (kCols - 1) - branchExtra) / kCols);
         const int H = getHeight();
         const int laneGap = 6;
         const int laneH = (H - laneGap) / 2;
         for (size_t i = 0; i < mTiles.size(); ++i)
         {
             const int col = mLayout[i].first, lane = mLayout[i].second;
-            const int x = col * (colW + gap);
+            const int x = col * (colW + gap) + (col >= 3 ? branchExtra : 0); // shift past the split
             int y = 0, h = H;
             if (lane == Top) { y = 0; h = laneH; }
             else if (lane == Bot) { y = H - laneH; h = laneH; }
             mTiles[i]->setBounds(x, y, colW, h);
+        }
+        // Single/Dual switch centred in the widened split gutter.
+        if (mModeSwitch && mTiles.size() > 3)
+        {
+            const int splitX = (mTiles[2]->getRight() + mTiles[3]->getX()) / 2;
+            const int sw = 34, sh = juce::jmin(H - 4, 46);
+            mModeSwitch->setBounds(splitX - sw / 2, (H - sh) / 2, sw, sh);
         }
     }
 
@@ -240,6 +319,7 @@ private:
     static constexpr int kCols = 10;
     std::vector<std::unique_ptr<BlockTile>> mTiles;
     std::vector<std::pair<int, int>> mLayout; // (col, lane) per tile
+    std::unique_ptr<RigModeSwitch> mModeSwitch;
     int mSelected = -1;
 };
 

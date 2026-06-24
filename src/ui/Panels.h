@@ -212,7 +212,18 @@ public:
         mCombo.onChange = [this] { repaint(); if (onChange) onChange(index()); };
     }
 
-    int index() const { return juce::jmax(0, mCombo.getSelectedItemIndex()); }
+    // Manual mode (no parameter attachment): the owner drives the highlight via
+    // setActive() and handles clicks via onChange(). Use this when the control
+    // maps to PART of a parameter's range — e.g. the Mix A/B selector over the
+    // 3-choice rigMode, where a plain attachment would mis-scale (2 items vs 3).
+    explicit SegmentedControl(juce::StringArray options)
+        : mOptions(std::move(options)), mManual(true) {}
+
+    int index() const
+    {
+        return mManual ? juce::jmax(0, mManualIndex) : juce::jmax(0, mCombo.getSelectedItemIndex());
+    }
+    void setActive(int i) { if (i != mManualIndex) { mManualIndex = i; repaint(); } }
     void setEnabledIndex(int i) { mCombo.setSelectedItemIndex(i); }
 
     int idealWidth() const
@@ -224,11 +235,51 @@ public:
         return juce::jmax(0, w - mGap);
     }
 
+    // Widest single button -- used to size the vertical stacked layout (all
+    // buttons are made this same size).
+    int idealCellWidth() const
+    {
+        auto f = fonts::archivo(12.0f, fonts::SemiBold);
+        int w = 0;
+        for (auto &o : mOptions)
+            w = juce::jmax(w, (int)std::ceil(juce::GlyphArrangement::getStringWidth(f, o)));
+        return w + 16;
+    }
+
+    // Stack the buttons vertically (equal size) instead of in a horizontal row.
+    void setVertical(bool v) { if (mVertical != v) { mVertical = v; repaint(); } }
+
     void paint(juce::Graphics &g) override
     {
         auto f = fonts::archivo(12.0f, fonts::SemiBold);
         g.setFont(f);
-        const int active = index();
+        // -1 (no highlight) when the value isn't one of this control's segments —
+        // e.g. the Mix A/B selector while the rig is in Dual.
+        const int active = mManual ? mManualIndex : mCombo.getSelectedItemIndex();
+        const int n = juce::jmax(1, mOptions.size());
+
+        if (mVertical) // equal-size buttons stacked top-to-bottom, touching
+        {
+            const float bh = (float)getHeight() / (float)n;
+            const float rad = 7.0f;
+            for (int i = 0; i < mOptions.size(); ++i)
+            {
+                auto r = juce::Rectangle<float>(0.0f, i * bh, (float)getWidth(), bh).reduced(0.5f);
+                const bool top = (i == 0), bot = (i == n - 1);
+                juce::Path cell; // round only the stack's outer corners
+                cell.addRoundedRectangle(r.getX(), r.getY(), r.getWidth(), r.getHeight(),
+                                         rad, rad, top, top, bot, bot);
+                const bool on = i == active;
+                g.setColour(on ? colors::accent : colors::tile);
+                g.fillPath(cell);
+                g.setColour(on ? colors::accent : colors::outline);
+                g.strokePath(cell, juce::PathStrokeType(1.0f));
+                g.setColour(on ? colors::bg : colors::textDim);
+                g.drawText(mOptions[i], r, juce::Justification::centred);
+            }
+            return;
+        }
+
         int x = 0;
         for (int i = 0; i < mOptions.size(); ++i)
         {
@@ -247,21 +298,37 @@ public:
 
     void mouseUp(const juce::MouseEvent &e) override
     {
+        const int n = juce::jmax(1, mOptions.size());
+        if (mVertical)
+        {
+            const float bh = (float)getHeight() / (float)n;
+            for (int i = 0; i < mOptions.size(); ++i)
+                if (e.y >= i * bh && e.y < (i + 1) * bh) { pick(i); return; }
+            return;
+        }
         auto f = fonts::archivo(12.0f, fonts::SemiBold);
         int x = 0;
         for (int i = 0; i < mOptions.size(); ++i)
         {
             const int w = (int)std::ceil(juce::GlyphArrangement::getStringWidth(f, mOptions[i])) + 26;
-            if (e.x >= x && e.x < x + w) { mCombo.setSelectedItemIndex(i); return; }
+            if (e.x >= x && e.x < x + w) { pick(i); return; }
             x += w + mGap;
         }
     }
 
 private:
+    void pick(int i)
+    {
+        if (mManual) { mManualIndex = i; repaint(); if (onChange) onChange(i); }
+        else mCombo.setSelectedItemIndex(i);
+    }
+
     juce::StringArray mOptions;
     juce::ComboBox mCombo;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mAtt;
     int mGap = 8;
+    bool mVertical = false, mManual = false;
+    int mManualIndex = -1;
 };
 
 // A small toggle "switch" (rounded track + sliding knob), bound to a bool param.
@@ -310,12 +377,58 @@ private:
 
 // Common panel chrome: rounded #1d2027 body + 46px header row (title left, an
 // optional right-aligned caption, bottom divider). Content laid out by subclass.
+// Bypass veil: when a block is off, this sits on top of the whole panel, draws the
+// dim "BYPASSED" scrim over the body, and swallows every mouse event so nothing —
+// including the header buttons next to the title — can be clicked.
+class BypassVeil : public juce::Component
+{
+public:
+    BypassVeil() { setInterceptsMouseClicks(true, false); }
+
+    void parentSizeChanged() override
+    {
+        if (auto *p = getParentComponent()) setBounds(p->getLocalBounds());
+    }
+
+    bool hitTest(int, int) override { return true; } // block the entire panel, header included
+
+    void paint(juce::Graphics &g) override
+    {
+        // Light dim across the whole panel so the header buttons next to the
+        // title also read as bypassed (the amber title stays legible through it).
+        g.setColour(colors::panel.withAlpha(0.45f));
+        g.fillRoundedRectangle(getLocalBounds().toFloat().reduced(0.5f), 11.0f);
+
+        // Heavier scrim over the body.
+        auto body = getLocalBounds().withTrimmedTop(46).toFloat().reduced(2.0f);
+        g.setColour(colors::panel.withAlpha(0.62f));
+        g.fillRoundedRectangle(body, 10.0f);
+        // Soft elliptical vignette behind the word — wider than it is tall — so it
+        // lifts off the scrim without a box; fades to nothing at the edges.
+        auto ctr = getLocalBounds().getCentre().toFloat();
+        {
+            juce::Graphics::ScopedSaveState save(g);
+            g.addTransform(juce::AffineTransform::scale(1.0f, 0.4f, ctr.x, ctr.y)); // squash height
+            juce::ColourGradient halo(juce::Colours::black.withAlpha(0.42f), ctr.x, ctr.y,
+                                      juce::Colours::black.withAlpha(0.0f), ctr.x + 180.0f, ctr.y, true);
+            halo.addColour(0.55, juce::Colours::black.withAlpha(0.16f));
+            g.setGradientFill(halo);
+            g.fillRect(getLocalBounds());
+        }
+
+        // Clean bright label, centred in the FULL panel height.
+        g.setColour(colors::textBright.withAlpha(0.97f));
+        g.setFont(fonts::archivo(16.0f, fonts::ExtraBold, 0.28f));
+        g.drawText("BYPASSED", getLocalBounds(), juce::Justification::centred);
+    }
+};
+
 class BlockPanel : public juce::Component
 {
 public:
     static constexpr int kHeaderH = 46;
 
-    explicit BlockPanel(const juce::String &title) : mTitle(title) {}
+    explicit BlockPanel(const juce::String &title) : mTitle(title) { addChildComponent(mVeil); }
 
     void paint(juce::Graphics &g) override
     {
@@ -349,7 +462,28 @@ public:
         if (mHeaderRight != t) { mHeaderRight = t; repaint(); }
     }
 
+    // Block on/off. When bypassed, the veil covers the whole body (up to the
+    // title) with a dim "BYPASSED" scrim AND blocks all input so nothing in the
+    // panel can be modified. The title bar stays live.
+    void setBypassed(bool b)
+    {
+        if (b == mBypassed) return;
+        mBypassed = b;
+        mVeil.setBounds(getLocalBounds());
+        mVeil.setVisible(b);
+        if (b) mVeil.toFront(false); // sit above controls added by the subclass
+        onBypassChanged(b);
+        repaint();
+    }
+    bool isBypassed() const { return mBypassed; }
+
 protected:
+    // Subclasses override to freeze internal animations when bypass toggles.
+    virtual void onBypassChanged(bool /*bypassed*/) {}
+
+    bool mBypassed = false;
+    BypassVeil mVeil;
+
     // 46px header band, inset by the standard 22px horizontal padding.
     juce::Rectangle<int> headerArea() const
     {
@@ -371,7 +505,7 @@ private:
 class GrAnalyser : public juce::Component
 {
 public:
-    static constexpr int N = 260;
+    static constexpr int N = 170; // shorter history -> trace scrolls a bit faster
 
     void setAccent(juce::Colour c) { mAccent = c; repaint(); }
     void setLabel(const juce::String &l) { mLabel = l; repaint(); }
@@ -380,7 +514,11 @@ public:
     void push(float grDb, float dt)
     {
         grDb = juce::jlimit(0.0f, mMaxDb, grDb);
-        mHist[(size_t)mW] = grDb;
+        // Smooth the stored trace so transients don't make it chatter. Fast on
+        // the way up (catch the grab), gentler on the way down.
+        const float coef = grDb > mPushSm ? 0.55f : 0.30f;
+        mPushSm += coef * (grDb - mPushSm);
+        mHist[(size_t)mW] = mPushSm;
         mW = (mW + 1) % N;
         mCur = juce::jmax(grDb, mCur - 60.0f * dt);
         repaint();
@@ -415,7 +553,8 @@ public:
             if (k == 0) line.startNewSubPath(x, y);
             else        line.lineTo(x, y);
         }
-        juce::Path area = line;
+        auto smooth = line.createPathWithRoundedCorners(7.0f); // round kinks for a fluid trace
+        juce::Path area = smooth;
         area.lineTo(in.getRight(), in.getY());
         area.lineTo(in.getX(), in.getY());
         area.closeSubPath();
@@ -424,7 +563,8 @@ public:
         g.setGradientFill(fill);
         g.fillPath(area);
         g.setColour(mAccent);
-        g.strokePath(line, juce::PathStrokeType(1.6f));
+        g.strokePath(smooth, juce::PathStrokeType(1.6f, juce::PathStrokeType::curved,
+                                                  juce::PathStrokeType::rounded));
 
         auto pill = juce::Rectangle<float>(86.0f, 20.0f).withPosition(in.getRight() - 92.0f, in.getY() + 7.0f);
         g.setColour(juce::Colour(0xff0f121a).withAlpha(0.72f));
@@ -444,9 +584,96 @@ public:
 private:
     std::array<float, N> mHist{};
     int mW = 0;
-    float mCur = 0.0f, mMaxDb = 14.0f;
+    float mCur = 0.0f, mMaxDb = 14.0f, mPushSm = 0.0f;
     juce::Colour mAccent = colors::accent;
     juce::String mLabel = "GR";
+};
+
+//==============================================================================
+// Gate waveform scope: draws the live (or captured) INPUT envelope as a faint
+// grey area and the GATED OUTPUT envelope as a luminous accent area + line, plus
+// a dashed THRESHOLD line. This is what makes the gate's dynamics visible — you
+// watch the input cross the threshold and the output open/close behind it.
+class GateScope : public juce::Component
+{
+public:
+    static constexpr int N = 132; // history length — kept short so features stay wide & readable
+
+    void setAccent(juce::Colour c) { mAccent = c; repaint(); }
+    void setThreshold01(float t) { mThr01 = juce::jlimit(0.0f, 1.0f, t); }
+    void setBypassed(bool b) { if (b != mBypassed) { mBypassed = b; repaint(); } }
+
+    // Live feed: one (input, output) pair per UI tick, each already mapped to 0..1.
+    void push(float in01, float out01)
+    {
+        mIn[(size_t)mW] = juce::jlimit(0.0f, 1.0f, in01);
+        mOut[(size_t)mW] = juce::jlimit(0.0f, 1.0f, out01);
+        mW = (mW + 1) % N;
+        if (mFill < N) ++mFill;
+        repaint();
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        RigLookAndFeel::drawWell(g, getLocalBounds().toFloat().reduced(0.5f));
+        auto in = getLocalBounds().toFloat().reduced(9.0f);
+
+        if (mBypassed)
+            return; // keep the well blank; the panel draws the BYPASSED scrim
+
+        if (mFill > 1)
+        {
+            const int n = mFill;
+            const int start = (mFill < N) ? 0 : mW; // oldest sample index
+            auto at = [&](const std::array<float, N> &buf, int k) { return buf[(size_t)((start + k) % N)]; };
+            auto xOf = [&](int k) { return in.getX() + (n > 1 ? (float)k / (float)(n - 1) : 0.0f) * in.getWidth(); };
+            auto yOf = [&](float v) { return in.getY() + (1.0f - juce::jlimit(0.0f, 1.0f, v)) * in.getHeight(); };
+
+            // INPUT envelope — faint grey filled area (the live dynamics coming in).
+            juce::Path inArea;
+            inArea.startNewSubPath(in.getX(), in.getBottom());
+            for (int k = 0; k < n; ++k) inArea.lineTo(xOf(k), yOf(at(mIn, k)));
+            inArea.lineTo(in.getRight(), in.getBottom());
+            inArea.closeSubPath();
+            g.setColour(colors::captionDim.withAlpha(0.20f));
+            g.fillPath(inArea);
+
+            // OUTPUT (gated) envelope — luminous accent area + stroke.
+            juce::Path outLine;
+            for (int k = 0; k < n; ++k)
+            {
+                const float x = xOf(k), y = yOf(at(mOut, k));
+                if (k == 0) outLine.startNewSubPath(x, y); else outLine.lineTo(x, y);
+            }
+            juce::Path outArea = outLine;
+            outArea.lineTo(in.getRight(), in.getBottom());
+            outArea.lineTo(in.getX(), in.getBottom());
+            outArea.closeSubPath();
+            juce::ColourGradient grad(mAccent.withAlpha(0.36f), in.getX(), in.getY(),
+                                      mAccent.withAlpha(0.02f), in.getX(), in.getBottom(), false);
+            g.setGradientFill(grad);
+            g.fillPath(outArea);
+            g.setColour(mAccent);
+            g.strokePath(outLine, juce::PathStrokeType(2.0f));
+
+            // THRESHOLD — dashed line + "THR" tag.
+            const float ty = yOf(mThr01);
+            g.setColour(colors::textDim.withAlpha(0.85f));
+            for (float x = in.getX(); x < in.getRight(); x += 8.0f)
+                g.fillRect(x, ty - 0.5f, juce::jmin(4.0f, in.getRight() - x), 1.0f);
+            g.setColour(colors::text2.withAlpha(0.9f));
+            g.setFont(fonts::mono(9.0f, fonts::SemiBold));
+            g.drawText("THR", juce::Rectangle<float>(in.getRight() - 30.0f, ty - 14.0f, 28.0f, 11.0f),
+                       juce::Justification::centredRight);
+        }
+    }
+
+private:
+    std::array<float, N> mIn{}, mOut{};
+    int mW = 0, mFill = 0;
+    float mThr01 = 0.5f;
+    bool mBypassed = false;
+    juce::Colour mAccent = colors::green;
 };
 
 //==============================================================================
@@ -465,20 +692,23 @@ public:
             addAndMakeVisible(*mKnobs.back());
         }
 
-        mAnalyser.setLabel("ATTEN");
-        mAnalyser.setAccent(colors::green);
-        mAnalyser.setSpanDb(24.0f);
-        addAndMakeVisible(mAnalyser);
-
-        mDetail.setButtonText("DETAIL");
-        mDetail.getProperties().set("pill", true);
-        mDetail.setClickingTogglesState(true);
-        mDetail.onClick = [this] { resized(); repaint(); };
-        addAndMakeVisible(mDetail);
+        mLive.setAccent(colors::green);
+        addAndMakeVisible(mLive);
     }
 
-    // Editor timer feed: gate attenuation (>=0 dB). Drives the live meter + state.
-    void pushActivity(float redDb, float dt) { mCurDb = redDb; mAnalyser.push(redDb, dt); }
+    // Editor timer feed. inDb = detector input level, gainDb = gate gain (<=0 dB),
+    // thrDb = open threshold. Drives the live scope and the OPEN/CLOSED pill.
+    void pushActivity(float inDb, float gainDb, float thrDb, float dt)
+    {
+        juce::ignoreUnused(dt);
+        mCurDb = -gainDb; // attenuation (>=0) for the state pill
+
+        mLive.setThreshold01(map01(thrDb));
+        mLive.push(map01(inDb), map01(inDb + gainDb));
+
+        const bool nowOpen = mCurDb < 1.5f;
+        if (nowOpen != mShownOpen) { mShownOpen = nowOpen; repaint(); }
+    }
 
     void setLowLatency(bool ll)
     {
@@ -488,13 +718,18 @@ public:
         repaint();
     }
 
+    // gateOn off: freeze/blank the scope so it doesn't show the forced-open
+    // passthrough as a live "OPEN" gate (the base draws the BYPASSED scrim).
+    void onBypassChanged(bool b) override { mLive.setBypassed(b); }
+
     void paint(juce::Graphics &g) override
     {
         BlockPanel::paint(g);
 
-        // OPEN / CLOSED state pill (header-right). Fixed min-width so the dot
-        // never moves; label centred in the remaining slot.
-        const bool open = mCurDb < 1.5f;
+        // State pill (header-right). Fixed min-width so the dot never moves;
+        // label centred in the remaining slot. Reads OPEN / CLOSED / BYP.
+        const bool open = !mBypassed && mCurDb < 1.5f;
+        const bool active = !mBypassed;
         auto pill = mStatePill.toFloat();
         g.setColour(open ? colors::green.withAlpha(0.14f) : colors::tile);
         g.fillRoundedRectangle(pill, 7.0f);
@@ -502,23 +737,12 @@ public:
         g.drawRoundedRectangle(pill, 7.0f, 1.0f);
         auto pc = pill.reduced(11.0f, 0.0f);
         auto dot = juce::Rectangle<float>(7.0f, 7.0f).withCentre({pc.getX() + 3.5f, pc.getCentreY()});
-        g.setColour(open ? colors::green : colors::caption);
+        g.setColour(open ? colors::green : (active ? colors::caption : colors::captionDim));
         g.fillEllipse(dot);
-        g.setColour(open ? colors::green : colors::textDim);
+        g.setColour(open ? colors::green : (active ? colors::textDim : colors::captionDim));
         g.setFont(fonts::archivo(10.0f, fonts::Bold, 0.12f));
-        g.drawText(open ? "OPEN" : "CLOSED", pc.withTrimmedLeft(10), juce::Justification::centred);
-
-        if (mDetail.getToggleState())
-        {
-            RigLookAndFeel::drawWell(g, mDetailWell.toFloat());
-            g.setColour(colors::text2);
-            g.setFont(fonts::mono(9.0f, fonts::SemiBold, 0.14f));
-            g.drawText("LAST TRIGGER", mDetailWell.reduced(12, 10).removeFromTop(12),
-                       juce::Justification::topLeft);
-            g.setColour(colors::captionDim);
-            g.setFont(fonts::mono(10.0f, fonts::Medium));
-            g.drawText("waiting for first trigger…", mDetailWell, juce::Justification::centred);
-        }
+        g.drawText(mBypassed ? "BYP" : (open ? "OPEN" : "CLOSED"),
+                   pc.withTrimmedLeft(10), juce::Justification::centred);
     }
 
     void resized() override
@@ -526,35 +750,28 @@ public:
         auto hr = headerArea();
         const int pillW = 90;
         mStatePill = hr.removeFromRight(pillW).withSizeKeepingCentre(pillW, 24);
-        hr.removeFromRight(10);
-        mDetail.setBounds(hr.removeFromRight(58).withSizeKeepingCentre(58, 24));
 
         auto area = bodyArea().reduced(24, 14);
         auto knobRow = area.removeFromBottom(118);
         area.removeFromBottom(12);
-
-        auto display = area;
-        if (mDetail.getToggleState())
-        {
-            mDetailWell = display.removeFromRight(juce::jmax(180, display.getWidth() / 3));
-            display.removeFromRight(14);
-        }
-        mAnalyser.setBounds(display);
+        mLive.setBounds(area); // full-width live scope
 
         auto row = knobRow.withSizeKeepingCentre(
-            juce::jmin(knobRow.getWidth(), 92 * (int)mKnobs.size()), knobRow.getHeight());
+            juce::jmin(knobRow.getWidth(), 86 * (int)mKnobs.size()), knobRow.getHeight());
         const int w = row.getWidth() / (int)mKnobs.size();
         for (auto &k : mKnobs)
-            k->setBounds(row.removeFromLeft(w).reduced(4, 0));
+            k->setBounds(row.removeFromLeft(w).reduced(7, 10));
     }
 
 private:
+    // Map a dB level onto the scope's 0..1 vertical axis (-90 dB floor .. 0 dB top).
+    static float map01(float db) { return juce::jlimit(0.0f, 1.0f, (db + 90.0f) / 90.0f); }
+
     std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
-    GrAnalyser mAnalyser;
-    juce::TextButton mDetail;
-    juce::Rectangle<int> mStatePill, mDetailWell;
+    GateScope mLive;
+    juce::Rectangle<int> mStatePill;
     float mCurDb = 0.0f;
-    bool mLowLat = false;
+    bool mLowLat = false, mShownOpen = true;
 };
 
 //==============================================================================
@@ -700,16 +917,6 @@ public:
         auto b = getLocalBounds().toFloat();
         const auto c = b.getCentre();
 
-        if (getToggleState() && mLit)
-        {
-            auto glow = juce::Rectangle<float>(80.0f, 80.0f).withCentre(c);
-            juce::ColourGradient rg(mAccent.withAlpha(0.55f), c.x, c.y,
-                                    mAccent.withAlpha(0.0f), c.x, c.y - 40.0f, true);
-            rg.addColour(0.42, mAccent.withAlpha(0.16f));
-            g.setGradientFill(rg);
-            g.fillEllipse(glow);
-        }
-
         // Hex-nut housing (pointy-top hexagon).
         const float hs = 52.0f;
         auto hb = juce::Rectangle<float>(hs, hs).withCentre(c);
@@ -721,16 +928,32 @@ public:
         hex.lineTo(pt(0.07f, 0.25f)); hex.closeSubPath();
         juce::ColourGradient hg(juce::Colour(0xff454c57), hb.getX(), hb.getY(),
                                 juce::Colour(0xff1b1f25), hb.getRight(), hb.getBottom(), false);
-        g.setGradientFill(hg);
-        g.fillPath(hex);
+        dither::fillPath(g, hg, hex);
 
-        // Chrome cap.
+        // Chrome cap geometry (needed before the glow so the cap area can be
+        // clipped OUT of the glow -- guarantees the glow only touches the hex).
         const float cs = down ? 32.0f : 34.0f;
         auto cap = juce::Rectangle<float>(cs, cs).withCentre(c);
+
+        // Accent bloom around the cap. Clip = whole component MINUS the cap
+        // (even-odd), so the glow can bloom out across the hex and beyond, but
+        // physically cannot land on the chrome cap.
+        if (getToggleState() && mLit)
+        {
+            juce::Graphics::ScopedSaveState s(g);
+            juce::Path ring;
+            ring.addRectangle(b);
+            ring.addEllipse(cap);
+            ring.setUsingNonZeroWinding(false); // even-odd -> component minus cap
+            g.reduceClipRegion(ring);
+            auto disc = juce::Rectangle<float>(50.0f, 50.0f).withCentre(c);
+            fx::glowEllipse(g, disc, mAccent, 32, 0.32f, 16, 0.46f);
+        }
+
+        // Chrome cap.
         juce::ColourGradient cg(juce::Colour(0xffd8dce2), c.x, cap.getY() + cs * 0.32f,
                                 juce::Colour(0xff565d67), c.x, cap.getBottom(), true);
-        g.setGradientFill(cg);
-        g.fillEllipse(cap);
+        dither::fillEllipse(g, cg, cap);
         g.setColour(juce::Colours::black.withAlpha(0.28f));
         g.drawEllipse(cap.reduced(0.5f), 1.0f);
     }
@@ -855,15 +1078,14 @@ public:
         const auto pair = colors::driveAccent(accentIndex());
         const juce::Colour tint = mActive ? pair.tint : juce::Colour(0xff343a43);
 
-        // Enclosure: neutral base + tint wash.
-        juce::ColourGradient base(juce::Colour(0xff262b33), 0.0f, b.getY(),
-                                  juce::Colour(0xff15181d), 0.0f, b.getBottom(), false);
-        g.setGradientFill(base);
-        g.fillRoundedRectangle(b, 16.0f);
-        juce::ColourGradient wash(tint.withAlpha(0.20f), 0.0f, b.getY(),
-                                  tint.withAlpha(0.05f), 0.0f, b.getBottom(), false);
-        g.setGradientFill(wash);
-        g.fillRoundedRectangle(b, 16.0f);
+        // Enclosure: neutral base + tint wash, pre-composited into one opaque
+        // gradient so the whole fill is dithered in a single pass (a separate
+        // translucent wash on top would re-introduce 8-bit banding).
+        const juce::Colour encTop = juce::Colour(0xff262b33).overlaidWith(tint.withAlpha(0.20f));
+        const juce::Colour encBot = juce::Colour(0xff15181d).overlaidWith(tint.withAlpha(0.05f));
+        juce::ColourGradient base(encTop, 0.0f, b.getY(),
+                                  encBot, 0.0f, b.getBottom(), false);
+        dither::fillRoundedRectangle(g, base, b, 16.0f);
         g.setColour(juce::Colours::white.withAlpha(0.05f));
         g.drawRoundedRectangle(b.reduced(0.5f).withTrimmedBottom(b.getHeight() - 2.0f), 16.0f, 1.0f);
         g.setColour(tint.withAlpha(mActive ? 0.55f : 0.34f));
@@ -875,7 +1097,7 @@ public:
         g.drawText(mKindStr, mHeaderRect, juce::Justification::centredLeft);
         auto jewel = juce::Rectangle<float>(13.0f, 13.0f).withCentre(
             {(float)mHeaderRect.getRight() - 6.5f, (float)mHeaderRect.getCentreY()});
-        if (mActive) { g.setColour(pair.accent.withAlpha(0.45f)); g.fillEllipse(jewel.expanded(3.0f)); }
+        if (mActive) fx::glowEllipse(g, jewel, pair.accent, 13, 0.6f, 6, 0.55f);
         g.setColour(mActive ? pair.accent : juce::Colour(0xff2a2f37));
         g.fillEllipse(jewel);
 
@@ -913,19 +1135,10 @@ public:
         a.removeFromTop(6);
 
         auto fs = a.removeFromBottom(80);
-        mOn.setBounds(fs.withSizeKeepingCentre(80, 80));
-        a.removeFromBottom(4);
-        mGlyphRect = a.removeFromBottom(juce::jmin(64, juce::jmax(40, a.getHeight() / 2)));
+        mOn.setBounds(fs.withSizeKeepingCentre(120, 120)); // larger: room for the glow to disperse
         a.removeFromBottom(4);
 
-        if (mRangeSeg->isVisible())
-        {
-            auto rr = a.removeFromTop(24);
-            const int rw = juce::jmin(mRangeSeg->idealWidth(), getWidth() - 40);
-            mRangeSeg->setBounds(rr.withSizeKeepingCentre(rw, 22));
-            a.removeFromTop(8);
-        }
-
+        a.removeFromTop(8); // drop the model name down a touch
         auto pillRow = a.removeFromTop(40);
         const int pw = juce::jlimit(90, getWidth() - 24,
             (int)std::ceil(juce::GlyphArrangement::getStringWidth(
@@ -933,6 +1146,12 @@ public:
         mPillRect = pillRow.withSizeKeepingCentre(pw, 38);
         a.removeFromTop(5);
         mSubRect = a.removeFromTop(16);
+
+        // Glyph centred vertically in the space left between the subtitle bottom
+        // and the footswitch top.
+        const int gh = juce::jlimit(40, 64, a.getHeight());
+        mGlyphRect = a.withSizeKeepingCentre(a.getWidth(), juce::jmin(gh, a.getHeight()))
+                         .translated(0, 14); // nudge down toward the footswitch
 
         LabeledKnob *ks[3] = {mDrive.get(), mTone.get(), mLevel.get()};
         int nVis = 0;
@@ -944,6 +1163,20 @@ public:
             for (auto *k : ks)
                 if (k->isVisible())
                     k->setBounds(grp.removeFromLeft(kw).reduced(3, 0));
+        }
+
+        // Range '65 (Boost): Treble/Mid/Full stacked vertically (equal size) to
+        // the right of the Boost knob, without moving the knob. Width clamps to
+        // the room available so it always fits inside the pedal.
+        if (mRangeSeg->isVisible())
+        {
+            mRangeSeg->setVertical(true);
+            auto kb = mDrive->getBounds();
+            const int dialCy = kb.getY() + mDrive->slider().getBounds().getCentreY(); // dial centre
+            const int avail = (getWidth() - 16) - (kb.getRight() + 10);
+            const int sw = juce::jlimit(36, mRangeSeg->idealCellWidth(), avail);
+            const int sh = 58;
+            mRangeSeg->setBounds(kb.getRight() + 10, dialCy - sh / 2, sw, sh);
         }
     }
 
@@ -1041,8 +1274,12 @@ private:
             mDrive->setVisible(false); mTone->setVisible(false); mLevel->setVisible(false);
             break;
         }
+        // Knob value-ring colour follows the pedal: accent when engaged, neutral
+        // grey when bypassed (so the colour drains like the rest of the pedal).
+        const juce::Colour knobAcc = mActive ? colors::driveAccent(accentIndex()).accent
+                                             : juce::Colour(0xff5a616b);
         for (auto *k : {mDrive.get(), mTone.get(), mLevel.get()})
-            k->setAccent(colors::driveAccent(accentIndex()).accent);
+            k->setAccent(knobAcc);
         mModelStr = type == 0 ? juce::String("Off")
                               : juce::String(nam_rig::DriveBlock::modelName(cat, model));
         mKindStr = names[juce::jlimit(0, 4, type)];
@@ -1312,12 +1549,11 @@ public:
         auto lp = mLoaderRect.toFloat();
         juce::ColourGradient lg(juce::Colour(0xff23272e), lp.getTopLeft(),
                                 juce::Colour(0xff1b1f25), lp.getBottomLeft(), false);
-        g.setGradientFill(lg);
-        g.fillRoundedRectangle(lp, 9.0f);
+        dither::fillRoundedRectangle(g, lg, lp, 9.0f);
         g.setColour(juce::Colour(0xff3a414c));
         g.drawRoundedRectangle(lp, 9.0f, 1.0f);
         auto dot = juce::Rectangle<float>(9.0f, 9.0f).withCentre({lp.getX() + 18.0f, lp.getCentreY()});
-        if (mLoaded) { g.setColour(colors::green.withAlpha(0.4f)); g.fillEllipse(dot.expanded(2.5f)); }
+        if (mLoaded) fx::glowEllipse(g, dot, colors::green, 9, 0.5f, 4, 0.4f);
         g.setColour(mLoaded ? colors::green : colors::caption);
         g.fillEllipse(dot);
         g.setColour(colors::text);
@@ -1573,8 +1809,7 @@ public:
                        juce::Rectangle<float>(x - 24.0f, y - 26.0f, 48.0f, 12.0f),
                        juce::Justification::centred);
             auto dot = juce::Rectangle<float>(13.0f, 13.0f).withCentre({x, y});
-            g.setColour(colors::accent.withAlpha(0.4f));
-            g.fillEllipse(dot.expanded(3.0f));
+            fx::glowEllipse(g, dot, colors::accent, 7, 0.40f, 3, 0.32f);
             g.setColour(colors::accent);
             g.fillEllipse(dot);
             g.setColour(juce::Colour(0xff11141b));
@@ -1585,11 +1820,6 @@ public:
                        juce::Justification::centred);
         }
 
-        g.setColour(juce::Colour(0xff5a616b));
-        g.setFont(fonts::mono(11.0f));
-        g.drawText(juce::String::fromUTF8("Drag any band to shape the curve \xC2\xB7 8-band graphic EQ, pre-cab"),
-                   juce::Rectangle<int>(mGraph.getX(), mGraph.getBottom() + 6, mGraph.getWidth(), 18),
-                   juce::Justification::centredLeft);
     }
 
 private:
@@ -1713,7 +1943,7 @@ private:
             g.setColour(colors::accent.withAlpha(0.5f));
             g.drawRoundedRectangle(row, 9.0f, 1.0f);
             auto dot = juce::Rectangle<float>(9.0f, 9.0f).withCentre({row.getX() + 17.0f, row.getCentreY()});
-            g.setColour(colors::green.withAlpha(0.4f)); g.fillEllipse(dot.expanded(2.5f));
+            fx::glowEllipse(g, dot, colors::green, 9, 0.5f, 4, 0.4f);
             g.setColour(colors::green); g.fillEllipse(dot);
             auto txt = row.withTrimmedLeft(32).withTrimmedRight(46);
             g.setColour(colors::text);
@@ -3559,8 +3789,13 @@ class MixPanel : public BlockPanel
 public:
     explicit MixPanel(NamRigProcessor &proc) : BlockPanel("MIX"), mProc(proc)
     {
-        mModes = std::make_unique<SegmentedControl>(mProc.apvts, "rigMode",
-                                                    juce::StringArray{"Solo A", "Solo B", "Dual"});
+        // Full Solo A / Solo B / Dual selector, kept in sync with the branch
+        // switch (both read/write rigMode). Manual mapping: A=0, B=1, Dual=2.
+        mModes = std::make_unique<SegmentedControl>(juce::StringArray{"Solo A", "Solo B", "Dual"});
+        mModes->onChange = [this](int i) {
+            if (auto *p = mProc.apvts.getParameter("rigMode"))
+                p->setValueNotifyingHost(p->convertTo0to1((float)i));
+        };
         addAndMakeVisible(*mModes);
 
         auto rigTag = [this](juce::Label &l, const char *txt, juce::Colour c)
@@ -3588,19 +3823,25 @@ public:
         mPolB.getProperties().set("pill", true);
         addAndMakeVisible(mPolA);
         addAndMakeVisible(mPolB);
-        mPolAAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            mProc.apvts, "rigPolA", mPolA);
-        mPolBAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            mProc.apvts, "rigPolB", mPolB);
+        // No plain attachment: the displayed toggle is decoupled from the saved
+        // parameter so Solo can read "not inverted" while the value is retained
+        // for Dual. Clicks (only possible in Dual) write the parameter; refresh()
+        // mirrors it back into the button.
+        mPolA.setClickingTogglesState(true);
+        mPolB.setClickingTogglesState(true);
+        mPolA.onClick = [this] {
+            if (auto *p = mProc.apvts.getParameter("rigPolA"))
+                p->setValueNotifyingHost(mPolA.getToggleState() ? 1.0f : 0.0f);
+        };
+        mPolB.onClick = [this] {
+            if (auto *p = mProc.apvts.getParameter("rigPolB"))
+                p->setValueNotifyingHost(mPolB.getToggleState() ? 1.0f : 0.0f);
+        };
 
         mAutoBtn.onClick = [this] { mProc.autoAlign(); };
         addAndMakeVisible(mAutoBtn);
         mMatchBtn.onClick = [this] { mProc.matchLevels(); };
         addAndMakeVisible(mMatchBtn);
-        mHint.setColour(juce::Label::textColourId, colors::textDim);
-        mHint.setText("Auto-align matches timing/polarity; Match Levels matches loudness.",
-                      juce::dontSendNotification);
-        addAndMakeVisible(mHint);
     }
 
     // Called from the editor timer.
@@ -3608,15 +3849,33 @@ public:
     {
         const int mode = (int)mProc.apvts.getRawParameterValue("rigMode")->load();
         const bool dual = (mode == 2);
-        // Pan / polarity only matter in Dual (Solo plays centered); grey otherwise.
+        // Which rig is audible: Solo greys the OTHER rig's whole row here in the
+        // Mix panel (Dual = both live). rigMode 0 = Solo A, 1 = Solo B, 2 = Dual.
+        const bool aOn = (mode != 1);
+        const bool bOn = (mode != 0);
+        mModes->setActive(mode); // A=0, B=1, Dual=2
+        mLevelA->setEnabled(aOn);
+        mLevelB->setEnabled(bOn);
+        mALabel.setColour(juce::Label::textColourId, aOn ? colors::titleAccent : colors::captionDim);
+        mBLabel.setColour(juce::Label::textColourId, bOn ? colors::laneColour(1) : colors::captionDim);
+        // Pan only matters in Dual (Solo plays centered); grey it otherwise.
         mPanA->setEnabled(dual);
         mPanB->setEnabled(dual);
+        // Polarity is a SAVED state but only shown/active in Dual. In Solo the
+        // button reads "not inverted" without clearing the stored value, so it
+        // pops back to inverted when Dual is re-selected.
+        const bool polA = mProc.apvts.getRawParameterValue("rigPolA")->load() >= 0.5f;
+        const bool polB = mProc.apvts.getRawParameterValue("rigPolB")->load() >= 0.5f;
         mPolA.setEnabled(dual);
         mPolB.setEnabled(dual);
-        // Auto-align + Match Levels need a model in BOTH rigs.
+        mPolA.setToggleState(dual && polA, juce::dontSendNotification);
+        mPolB.setToggleState(dual && polB, juce::dontSendNotification);
+        // Alignment only applies when both rigs play, so the Align knob + the
+        // Auto-align / Match Levels buttons are bypassed in Single (Solo A/B).
         const bool bothLoaded = mProc.isModelLoaded(0) && mProc.isModelLoaded(1);
-        mAutoBtn.setEnabled(bothLoaded);
-        mMatchBtn.setEnabled(bothLoaded);
+        mAlign->setEnabled(dual);
+        mAutoBtn.setEnabled(dual && bothLoaded);
+        mMatchBtn.setEnabled(dual && bothLoaded);
     }
 
     void resized() override
@@ -3649,18 +3908,15 @@ public:
         mAutoBtn.setBounds(alignRow.removeFromLeft(130).withSizeKeepingCentre(130, 30));
         alignRow.removeFromLeft(8);
         mMatchBtn.setBounds(alignRow.removeFromLeft(130).withSizeKeepingCentre(130, 30));
-        alignRow.removeFromLeft(12);
-        mHint.setBounds(alignRow.withSizeKeepingCentre(alignRow.getWidth(), 44));
     }
 
 private:
     NamRigProcessor &mProc;
     std::unique_ptr<SegmentedControl> mModes;
-    juce::Label mALabel, mBLabel, mHint;
+    juce::Label mALabel, mBLabel;
     std::unique_ptr<LabeledKnob> mLevelA, mPanA, mLevelB, mPanB, mAlign;
     juce::ToggleButton mPolA, mPolB;
     juce::TextButton mAutoBtn{"Auto-align"}, mMatchBtn{"Match Levels"};
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mPolAAtt, mPolBAtt;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MixPanel)
 };
