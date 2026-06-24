@@ -27,22 +27,22 @@ public:
     // Driven by the panel from the Sustain knob (0..1).
     void setSustain(float s01)
     {
-        s01 = juce::jlimit(0.0f, 1.0f, s01);
-        if (std::abs(s01 - mSustain) > 1.0e-4f)
-        {
-            mSustain = s01;
-            repaint();
-        }
+        // Set a target; the drawn value eases toward it (see setInputDb, called
+        // every UI tick) so the knee glides instead of snapping as Sustain turns.
+        mSustainTarget = juce::jlimit(0.0f, 1.0f, s01);
     }
 
     // Live input level (dBFS) for the operating-point dot; -120 = idle/hidden.
+    // Eased toward the target each tick so the dot glides instead of jumping.
     void setInputDb(float db)
     {
-        if (std::abs(db - mInputDb) > 0.1f)
-        {
-            mInputDb = db;
+        const float target = (db <= kMinDb + 1.0f) ? (kMinDb - 6.0f) : db; // park below floor when idle
+        const float pIn = mInputDb, pSus = mSustain;
+        const float coef = target > mInputDb ? 0.45f : 0.25f; // snappy up, smooth down
+        mInputDb += coef * (target - mInputDb);
+        mSustain += 0.35f * (mSustainTarget - mSustain); // glide the knee toward the knob
+        if (std::abs(mInputDb - pIn) > 0.05f || std::abs(mSustain - pSus) > 1.0e-4f)
             repaint();
-        }
     }
 
     // Voicing shape (from CompBlock::voicingFor) so the curve matches the mode.
@@ -100,7 +100,7 @@ public:
         // transfer curve: out = in + computeGainDb(in, threshold)
         juce::Path curve;
         bool started = false;
-        for (float inDb = kMinDb; inDb <= 0.001f; inDb += 1.0f)
+        for (float inDb = kMinDb; inDb <= 0.001f; inDb += 0.5f)
         {
             const float outDb = inDb + nam_rig::CompBlock::computeGainDb(inDb, thr, mRatio, mKnee);
             const float px = xOf(inDb), py = yOf(juce::jmax(outDb, kMinDb));
@@ -139,6 +139,7 @@ public:
 
 private:
     float mSustain = 0.5f;
+    float mSustainTarget = 0.5f; // knob target; mSustain eases toward it each tick
     float mInputDb = kMinDb; // idle (dot hidden) until fed
     float mRatio = nam_rig::CompBlock::kRatio;
     float mKnee = nam_rig::CompBlock::kKneeDb;

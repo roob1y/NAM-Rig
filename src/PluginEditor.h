@@ -4,18 +4,20 @@
 
 #include "ui/RigLookAndFeel.h"
 #include "ui/Meter.h"
+#include "ui/HeaderPanel.h"
 #include "ui/BlockStrip.h"
 #include "ui/Panels.h"
+#include "ui/IrBrowser.h"
 #include "ui/PresetBar.h"
 
-// Block-strip editor: global header (presets + I/O gains + meters + status),
-// the chain as a row of tiles with bypass LEDs, and one block's full panel
-// below. Logical size is fixed (920x540); the window is resizable and the
-// whole UI scales uniformly via an AffineTransform on the content component.
+// Block-strip editor: global header (wordmark + presets + loaded captures + I/O
+// + settings), the dual-rig chain as a branched row of tiles, and one block's
+// full panel below. Logical size is fixed (1180x808); the window is resizable
+// and the whole UI scales uniformly via an AffineTransform on the content.
 class NamRigEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
 public:
-    static constexpr int kBaseW = 920, kBaseH = 540;
+    static constexpr int kBaseW = 1180, kBaseH = 808;
 
     explicit NamRigEditor(NamRigProcessor &);
     ~NamRigEditor() override;
@@ -26,6 +28,7 @@ public:
 private:
     void timerCallback() override;
     void showPanel(int selectableIndex);
+    void showSettingsMenu();
 
     NamRigProcessor &mProc;
     nam_rig::ui::RigLookAndFeel mLnf;
@@ -34,32 +37,31 @@ private:
     juce::Component mContent;
 
     // --- Header ---
-    juce::Label mTitle{{}, "NAM RIG"};
+    nam_rig::ui::HeaderPanel mHeader;
     nam_rig::ui::PresetBar mPresetBar;
-    juce::Label mStatus;
-    juce::Label mInLabel{{}, "IN"}, mOutLabel{{}, "OUT"};
-    juce::Slider mInGain{juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox};
-    juce::Slider mOutGain{juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox};
+    nam_rig::ui::LabeledKnob mInKnob, mOutKnob;
     nam_rig::ui::PeakMeter mInMeter, mOutMeter;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mInAtt, mOutAtt;
-    juce::TextButton mCalBtn{"INPUT"}; // opens the global calibration panel
+    nam_rig::ui::HamburgerButton mMenuBtn;
 
     // --- Chain strip + per-block panels ---
-    // selectable: 0 gate, 1 comp, 2 ampA, 3 eqA, 4 cabA, 5 ampB, 6 eqB, 7 cabB,
-    //             8 mix, 9 mod, 10 delay, 11 reverb
+    // selectable: 0 gate, 1 comp, 2 drive, 3 ampA, 4 eqA, 5 ampB, 6 eqB,
+    //             7 cab (both), 8 mix, 9 mod, 10 delay, 11 reverb
     nam_rig::ui::BlockStrip mStrip;
     nam_rig::ui::GatePanel mGatePanel;
     nam_rig::ui::CompPanel mCompPanel;
     nam_rig::ui::DrivePanel mDrivePanel;
     nam_rig::ui::AmpPanel mAmpPanelA, mAmpPanelB;
     nam_rig::ui::EqPanel mEqPanelA, mEqPanelB;
-    nam_rig::ui::CabPanel mCabPanelA, mCabPanelB;
+    nam_rig::ui::CombinedCabPanel mCabPanel; // both cabs (A | B) in one panel
     nam_rig::ui::MixPanel mMixPanel;
     nam_rig::ui::ModPanel mModPanel;
     nam_rig::ui::DelayPanel mDelayPanel;
     nam_rig::ui::ReverbPanel mReverbPanel;
-    nam_rig::ui::CalPanel mCalPanel;       // global input-cal overlay (header button)
-    std::array<juce::Component *, 13> mPanels;
+    nam_rig::ui::CalPanel mCalPanel;       // global input-cal overlay (settings menu)
+    nam_rig::ui::IrBrowser mIrBrowser;     // IR library overlay (opened from a cab)
+    std::array<juce::Component *, 12> mPanels;
+
+    void openIrBrowser(int rig);
 
     double mLastTimerMs = 0.0;
     int mPresetRefreshTick = 0;

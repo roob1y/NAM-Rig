@@ -8,6 +8,8 @@
 #include "rig/Biquad.h"
 #include <cstdio>
 #include <cmath>
+#include <cstdint>
+#include <algorithm>
 #include <vector>
 
 using nam_rig::EqBlock;
@@ -138,6 +140,61 @@ int main()
             cuts.process(h.data() + p, (int)std::min<size_t>(BLK, h.size() - p));
         double dc = 0; for (auto v : h) dc += v;
         CHECK(std::abs(dc) < 1.0e-3, "T5 HPF kills DC in the measured impulse (sum %.2e)", dc);
+    }
+
+    // ---- T6: instant curve-based auto-gain holds output == input level ----
+    // Drive a signal with EQUAL ENERGY PER OCTAVE (the makeup's design spectrum:
+    // log-spaced equal-amplitude tones) and confirm the level is preserved.
+    {
+        const float gains[EqBlock::kNumBands] = {6, 4, -3, -2, 2, 5, 8, 4};
+
+        // Multitone: 120 equal-amplitude tones, log-spaced 50 Hz..10 kHz.
+        const int K = 120;
+        const double fLo = 50.0, fHi = 10000.0;
+        std::vector<double> tone(K);
+        for (int k = 0; k < K; ++k)
+            tone[k] = fLo * std::pow(fHi / fLo, (double)k / (double)(K - 1));
+        const int N = (int)(SR * 2.0);
+        std::vector<float> base(N, 0.0f);
+        for (int i = 0; i < N; ++i)
+        {
+            double x = 0.0;
+            for (int k = 0; k < K; ++k)
+                x += std::sin(2.0 * M_PI * tone[k] * (double)i / SR + 0.7 * k);
+            base[i] = (float)(x * 0.01);
+        }
+
+        const int skip = 4800;        // let the 15 ms gain smoother settle
+        auto rmsTail = [&](const std::vector<float> &v) {
+            double sq = 0; for (int i = skip; i < N; ++i) sq += (double)v[i] * v[i];
+            return std::sqrt(sq / (N - skip));
+        };
+        const double inRms = rmsTail(base);
+
+        EqBlock eqOn; eqOn.prepare({SR, BLK}); eqOn.setAutoGain(true);
+        for (int b = 0; b < EqBlock::kNumBands; ++b) eqOn.setBandGainDb(b, gains[b]);
+        std::vector<float> on = base;
+        for (int p = 0; p < N; p += BLK) eqOn.process(on.data() + p, std::min(BLK, N - p));
+        const double onDb = 20.0 * std::log10(rmsTail(on) / inRms);
+
+        EqBlock eqOff; eqOff.prepare({SR, BLK}); // auto-gain off by default
+        for (int b = 0; b < EqBlock::kNumBands; ++b) eqOff.setBandGainDb(b, gains[b]);
+        std::vector<float> off = base;
+        for (int p = 0; p < N; p += BLK) eqOff.process(off.data() + p, std::min(BLK, N - p));
+        const double offDb = 20.0 * std::log10(rmsTail(off) / inRms);
+
+        std::printf("[T6] makeup=%.3f  onDb=%.3f  offDb=%.3f\n", eqOn.makeupGain(), onDb, offDb);
+        CHECK(std::abs(onDb) < 0.5, "T6 instant auto-gain holds output == input level (%.2f dB off, want < 0.5)", onDb);
+        CHECK(std::abs(offDb) > 0.5, "T6 without auto-gain the shape shifts level (%.2f dB), so makeup is doing work", offDb);
+
+        // T6b: the makeup is INSTANT — correct from the very first block, no
+        // settling needed beyond the click-smoother. Check the first 256 samples
+        // after the smoother lead are already within 1 dB.
+        const int a = 1200, bgn = a, end = a + 4096;
+        double sqi = 0, sqo = 0;
+        for (int i = bgn; i < end; ++i) { sqi += (double)base[i] * base[i]; sqo += (double)on[i] * on[i]; }
+        const double earlyDb = 20.0 * std::log10(std::sqrt(sqo) / std::sqrt(sqi));
+        CHECK(std::abs(earlyDb) < 1.0, "T6b makeup is instant (%.2f dB off just 25 ms in, want < 1.0)", earlyDb);
     }
 
     std::printf("\n%s (%d failure%s)\n", gFails ? "RESULT: FAIL" : "RESULT: ALL PASS", gFails, gFails == 1 ? "" : "s");

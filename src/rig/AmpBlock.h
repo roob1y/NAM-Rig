@@ -12,6 +12,9 @@
 #include "AaEngine.h"
 
 #include <atomic>
+#include <vector>
+#include <cmath>
+#include <algorithm>
 
 namespace nam_rig
 {
@@ -25,17 +28,52 @@ public:
     {
         mEngine.prepare(ctx.sampleRate, ctx.maxBlockSize);
         mDcState = 0.0f;
+        mDelay.assign(4096, 0.0f); // covers any SRC group delay + block
+        mDelayCap = (int)mDelay.size();
+        mDelayWrite = 0;
     }
 
-    void reset() override { mDcState = 0.0f; }
+    void reset() override
+    {
+        mDcState = 0.0f;
+        std::fill(mDelay.begin(), mDelay.end(), 0.0f);
+        mDelayWrite = 0;
+    }
 
     // Requested AA factor (1/2/4/8/16/32), set from the parameter/offline logic
     // before chain.process(). Latency depends on it — re-report PDC on change.
     void setRequestedFactor(int factor) { mRequestedFactor.store(factor); }
     int requestedFactor() const { return mRequestedFactor.load(); }
 
+    // Amp bypass: skip the model but keep the SAME reported latency by passing the
+    // dry signal through a matching delay. This keeps PDC + dual-rig alignment
+    // constant (no host re-sync), unlike a plain chain skip.
+    void setBypass(bool b) { mBypass.store(b); }
+    bool bypassed() const { return mBypass.load(); }
+
     void process(float *mono, int numSamples) override
     {
+        if (mBypass.load())
+        {
+            // Dry, delayed by the engine's group delay so latency is unchanged.
+            int L = (int)std::lround(latencySamples());
+            if (L < 0) L = 0;
+            if (L > mDelayCap - 1) L = mDelayCap - 1;
+            if (L > 0 && mDelayCap > 0)
+            {
+                for (int i = 0; i < numSamples; ++i)
+                {
+                    mDelay[(size_t)mDelayWrite] = mono[i];
+                    int rd = mDelayWrite - L;
+                    if (rd < 0) rd += mDelayCap;
+                    mono[i] = mDelay[(size_t)rd];
+                    if (++mDelayWrite >= mDelayCap) mDelayWrite = 0;
+                }
+            }
+            mEngaged.store(0);
+            return;
+        }
+
         // Non-positive = passthrough (no model for path / model lock contended):
         // leave the buffer untouched, matching NAM-AA's behavior.
         const int engaged = mEngine.process(mono, numSamples, mRequestedFactor.load());
@@ -79,7 +117,10 @@ private:
     nam_aa::AaEngine mEngine;
     std::atomic<int> mRequestedFactor{1};
     std::atomic<int> mEngaged{0};
+    std::atomic<bool> mBypass{false};
     float mDcState = 0.0f;
+    std::vector<float> mDelay;
+    int mDelayWrite = 0, mDelayCap = 0;
 };
 
 } // namespace nam_rig

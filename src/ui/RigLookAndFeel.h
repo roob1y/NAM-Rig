@@ -1,26 +1,56 @@
 #pragma once
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <array>
+#include <vector>
+#include <cmath>
+
+// Bundled UI typefaces (Archivo + JetBrains Mono, SIL OFL 1.1). Guarded so the
+// header still compiles in non-plugin targets that don't link the binary data.
+#if __has_include("BinaryData.h")
+#include "BinaryData.h"
+#define NAM_RIG_HAS_FONTS 1
+#endif
 
 namespace nam_rig::ui
 {
 
 // Palette for the whole editor. Dark flat: one amber accent, no textures.
+// Values lifted from the design handoff (NAM Rig.dc.html design tokens).
 namespace colors
 {
-    inline const juce::Colour bg          {0xff14161a}; // window
+    inline const juce::Colour bg          {0xff14161a}; // window frame
+    inline const juce::Colour deepBg      {0xff08090b}; // backdrop
+    inline const juce::Colour headerTop   {0xff171a1f}; // header gradient top
+    inline const juce::Colour headerBot   {0xff131519}; // header gradient bottom
     inline const juce::Colour panel       {0xff1d2027}; // block panel body
-    inline const juce::Colour tile        {0xff22262d}; // strip tile
+    inline const juce::Colour tile        {0xff22262d}; // strip tile / control fill
     inline const juce::Colour tileSel     {0xff2b3039}; // selected strip tile
-    inline const juce::Colour outline     {0xff343a43};
-    inline const juce::Colour text        {0xffd8dbe0};
-    inline const juce::Colour textDim     {0xff8b919b};
-    inline const juce::Colour accent      {0xffffb13d}; // amber: value arcs, selection
+    inline const juce::Colour inset       {0xff1b1e24}; // inset field fill
+    inline const juce::Colour outline     {0xff343a43}; // panel + control border
+    inline const juce::Colour divider     {0xff262a31}; // panel header rule / subtle
+    inline const juce::Colour cardBorder  {0xff2c313a}; // display-well / card border
+    inline const juce::Colour wellTop     {0xff14171f}; // display-well gradient top
+    inline const juce::Colour wellBot     {0xff0f121a}; // display-well gradient bottom
+
+    inline const juce::Colour text        {0xffd8dbe0}; // values / body
+    inline const juce::Colour textBright  {0xffeef0f3}; // wordmark / big values
+    inline const juce::Colour text2       {0xff9aa0aa}; // secondary
+    inline const juce::Colour textDim     {0xff8b919b}; // labels
+    inline const juce::Colour caption     {0xff6c727c}; // captions / axis
+    inline const juce::Colour captionDim  {0xff5a616b}; // faint ticks
+
+    inline const juce::Colour accent      {0xffffb13d}; // amber: arcs / active fills
     inline const juce::Colour accentDim   {0xff7a5a28};
+    inline const juce::Colour titleAccent {0xffeb9b43}; // panel header titles
     inline const juce::Colour ledOff      {0xff3a3f47};
-    inline const juce::Colour track       {0xff2e333b}; // knob/slider track
-    inline const juce::Colour meterLo     {0xff5fcf6e};
+    inline const juce::Colour track       {0xff2e333b}; // knob/slider/meter track
+
+    inline const juce::Colour meterLo     {0xff5fcf6e}; // green (open/loaded LED)
     inline const juce::Colour meterMid    {0xffffb13d};
-    inline const juce::Colour meterHi     {0xffe85d4a};
+    inline const juce::Colour meterHi     {0xffe85d4a}; // red (peak)
+    inline const juce::Colour green       {0xff5fcf6e};
+    inline const juce::Colour red         {0xffe85d4a};
+
     inline const juce::Colour scopeBg     {0xff13161f}; // mod-lane scope canvas
     inline const juce::Colour post        {0xffc79be6}; // post-lane (OUT) accent (violet)
 
@@ -35,6 +65,279 @@ namespace colors
         case 2: return juce::Colour(0xff9a6fd0);
         default: return post; // post lane / fallback
         }
+    }
+
+    // Drive-pedal accent / tint pairs (per model family). first = bright accent
+    // (LED, knob arcs), second = enclosure tint.
+    struct AccentPair { juce::Colour accent, tint; };
+    inline AccentPair driveAccent(int kind) // 0 boost,1 od,2 dist,3 fuzz,4 fuzz-alt
+    {
+        switch (kind)
+        {
+        case 0: return {juce::Colour(0xfff0d68a), juce::Colour(0xffc79a3e)}; // EP Boost
+        case 1: return {juce::Colour(0xff3fd45f), juce::Colour(0xff3f9d57)}; // Green Drive
+        case 2: return {juce::Colour(0xffcfd5dd), juce::Colour(0xff3a4049)}; // Black Rodent
+        case 3: return {juce::Colour(0xffcaa6f0), juce::Colour(0xff8a5cc6)}; // Round Fuzz
+        case 4: return {juce::Colour(0xffff7d6b), juce::Colour(0xffa23d31)}; // Range '65
+        default: return {accent, accentDim};
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bundled fonts. Archivo for all UI text, JetBrains Mono for numeric readouts.
+// ---------------------------------------------------------------------------
+namespace fonts
+{
+    enum Weight { Regular = 0, Medium, SemiBold, Bold, ExtraBold };
+
+#if NAM_RIG_HAS_FONTS
+    inline juce::Typeface::Ptr archivoFace(Weight w)
+    {
+        static std::array<juce::Typeface::Ptr, 5> cache;
+        auto &slot = cache[(size_t)w];
+        if (slot == nullptr)
+        {
+            switch (w)
+            {
+            case Regular:   slot = juce::Typeface::createSystemTypefaceFor(BinaryData::ArchivoRegular_ttf,   (size_t)BinaryData::ArchivoRegular_ttfSize); break;
+            case Medium:    slot = juce::Typeface::createSystemTypefaceFor(BinaryData::ArchivoMedium_ttf,    (size_t)BinaryData::ArchivoMedium_ttfSize); break;
+            case SemiBold:  slot = juce::Typeface::createSystemTypefaceFor(BinaryData::ArchivoSemiBold_ttf,  (size_t)BinaryData::ArchivoSemiBold_ttfSize); break;
+            case Bold:      slot = juce::Typeface::createSystemTypefaceFor(BinaryData::ArchivoBold_ttf,      (size_t)BinaryData::ArchivoBold_ttfSize); break;
+            case ExtraBold: slot = juce::Typeface::createSystemTypefaceFor(BinaryData::ArchivoExtraBold_ttf, (size_t)BinaryData::ArchivoExtraBold_ttfSize); break;
+            }
+        }
+        return slot;
+    }
+
+    inline juce::Typeface::Ptr monoFace(Weight w)
+    {
+        const int idx = w >= SemiBold ? 2 : (int)w; // mono has Regular/Medium/SemiBold
+        static std::array<juce::Typeface::Ptr, 3> cache;
+        auto &slot = cache[(size_t)idx];
+        if (slot == nullptr)
+        {
+            switch (idx)
+            {
+            case 0: slot = juce::Typeface::createSystemTypefaceFor(BinaryData::JetBrainsMonoRegular_ttf,  (size_t)BinaryData::JetBrainsMonoRegular_ttfSize); break;
+            case 1: slot = juce::Typeface::createSystemTypefaceFor(BinaryData::JetBrainsMonoMedium_ttf,   (size_t)BinaryData::JetBrainsMonoMedium_ttfSize); break;
+            default:slot = juce::Typeface::createSystemTypefaceFor(BinaryData::JetBrainsMonoSemiBold_ttf, (size_t)BinaryData::JetBrainsMonoSemiBold_ttfSize); break;
+            }
+        }
+        return slot;
+    }
+#else
+    inline juce::Typeface::Ptr archivoFace(Weight) { return {}; }
+    inline juce::Typeface::Ptr monoFace(Weight) { return {}; }
+#endif
+
+    // tracking = extra letter-spacing as a fraction of height (≈ CSS em).
+    inline juce::Font archivo(float height, Weight w = Regular, float tracking = 0.0f)
+    {
+        auto opts = juce::FontOptions{}.withHeight(height);
+#if NAM_RIG_HAS_FONTS
+        opts = opts.withTypeface(archivoFace(w));
+#else
+        if (w >= Bold) opts = opts.withStyle("Bold");
+#endif
+        juce::Font f(opts);
+        if (tracking != 0.0f) f.setExtraKerningFactor(tracking);
+        return f;
+    }
+
+    inline juce::Font mono(float height, Weight w = Regular, float tracking = 0.0f)
+    {
+        auto opts = juce::FontOptions{}.withHeight(height);
+#if NAM_RIG_HAS_FONTS
+        opts = opts.withTypeface(monoFace(w));
+#else
+        opts = opts.withName(juce::Font::getDefaultMonospacedFontName());
+#endif
+        juce::Font f(opts);
+        if (tracking != 0.0f) f.setExtraKerningFactor(tracking);
+        return f;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Gradient dithering. JUCE's software renderer interpolates ColourGradients in
+// 8-bit with no dithering, so subtle dark gradients (wells, knob caps, the
+// header) show visible stair-step banding. Instead of a noise overlay (which
+// reads as grain), we render the gradient ourselves in floating point and add
+// an ordered (Bayer) +/-0.5 LSB dither BEFORE quantising to 8-bit -- true
+// dithering, so the bands dissolve with no perceptible grain. (Random noise
+// dither, as used on the reverb field background, is invisible on near-black
+// but reads as faint fuzz on lighter/saturated fills; the ordered pattern does
+// not.) Renders are cached
+// by geometry + colour, so repainting panels re-blit a prebuilt image instead
+// of looping over pixels every frame. Use the fill* helpers in place of
+// g.setGradientFill(grad) + g.fill<shape>().
+// ---------------------------------------------------------------------------
+namespace dither
+{
+    // Float colour of a gradient's stops at position t in [0,1].
+    inline void sampleStops(const juce::ColourGradient &grad, float t,
+                            float &r, float &g, float &b, float &a)
+    {
+        const int n = grad.getNumColours();
+        if (n <= 0) { r = g = b = a = 0.0f; return; }
+        auto set = [&](juce::Colour c) { r = c.getFloatRed(); g = c.getFloatGreen();
+                                         b = c.getFloatBlue(); a = c.getFloatAlpha(); };
+        if (t <= (float) grad.getColourPosition(0)) { set(grad.getColour(0)); return; }
+        for (int i = 1; i < n; ++i)
+        {
+            const float p1 = (float) grad.getColourPosition(i);
+            if (t <= p1)
+            {
+                const float p0 = (float) grad.getColourPosition(i - 1);
+                const float f  = p1 > p0 ? (t - p0) / (p1 - p0) : 0.0f;
+                const auto c0 = grad.getColour(i - 1), c1 = grad.getColour(i);
+                r = c0.getFloatRed()   + (c1.getFloatRed()   - c0.getFloatRed())   * f;
+                g = c0.getFloatGreen() + (c1.getFloatGreen() - c0.getFloatGreen()) * f;
+                b = c0.getFloatBlue()  + (c1.getFloatBlue()  - c0.getFloatBlue())  * f;
+                a = c0.getFloatAlpha() + (c1.getFloatAlpha() - c0.getFloatAlpha()) * f;
+                return;
+            }
+        }
+        set(grad.getColour(n - 1));
+    }
+
+    // Render `grad` into a dithered ARGB image covering `bounds` (pixel (0,0) ->
+    // bounds.getTopLeft()). Cached by geometry+colour; juce::Image is a cheap
+    // ref-counted handle so returning by value is fine.
+    inline juce::Image image(juce::ColourGradient grad, juce::Rectangle<float> bounds)
+    {
+        const int w = juce::jmax(1, (int) std::ceil(bounds.getWidth()));
+        const int h = juce::jmax(1, (int) std::ceil(bounds.getHeight()));
+
+        // Work in local space so the cache key is position-independent.
+        grad.point1 -= bounds.getTopLeft();
+        grad.point2 -= bounds.getTopLeft();
+
+        struct Entry { int w, h, n; bool radial; float p1x, p1y, p2x, p2y;
+                       float sp[6]; juce::uint32 sc[6]; juce::Image img; };
+        static std::vector<Entry> cache;
+
+        const int ns = juce::jmin(6, grad.getNumColours());
+        const bool radial = grad.isRadial;
+        auto matches = [&](const Entry &e)
+        {
+            if (e.w != w || e.h != h || e.n != ns || e.radial != radial) return false;
+            if (e.p1x != grad.point1.x || e.p1y != grad.point1.y
+                || e.p2x != grad.point2.x || e.p2y != grad.point2.y) return false;
+            for (int i = 0; i < ns; ++i)
+                if (e.sp[i] != (float) grad.getColourPosition(i)
+                    || e.sc[i] != grad.getColour(i).getARGB()) return false;
+            return true;
+        };
+        for (auto &e : cache)
+            if (matches(e)) return e.img;
+
+        juce::Image img(juce::Image::ARGB, w, h, true);
+        {
+            juce::Image::BitmapData bd(img, juce::Image::BitmapData::writeOnly);
+            const float ax = grad.point2.x - grad.point1.x;
+            const float ay = grad.point2.y - grad.point1.y;
+            const float len2 = juce::jmax(1.0e-6f, ax * ax + ay * ay);
+            const float radius = std::sqrt(len2);
+            // Ordered (Bayer 8x8) dither: an evenly-dispersed +/-0.5 LSB offset.
+            // Unlike random noise it has no clumps, so it dissolves banding with
+            // no perceptible grain (random dither reads as fuzz on mid-tones).
+            static constexpr int bayer8[8][8] = {
+                {  0, 32,  8, 40,  2, 34, 10, 42 },
+                { 48, 16, 56, 24, 50, 18, 58, 26 },
+                { 12, 44,  4, 36, 14, 46,  6, 38 },
+                { 60, 28, 52, 20, 62, 30, 54, 22 },
+                {  3, 35, 11, 43,  1, 33,  9, 41 },
+                { 51, 19, 59, 27, 49, 17, 57, 25 },
+                { 15, 47,  7, 39, 13, 45,  5, 37 },
+                { 63, 31, 55, 23, 61, 29, 53, 21 }};
+            for (int y = 0; y < h; ++y)
+                for (int x = 0; x < w; ++x)
+                {
+                    const float px = (float) x + 0.5f, py = (float) y + 0.5f;
+                    float t;
+                    if (radial)
+                        t = std::sqrt((px - grad.point1.x) * (px - grad.point1.x)
+                                      + (py - grad.point1.y) * (py - grad.point1.y)) / radius;
+                    else
+                        t = ((px - grad.point1.x) * ax + (py - grad.point1.y) * ay) / len2;
+                    t = juce::jlimit(0.0f, 1.0f, t);
+
+                    float r, gg, b, a;
+                    sampleStops(grad, t, r, gg, b, a);
+                    // Bayer value 0..63 -> centred offset in (-0.5,+0.5) LSB.
+                    const float dz = (((float) bayer8[y & 7][x & 7] + 0.5f) / 64.0f - 0.5f) / 255.0f;
+                    bd.setPixelColour(x, y, juce::Colour::fromFloatRGBA(
+                        juce::jlimit(0.0f, 1.0f, r + dz),
+                        juce::jlimit(0.0f, 1.0f, gg + dz),
+                        juce::jlimit(0.0f, 1.0f, b + dz),
+                        juce::jlimit(0.0f, 1.0f, a + dz)));
+                }
+        }
+
+        if (cache.size() >= 64) cache.clear(); // bound memory; geometry set is small
+        Entry e {}; e.w = w; e.h = h; e.n = ns; e.radial = radial;
+        e.p1x = grad.point1.x; e.p1y = grad.point1.y;
+        e.p2x = grad.point2.x; e.p2y = grad.point2.y;
+        for (int i = 0; i < ns; ++i) { e.sp[i] = (float) grad.getColourPosition(i);
+                                       e.sc[i] = grad.getColour(i).getARGB(); }
+        e.img = img;
+        cache.push_back(e);
+        return img;
+    }
+
+    // Fill helpers: drop-in for g.setGradientFill(grad) + g.fill<shape>().
+    inline void fillPath(juce::Graphics &g, const juce::ColourGradient &grad, const juce::Path &shape)
+    {
+        const auto b = shape.getBounds();
+        const auto img = image(grad, b);
+        juce::Graphics::ScopedSaveState s(g);
+        g.reduceClipRegion(shape);
+        g.drawImageAt(img, (int) std::floor(b.getX()), (int) std::floor(b.getY()));
+    }
+    inline void fillRect(juce::Graphics &g, const juce::ColourGradient &grad, juce::Rectangle<float> r)
+    {
+        const auto img = image(grad, r);
+        juce::Graphics::ScopedSaveState s(g);
+        g.reduceClipRegion(r.getSmallestIntegerContainer());
+        g.drawImageAt(img, (int) std::floor(r.getX()), (int) std::floor(r.getY()));
+    }
+    inline void fillRoundedRectangle(juce::Graphics &g, const juce::ColourGradient &grad,
+                                     juce::Rectangle<float> r, float radius)
+    {
+        juce::Path p;
+        p.addRoundedRectangle(r, radius);
+        fillPath(g, grad, p);
+    }
+    inline void fillEllipse(juce::Graphics &g, const juce::ColourGradient &grad, juce::Rectangle<float> r)
+    {
+        juce::Path p;
+        p.addEllipse(r);
+        fillPath(g, grad, p);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Soft glows. A real glow is a blurred copy of the lit shape (like a CSS
+// box-shadow), which fades off in every direction -- NOT a hard-edged expanded
+// shape or a flat translucent disc. Use a wide faint pass + a tight brighter
+// pass for a natural bloom. Shared so every glowing element matches.
+// ---------------------------------------------------------------------------
+namespace fx
+{
+    inline void glow(juce::Graphics &g, const juce::Path &shape, juce::Colour c,
+                     int wideRadius, float wideAlpha, int tightRadius, float tightAlpha)
+    {
+        juce::DropShadow(c.withAlpha(wideAlpha),  juce::jmax(1, wideRadius),  {}).drawForPath(g, shape);
+        juce::DropShadow(c.withAlpha(tightAlpha), juce::jmax(1, tightRadius), {}).drawForPath(g, shape);
+    }
+    inline void glowEllipse(juce::Graphics &g, juce::Rectangle<float> area, juce::Colour c,
+                            int wideRadius, float wideAlpha, int tightRadius, float tightAlpha)
+    {
+        juce::Path p;
+        p.addEllipse(area);
+        glow(g, p, c, wideRadius, wideAlpha, tightRadius, tightAlpha);
     }
 }
 
@@ -57,68 +360,101 @@ public:
         setColour(juce::PopupMenu::textColourId, colors::text);
         setColour(juce::PopupMenu::highlightedBackgroundColourId, colors::tileSel);
         setColour(juce::PopupMenu::highlightedTextColourId, colors::text);
+        setColour(juce::TooltipWindow::backgroundColourId, colors::panel);
+        setColour(juce::TooltipWindow::textColourId, colors::text);
+        setColour(juce::TooltipWindow::outlineColourId, colors::outline);
     }
 
+    // Resolve any non-explicit Font (Labels, combos, tooltips) to Archivo.
+    juce::Typeface::Ptr getTypefaceForFont(const juce::Font &f) override
+    {
+#if NAM_RIG_HAS_FONTS
+        return fonts::archivoFace(f.isBold() ? fonts::Bold : fonts::Regular);
+#else
+        return LookAndFeel_V4::getTypefaceForFont(f);
+#endif
+    }
+
+    // ---- Knob: glow pointer + outer fill ring (design "Glow Pointer + fill") ----
     void drawRotarySlider(juce::Graphics &g, int x, int y, int width, int height,
-                          float sliderPos, float rotaryStartAngle, float rotaryEndAngle,
+                          float sliderPos, float /*startAngle*/, float /*endAngle*/,
                           juce::Slider &slider) override
     {
-        const auto bounds = juce::Rectangle<int>(x, y, width, height).toFloat().reduced(3.0f);
+        const auto bounds = juce::Rectangle<int>(x, y, width, height).toFloat();
         const float radius = juce::jmin(bounds.getWidth(), bounds.getHeight()) * 0.5f;
-        const auto centre = bounds.getCentre();
-        const float angle = rotaryStartAngle + sliderPos * (rotaryEndAngle - rotaryStartAngle);
-        const float lineW = juce::jmax(2.0f, radius * 0.14f);
-        const float arcR = radius - lineW * 0.5f;
+        const auto c = bounds.getCentre();
         const bool enabled = slider.isEnabled();
+        const float ga = enabled ? 1.0f : 0.45f; // whole-knob opacity when disabled
+
+        // 280° sweep starting at 220° (gap centred at the bottom).
+        const float kStart = juce::degreesToRadians(220.0f);
+        const float kEnd   = juce::degreesToRadians(500.0f);
+        const float angle  = kStart + sliderPos * (kEnd - kStart);
+
+        // Outer value-ring band (~ outer 26% of the radius).
+        const float bandW = juce::jmax(3.0f, radius * 0.26f);
+        const float ringR = radius - bandW * 0.5f - 1.0f;
 
         juce::Path track;
-        track.addCentredArc(centre.x, centre.y, arcR, arcR, 0.0f,
-                            rotaryStartAngle, rotaryEndAngle, true);
-        g.setColour(colors::track);
-        g.strokePath(track, juce::PathStrokeType(lineW, juce::PathStrokeType::curved,
-                                                 juce::PathStrokeType::rounded));
+        track.addCentredArc(c.x, c.y, ringR, ringR, 0.0f, kStart, kEnd, true);
+        g.setColour(colors::track.withMultipliedAlpha(ga));
+        g.strokePath(track, juce::PathStrokeType(bandW, juce::PathStrokeType::curved,
+                                                 juce::PathStrokeType::butt));
 
-        // Bipolar params (range spanning 0) fill from 12 o'clock, others from the start.
+        const juce::Colour accentCol = slider.isColourSpecified(juce::Slider::rotarySliderFillColourId)
+                                           ? slider.findColour(juce::Slider::rotarySliderFillColourId)
+                                           : colors::accent;
+
         const auto &range = slider.getRange();
         const bool bipolar = range.getStart() < 0.0 && range.getEnd() > 0.0;
-        float fillFrom = rotaryStartAngle;
+        float fillFrom = kStart;
         if (bipolar)
-            fillFrom = rotaryStartAngle
-                       + (float)((0.0 - range.getStart()) / range.getLength())
-                             * (rotaryEndAngle - rotaryStartAngle);
+            fillFrom = kStart + (float)((0.0 - range.getStart()) / range.getLength())
+                                    * (kEnd - kStart);
 
-        if (std::abs(angle - fillFrom) > 0.01f)
+        if (std::abs(angle - fillFrom) > 0.004f)
         {
             juce::Path value;
-            value.addCentredArc(centre.x, centre.y, arcR, arcR, 0.0f,
+            value.addCentredArc(c.x, c.y, ringR, ringR, 0.0f,
                                 juce::jmin(fillFrom, angle), juce::jmax(fillFrom, angle), true);
-            // Per-knob fill colour (mod lanes tint their arcs); else the global accent.
-            const juce::Colour fill = slider.isColourSpecified(juce::Slider::rotarySliderFillColourId)
-                                          ? slider.findColour(juce::Slider::rotarySliderFillColourId)
-                                          : colors::accent;
-            g.setColour(enabled ? fill : fill.withMultipliedSaturation(0.6f).darker(0.4f));
-            g.strokePath(value, juce::PathStrokeType(lineW, juce::PathStrokeType::curved,
-                                                     juce::PathStrokeType::rounded));
+            g.setColour((enabled ? accentCol : juce::Colour(0xff3a414c)).withMultipliedAlpha(ga));
+            g.strokePath(value, juce::PathStrokeType(bandW, juce::PathStrokeType::curved,
+                                                     juce::PathStrokeType::butt));
         }
 
-        // Pointer
-        const float innerR = arcR - lineW * 1.4f;
-        juce::Path p;
-        p.addRoundedRectangle(-lineW * 0.5f, -innerR, lineW, innerR * 0.55f, lineW * 0.4f);
-        g.setColour(enabled ? colors::text : colors::textDim);
-        g.fillPath(p, juce::AffineTransform::rotation(angle).translated(centre.x, centre.y));
+        // Dark dial cap, inset ~17%.
+        const float capR = radius * 0.83f;
+        auto cap = juce::Rectangle<float>(capR * 2.0f, capR * 2.0f).withCentre(c);
+        juce::ColourGradient cg(juce::Colour(0xff262b33).withMultipliedAlpha(ga), cap.getTopLeft(),
+                                juce::Colour(0xff1b1f25).withMultipliedAlpha(ga), cap.getBottomRight(), false);
+        dither::fillEllipse(g, cg, cap);
+        g.setColour(juce::Colours::white.withAlpha(0.05f * ga));
+        g.drawEllipse(cap.reduced(0.5f), 1.0f);
+
+        // Glowing pointer from centre to ~0.7×radius.
+        const float pinLen = radius * 0.70f;
+        const float pinW   = juce::jmax(2.4f, radius * 0.085f);
+        const auto tf = juce::AffineTransform::rotation(angle).translated(c.x, c.y);
+        const juce::Colour pinCol = enabled ? accentCol : juce::Colour(0xff5a616b);
+        juce::Path pin;
+        pin.addRoundedRectangle(-pinW * 0.5f, -pinLen, pinW, pinLen, pinW * 0.5f);
+        pin.applyTransform(tf);
+        if (enabled)
+            fx::glow(g, pin, pinCol,
+                     juce::roundToInt(juce::jmax(7.0f, radius * 0.42f)), 0.28f,
+                     juce::roundToInt(juce::jmax(3.0f, radius * 0.16f)), 0.48f);
+        g.setColour(pinCol.withMultipliedAlpha(ga));
+        g.fillPath(pin);
     }
 
-    // Buttons flagged with a "pill" property draw as a filled/outlined pill with
-    // centred text (the mod-lane On / S toggles) instead of a checkbox + label.
+    // Toggle: "pill" property -> filled/outlined pill with centred text; caption-
+    // less -> small centred box; else a standard checkbox.
     void drawToggleButton(juce::Graphics &g, juce::ToggleButton &b,
-                          bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override
+                          bool highlighted, bool down) override
     {
         const bool pill = b.getProperties()["pill"].equals(true);
         if (!pill && b.getButtonText().isEmpty())
         {
-            // Caption-less checkbox (bi-phase Series, label drawn above): a small
-            // CENTRED box -- filled accent when on, outlined when off (no tick).
             auto a = b.getLocalBounds().toFloat();
             const float sz = juce::jmin(15.0f, a.getWidth() - 2.0f, a.getHeight() - 2.0f);
             auto box = juce::Rectangle<float>(sz, sz).withCentre(a.getCentre());
@@ -131,29 +467,30 @@ public:
         }
         if (!pill)
         {
-            LookAndFeel_V4::drawToggleButton(g, b, shouldDrawButtonAsHighlighted, shouldDrawButtonAsDown);
+            LookAndFeel_V4::drawToggleButton(g, b, highlighted, down);
             return;
         }
         auto r = b.getLocalBounds().toFloat().reduced(1.0f);
         const bool on = b.getToggleState();
-        // Optional per-button tint via TextButton::buttonOnColourId; default = accent.
         const juce::Colour onCol = b.isColourSpecified(juce::TextButton::buttonOnColourId)
                                        ? b.findColour(juce::TextButton::buttonOnColourId)
                                        : colors::accent;
         if (on)
         {
-            g.setColour(shouldDrawButtonAsHighlighted ? onCol.brighter(0.08f) : onCol);
-            g.fillRoundedRectangle(r, 5.0f);
+            g.setColour(highlighted ? onCol.brighter(0.08f) : onCol);
+            g.fillRoundedRectangle(r, 7.0f);
+            g.setColour(onCol);
+            g.drawRoundedRectangle(r, 7.0f, 1.0f);
         }
         else
         {
-            g.setColour(shouldDrawButtonAsHighlighted ? colors::tileSel : colors::tile);
-            g.fillRoundedRectangle(r, 5.0f);
+            g.setColour(highlighted ? colors::tileSel : colors::tile);
+            g.fillRoundedRectangle(r, 7.0f);
             g.setColour(colors::outline);
-            g.drawRoundedRectangle(r, 5.0f, 1.0f);
+            g.drawRoundedRectangle(r, 7.0f, 1.0f);
         }
         g.setColour(on ? colors::bg : colors::textDim);
-        g.setFont(RigLookAndFeel::withHeight(12.0f));
+        g.setFont(fonts::archivo(12.0f, fonts::SemiBold));
         g.drawText(b.getButtonText(), b.getLocalBounds(), juce::Justification::centred);
     }
 
@@ -168,28 +505,23 @@ public:
             return;
         }
 
-        // Vertical EQ-style slider: centered bipolar fill + bar thumb.
         const float trackW = 5.0f;
         const float cx = (float)x + (float)width * 0.5f;
-        const auto track = juce::Rectangle<float>(cx - trackW * 0.5f, (float)y,
-                                                  trackW, (float)height);
+        const auto trk = juce::Rectangle<float>(cx - trackW * 0.5f, (float)y, trackW, (float)height);
         g.setColour(colors::track);
-        g.fillRoundedRectangle(track, trackW * 0.5f);
+        g.fillRoundedRectangle(trk, trackW * 0.5f);
 
         const auto &range = slider.getRange();
         const bool bipolar = range.getStart() < 0.0 && range.getEnd() > 0.0;
-        float fillFromY = (float)y + (float)height; // bottom (unipolar)
+        float fillFromY = (float)y + (float)height;
         if (bipolar)
-            fillFromY = (float)y + (float)height
-                        * (float)(range.getEnd() / range.getLength()); // value 0 line
+            fillFromY = (float)y + (float)height * (float)(range.getEnd() / range.getLength());
 
-        const auto fill = juce::Rectangle<float>(cx - trackW * 0.5f,
-                                                 juce::jmin(sliderPos, fillFromY), trackW,
-                                                 std::abs(fillFromY - sliderPos));
+        const auto fill = juce::Rectangle<float>(cx - trackW * 0.5f, juce::jmin(sliderPos, fillFromY),
+                                                 trackW, std::abs(fillFromY - sliderPos));
         g.setColour(slider.isEnabled() ? colors::accent : colors::accentDim);
         g.fillRoundedRectangle(fill, trackW * 0.5f);
 
-        // Thumb: horizontal bar
         const float thumbW = juce::jmin((float)width, 26.0f);
         g.setColour(colors::text);
         g.fillRoundedRectangle(cx - thumbW * 0.5f, sliderPos - 2.5f, thumbW, 5.0f, 2.5f);
@@ -203,45 +535,64 @@ public:
         if (down) fill = colors::tileSel.brighter(0.06f);
         else if (highlighted) fill = colors::tileSel;
         g.setColour(fill);
-        g.fillRoundedRectangle(b, 6.0f);
+        g.fillRoundedRectangle(b, 7.0f);
         g.setColour(colors::outline);
-        g.drawRoundedRectangle(b, 6.0f, 1.0f);
+        g.drawRoundedRectangle(b, 7.0f, 1.0f);
     }
 
     void drawComboBox(juce::Graphics &g, int width, int height, bool,
                       int, int, int, int, juce::ComboBox &box) override
     {
         auto b = juce::Rectangle<float>(0, 0, (float)width, (float)height).reduced(0.5f);
-        g.setColour(colors::tile);
-        g.fillRoundedRectangle(b, 6.0f);
+        g.setColour(colors::inset);
+        g.fillRoundedRectangle(b, 8.0f);
         g.setColour(colors::outline);
-        g.drawRoundedRectangle(b, 6.0f, 1.0f);
+        g.drawRoundedRectangle(b, 8.0f, 1.0f);
 
-        juce::Path arrow;
-        const float ax = (float)width - 14.0f, ay = (float)height * 0.5f;
-        arrow.addTriangle(ax - 4.0f, ay - 2.5f, ax + 4.0f, ay - 2.5f, ax, ay + 3.5f);
-        g.setColour(box.isEnabled() ? colors::textDim : colors::ledOff);
-        g.fillPath(arrow);
+        g.setColour(box.isEnabled() ? colors::caption : colors::ledOff);
+        g.setFont(fonts::archivo((float)height * 0.5f));
+        g.drawText(juce::String::fromUTF8("▾"), // ▾
+                   juce::Rectangle<int>(width - 20, 0, 16, height), juce::Justification::centred);
     }
 
-    juce::Font getComboBoxFont(juce::ComboBox &) override { return withHeight(14.0f); }
-    // Reserve the arrow width on BOTH sides so centred text sits in the true middle.
+    juce::Font getComboBoxFont(juce::ComboBox &) override { return fonts::archivo(13.0f, fonts::SemiBold); }
     void positionComboBoxText(juce::ComboBox &box, juce::Label &label) override
     {
-        const int m = 22;
-        label.setBounds(m, 1, juce::jmax(1, box.getWidth() - m * 2), box.getHeight() - 2);
+        label.setBounds(13, 1, juce::jmax(1, box.getWidth() - 30), box.getHeight() - 2);
         label.setFont(getComboBoxFont(box));
     }
-    juce::Font getTextButtonFont(juce::TextButton &, int) override { return withHeight(14.0f); }
+    juce::Font getTextButtonFont(juce::TextButton &, int) override { return fonts::archivo(13.0f, fonts::SemiBold); }
     juce::Font getLabelFont(juce::Label &l) override
     {
-        // Label may not be laid out yet — never hand Font a non-positive height.
-        return withHeight(juce::jlimit(10.0f, 14.0f, (float)l.getHeight() - 2.0f));
+        return fonts::archivo(juce::jlimit(9.0f, 14.0f, (float)l.getHeight() - 2.0f));
     }
+    juce::Font getPopupMenuFont() override { return fonts::archivo(13.0f); }
 
+    // Back-compat helper used throughout the UI; resolves to Archivo via the
+    // typeface override (bold flag picks Archivo-Bold).
     static juce::Font withHeight(float h)
     {
         return juce::Font(juce::FontOptions{}.withHeight(h));
+    }
+
+    // Vertical level-meter gradient (green -> amber -> red, anchored at bottom).
+    static juce::ColourGradient meterGradient(juce::Rectangle<float> r)
+    {
+        juce::ColourGradient grad(colors::meterLo, r.getBottomLeft(),
+                                  colors::meterHi, r.getTopLeft(), false);
+        grad.addColour(0.55, colors::meterLo);
+        grad.addColour(0.80, colors::accent);
+        return grad;
+    }
+
+    // Display-well background (meters / graphs): vertical gradient + card border.
+    static void drawWell(juce::Graphics &g, juce::Rectangle<float> r, float radius = 11.0f)
+    {
+        juce::ColourGradient grad(colors::wellTop, r.getTopLeft(),
+                                  colors::wellBot, r.getBottomLeft(), false);
+        dither::fillRoundedRectangle(g, grad, r, radius);
+        g.setColour(colors::cardBorder);
+        g.drawRoundedRectangle(r.reduced(0.5f), radius, 1.0f);
     }
 };
 

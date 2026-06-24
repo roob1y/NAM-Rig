@@ -20,7 +20,7 @@ juce_add_plugin(NAM_Rig
     COMPANY_NAME               "Robbie"
     PLUGIN_MANUFACTURER_CODE   RbAA
     PLUGIN_CODE                NmRg
-    FORMATS                    VST3
+    FORMATS                    VST3 Standalone
     PRODUCT_NAME               "NAM Rig"
     COPY_PLUGIN_AFTER_BUILD    TRUE
     NEEDS_MIDI_INPUT            FALSE
@@ -29,7 +29,17 @@ juce_add_plugin(NAM_Rig
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE
 )
 
-juce_add_binary_data(NAM_RigData SOURCES resources/plate_early_kernel.wav)
+juce_add_binary_data(NAM_RigData SOURCES
+    resources/plate_early_kernel.wav
+    # --- UI fonts (SIL OFL 1.1 — see resources/fonts/*-OFL.txt) ---
+    resources/fonts/Archivo-Regular.ttf
+    resources/fonts/Archivo-Medium.ttf
+    resources/fonts/Archivo-SemiBold.ttf
+    resources/fonts/Archivo-Bold.ttf
+    resources/fonts/Archivo-ExtraBold.ttf
+    resources/fonts/JetBrainsMono-Regular.ttf
+    resources/fonts/JetBrainsMono-Medium.ttf
+    resources/fonts/JetBrainsMono-SemiBold.ttf)
 
 target_sources(NAM_Rig PRIVATE
     src/PluginProcessor.cpp
@@ -41,6 +51,7 @@ target_sources(NAM_Rig PRIVATE
     src/PresetManager.h
     src/ui/RigLookAndFeel.h
     src/ui/Meter.h
+    src/ui/HeaderPanel.h
     src/ui/BlockStrip.h
     src/ui/Panels.h
     src/ui/PresetBar.h

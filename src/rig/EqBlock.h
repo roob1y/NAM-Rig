@@ -12,6 +12,14 @@
 // +/-12 dB. All-flat = the block snaps out of the path entirely (bit-exact
 // passthrough). Zero latency; chain-bypass via eqOn is safe.
 //
+// Auto-gain (output loudness-lock): an INSTANT makeup gain computed directly
+// from the band settings — the average of |H(f)|^2 over the guitar range with
+// equal-energy-per-octave weighting, inverted (= 1/sqrt(meanPower)). Because it
+// is a function of the curve, not of the signal, it lands the moment a band
+// moves (no envelope lag, no pumping, works in silence); a 15 ms one-pole only
+// de-zippers the applied gain. OFF by default so the harness measures the raw
+// band gains; the plugin turns it on.
+//
 // Verified by tests/eq_test.cpp against Biquad::magnitudeAt (the harness
 // evaluates the SAME coefficients the audio path runs).
 
@@ -19,6 +27,8 @@
 #include "Biquad.h"
 #include <array>
 #include <atomic>
+#include <algorithm>
+#include <cmath>
 
 namespace nam_rig
 {
@@ -41,6 +51,12 @@ public:
             mGainsDb[(size_t)band].store(gainDb);
     }
 
+    // Output loudness-lock: instant curve-based makeup (see file header). OFF by
+    // default so the verification harness measures the raw band gains.
+    void setAutoGain(bool on) { mAutoGain = on; }
+    bool autoGain() const { return mAutoGain; }
+    float makeupGain() const { return mMakeupZ; } // current applied makeup (linear)
+
     void prepare(const BlockContext &ctx) override
     {
         mFs = ctx.sampleRate;
@@ -48,6 +64,10 @@ public:
             f = Biquad::identity();
         for (auto &g : mApplied)
             g = 1.0e9f; // force coefficient rebuild on first block
+        mGainCoef = 1.0f - (float)std::exp(-1.0 / (0.015 * ctx.sampleRate)); // 15 ms de-zip
+        mMakeupTarget = 1.0f;
+        mMakeupZ = 1.0f;
+        mMakeupValid = false;
         mPrepared = true;
     }
 
@@ -55,6 +75,8 @@ public:
     {
         for (auto &f : mFilters)
             f.reset();
+        mMakeupZ = 1.0f;
+        mMakeupValid = false;
     }
 
     void process(float *mono, int numSamples) override
@@ -63,6 +85,7 @@ public:
             return;
 
         bool anyActive = false;
+        bool coeffsChanged = false;
         for (int b = 0; b < kNumBands; ++b)
         {
             const float g = mGainsDb[(size_t)b].load();
@@ -75,16 +98,61 @@ public:
                 mFilters[(size_t)b].z1 = z1;
                 mFilters[(size_t)b].z2 = z2;
                 mApplied[(size_t)b] = g;
+                coeffsChanged = true;
             }
             anyActive = anyActive || !mFilters[(size_t)b].isIdentity();
         }
 
         if (!anyActive)
-            return; // all flat: bit-exact passthrough
+            return; // all flat: bit-exact passthrough (makeup idles at unity)
 
         for (int b = 0; b < kNumBands; ++b)
             if (!mFilters[(size_t)b].isIdentity())
                 mFilters[(size_t)b].process(mono, numSamples);
+
+        if (!mAutoGain)
+            return; // raw shaped output (harness path / auto-gain disabled)
+
+        // Recompute the instant makeup only when the curve actually moved.
+        if (coeffsChanged || !mMakeupValid)
+        {
+            mMakeupTarget = computeMakeupGain();
+            mMakeupValid = true;
+        }
+        // Apply with a 15 ms one-pole so dragging a band doesn't click.
+        float g = mMakeupZ;
+        const float c = mGainCoef, tgt = mMakeupTarget;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            g += c * (tgt - g);
+            mono[i] *= g;
+        }
+        mMakeupZ = g;
+    }
+
+    // The instant makeup gain for the current band settings: 1/sqrt of the
+    // equal-energy-per-octave mean of |H(f)|^2 across the guitar range. Public
+    // so the verification harness can check it directly.
+    float computeMakeupGain() const
+    {
+        constexpr int kPts = 160;
+        constexpr double fLo = 50.0, fHi = 10000.0;
+        double sumPow = 0.0;
+        for (int i = 0; i < kPts; ++i)
+        {
+            const double f = fLo * std::pow(fHi / fLo, (double)i / (double)(kPts - 1));
+            double magSq = 1.0;
+            for (int b = 0; b < kNumBands; ++b)
+                if (!mFilters[(size_t)b].isIdentity())
+                {
+                    const double m = mFilters[(size_t)b].magnitudeAt(mFs, f);
+                    magSq *= m * m; // cascade: powers multiply
+                }
+            sumPow += magSq;
+        }
+        const double mean = sumPow / (double)kPts;                  // mean power per octave
+        const float gain = (float)(1.0 / std::sqrt(std::max(mean, 1.0e-9)));
+        return std::min(4.0f, std::max(0.25f, gain));               // ±12 dB safety clamp
     }
 
     // Verification access: the live filter cascade.
@@ -94,6 +162,11 @@ private:
     std::array<std::atomic<float>, kNumBands> mGainsDb{}; // default 0 = flat
     std::array<Biquad, kNumBands> mFilters{};
     std::array<float, kNumBands> mApplied{};
+    float mGainCoef = 0.0f;        // 15 ms applied-gain de-zipper
+    float mMakeupTarget = 1.0f;    // instant makeup for the current curve
+    float mMakeupZ = 1.0f;         // smoothed applied makeup
+    bool mMakeupValid = false;     // recompute target when the curve moves
+    bool mAutoGain = false;        // OFF by default; the plugin enables it
     double mFs = 48000.0;
     bool mPrepared = false;
 };

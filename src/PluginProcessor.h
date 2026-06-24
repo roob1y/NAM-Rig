@@ -60,6 +60,28 @@ public:
     juce::String getIrName(int rig = 0) const { return cabFor(rig).irName(); }
     bool isModelLoaded(int rig = 0) const { return mModelLoaded[rig].load(); }
     bool isIrLoaded(int rig = 0) const { return cabFor(rig).isIrLoaded(); }
+    // IR magnitude response for the Cab panel (dst must hold CabBlock::kResPts
+    // floats); false until an IR is loaded. Message thread only.
+    bool getCabResponseDb(float *dst, int rig = 0) const { return cabFor(rig).copyResponseDb(dst); }
+
+    // Persistent IR-library root folder (a tiny settings file next to the
+    // presets). Empty until the user picks one. Message thread only.
+    juce::File irLibraryRoot() const
+    {
+        auto f = irRootSettingsFile();
+        if (f.existsAsFile())
+        {
+            juce::File d(f.loadFileAsString().trim());
+            if (d.isDirectory()) return d;
+        }
+        return {};
+    }
+    void setIrLibraryRoot(const juce::File &dir)
+    {
+        auto f = irRootSettingsFile();
+        f.getParentDirectory().createDirectory();
+        f.replaceWithText(dir.getFullPathName());
+    }
     bool isA2Model(int rig = 0) const { return ampFor(rig).engine().isA2(); }
 
     // Engaged amp factor on the last block (0 = passthrough). Editor status.
@@ -92,6 +114,7 @@ public:
 
     // Live gain-reduction telemetry for the editor meters.
     float gateGainDb() const { return mChain.gate.currentGainDb(); }
+    float gateInDb() const { return mChain.gate.currentInDb(); }
     float compGrDb() const { return mChain.comp.grDb(); }
     float compInDb() const { return mChain.comp.inPeakDb(); }
     float compOutDb() const { return mChain.comp.outPeakDb(); }
@@ -151,6 +174,12 @@ private:
     const nam_rig::AmpBlock &ampFor(int rig) const { return rig ? mChain.ampB : mChain.amp; }
     nam_rig::CabBlock &cabFor(int rig) { return rig ? mChain.cabB : mChain.cab; }
     const nam_rig::CabBlock &cabFor(int rig) const { return rig ? mChain.cabB : mChain.cab; }
+
+    static juce::File irRootSettingsFile()
+    {
+        return juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
+            .getChildFile("NAM Rig").getChildFile("ir_library_root.txt");
+    }
 
     nam_rig::RigChain mChain;
 

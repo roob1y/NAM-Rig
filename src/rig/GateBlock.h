@@ -114,6 +114,7 @@ public:
         bool open = mOpen;
         int hold = mHoldCount;
         const bool enabled = mEnabled.load();
+        float blkPeak = 0.0f; // max detector peak this block (for the UI input scope)
 
         for (int i = 0; i < numSamples; ++i)
         {
@@ -124,6 +125,7 @@ public:
             const float hf = x - hp;          // high-passed (>~80 Hz)
             const float a = std::abs(hf);
             peak = std::max(a, peak * (1.0f - peakDecay)); // instant up, fast exp down
+            blkPeak = std::max(blkPeak, peak);
             rms2 += rmsCoef * (a * a - rms2);
 
             // ---- state machine ----
@@ -181,10 +183,15 @@ public:
         // Published once per block for the editor's GR meter.
         mGainDbPub.store((gain >= 1.0f) ? 0.0f
                                         : 20.0f * std::log10(std::max(gain, 1.0e-5f)));
+        mInDbPub.store(blkPeak > 1.0e-6f ? 20.0f * std::log10(blkPeak) : -120.0f);
     }
 
     // Last block's gate gain in dB (0 = open, negative = attenuating). UI thread.
     float currentGainDb() const { return mGainDbPub.load(); }
+
+    // Last block's detector input level in dB (post-HPF peak envelope). Drives
+    // the editor's live waveform scope so the incoming dynamics are visible.
+    float currentInDb() const { return mInDbPub.load(); }
 
 private:
     int lookaheadSamples() const
@@ -219,6 +226,7 @@ private:
     int mDelayCap = 0, mWrite = 0;
     float mHpState = 0.0f, mPeakEnv = 0.0f, mRms2 = 0.0f, mGain = 0.0f;
     std::atomic<float> mGainDbPub{0.0f};
+    std::atomic<float> mInDbPub{-120.0f};
     bool mOpen = false;
     int mHoldCount = 0;
     double mSampleRate = 48000.0;

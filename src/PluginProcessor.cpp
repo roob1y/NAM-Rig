@@ -41,11 +41,29 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::ParameterID("offlineAA", 1), "Offline AA",
         juce::StringArray{"Same as live", "8x", "16x", "32x"}, 1)); // default 8x
 
+    // Low-latency monitoring: forces gate lookahead to 0 and caps LIVE amp
+    // oversampling at 4x (offline renders are unaffected). Lowest round-trip.
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("lowLatency", 1), "Low Latency", false));
+
     // Block bypasses (stub blocks are passthrough anyway; params reserved now
     // so automation indices stay stable as blocks gain DSP).
     for (const char *id : {"gateOn", "compOn", "eqOn", "cabOn", "modOn", "delayOn", "reverbOn"})
         params.push_back(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID(id, 1), juce::String(id).dropLastCharacters(2) + " Enable", true));
+    // Rig B's EQ + cab have their own bypass (Rig A uses eqOn / cabOn).
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("eqOnB", 1), "EQ B Enable", true));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("cabOnB", 1), "Cab B Enable", true));
+    // Master enable for the drive rack (on top of the per-pedal footswitches).
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("driveOn", 1), "Drive Enable", true));
+    // Per-amp enable (latency-preserving bypass; A=rig A, B=rig B).
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("ampOnA", 1), "Amp A Enable", true));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("ampOnB", 1), "Amp B Enable", true));
 
     // --- Gate (see rig/GateBlock.h; verified by tests/gate_test.cpp) ---
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
@@ -667,6 +685,9 @@ int NamRigProcessor::requestedFactorNow(int rig) const
     const char *offId = rig == 0 ? "offlineAA" : "offlineAAB";
     const int choice = static_cast<int>(apvts.getRawParameterValue(osId)->load());
     int requested = 1 << juce::jlimit(0, 5, choice); // Off..32x -> 1..32
+    // Low Latency caps LIVE oversampling at 4x (offline renders override below).
+    if (apvts.getRawParameterValue("lowLatency")->load() >= 0.5f)
+        requested = juce::jmin(requested, 4);
     const int offline = static_cast<int>(apvts.getRawParameterValue(offId)->load());
     if (isNonRealtime() && offline > 0 && ampFor(rig).engine().isA2())
         requested = juce::jmax(requested, 8 << (offline - 1)); // 8x / 16x / 32x
@@ -685,7 +706,8 @@ void NamRigProcessor::updateLatency()
         return;
     mChain.amp.setRequestedFactor(requestedFactorNow(0));
     mChain.ampB.setRequestedFactor(requestedFactorNow(1));
-    mChain.gate.setLookaheadMs(apvts.getRawParameterValue("gateLook")->load());
+    const bool lowLat = apvts.getRawParameterValue("lowLatency")->load() >= 0.5f;
+    mChain.gate.setLookaheadMs(lowLat ? 0.0f : apvts.getRawParameterValue("gateLook")->load());
     setLatencySamples((int)std::round(mChain.latencySamples()));
 }
 
@@ -723,6 +745,9 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     const int fB = requestedFactorNow(1);
     mChain.amp.setRequestedFactor(fA);
     mChain.ampB.setRequestedFactor(fB);
+    // Per-amp bypass (latency-preserving; does not change PDC).
+    mChain.amp.setBypass(apvts.getRawParameterValue("ampOnA")->load() < 0.5f);
+    mChain.ampB.setBypass(apvts.getRawParameterValue("ampOnB")->load() < 0.5f);
     if (fA != mLastFactorA || fB != mLastFactorB)
     {
         mLastFactorA = fA;
@@ -737,7 +762,8 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.gate.setAttackMs(apvts.getRawParameterValue("gateAttack")->load());
     mChain.gate.setHoldMs(apvts.getRawParameterValue("gateHold")->load());
     mChain.gate.setReleaseMs(apvts.getRawParameterValue("gateRelease")->load());
-    const float gateLookMs = apvts.getRawParameterValue("gateLook")->load();
+    const bool lowLat = apvts.getRawParameterValue("lowLatency")->load() >= 0.5f;
+    const float gateLookMs = lowLat ? 0.0f : apvts.getRawParameterValue("gateLook")->load();
     if (gateLookMs != mLastGateLookMs)
     {
         mLastGateLookMs = gateLookMs;
@@ -796,7 +822,8 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         }
     }
     mChain.drive.setAutoGain(apvts.getRawParameterValue("driveAutoGain")->load() >= 0.5f);
-    mChain.drive.setBypassed(!mChain.drive.anyActive());
+    mChain.drive.setBypassed(apvts.getRawParameterValue("driveOn")->load() < 0.5f
+                             || !mChain.drive.anyActive());
     // Graphic EQ band gains (Rig A; zero latency; chain bypass via eqOn is safe).
     {
         static const char *ids[] = {"eq62", "eq125", "eq250", "eq500",
@@ -804,6 +831,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         for (int b = 0; b < nam_rig::EqBlock::kNumBands; ++b)
             mChain.eq.setBandGainDb(b, apvts.getRawParameterValue(ids[b])->load());
     }
+    mChain.eq.setAutoGain(true); // always-on output loudness-lock (no UI toggle)
     mChain.eq.setBypassed(apvts.getRawParameterValue("eqOn")->load() < 0.5f);
 
     // Post-cab cuts ride with the cab block (Rig A).
@@ -818,8 +846,11 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         for (int b = 0; b < nam_rig::EqBlock::kNumBands; ++b)
             mChain.eqB.setBandGainDb(b, apvts.getRawParameterValue(idsB[b])->load());
     }
+    mChain.eqB.setAutoGain(true); // always-on output loudness-lock (no UI toggle)
+    mChain.eqB.setBypassed(apvts.getRawParameterValue("eqOnB")->load() < 0.5f);
     mChain.cabB.setHpfHz(apvts.getRawParameterValue("rigBcabHpf")->load());
     mChain.cabB.setLpfHz(apvts.getRawParameterValue("rigBcabLpf")->load());
+    mChain.cabB.setBypassed(apvts.getRawParameterValue("cabOnB")->load() < 0.5f);
 
     // ---- Dual-rig mixer (mode / per-rig level + pan + polarity + align) ----
     mChain.setLevelA(juce::Decibels::decibelsToGain(apvts.getRawParameterValue("rigLevelA")->load()));

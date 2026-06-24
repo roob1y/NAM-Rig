@@ -20,22 +20,25 @@ public:
         repaint();
     }
 
+    float shownDb() const { return mShownDb; }
+
     void paint(juce::Graphics &g) override
     {
         auto b = getLocalBounds().toFloat();
+        const float radius = juce::jmin(4.0f, b.getWidth() * 0.5f);
         g.setColour(colors::track);
-        g.fillRoundedRectangle(b, 2.0f);
+        g.fillRoundedRectangle(b, radius);
 
+        // Full gradient, masked from the top by the unlit portion.
+        juce::Graphics::ScopedSaveState ss(g);
+        juce::Path clip;
+        clip.addRoundedRectangle(b, radius);
+        g.reduceClipRegion(clip);
+        g.setGradientFill(RigLookAndFeel::meterGradient(b));
+        g.fillRect(b);
         const float norm = juce::jlimit(0.0f, 1.0f, (mShownDb - kMinDb) / (0.0f - kMinDb));
-        if (norm > 0.001f)
-        {
-            auto fill = b.removeFromBottom(b.getHeight() * norm);
-            auto colour = colors::meterLo;
-            if (mShownDb > -3.0f)       colour = colors::meterHi;
-            else if (mShownDb > -12.0f) colour = colors::meterMid;
-            g.setColour(colour);
-            g.fillRoundedRectangle(fill, 2.0f);
-        }
+        g.setColour(juce::Colour(0xff191c21)); // dark mask over the un-lit top
+        g.fillRect(b.withHeight(b.getHeight() * (1.0f - norm)));
     }
 
 private:
