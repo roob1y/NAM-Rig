@@ -257,6 +257,7 @@ public:
         // e.g. the Mix A/B selector while the rig is in Dual.
         const int active = mManual ? mManualIndex : mCombo.getSelectedItemIndex();
         const int n = juce::jmax(1, mOptions.size());
+        const bool en = isEnabled(); // greyed (no accent) when the host disables it
 
         if (mVertical) // equal-size buttons stacked top-to-bottom, touching
         {
@@ -270,11 +271,11 @@ public:
                 cell.addRoundedRectangle(r.getX(), r.getY(), r.getWidth(), r.getHeight(),
                                          rad, rad, top, top, bot, bot);
                 const bool on = i == active;
-                g.setColour(on ? colors::accent : colors::tile);
+                g.setColour(on ? (en ? colors::accent : colors::tileSel) : colors::tile);
                 g.fillPath(cell);
-                g.setColour(on ? colors::accent : colors::outline);
+                g.setColour((on && en) ? colors::accent : colors::outline);
                 g.strokePath(cell, juce::PathStrokeType(1.0f));
-                g.setColour(on ? colors::bg : colors::textDim);
+                g.setColour(on ? (en ? colors::bg : colors::textDim) : (en ? colors::textDim : colors::captionDim));
                 g.drawText(mOptions[i], r, juce::Justification::centred);
             }
             return;
@@ -286,11 +287,11 @@ public:
             const int w = (int)std::ceil(juce::GlyphArrangement::getStringWidth(f, mOptions[i])) + 26;
             auto r = juce::Rectangle<float>((float)x, 0.0f, (float)w, (float)getHeight());
             const bool on = i == active;
-            g.setColour(on ? colors::accent : colors::tile);
+            g.setColour(on ? (en ? colors::accent : colors::tileSel) : colors::tile);
             g.fillRoundedRectangle(r, 7.0f);
-            g.setColour(on ? colors::accent : colors::outline);
+            g.setColour((on && en) ? colors::accent : colors::outline);
             g.drawRoundedRectangle(r.reduced(0.5f), 7.0f, 1.0f);
-            g.setColour(on ? colors::bg : colors::textDim);
+            g.setColour(on ? (en ? colors::bg : colors::textDim) : (en ? colors::textDim : colors::captionDim));
             g.drawText(mOptions[i], r, juce::Justification::centred);
             x += w + mGap;
         }
@@ -298,6 +299,7 @@ public:
 
     void mouseUp(const juce::MouseEvent &e) override
     {
+        if (!isEnabled()) return; // bypassed control: ignore clicks
         const int n = juce::jmax(1, mOptions.size());
         if (mVertical)
         {
@@ -1158,11 +1160,17 @@ public:
         for (auto *k : ks) if (k->isVisible()) ++nVis;
         if (nVis > 0)
         {
-            const int kw = juce::jmin(78, juce::jmax(1, knobRow.getWidth() / nVis));
-            auto grp = knobRow.withSizeKeepingCentre(kw * nVis, knobRow.getHeight());
+            const int gap = (nVis == 2) ? 16 : 0; // two-knob pedals: extra breathing room
+            const int kw = juce::jmin(78, juce::jmax(1, (knobRow.getWidth() - gap * (nVis - 1)) / nVis));
+            auto grp = knobRow.withSizeKeepingCentre(kw * nVis + gap * (nVis - 1), knobRow.getHeight());
+            bool first = true;
             for (auto *k : ks)
                 if (k->isVisible())
+                {
+                    if (!first) grp.removeFromLeft(gap);
                     k->setBounds(grp.removeFromLeft(kw).reduced(3, 0));
+                    first = false;
+                }
         }
 
         // Range '65 (Boost): Treble/Mid/Full stacked vertically (equal size) to
@@ -1286,6 +1294,7 @@ private:
         mSubStr = type == 0 ? juce::String("select a pedal")
                             : juce::String(nam_rig::DriveBlock::modelSub(cat, model));
         mRangeSeg->setVisible(nam_rig::DriveBlock::modelHasRange(cat, model));
+        mRangeSeg->setEnabled(mActive); // drains its colour when the pedal is bypassed
         mOn.setAccent(colors::driveAccent(accentIndex()).accent);
         mOn.setLit(mActive);
     }
@@ -3849,33 +3858,36 @@ public:
     {
         const int mode = (int)mProc.apvts.getRawParameterValue("rigMode")->load();
         const bool dual = (mode == 2);
-        // Which rig is audible: Solo greys the OTHER rig's whole row here in the
-        // Mix panel (Dual = both live). rigMode 0 = Solo A, 1 = Solo B, 2 = Dual.
-        const bool aOn = (mode != 1);
-        const bool bOn = (mode != 0);
+        // A rig's row is live when it's in the path AND its amp is engaged, so a
+        // bypassed amp greys that rig's Mix knobs too. rigMode 0=Solo A,1=Solo B,2=Dual.
+        const bool ampA = mProc.apvts.getRawParameterValue("ampOnA")->load() >= 0.5f;
+        const bool ampB = mProc.apvts.getRawParameterValue("ampOnB")->load() >= 0.5f;
+        const bool aOn = (mode != 1) && ampA;
+        const bool bOn = (mode != 0) && ampB;
         mModes->setActive(mode); // A=0, B=1, Dual=2
         mLevelA->setEnabled(aOn);
         mLevelB->setEnabled(bOn);
         mALabel.setColour(juce::Label::textColourId, aOn ? colors::titleAccent : colors::captionDim);
         mBLabel.setColour(juce::Label::textColourId, bOn ? colors::laneColour(1) : colors::captionDim);
-        // Pan only matters in Dual (Solo plays centered); grey it otherwise.
-        mPanA->setEnabled(dual);
-        mPanB->setEnabled(dual);
+        // Pan only matters in Dual (Solo plays centered) and on a live row.
+        mPanA->setEnabled(dual && aOn);
+        mPanB->setEnabled(dual && bOn);
         // Polarity is a SAVED state but only shown/active in Dual. In Solo the
         // button reads "not inverted" without clearing the stored value, so it
         // pops back to inverted when Dual is re-selected.
         const bool polA = mProc.apvts.getRawParameterValue("rigPolA")->load() >= 0.5f;
         const bool polB = mProc.apvts.getRawParameterValue("rigPolB")->load() >= 0.5f;
-        mPolA.setEnabled(dual);
-        mPolB.setEnabled(dual);
-        mPolA.setToggleState(dual && polA, juce::dontSendNotification);
-        mPolB.setToggleState(dual && polB, juce::dontSendNotification);
-        // Alignment only applies when both rigs play, so the Align knob + the
-        // Auto-align / Match Levels buttons are bypassed in Single (Solo A/B).
+        mPolA.setEnabled(dual && aOn);
+        mPolB.setEnabled(dual && bOn);
+        mPolA.setToggleState(dual && aOn && polA, juce::dontSendNotification);
+        mPolB.setToggleState(dual && bOn && polB, juce::dontSendNotification);
+        // Alignment only applies when BOTH rigs are actually playing (Dual with
+        // both amps engaged) — greyed in Single and when the amps are bypassed.
         const bool bothLoaded = mProc.isModelLoaded(0) && mProc.isModelLoaded(1);
-        mAlign->setEnabled(dual);
-        mAutoBtn.setEnabled(dual && bothLoaded);
-        mMatchBtn.setEnabled(dual && bothLoaded);
+        const bool aligning = dual && aOn && bOn;
+        mAlign->setEnabled(aligning);
+        mAutoBtn.setEnabled(aligning && bothLoaded);
+        mMatchBtn.setEnabled(aligning && bothLoaded);
     }
 
     void resized() override

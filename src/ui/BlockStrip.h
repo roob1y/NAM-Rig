@@ -242,16 +242,13 @@ public:
         mModeSwitch = std::make_unique<RigModeSwitch>(apvts);
         addAndMakeVisible(*mModeSwitch);
 
-        // Amp A / Amp B "which rig" radios: clicking A solos A, B solos B; Dual
-        // (set elsewhere) lights both. State mirrors rigMode (0=A, 1=B, 2=Dual).
-        auto setRig = [this](int v) {
-            if (auto *p = mApvts.getParameter("rigMode"))
-                p->setValueNotifyingHost(p->convertTo0to1((float)v));
-        };
+        // Amp A / Amp B indicators. Lit = that rig is active AND its amp engaged.
+        // Click logic (see ampClick): an inactive rig's amp selects/solos that rig;
+        // an active amp toggles its own bypass (Single) or both amps' (Dual).
         if (mTiles.size() > 6)
         {
-            mTiles[3]->setManualLed([setRig] { setRig(0); }); // Amp A -> Solo A
-            mTiles[6]->setManualLed([setRig] { setRig(1); }); // Amp B -> Solo B
+            mTiles[3]->setManualLed([this] { ampClick(0); }); // Amp A
+            mTiles[6]->setManualLed([this] { ampClick(1); }); // Amp B
         }
         updateAmpLeds();
         startTimerHz(20);
@@ -351,12 +348,55 @@ private:
     }
 
     void timerCallback() override { updateAmpLeds(); }
+
+    float getF(const char *id) const { return mApvts.getRawParameterValue(id)->load(); }
+    void setF(const char *id, float v)
+    {
+        if (auto *p = mApvts.getParameter(id)) p->setValueNotifyingHost(p->convertTo0to1(v));
+    }
+
     void updateAmpLeds()
     {
         if (mTiles.size() <= 6) return;
-        const int mode = (int)mApvts.getRawParameterValue("rigMode")->load();
-        mTiles[3]->setLedOn(mode != 1); // Amp A active unless Solo B
-        mTiles[6]->setLedOn(mode != 0); // Amp B active unless Solo A
+        const int mode = (int)getF("rigMode");
+        // Invariant: in Dual the two amps move together — you can never end up
+        // with exactly one active (e.g. after switching in from a Solo bypass).
+        if (mode == 2 && (getF("ampOnA") >= 0.5f) != (getF("ampOnB") >= 0.5f))
+        {
+            setF("ampOnA", 1.0f);
+            setF("ampOnB", 1.0f);
+        }
+        const bool aRig = (mode != 1), bRig = (mode != 0); // rig in the signal path
+        mTiles[3]->setLedOn(aRig && getF("ampOnA") >= 0.5f);
+        mTiles[6]->setLedOn(bRig && getF("ampOnB") >= 0.5f);
+    }
+
+    // which: 0 = Amp A, 1 = Amp B.
+    void ampClick(int which)
+    {
+        const int mode = (int)getF("rigMode");
+        const bool rigActive = (which == 0) ? (mode != 1) : (mode != 0);
+        const char *ampId = (which == 0) ? "ampOnA" : "ampOnB";
+
+        if (!rigActive)
+        {
+            // Inactive rig: select/solo it and make sure its amp is engaged.
+            setF("rigMode", (float)which); // 0 = Solo A, 1 = Solo B
+            setF(ampId, 1.0f);
+        }
+        else if (mode == 2)
+        {
+            // Dual: a click bypasses BOTH amps (or restores both).
+            const bool anyOn = getF("ampOnA") >= 0.5f || getF("ampOnB") >= 0.5f;
+            setF("ampOnA", anyOn ? 0.0f : 1.0f);
+            setF("ampOnB", anyOn ? 0.0f : 1.0f);
+        }
+        else
+        {
+            // Single, this rig active: toggle just this amp's bypass.
+            setF(ampId, getF(ampId) >= 0.5f ? 0.0f : 1.0f);
+        }
+        updateAmpLeds();
     }
 
     static constexpr int kCols = 10;

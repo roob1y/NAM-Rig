@@ -59,6 +59,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     // Master enable for the drive rack (on top of the per-pedal footswitches).
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID("driveOn", 1), "Drive Enable", true));
+    // Per-amp enable (latency-preserving bypass; A=rig A, B=rig B).
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("ampOnA", 1), "Amp A Enable", true));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("ampOnB", 1), "Amp B Enable", true));
 
     // --- Gate (see rig/GateBlock.h; verified by tests/gate_test.cpp) ---
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
@@ -740,6 +745,9 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     const int fB = requestedFactorNow(1);
     mChain.amp.setRequestedFactor(fA);
     mChain.ampB.setRequestedFactor(fB);
+    // Per-amp bypass (latency-preserving; does not change PDC).
+    mChain.amp.setBypass(apvts.getRawParameterValue("ampOnA")->load() < 0.5f);
+    mChain.ampB.setBypass(apvts.getRawParameterValue("ampOnB")->load() < 0.5f);
     if (fA != mLastFactorA || fB != mLastFactorB)
     {
         mLastFactorA = fA;

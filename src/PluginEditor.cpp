@@ -152,8 +152,8 @@ void NamRigEditor::timerCallback()
 
     mCompPanel.setBypassed(off("compOn"));
     mDrivePanel.setBypassed(off("driveOn"));
-    mAmpPanelA.setBypassed(aOut);
-    mAmpPanelB.setBypassed(bOut);
+    mAmpPanelA.setBypassed(aOut || off("ampOnA"));
+    mAmpPanelB.setBypassed(bOut || off("ampOnB"));
     mEqPanelA.setBypassed(aOut || off("eqOn"));
     mCabPanelA.setBypassed(aOut || off("cabOn"));
     mEqPanelB.setBypassed(bOut || off("eqOnB"));
