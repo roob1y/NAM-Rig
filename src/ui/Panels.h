@@ -3220,11 +3220,7 @@ public:
                        flip ? juce::Justification::centredRight : juce::Justification::centredLeft);
         }
 
-        // --- caption + legend (bigger swatches) -------------------------------
-        g.setColour(juce::Colour(0xff5a616b));
-        g.setFont(fonts::mono(9.0f, fonts::SemiBold, 0.1f));
-        g.drawText("PRE-DELAY \xE2\x86\x92 EARLY \xE2\x86\x92 LATE FIELD",
-                   in.toNearestInt().removeFromTop(12), juce::Justification::topLeft);
+        // --- legend (bigger swatches) -----------------------------------------
         // Right-align the swatch glyphs + labels flush into the top-right corner.
         const auto legendFont = fonts::mono(10.0f, fonts::SemiBold);
         const float boxW = 13.0f, gapW = 5.0f, tailW = 6.0f;
