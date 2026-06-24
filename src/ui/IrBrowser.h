@@ -219,7 +219,7 @@ public:
         {
             g.setColour(colors::captionDim);
             g.setFont(fonts::mono(10.0f));
-            g.drawText("Drag a file onto a cab above, or double-click to load",
+            g.drawText("Drag a file onto Cab A or Cab B to load it",
                        mHintRect, juce::Justification::centredLeft);
         }
     }
@@ -246,15 +246,9 @@ private:
     // FileBrowserListener
     void selectionChanged() override {} // drag/double-click read the selection live
     void fileClicked(const juce::File &, const juce::MouseEvent &) override {}
-    void fileDoubleClicked(const juce::File &f) override
-    {
-        if (f.existsAsFile() && IrDropZone::looksLikeIr(f.getFullPathName()) && onLoad)
-        {
-            onLoad(f, mActiveRig);
-            (mActiveRig == 0 ? mZoneA : mZoneB).setIrName(f.getFileNameWithoutExtension());
-            if (onClose) onClose();
-        }
-    }
+    // Double-click does NOT load (folders still expand as normal) — loading is
+    // drag-only: drag a file onto the Cab A / Cab B zone.
+    void fileDoubleClicked(const juce::File &) override {}
     void browserRootChanged(const juce::File &) override {}
 
     juce::TimeSliceThread mThread;
