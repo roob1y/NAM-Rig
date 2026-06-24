@@ -831,6 +831,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         for (int b = 0; b < nam_rig::EqBlock::kNumBands; ++b)
             mChain.eq.setBandGainDb(b, apvts.getRawParameterValue(ids[b])->load());
     }
+    mChain.eq.setAutoGain(true); // always-on output loudness-lock (no UI toggle)
     mChain.eq.setBypassed(apvts.getRawParameterValue("eqOn")->load() < 0.5f);
 
     // Post-cab cuts ride with the cab block (Rig A).
@@ -845,6 +846,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         for (int b = 0; b < nam_rig::EqBlock::kNumBands; ++b)
             mChain.eqB.setBandGainDb(b, apvts.getRawParameterValue(idsB[b])->load());
     }
+    mChain.eqB.setAutoGain(true); // always-on output loudness-lock (no UI toggle)
     mChain.eqB.setBypassed(apvts.getRawParameterValue("eqOnB")->load() < 0.5f);
     mChain.cabB.setHpfHz(apvts.getRawParameterValue("rigBcabHpf")->load());
     mChain.cabB.setLpfHz(apvts.getRawParameterValue("rigBcabLpf")->load());

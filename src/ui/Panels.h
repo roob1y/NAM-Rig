@@ -1712,16 +1712,8 @@ public:
         setHeaderRight(juce::String("RIG ") + (mRigB ? "B" : "A"));
 
         mGraph = bodyArea().reduced(26, 18);
-        mGraph.removeFromBottom(24); // hint line
     }
 
-    // map a band's normalised slider position to a y inside the graph.
-    float bandY(int b) const
-    {
-        const float prop = (float)mSliders[(size_t)b]->valueToProportionOfLength(
-            mSliders[(size_t)b]->getValue());
-        return (float)mGraph.getBottom() - prop * (float)mGraph.getHeight();
-    }
     float bandX(int b) const
     {
         return (float)mGraph.getX()
@@ -1758,20 +1750,39 @@ public:
         RigLookAndFeel::drawWell(g, mGraph.toFloat());
         auto in = mGraph.toFloat().reduced(1.0f);
 
-        // dB grid: +12 / 0 / −12 (design percentages).
-        struct Grid { float pct; juce::Colour c; const char *lbl; };
-        const Grid grid[] = {{0.0875f, juce::Colour(0xff21262d), "+12"},
-                             {0.50f,   juce::Colour(0xff363d47), "0 dB"},
-                             {0.9125f, juce::Colour(0xff21262d), "-12"}};
+        // ONE dB->y mapping shared by grid, curve and nodes so the curve always
+        // meets the dots. The box spans exactly +/-12 dB (the band range), which
+        // is the same full-height scale the draggable nodes already use — so the
+        // curve moves to the points, the points don't move.
+        const float centreY = in.getCentreY();
+        const float pxPer12 = in.getHeight() * 0.5f;
+        auto dbToY = [&](double db)
+        {
+            return juce::jlimit(in.getY(), in.getBottom(),
+                                centreY - (float)(db / 12.0) * pxPer12);
+        };
+
+        // dB grid: +/-12 frame the edges, 0 dB centre is labelled, +/-6 are
+        // faint unlabelled guide lines.
+        struct Grid { float db; juce::Colour c; const char *lbl; };
+        const Grid grid[] = {{ 12.0f, juce::Colour(0xff21262d), "+12"},
+                             {  6.0f, juce::Colour(0xff1b2027), nullptr},
+                             {  0.0f, juce::Colour(0xff363d47), "0 dB"},
+                             { -6.0f, juce::Colour(0xff1b2027), nullptr},
+                             {-12.0f, juce::Colour(0xff21262d), "-12"}};
         for (auto &gr : grid)
         {
-            const float y = in.getY() + gr.pct * in.getHeight();
+            const float y = juce::jlimit(in.getY() + 0.5f, in.getBottom() - 0.5f, dbToY(gr.db));
             g.setColour(gr.c);
             g.fillRect(in.getX(), y, in.getWidth(), 1.0f);
-            g.setColour(juce::Colour(0xff5a616b));
-            g.setFont(fonts::mono(8.5f, fonts::SemiBold));
-            g.drawText(gr.lbl, juce::Rectangle<float>(in.getX() + 6.0f, y - 7.0f, 32.0f, 14.0f),
-                       juce::Justification::centredLeft);
+            if (gr.lbl != nullptr)
+            {
+                g.setColour(juce::Colour(0xff5a616b));
+                g.setFont(fonts::mono(8.5f, fonts::SemiBold));
+                const float ly = juce::jlimit(in.getY() + 1.0f, in.getBottom() - 13.0f, y - 7.0f);
+                g.drawText(gr.lbl, juce::Rectangle<float>(in.getX() + 6.0f, ly, 32.0f, 14.0f),
+                           juce::Justification::centredLeft);
+            }
         }
 
         // Response curve from the SAME RBJ designs the DSP runs.
@@ -1780,55 +1791,69 @@ public:
         for (int b = 0; b < EqBlock::kNumBands; ++b)
             filters[(size_t)b] = Biquad::peaking(fs, EqBlock::kBandHz[(size_t)b], EqBlock::kQ,
                                                  mSliders[(size_t)b]->getValue());
+        // Frequency axis warped so each band centre lands exactly under its
+        // node slot (octave-spaced bands -> kNumBands octaves across the width,
+        // band 0 at the first slot). This is what makes the curve peaks sit
+        // under the dots horizontally; the dots themselves don't move.
         juce::Path curve;
-        const double fLo = 30.0, fHi = 16000.0;
+        const double fBase = EqBlock::kBandHz[0];
+        const double octaves = (double)EqBlock::kNumBands;
         const int n = juce::jmax(2, (int)in.getWidth());
         for (int x = 0; x < n; ++x)
         {
-            const double f = fLo * std::pow(fHi / fLo, (double)x / (double)(n - 1));
+            const double frac = (double)x / (double)(n - 1);
+            const double f = fBase * std::pow(2.0, octaves * frac - 0.5);
             double db = 0.0;
             for (auto &bi : filters)
                 if (!bi.isIdentity())
                     db += 20.0 * std::log10(std::max(bi.magnitudeAt(fs, f), 1.0e-6));
-            const float y = juce::jlimit(in.getY(), in.getBottom(),
-                                         in.getCentreY() - (float)(db / 12.0) * in.getHeight() * 0.4125f);
+            const float y = dbToY(db);
             const float px = in.getX() + (float)x;
             if (x == 0) curve.startNewSubPath(px, y);
             else curve.lineTo(px, y);
         }
-        juce::Path area = curve;
-        area.lineTo(in.getRight(), in.getBottom());
-        area.lineTo(in.getX(), in.getBottom());
-        area.closeSubPath();
-        juce::ColourGradient fill(colors::accent.withAlpha(0.30f), in.getX(), in.getY(),
-                                  colors::accent.withAlpha(0.0f), in.getX(), in.getBottom(), false);
-        g.setGradientFill(fill);
-        g.fillPath(area);
+
+        // Center-anchored bipolar fill: the glow lives between the curve and the
+        // 0 dB centre line (boosts fill up, cuts fill down) rather than flooding
+        // the whole well to the bottom. Brightest at the curve, fading to nothing
+        // at the centre line via a symmetric top/centre/bottom gradient.
+        juce::Path fillPath = curve;
+        fillPath.lineTo(in.getRight(), centreY);
+        fillPath.lineTo(in.getX(), centreY);
+        fillPath.closeSubPath();
+        {
+            juce::Graphics::ScopedSaveState save(g);
+            g.reduceClipRegion(fillPath);
+            juce::ColourGradient grad(colors::accent.withAlpha(0.36f), in.getX(), in.getY(),
+                                      colors::accent.withAlpha(0.36f), in.getX(), in.getBottom(), false);
+            grad.addColour(0.5, colors::accent.withAlpha(0.03f));
+            g.setGradientFill(grad);
+            g.fillRect(in);
+        }
         g.setColour(colors::accent);
         g.strokePath(curve, juce::PathStrokeType(2.4f, juce::PathStrokeType::curved));
 
-        // Node handles + value + frequency labels.
+        // Node handles + value + frequency labels. Smaller dots, no ring — the
+        // accent glow is the halo.
         for (int b = 0; b < (int)mSliders.size(); ++b)
         {
-            const float x = bandX(b), y = juce::jlimit(in.getY(), in.getBottom(), bandY(b));
+            const float x = bandX(b);
             const float db = (float)mSliders[(size_t)b]->getValue();
+            const float y = dbToY(db);
             g.setColour(colors::text);
             g.setFont(fonts::mono(9.0f, fonts::SemiBold));
             g.drawText((db >= 0 ? "+" : "") + juce::String(db, 1),
-                       juce::Rectangle<float>(x - 24.0f, y - 26.0f, 48.0f, 12.0f),
+                       juce::Rectangle<float>(x - 24.0f, y - 24.0f, 48.0f, 12.0f),
                        juce::Justification::centred);
-            auto dot = juce::Rectangle<float>(13.0f, 13.0f).withCentre({x, y});
-            fx::glowEllipse(g, dot, colors::accent, 7, 0.40f, 3, 0.32f);
+            auto dot = juce::Rectangle<float>(9.0f, 9.0f).withCentre({x, y});
+            fx::glowEllipse(g, dot, colors::accent, 11, 0.55f, 5, 0.5f);
             g.setColour(colors::accent);
             g.fillEllipse(dot);
-            g.setColour(juce::Colour(0xff11141b));
-            g.drawEllipse(dot, 2.0f);
             g.setColour(colors::caption);
             g.setFont(fonts::archivo(9.5f, fonts::SemiBold, 0.03f));
             g.drawText(mCaptions[b], juce::Rectangle<float>(x - 26.0f, in.getBottom() - 16.0f, 52.0f, 12.0f),
                        juce::Justification::centred);
         }
-
     }
 
 private:
@@ -1844,172 +1869,223 @@ private:
 };
 
 //==============================================================================
-class CabPanel : public BlockPanel
+// One cab "lane" inside the combined CAB panel (no box/title of its own — the
+// parent draws the single "CAB" frame). Holds the IR name/tag, response graph and
+// the per-rig Low/High cut. Dims + disables when its cab is bypassed/out.
+class CabPanel : public juce::Component, public juce::FileDragAndDropTarget
 {
 public:
     CabPanel(NamRigProcessor &proc, int rig)
-        : BlockPanel(rig == 0 ? "CABINET A - IR" : "CABINET B - IR"), mProc(proc), mRig(rig)
+        : mProc(proc), mRig(rig)
     {
-        setHeaderRight(rig == 0 ? "RIG A" : "RIG B");
-        mHpfId = rig == 0 ? "cabHpf" : "rigBcabHpf";
-        mLpfId = rig == 0 ? "cabLpf" : "rigBcabLpf";
-
-        mLoadBtn.setButtonText(juce::String::fromUTF8("Load custom IR\xE2\x80\xA6"));
-        addAndMakeVisible(mLoadBtn);
-        mLoadBtn.onClick = [this]
-        {
-            mChooser = std::make_unique<juce::FileChooser>("Select a cab IR", juce::File{},
-                                                           "*.wav;*.aif;*.aiff");
-            mChooser->launchAsync(juce::FileBrowserComponent::openMode |
-                                      juce::FileBrowserComponent::canSelectFiles,
-                                  [this](const juce::FileChooser &fc)
-                                  {
-                                      if (fc.getResult().existsAsFile())
-                                          mProc.loadIr(fc.getResult(), mRig);
-                                  });
-        };
-
-        mHpf = std::make_unique<LabeledKnob>(mProc.apvts, mHpfId, "Low Cut");
-        mLpf = std::make_unique<LabeledKnob>(mProc.apvts, mLpfId, "High Cut");
-        mHpf->slider().onValueChange = [this] { repaint(); };
-        mLpf->slider().onValueChange = [this] { repaint(); };
+        // Post-cab cuts live with their cab (per rig).
+        mHpf = std::make_unique<LabeledKnob>(mProc.apvts, rig == 0 ? "cabHpf" : "rigBcabHpf", "Low Cut");
+        mLpf = std::make_unique<LabeledKnob>(mProc.apvts, rig == 0 ? "cabLpf" : "rigBcabLpf", "High Cut");
         addAndMakeVisible(*mHpf);
         addAndMakeVisible(*mLpf);
+
+        // Per-cab on/off so each cab can be bypassed independently from the panel
+        // (the strip's CAB tile toggles both at once). Stays live when dimmed.
+        mOn.setButtonText("On");
+        mOn.getProperties().set("pill", true);
+        addAndMakeVisible(mOn);
+        mOnAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            mProc.apvts, rig == 0 ? "cabOn" : "cabOnB", mOn);
+    }
+
+    // Dim + lock this lane when its cab is bypassed or its rig is out of the path.
+    void setBypassed(bool b)
+    {
+        if (b == mDim) return;
+        mDim = b;
+        if (mHpf) mHpf->setEnabled(!b);
+        if (mLpf) mLpf->setEnabled(!b);
+        repaint();
     }
 
     void refresh()
     {
         const bool loaded = mProc.isIrLoaded(mRig);
         auto name = loaded ? mProc.getIrName(mRig) : juce::String::fromUTF8("No IR \xC2\xB7 amp runs direct");
-        if (loaded != mLoaded || name != mIrName) { mLoaded = loaded; mIrName = name; repaint(); }
+        if (loaded != mLoaded || name != mIrName)
+        {
+            mLoaded = loaded;
+            mIrName = name;
+            mCharacter = {};
+            if (loaded)
+            {
+                float resp[nam_rig::CabBlock::kResPts];
+                if (mProc.getCabResponseDb(resp, mRig))
+                    mCharacter = classifyCharacter(resp);
+            }
+            repaint();
+        }
+    }
+
+    // Auto tone descriptor (1-2 words) from the IR's per-zone energy, relative to
+    // its own average. Pure function of the smoothed response — same data the
+    // heat map shows, just named.
+    static juce::String classifyCharacter(const float *resp)
+    {
+        const double zfLo = nam_rig::CabBlock::kResFLo, zfHi = nam_rig::CabBlock::kResFHi;
+        const int P = nam_rig::CabBlock::kResPts;
+        const double lr = std::log(zfHi / zfLo);
+        auto zavg = [&](double a, double b) {
+            int i0 = juce::jlimit(0, P - 1, (int)std::round((double)(P - 1) * std::log(a / zfLo) / lr));
+            int i1 = juce::jlimit(0, P - 1, (int)std::round((double)(P - 1) * std::log(b / zfLo) / lr));
+            float s = 0.0f;
+            for (int i = i0; i <= i1; ++i) s += resp[i];
+            return s / (float)(i1 - i0 + 1);
+        };
+        const float lows = zavg(40, 120), body = zavg(120, 400), mids = zavg(400, 1500),
+                    pres = zavg(1500, 4000), fizz = zavg(4000, 8000);
+        const float tilt = 0.5f * (pres + fizz) - 0.5f * (lows + body);
+        const float scoop = 0.5f * (body + pres) - mids;
+
+        const char *t1 = (tilt > 3.0f) ? "Bright" : (tilt < -3.0f ? "Dark" : nullptr);
+        struct C { const char *w; float s; };
+        const C cs[] = {{"thick", body - 3.0f}, {"scooped", scoop - 4.0f}, {"present", pres - 3.0f},
+                        {"fizzy", fizz - 4.0f}, {"boomy", lows - 5.0f}, {"mid-forward", mids - 3.0f}};
+        const char *t2 = nullptr;
+        float best = 0.0f;
+        for (auto &c : cs) if (c.s > best) { best = c.s; t2 = c.w; }
+
+        auto cap = [](const char *w) { juce::String s(w); return s.substring(0, 1).toUpperCase() + s.substring(1); };
+        if (t1 == nullptr && t2 == nullptr) return "Balanced";
+        if (t2 != nullptr && (juce::String(t2) == "fizzy" || juce::String(t2) == "present"))
+            return cap(t2); // already implies bright; keep it to one word
+        if (t1 != nullptr && t2 != nullptr) return juce::String(t1) + ", " + t2;
+        if (t1 != nullptr) return juce::String(t1);
+        return cap(t2);
     }
 
     void resized() override
     {
-        auto area = bodyArea().reduced(24, 13);
-        mCard = area.removeFromLeft(330);
-        area.removeFromLeft(20);
-        mRight = area;
+        // Vertical lane: rig label + IR name on top, response well in the middle,
+        // Low/High cut knobs at the bottom.
+        auto area = getLocalBounds().reduced(14, 10);
+        auto top = area.removeFromTop(24);
+        mOn.setBounds(top.removeFromRight(46).withSizeKeepingCentre(46, 20));
+        top.removeFromRight(8);
+        mNameRect = top;
 
-        // IR library card: load button pinned to the bottom.
-        auto card = mCard.reduced(12);
-        mLoadBtn.setBounds(card.removeFromBottom(34));
-        mListRect = mCard.reduced(8).withTrimmedTop(64).withTrimmedBottom(46);
+        auto knobs = area.removeFromBottom(88);
+        const int kw = 104, gap = 16;
+        auto krow = knobs.withSizeKeepingCentre(kw * 2 + gap, knobs.getHeight());
+        mHpf->setBounds(krow.removeFromLeft(kw));
+        krow.removeFromLeft(gap);
+        mLpf->setBounds(krow.removeFromLeft(kw));
 
-        // Right column: response well on top, knobs + hint below.
-        auto right = mRight;
-        right.removeFromTop(22); // caption row
-        mRespRect = right.removeFromTop(juce::jmax(150, right.getHeight() - 122));
-        right.removeFromTop(10);
-        auto knobRow = right.removeFromTop(96);
-        mHpf->setBounds(knobRow.removeFromLeft(100).reduced(2, 0));
-        knobRow.removeFromLeft(14);
-        mLpf->setBounds(knobRow.removeFromLeft(100).reduced(2, 0));
-        mHintRect = knobRow;
+        area.removeFromTop(6);
+        mRespRect = area.withTrimmedBottom(4);
     }
 
     void paint(juce::Graphics &g) override
     {
-        BlockPanel::paint(g);
-        paintCard(g);
+        paintNameRow(g);
         paintResponse(g);
+        if (mDim) // bypassed / out of path: dim the whole lane
+        {
+            g.setColour(colors::panel.withAlpha(0.62f));
+            g.fillRect(getLocalBounds());
+        }
+    }
+
+    // Drag an IR straight from the OS file manager onto the cab to load it.
+    bool isInterestedInFileDrag(const juce::StringArray &files) override
+    {
+        if (mDim) return false;
+        for (auto &f : files)
+        {
+            const auto l = f.toLowerCase();
+            if (l.endsWith(".wav") || l.endsWith(".aif") || l.endsWith(".aiff")) return true;
+        }
+        return false;
+    }
+    void filesDropped(const juce::StringArray &files, int, int) override
+    {
+        for (auto &f : files)
+        {
+            const auto l = f.toLowerCase();
+            if (l.endsWith(".wav") || l.endsWith(".aif") || l.endsWith(".aiff"))
+            {
+                mProc.loadIr(juce::File(f), mRig);
+                break;
+            }
+        }
     }
 
 private:
-    void paintCard(juce::Graphics &g)
+    void paintNameRow(juce::Graphics &g)
     {
-        auto c = mCard.toFloat();
-        g.setColour(juce::Colour(0xff181b21));
-        g.fillRoundedRectangle(c, 11.0f);
-        g.setColour(colors::cardBorder);
-        g.drawRoundedRectangle(c, 11.0f, 1.0f);
+        auto r = mNameRect;
+        // Rig tag on the left (A amber, B lane colour) so the unified CAB box
+        // still tells the two apart.
+        auto tagR = r.removeFromLeft(40);
+        g.setColour(mRig == 0 ? colors::titleAccent : colors::laneColour(1));
+        g.setFont(fonts::archivo(11.0f, fonts::Bold, 0.08f));
+        g.drawText(mRig == 0 ? "A" : "B", tagR, juce::Justification::centredLeft);
+        r.removeFromLeft(2);
 
-        auto head = mCard.reduced(14, 0).withTop(mCard.getY() + 13).withHeight(16);
-        g.setColour(colors::caption);
-        g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.12f));
-        g.drawText("IR LIBRARY", head, juce::Justification::centredLeft);
-        g.setColour(colors::captionDim);
-        g.setFont(fonts::mono(10.0f));
-        g.drawText(mLoaded ? "1 cab" : "0 cabs", head, juce::Justification::centredRight);
-
-        // Search box (decorative).
-        auto search = mCard.reduced(12, 0).withTop(mCard.getY() + 36).withHeight(30).toFloat();
-        g.setColour(juce::Colour(0xff13161f));
-        g.fillRoundedRectangle(search, 8.0f);
-        g.setColour(colors::cardBorder);
-        g.drawRoundedRectangle(search, 8.0f, 1.0f);
-        g.setColour(colors::captionDim);
-        g.drawEllipse(search.getX() + 12.0f, search.getCentreY() - 5.0f, 10.0f, 10.0f, 1.5f);
-        g.setFont(fonts::archivo(12.0f));
-        g.drawText(juce::String::fromUTF8("Search cabinets\xE2\x80\xA6"), search.withTrimmedLeft(30), juce::Justification::centredLeft);
-
-        // List: the loaded IR (selected row) or an empty hint.
-        auto row = juce::Rectangle<int>(mListRect.getX(), mListRect.getY(), mListRect.getWidth(), 46).toFloat();
-        if (mLoaded)
-        {
-            g.setColour(colors::accent.withAlpha(0.10f));
-            g.fillRoundedRectangle(row, 9.0f);
-            g.setColour(colors::accent.withAlpha(0.5f));
-            g.drawRoundedRectangle(row, 9.0f, 1.0f);
-            auto dot = juce::Rectangle<float>(9.0f, 9.0f).withCentre({row.getX() + 17.0f, row.getCentreY()});
-            fx::glowEllipse(g, dot, colors::green, 9, 0.5f, 4, 0.4f);
-            g.setColour(colors::green); g.fillEllipse(dot);
-            auto txt = row.withTrimmedLeft(32).withTrimmedRight(46);
-            g.setColour(colors::text);
-            g.setFont(fonts::archivo(13.0f, fonts::SemiBold));
-            g.drawText(mIrName, txt.removeFromTop(22).toNearestInt(), juce::Justification::centredLeft, true);
-            g.setColour(colors::caption);
-            g.setFont(fonts::mono(10.5f));
-            g.drawText(juce::String::fromUTF8("custom \xC2\xB7 loaded"), txt.toNearestInt(), juce::Justification::centredLeft);
-            auto tag = juce::Rectangle<float>(30.0f, 18.0f).withCentre({row.getRight() - 24.0f, row.getCentreY()});
-            g.setColour(juce::Colour(0xff22262d)); g.fillRoundedRectangle(tag, 5.0f);
-            g.setColour(colors::cardBorder); g.drawRoundedRectangle(tag, 5.0f, 1.0f);
-            g.setColour(juce::Colour(0xff7a808a)); g.setFont(fonts::archivo(8.5f, fonts::SemiBold, 0.08f));
-            g.drawText("IR", tag, juce::Justification::centred);
-        }
-        else
+        if (!mLoaded)
         {
             g.setColour(colors::captionDim);
             g.setFont(fonts::mono(11.0f));
-            g.drawText(juce::String::fromUTF8("No cabs yet \xE2\x80\x94 load a custom IR below"), mListRect,
-                       juce::Justification::centredTop);
+            g.drawText(juce::String::fromUTF8("No IR \xC2\xB7 amp runs direct"), r,
+                       juce::Justification::centredLeft);
+            return;
         }
+        if (mCharacter.isNotEmpty()) // auto tone tag, as a pill on the right
+        {
+            const int tw = juce::jlimit(40, r.getWidth() / 2, 18 + mCharacter.length() * 7);
+            auto tag = r.removeFromRight(tw);
+            g.setColour(colors::accent.withAlpha(0.14f));
+            g.fillRoundedRectangle(tag.toFloat().reduced(0.0f, 4.0f), 5.0f);
+            g.setColour(colors::accent);
+            g.setFont(fonts::mono(10.0f, fonts::SemiBold));
+            g.drawText(mCharacter, tag, juce::Justification::centred);
+            r.removeFromRight(8);
+        }
+        g.setColour(colors::text);
+        g.setFont(fonts::archivo(13.0f, fonts::SemiBold));
+        g.drawText(mIrName, r, juce::Justification::centredLeft, true);
     }
 
     void paintResponse(juce::Graphics &g)
     {
-        // Caption row.
-        auto cap = juce::Rectangle<int>(mRight.getX(), mRight.getY(), mRight.getWidth(), 16);
-        g.setColour(colors::caption);
-        g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.12f));
-        g.drawText("FREQUENCY RESPONSE", cap, juce::Justification::centredLeft);
-        g.setColour(colors::text2);
-        g.setFont(fonts::mono(11.0f));
-        g.drawText(mLoaded ? mIrName : juce::String("direct"), cap, juce::Justification::centredRight);
-
         RigLookAndFeel::drawWell(g, mRespRect.toFloat());
         auto in = mRespRect.toFloat().reduced(2.0f);
         g.setColour(juce::Colour(0xff262c34));
         g.fillRect(in.getX(), in.getCentreY(), in.getWidth(), 1.0f);
 
-        const double fs = 48000.0;
-        const float hpf = (float)mProc.apvts.getRawParameterValue(mHpfId)->load();
-        const float lpf = (float)mProc.apvts.getRawParameterValue(mLpfId)->load();
-        const bool hpOn = hpf > 20.5f, lpOn = lpf < 19990.0f;
-        Biquad hp = hpOn ? Biquad::highpass(fs, hpf) : Biquad::identity();
-        Biquad lp = lpOn ? Biquad::lowpass(fs, lpf) : Biquad::identity();
+        // The loaded IR's actual magnitude response (centred on its own mean).
+        // No IR -> a flat "direct" line at 0 dB.
+        float resp[nam_rig::CabBlock::kResPts];
+        const bool haveIr = mLoaded && mProc.getCabResponseDb(resp, mRig);
+
+        // Display scale: +/-18 dB across the well half-height.
+        constexpr float kSpanDb = 18.0f;
+        auto dbToY = [&](float db) {
+            return juce::jlimit(in.getY(), in.getBottom(),
+                                in.getCentreY() - (db / kSpanDb) * in.getHeight() * 0.5f);
+        };
 
         juce::Path line;
-        const double fLo = 20.0, fHi = 20000.0;
         const int n = juce::jmax(2, (int)in.getWidth());
+        const int P = nam_rig::CabBlock::kResPts;
         for (int x = 0; x < n; ++x)
         {
-            const double f = fLo * std::pow(fHi / fLo, (double)x / (double)(n - 1));
-            double db = 0.0;
-            if (hpOn) db += 20.0 * std::log10(std::max(hp.magnitudeAt(fs, f), 1.0e-6));
-            if (lpOn) db += 20.0 * std::log10(std::max(lp.magnitudeAt(fs, f), 1.0e-6));
-            const float y = juce::jlimit(in.getY(), in.getBottom(),
-                                         in.getCentreY() - (float)(db / 24.0) * in.getHeight());
+            const float t = (float)x / (float)(n - 1); // 0..1 across the log-f axis
+            float db = 0.0f;
+            if (haveIr)
+            {
+                // map x to the response array (log-spaced, same fLo..fHi) + lerp
+                const float fp = t * (float)(P - 1);
+                const int i0 = juce::jlimit(0, P - 1, (int)fp);
+                const int i1 = juce::jmin(P - 1, i0 + 1);
+                db = resp[i0] + (resp[i1] - resp[i0]) * (fp - (float)i0);
+            }
+            const float y = dbToY(db);
             const float px = in.getX() + (float)x;
             if (x == 0) line.startNewSubPath(px, y);
             else line.lineTo(px, y);
@@ -2018,34 +2094,176 @@ private:
         area.lineTo(in.getRight(), in.getBottom());
         area.lineTo(in.getX(), in.getBottom());
         area.closeSubPath();
-        juce::ColourGradient fill(colors::accent.withAlpha(0.20f), in.getX(), in.getY(),
-                                  colors::accent.withAlpha(0.0f), in.getX(), in.getBottom(), false);
-        g.setGradientFill(fill);
-        g.fillPath(area);
-        g.setColour(colors::accent);
+
+        // Tone-zone energy heat map: each guitar band is tinted by how much
+        // energy this IR has there RELATIVE to its own average (the curve is
+        // mean-centred), so the cab's character reads at a glance — hot lows =
+        // thick, hot presence = bright/cutting, hot fizz = harsh.
+        struct Zone { double fLo, fHi; const char *lbl; };
+        static const Zone zones[] = {
+            {40.0, 120.0, "LOWS"}, {120.0, 400.0, "BODY"}, {400.0, 1500.0, "MIDS"},
+            {1500.0, 4000.0, "PRESENCE"}, {4000.0, 8000.0, "FIZZ"}};
+        const double zfLo = nam_rig::CabBlock::kResFLo, zfHi = nam_rig::CabBlock::kResFHi;
+        const double lr = std::log(zfHi / zfLo);
+        auto tOf = [&](double f) { return (float)(std::log(f / zfLo) / lr); };
+        auto idxOf = [&](double f) {
+            return juce::jlimit(0, P - 1, (int)std::round((double)(P - 1) * std::log(f / zfLo) / lr));
+        };
+
+        if (haveIr)
+        {
+            const juce::Colour cold(0xff2f6fae), warm = colors::accent, hot(0xffff5a2a);
+            auto blend = [](juce::Colour a, juce::Colour b, float t) {
+                return juce::Colour::fromFloatRGBA(
+                    a.getFloatRed() + (b.getFloatRed() - a.getFloatRed()) * t,
+                    a.getFloatGreen() + (b.getFloatGreen() - a.getFloatGreen()) * t,
+                    a.getFloatBlue() + (b.getFloatBlue() - a.getFloatBlue()) * t, 1.0f);
+            };
+            for (auto &z : zones)
+            {
+                int c0 = idxOf(z.fLo), c1 = idxOf(z.fHi);
+                float zdb = 0.0f;
+                for (int i = c0; i <= c1; ++i) zdb += resp[i];
+                zdb /= (float)(c1 - c0 + 1);
+                const float tt = juce::jlimit(0.0f, 1.0f, (zdb + 9.0f) / 18.0f); // -9..+9 dB
+                const juce::Colour c = (tt < 0.5f) ? blend(cold, warm, tt * 2.0f)
+                                                   : blend(warm, hot, (tt - 0.5f) * 2.0f);
+                const float xL = in.getX() + tOf(z.fLo) * in.getWidth();
+                const float xR = in.getX() + tOf(z.fHi) * in.getWidth();
+                juce::Graphics::ScopedSaveState save(g);
+                g.reduceClipRegion(area);
+                g.reduceClipRegion(juce::Rectangle<int>((int)std::floor(xL), (int)std::floor(in.getY()),
+                                                        (int)std::ceil(xR - xL), (int)std::ceil(in.getHeight())));
+                juce::ColourGradient grad(c.withAlpha(0.46f), 0.0f, in.getY(),
+                                          c.withAlpha(0.05f), 0.0f, in.getBottom(), false);
+                g.setGradientFill(grad);
+                g.fillRect(in);
+            }
+        }
+        else
+        {
+            juce::ColourGradient fill(colors::accent.withAlpha(0.06f), in.getX(), in.getY(),
+                                      colors::accent.withAlpha(0.0f), in.getX(), in.getBottom(), false);
+            g.setGradientFill(fill);
+            g.fillPath(area);
+        }
+        g.setColour(haveIr ? colors::accent : colors::accent.withAlpha(0.35f));
         g.strokePath(line, juce::PathStrokeType(2.4f, juce::PathStrokeType::curved));
 
-        g.setColour(juce::Colour(0xff4a515c));
-        g.setFont(fonts::mono(8.5f, fonts::SemiBold));
-        g.drawText("20 Hz", in.toNearestInt().reduced(8, 6), juce::Justification::bottomLeft);
-        g.drawText("20 kHz", in.toNearestInt().reduced(8, 6), juce::Justification::bottomRight);
+        // Zone dividers + labels along the top of the well.
+        for (auto &z : zones)
+        {
+            const float xL = in.getX() + tOf(z.fLo) * in.getWidth();
+            const float xR = in.getX() + tOf(z.fHi) * in.getWidth();
+            if (z.fHi < zfHi - 1.0)
+            {
+                g.setColour(juce::Colour(0x16ffffff));
+                g.fillRect(xR, in.getY(), 1.0f, in.getHeight());
+            }
+            g.setColour(haveIr ? colors::caption : colors::captionDim);
+            g.setFont(fonts::archivo(8.5f, fonts::SemiBold, 0.06f));
+            g.drawText(z.lbl, juce::Rectangle<float>(xL, in.getY() + 3.0f, xR - xL, 11.0f),
+                       juce::Justification::centred);
+        }
 
-        g.setColour(juce::Colour(0xff5a616b));
-        g.setFont(fonts::mono(11.0f));
-        g.drawText(juce::String::fromUTF8("Post-cab cuts \xC2\xB7 12 dB/oct \xC2\xB7 knob extremes = off"),
-                   mHintRect, juce::Justification::centredRight);
+        // Zone-boundary frequency markers along the bottom (lined up with the
+        // dividers): 40, 120, 400, 1.5k, 4k, 8k.
+        {
+            g.setColour(juce::Colour(0xff5a616b));
+            g.setFont(fonts::mono(8.0f, fonts::SemiBold));
+            auto freqStr = [](double f) -> juce::String {
+                if (f >= 1000.0)
+                {
+                    const double k = f / 1000.0;
+                    return (k == std::floor(k)) ? juce::String((int)k) + "k" : juce::String(k, 1) + "k";
+                }
+                return juce::String((int)(f + 0.5));
+            };
+            const int nz = (int)(sizeof(zones) / sizeof(zones[0]));
+            for (int b = 0; b <= nz; ++b)
+            {
+                const double f = (b == 0) ? zones[0].fLo : zones[b - 1].fHi;
+                const float cx = in.getX() + tOf(f) * in.getWidth();
+                const float w = 42.0f;
+                const float rx = juce::jlimit(in.getX() + 1.0f, in.getRight() - w - 1.0f, cx - w * 0.5f);
+                g.drawText(freqStr(f), juce::Rectangle<float>(rx, in.getBottom() - 13.0f, w, 11.0f),
+                           juce::Justification::centred);
+            }
+        }
+
+        if (!haveIr)
+        {
+            g.setColour(colors::captionDim);
+            g.setFont(fonts::mono(11.0f));
+            g.drawText("No IR loaded \xC2\xB7 amp runs direct", in.toNearestInt(),
+                       juce::Justification::centred);
+        }
     }
 
     NamRigProcessor &mProc;
     int mRig = 0;
-    juce::String mHpfId, mLpfId, mIrName{juce::String::fromUTF8("No IR \xC2\xB7 amp runs direct")};
-    juce::TextButton mLoadBtn;
-    std::unique_ptr<LabeledKnob> mHpf, mLpf;
-    std::unique_ptr<juce::FileChooser> mChooser;
-    juce::Rectangle<int> mCard, mRight, mListRect, mRespRect, mHintRect;
+    juce::String mIrName{juce::String::fromUTF8("No IR \xC2\xB7 amp runs direct")};
+    juce::String mCharacter; // auto tone descriptor (e.g. "Dark, thick")
+    std::unique_ptr<LabeledKnob> mHpf, mLpf; // post-cab Low/High cut
+    juce::ToggleButton mOn;                  // per-cab bypass (cabOn / cabOnB)
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mOnAtt;
+    juce::Rectangle<int> mNameRect, mRespRect;
     bool mLoaded = false;
+    bool mDim = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(CabPanel)
+};
+
+//==============================================================================
+// One "CAB" box holding both rigs side by side (A left, B right) with a divider
+// and a single Browse button. Per-rig dimming (not a whole-panel veil) shows each
+// cab's bypass independently. The chain strip's CAB A and CAB B tiles both open it.
+class CombinedCabPanel : public BlockPanel
+{
+public:
+    std::function<void()> onBrowse; // open the IR library
+
+    explicit CombinedCabPanel(NamRigProcessor &proc) : BlockPanel("CAB"), mA(proc, 0), mB(proc, 1)
+    {
+        addAndMakeVisible(mA);
+        addAndMakeVisible(mB);
+        mBrowseBtn.setButtonText(juce::String::fromUTF8("Browse IRs\xE2\x80\xA6"));
+        mBrowseBtn.getProperties().set("pill", true);
+        mBrowseBtn.onClick = [this] { if (onBrowse) onBrowse(); };
+        addAndMakeVisible(mBrowseBtn);
+    }
+
+    void resized() override
+    {
+        auto hr = headerArea();
+        mBrowseBtn.setBounds(hr.removeFromRight(120).withSizeKeepingCentre(120, 28));
+
+        auto body = bodyArea().reduced(12, 8);
+        const int gap = 18;
+        auto left = body.removeFromLeft((body.getWidth() - gap) / 2);
+        auto sep = body.removeFromLeft(gap);
+        mDivX = sep.getCentreX();
+        mA.setBounds(left);
+        mB.setBounds(body);
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        BlockPanel::paint(g);
+        auto body = bodyArea().reduced(12, 14);
+        g.setColour(colors::divider);
+        g.fillRect((float)mDivX, (float)body.getY(), 1.0f, (float)body.getHeight());
+    }
+
+    void refresh() { mA.refresh(); mB.refresh(); }
+    CabPanel &cabA() { return mA; }
+    CabPanel &cabB() { return mB; }
+
+private:
+    CabPanel mA, mB;
+    juce::TextButton mBrowseBtn;
+    int mDivX = 0;
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(CombinedCabPanel)
 };
 
 //==============================================================================
