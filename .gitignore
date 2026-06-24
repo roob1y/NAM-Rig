@@ -61,3 +61,7 @@ frame_*.png
 drive_panel.png
 menu_region.png
 uishot.ps1
+field_*.png
+*_zoom.png
+rightedge.png
+drive.ps1
