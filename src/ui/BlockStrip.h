@@ -64,6 +64,26 @@ public:
 
     bool isFuture() const { return mFuture; }
 
+    // Manual LED (no bool-param attachment): its lit state is set via setLedOn()
+    // and clicks are routed to onClick. Used for the Amp A/B "which rig" radios.
+    void setManualLed(std::function<void()> onClick)
+    {
+        mLed = std::make_unique<BypassLed>();
+        mLed->setClickingTogglesState(false);
+        mLed->onClick = std::move(onClick);
+        mLed->onStateChange = [this] { repaint(); };
+        addAndMakeVisible(*mLed);
+        resized();
+    }
+    void setLedOn(bool on)
+    {
+        if (mLed != nullptr && mLed->getToggleState() != on)
+        {
+            mLed->setToggleState(on, juce::dontSendNotification);
+            repaint();
+        }
+    }
+
     void mouseUp(const juce::MouseEvent &e) override
     {
         if (!mFuture && onSelect && getLocalBounds().contains(e.getPosition()))
@@ -185,13 +205,13 @@ private:
 // the mono pre (gate, comp) and stereo post (mix, mod, delay, verb), with the
 // two rig voices as parallel half-height lanes (Rig A top, Rig B bottom) that
 // split off the comp and merge at the MIX tile.
-class BlockStrip : public juce::Component
+class BlockStrip : public juce::Component, private juce::Timer
 {
 public:
     enum Lane { Full = 0, Top = 1, Bot = 2 };
     std::function<void(int)> onSelectionChanged; // selectable-block index
 
-    BlockStrip(juce::AudioProcessorValueTreeState &apvts)
+    BlockStrip(juce::AudioProcessorValueTreeState &apvts) : mApvts(apvts)
     {
         struct Slot { const char *name, *param; int col, lane; };
         // Order MUST match the editor's mPanels array (selectable index).
@@ -221,6 +241,20 @@ public:
         }
         mModeSwitch = std::make_unique<RigModeSwitch>(apvts);
         addAndMakeVisible(*mModeSwitch);
+
+        // Amp A / Amp B "which rig" radios: clicking A solos A, B solos B; Dual
+        // (set elsewhere) lights both. State mirrors rigMode (0=A, 1=B, 2=Dual).
+        auto setRig = [this](int v) {
+            if (auto *p = mApvts.getParameter("rigMode"))
+                p->setValueNotifyingHost(p->convertTo0to1((float)v));
+        };
+        if (mTiles.size() > 6)
+        {
+            mTiles[3]->setManualLed([setRig] { setRig(0); }); // Amp A -> Solo A
+            mTiles[6]->setManualLed([setRig] { setRig(1); }); // Amp B -> Solo B
+        }
+        updateAmpLeds();
+        startTimerHz(20);
     }
 
     void select(int selectableIndex)
@@ -316,7 +350,17 @@ private:
         g.strokePath(p, juce::PathStrokeType(1.5f));
     }
 
+    void timerCallback() override { updateAmpLeds(); }
+    void updateAmpLeds()
+    {
+        if (mTiles.size() <= 6) return;
+        const int mode = (int)mApvts.getRawParameterValue("rigMode")->load();
+        mTiles[3]->setLedOn(mode != 1); // Amp A active unless Solo B
+        mTiles[6]->setLedOn(mode != 0); // Amp B active unless Solo A
+    }
+
     static constexpr int kCols = 10;
+    juce::AudioProcessorValueTreeState &mApvts;
     std::vector<std::unique_ptr<BlockTile>> mTiles;
     std::vector<std::pair<int, int>> mLayout; // (col, lane) per tile
     std::unique_ptr<RigModeSwitch> mModeSwitch;
