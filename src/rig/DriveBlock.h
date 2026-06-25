@@ -8,10 +8,10 @@
 //   Boost        : germanium treble booster ("Range '65") / FET clean boost
 //                  ("EP Boost"). Range '65 = a one-pole input-cap high-pass
 //                  (the 3-way switch moves the corner) + soft germanium clip.
-//   Green Drive  : a green-box mid-hump overdrive. The ~720 Hz midrange HUMP
-//                  lives in the GAIN stage, so the voicing is flat at Drive 0
-//                  and blooms (bass-tighten + hump + ~5 kHz roll-off) as Drive
-//                  rises, into a SYMMETRIC soft clip. Tuned to a measured TS9.
+//   Green Drive  : a green-box mid-hump overdrive (TS-style). TWO models:
+//                  model 0 "Green Drive" = the original memoryless tanh voicing;
+//                  model 1 "Green Drive II" = the reworked feedback-clip model
+//                  (see below). Both share the ~720 Hz mid hump.
 //   Black Rodent : a hard-clip distortion. HARD symmetric silicon clip (diodes
 //                  to ground) fed by a gain stage whose bass-cut + ~1 kHz hump +
 //                  ~5 kHz roll-off all live in the feedback — so, like the real
@@ -23,18 +23,39 @@
 //                  that squares up toward both rails when cranked.
 //
 // Signal per slot:  drive gain -> pre low-cut -> mid/treble peak -> waveshaper
-//                   (1st-order ADAA) -> post low-pass -> DC blocker -> tone -> level.
+//                   (ADAA) -> post low-pass -> DC blocker -> tone -> level.
 //
-// Anti-aliasing: each shaper runs 1st-order ANTIDERIVATIVE anti-aliasing (ADAA):
-// y = (F(x1)-F(x0))/(x1-x0) from the shaper's antiderivative F (midpoint-f
-// fallback for tiny dx). Evaluated in DOUBLE — in float the antiderivative
-// subtraction loses precision at small signal and crackles. Zero latency, one
-// sample of state, strong fold-back reduction. An all-Off rack is bit-exact.
+// Anti-aliasing: shapers run ANTIDERIVATIVE anti-aliasing (ADAA) in DOUBLE (in
+// float the antiderivative subtraction loses precision at small signal and
+// crackles). The legacy shapers (tanh / hard / asym) use 1st-order ADAA:
+//   y = (F1(x1)-F1(x0))/(x1-x0)  (midpoint-f fallback for tiny dx).
+// The cubic soft-clip (Green Drive II) uses 2nd-order ADAA (Parker/Bilbao):
+//   from F2, three samples, with L'Hopital fallbacks — markedly less fizz.
+// Zero latency, all-Off rack bit-exact.
 //
 // Base shapers:
-//   0 soft (tanh)            — Treble Boost / Overdrive   (asymmetry via input bias)
+//   0 soft (tanh)            — Treble Boost / Overdrive v1 (asymmetry via bias)
 //   1 hard clip +/-1 (sym)   — Distortion
 //   2 hard clip, ASYM rails  — Fuzz (positive rail +1, negative rail -(1-bias))
+//   3 cubic soft (poly)      — Overdrive v2 (cheap F1+F2 -> 2nd-order ADAA)
+//
+// Green Drive II authentic-TS extras (clip 3 only, all zero-latency):
+//   * pre/de-emphasis high-shelf pair around ~700 Hz: boosts mids/highs INTO
+//     the clipper and cuts them after -> bass is clipped LEAST (the TS feedback
+//     HPF) and the clip corners are softened (the 51 pF cap). Net small-signal
+//     response stays ~flat; the DISTORTION is frequency-selective.
+//   * clean blend: sums a little un-clipped band-limited signal back in (the TS
+//     "secret" / Klon feed-forward) -> preserves dynamics, never pure fizz.
+//   * envelope dynamics: a follower on the input nudges the clean blend so soft
+//     picking cleans up and digging in bites — touch sensitivity.
+//   * STATIC voicing (shapeTrack 0): the ~780 Hz mid hump + bass-cut are present
+//     even at Drive 0, so the pedal works as an always-on mid SHAPER (drive off,
+//     tone past noon) — like the real fixed tone stack. Only the clipping (gain
+//     + emphasis) scales with Drive; the floor gain (gMin) leaves it breaking up
+//     a little even at minimum, as the real circuit does.
+//   * TREBLE-shelf Tone (bass fixed): the Tone knob moves the treble above
+//     ~1.2 kHz and leaves bass/low-mids put — the TS tone control, not a tilt.
+//     Drive itself is the engine's log/audio-taper map (gain ~ pot resistance).
 //
 // The mid/treble peak is a shared RBJ Biquad (Biquad.h), reconfigured only on a
 // voicing change. A DC blocker after the shaper removes the offset asymmetric
@@ -77,12 +98,12 @@ public:
     // Per-voicing character (single source of truth for process + tests).
     struct Voicing
     {
-        int   clip;        // 0 soft tanh, 1 hard sym, 2 hard ASYM rails
+        int   clip;        // 0 soft tanh, 1 hard sym, 2 hard ASYM rails, 3 cubic soft
         float gMin, gMax;  // pre-gain range (linear), log-mapped from Drive
         float lowCutHz;    // pre-shaper one-pole high-pass (tighten); 0 = off
         float midHz, midDb, midQ;  // pre-shaper peak (mid hump / treble peak); 0 dB = off
         float lpHz;        // post-shaper one-pole low-pass (top roll-off); 0 = off
-        float bias;        // type 0/1: input bias; type 2: negative-rail = -(1-bias)
+        float bias;        // type 0/1/3: input bias; type 2: negative-rail = -(1-bias)
         float pivotHz;     // tone tilt pivot
         float outTrim;     // voicing output compensation
         float shapeTrack;  // 0 = pre-shaper EQ always on; 1 = EQ (low-cut + mid)
@@ -91,6 +112,11 @@ public:
         float midPost;     // 0 = mid peak PRE-clip (treble booster input cap);
                            //     1 = POST-clip (overdrive/distortion tone stack -> peak freq is
                            //     level-stable instead of dragged down by clipping)
+        // --- clip-3 (cubic) authentic-TS extras; all 0 = behave like a plain shaper ---
+        float emphDb;      // pre/de-emphasis high-shelf depth (dB); 0 = off
+        float emphHz;      // emphasis corner (Hz)
+        float cleanBlend;  // 0..1 clean signal summed back after clipping
+        float dynDepth;    // 0..1 envelope -> clean-blend modulation (touch)
     };
 
     // A specific pedal MODEL inside a category (Type). A category can hold several
@@ -99,29 +125,31 @@ public:
     struct Model { const char *name, *sub; Voicing v; bool hasRange; };
 
     static const Model *modelsFor(Kind cat, int &count)
-    {                       // clip  gMin    gMax  lowCut   midHz  midDb midQ   lpHz   bias   pivot   outTrim shp post
+    {                       // clip  gMin    gMax  lowCut   midHz  midDb midQ   lpHz   bias   pivot   outTrim shp post  emphDb emphHz clean  dyn
         static const Model boost[] = {
             {"Range '65", "germanium treble boost",
-             { 0, 2.0f, 20.0f, 2600.0f,   0.0f, 0.0f, 0.7f,    0.0f, 0.20f, 2500.0f, 0.95f, 0.0f, 0.0f}, true},
+             { 0, 2.0f, 20.0f, 2600.0f,   0.0f, 0.0f, 0.7f,    0.0f, 0.20f, 2500.0f, 0.95f, 0.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.0f}, true},
             {"EP Boost", "FET clean boost",
-             { 0, 1.0f,  6.0f,  40.0f, 5000.0f, 3.0f, 0.6f,    0.0f, 0.05f, 1000.0f, 0.95f, 0.0f, 1.0f}, false},
+             { 0, 1.0f,  6.0f,  40.0f, 5000.0f, 3.0f, 0.6f,    0.0f, 0.05f, 1000.0f, 0.95f, 0.0f, 1.0f,  0.0f, 700.0f, 0.0f, 0.0f}, false},
         };
         static const Model od[] = {
-            {"Green Drive", "mid-hump overdrive",
-             { 0, 1.5f, 30.0f, 560.0f,  780.0f, 6.0f, 0.7f, 1300.0f, 0.05f,  720.0f, 1.10f, 1.0f, 1.0f}, false},
+            {"Green Drive", "mid-hump overdrive (v1 tanh)",
+             { 0, 1.5f, 30.0f, 560.0f,  780.0f, 6.0f, 0.7f, 1300.0f, 0.05f,  720.0f, 1.10f, 1.0f, 1.0f,  0.0f, 700.0f, 0.00f, 0.0f}, false},
+            {"Green Drive II", "feedback-clip overdrive (v2)",
+             { 3, 3.0f, 33.0f, 560.0f,  780.0f, 6.0f, 0.7f, 1300.0f, 0.00f, 1200.0f, 1.15f, 0.0f, 1.0f,  9.0f, 700.0f, 0.20f, 0.40f}, false},
         };
         static const Model dist[] = {
             {"Black Rodent", "hard-clip distortion",
-             { 1, 2.0f,160.0f, 300.0f, 1000.0f, 4.0f, 0.6f, 5000.0f, 0.00f, 1500.0f, 0.44f, 1.0f, 1.0f}, false},
+             { 1, 2.0f,160.0f, 300.0f, 1000.0f, 4.0f, 0.6f, 5000.0f, 0.00f, 1500.0f, 0.44f, 1.0f, 1.0f,  0.0f, 700.0f, 0.0f, 0.0f}, false},
         };
         static const Model fuzz[] = {
             {"Round Fuzz", "germanium fuzz",
-             { 2, 6.0f,300.0f,  40.0f,    0.0f, 0.0f, 0.7f,    0.0f, 0.45f,  700.0f, 0.45f, 0.0f, 0.0f}, false},
+             { 2, 6.0f,300.0f,  40.0f,    0.0f, 0.0f, 0.7f,    0.0f, 0.45f,  700.0f, 0.45f, 0.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.0f}, false},
         };
         switch (cat)
         {
         case Kind::Boost:      count = 2; return boost;
-        case Kind::Overdrive:  count = 1; return od;
+        case Kind::Overdrive:  count = 2; return od;
         case Kind::Distortion: count = 1; return dist;
         case Kind::Fuzz:       count = 1; return fuzz;
         default:               count = 0; return nullptr;
@@ -139,7 +167,7 @@ public:
     static Voicing voicingFor(Kind c, int m)
     {
         int n = 0; const Model *a = modelsFor(c, n);
-        if (!a || n == 0) return { 0, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.7f, 0.0f, 0.0f, 700.0f, 1.0f, 0.0f, 0.0f };
+        if (!a || n == 0) return { 0, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.7f, 0.0f, 0.0f, 700.0f, 1.0f, 0.0f, 0.0f, 0.0f, 700.0f, 0.0f, 0.0f };
         return a[juce::jlimit(0, n - 1, m)].v;
     }
     static Voicing voicingFor(Kind c) { return voicingFor(c, 0); } // compat (model 0)
@@ -196,6 +224,12 @@ public:
                 s.lastKind = cfg;
                 s.mid = (v.midDb != 0.0f) ? Biquad::peaking(sr, v.midHz, v.midQ, v.midDb)
                                           : Biquad::identity();
+                if (v.clip == 3 && v.emphDb > 0.0f) // pre/de-emphasis pair (frequency-selective clip)
+                {
+                    s.emphPre  = Biquad::highshelf(sr, v.emphHz,  v.emphDb);
+                    s.emphPost = Biquad::highshelf(sr, v.emphHz, -v.emphDb);
+                }
+                else { s.emphPre = Biquad::identity(); s.emphPost = Biquad::identity(); }
             }
 
             const float preGain = v.gMin * std::pow(v.gMax / v.gMin, s.drive.load()); // log
@@ -207,8 +241,9 @@ public:
             const bool useMid = (v.midDb != 0.0f);
             const bool midPost = (v.midPost > 0.5f);
             const bool useLp = (v.lpHz > 0.0f);
+            const bool cubic = (v.clip == 3);
             const double asym = (v.clip == 2) ? (double)v.bias : 0.0;     // type-2 rail
-            const double inBias = (v.clip == 2) ? 0.0 : (double)v.bias;   // type 0/1 input bias
+            const double inBias = (v.clip == 2) ? 0.0 : (double)v.bias;   // type 0/1/3 input bias
             float levelLin = std::pow(10.0f, s.levelDb.load() * 0.05f) * v.outTrim;
             if (mAutoGain.load()) // OFF by default: Drive then naturally pushes the amp harder
                 levelLin *= driveMakeup(k, model, s.drive.load()) * toneMakeup(k, model, s.tone.load());
@@ -218,27 +253,54 @@ public:
             const float bassG   = std::pow(10.0f, (-tilt * kMaxTiltDb) * 0.05f);
             const float toneCoef = coefForHz(v.pivotHz, sr);
 
+            // envelope-follower coefficients (touch dynamics, clip 3)
+            const float envAtk = 1.0f - (float)std::exp(-1.0 / (0.005 * sr)); // ~5 ms
+            const float envRel = 1.0f - (float)std::exp(-1.0 / (0.120 * sr)); // ~120 ms
+            const float invEnvRef = 1.0f / 0.25f; // picking-level reference
+
             float hp = s.hp, lpz = s.lp, low = s.toneLp;
             float dcx = s.dcX1, dcy = s.dcY1;
-            double x0 = s.x0;
+            double x0 = s.x0, adx1 = s.adaaX1, adx2 = s.adaaX2;
+            float env = s.env;
 
             for (int i = 0; i < numSamples; ++i)
             {
-                float u = mono[i] * preGain;
+                const float xin = mono[i];
+                float u = xin * preGain;
 
                 if (hpCoef > 0.0f) { hp += hpCoef * (u - hp); const float hipassed = u - hp; u += shapeAmt * (hipassed - u); } // pre low-cut (drive-scaled)
                 if (useMid && !midPost) { const float m = s.mid.processSample(u); u += shapeAmt * (m - u); } // pre-clip peak (treble booster)
 
-                // waveshaper, 1st-order ADAA in DOUBLE (avoids float cancellation crackle)
-                const double xb = (double)u + inBias;
-                const double d = xb - x0;
-                double y;
-                if (std::abs(d) > 1.0e-6)
-                    y = (clipAD(v.clip, xb, asym) - clipAD(v.clip, x0, asym)) / d;
+                float c;
+                if (cubic)
+                {
+                    // ---- Green Drive II: pre-emphasis -> cubic 2nd-order ADAA -> de-emphasis -> clean blend ----
+                    const float clean = u; // band-limited, un-clipped (for the blend)
+                    float aenv = std::abs(xin);
+                    env += (aenv > env ? envAtk : envRel) * (aenv - env);
+                    const float envN = clamp01(env * invEnvRef);
+                    float bEff = v.cleanBlend + v.dynDepth * (0.5f - envN); // soft picking -> more clean
+                    bEff = bEff < 0.0f ? 0.0f : (bEff > 0.9f ? 0.9f : bEff);
+
+                    const double xb = (double)s.emphPre.processSample(u) + inBias;
+                    const double y = clipCubicADAA2(xb, adx1, adx2);
+                    adx2 = adx1; adx1 = xb;
+                    float cc = s.emphPost.processSample((float)y);
+                    c = (1.0f - bEff) * cc + bEff * clean;
+                }
                 else
-                    y = clipF(v.clip, 0.5 * (xb + x0), asym);
-                x0 = xb;
-                float c = (float)y;
+                {
+                    // ---- legacy shapers (tanh / hard / asym): 1st-order ADAA in DOUBLE ----
+                    const double xb = (double)u + inBias;
+                    const double d = xb - x0;
+                    double y;
+                    if (std::abs(d) > 1.0e-6)
+                        y = (clipAD(v.clip, xb, asym) - clipAD(v.clip, x0, asym)) / d;
+                    else
+                        y = clipF(v.clip, 0.5 * (xb + x0), asym);
+                    x0 = xb;
+                    c = (float)y;
+                }
 
                 if (useMid && midPost) { const float m = s.mid.processSample(c); c += shapeAmt * (m - c); } // post-clip peak (OD/dist tone stack; level-stable)
                 if (useLp) { lpz += lpCoef * (c - lpz); c += shapeAmt * (lpz - c); } // post low-pass (drive-scaled)
@@ -251,11 +313,14 @@ public:
                 // tone tilt: at tone=0.5 low+high == c (transparent).
                 low += toneCoef * (c - low);
                 const float high = c - low;
-                mono[i] = (low * bassG + high * trebleG) * levelLin;
+                const float bG = cubic ? 1.0f : bassG; // clip-3: treble-shelf tone (bass fixed, TS-style)
+                const float outv = (low * bG + high * trebleG) * levelLin;
+                mono[i] = std::isfinite(outv) ? outv : 0.0f; // never emit NaN/Inf downstream
             }
 
             s.hp = flush(hp); s.lp = flush(lpz); s.toneLp = flush(low);
-            s.dcX1 = flush(dcx); s.dcY1 = flush(dcy); s.x0 = x0;
+            s.dcX1 = flush(dcx); s.dcY1 = flush(dcy); s.x0 = flushD(x0);
+            s.adaaX1 = flushD(adx1); s.adaaX2 = flushD(adx2); s.env = flush(env);
         }
     }
 
@@ -273,20 +338,24 @@ private:
         std::atomic<int> model{0};
         std::atomic<bool> on{true};
         float hp = 0.0f, lp = 0.0f, toneLp = 0.0f, dcX1 = 0.0f, dcY1 = 0.0f;
-        double x0 = 0.0; // ADAA history in double
+        double x0 = 0.0; // 1st-order ADAA history (double)
+        double adaaX1 = 0.0, adaaX2 = 0.0; // 2nd-order ADAA history (cubic, double)
+        float env = 0.0f; // envelope follower (touch dynamics)
         int lastKind = -1;
-        Biquad mid; // pre-shaper peak (state preserved across blocks)
+        Biquad mid;     // pre/post-shaper peak (state preserved across blocks)
+        Biquad emphPre, emphPost; // pre/de-emphasis pair (clip 3)
         void resetState()
         {
             hp = lp = toneLp = dcX1 = dcY1 = 0.0f; x0 = 0.0;
-            lastKind = -1; mid.reset();
+            adaaX1 = adaaX2 = 0.0; env = 0.0f;
+            lastKind = -1; mid.reset(); emphPre.reset(); emphPost.reset();
         }
     };
 
     Slot &at(int slot) { return mSlot[juce::jlimit(0, kSlots - 1, slot)]; }
 
-    // ---- base shapers: f and its antiderivative F (for ADAA), in double ----
-    // 0 soft (tanh): f=tanh, F=logcosh.  1 hard +/-1: f=clamp, F piecewise.
+    // ---- base shapers: f and its antiderivative F1 (for 1st-order ADAA), double ----
+    // 0 soft (tanh): f=tanh, F1=logcosh.  1 hard +/-1: f=clamp, F1 piecewise.
     // 2 hard ASYM: positive rail +1, negative rail -(1-asym).
     static double clipF(int type, double x, double asym)
     {
@@ -310,6 +379,59 @@ private:
     {
         const double a = std::abs(x);
         return a + std::log1p(std::exp(-2.0 * a)) - 0.6931471805599453; // log(cosh x)
+    }
+
+    // ---- cubic soft-clip (type 3): unit slope at 0, saturates at +/-2/3 ----
+    //   f(x)  = x - x^3/3        (|x| <= 1),    sign(x)*2/3     (|x| > 1)
+    //   F1(x) = x^2/2 - x^4/12   (|x| <= 1),    (2/3)|x| - 1/4  (|x| > 1)   [even]
+    //   F2(x) = x^3/6 - x^5/60   (|x| <= 1),    s*((1/3)x^2 - |x|/4 + 1/15) [odd]
+    static double cubF(double x)
+    {
+        if (x > 1.0) return 2.0 / 3.0;
+        if (x < -1.0) return -2.0 / 3.0;
+        return x - x * x * x / 3.0;
+    }
+    static double cubF1(double x)
+    {
+        const double a = std::abs(x);
+        if (a <= 1.0) return 0.5 * x * x - x * x * x * x / 12.0;
+        return (2.0 / 3.0) * a - 0.25;
+    }
+    static double cubF2(double x)
+    {
+        const double a = std::abs(x);
+        if (a <= 1.0) return x * x * x / 6.0 - x * x * x * x * x / 60.0;
+        const double s = x < 0.0 ? -1.0 : 1.0;
+        return s * ((1.0 / 3.0) * a * a - 0.25 * a + 1.0 / 15.0);
+    }
+    // (F2(a)-F2(b))/(a-b) with the L'Hopital limit F1((a+b)/2) for a~=b.
+    static double cubD(double a, double b)
+    {
+        const double d = a - b;
+        if (std::abs(d) < 1.0e-5) return cubF1(0.5 * (a + b));
+        return (cubF2(a) - cubF2(b)) / d;
+    }
+    // 2nd-order ADAA of the cubic (Parker/Bilbao). x newest, x1=x[n-1], x2=x[n-2].
+    static double clipCubicADAA2(double x, double x1, double x2)
+    {
+        const double TOL = 1.0e-5;
+        if (std::abs(x - x1) < TOL) // x ~= x[n-1]: degenerate, expand via F1/f
+        {
+            const double xBar = 0.5 * (x + x2);
+            const double delta = xBar - x1;
+            if (std::abs(delta) < TOL)
+                return cubF(0.5 * (xBar + x1));
+            return (2.0 / delta) * (cubF1(xBar) + (cubF2(x1) - cubF2(xBar)) / delta);
+        }
+        // x ~= x[n-2] but NOT ~= x[n-1]: the OUTER denominator (x - x2) collapses
+        // while x1 sits apart — the near-Nyquist alternation x[n]==x[n-2]!=x[n-1].
+        // The |x-x1| guard above never catches this, so without a fallback the
+        // 2/(x-x2) below is a divide-by-zero -> Inf/NaN that then poisons every
+        // downstream block's state (amp engine, cab convolver). Fall back to the
+        // well-conditioned 1st-order ADAA over the current step.
+        if (std::abs(x - x2) < TOL)
+            return cubD(x, x1);
+        return (2.0 / (x - x2)) * (cubD(x, x1) - cubD(x1, x2));
     }
 
     // ---- auto-gain: keep output level ~constant as Drive / Tone move ----
@@ -358,7 +480,11 @@ private:
     {
         return 1.0f - (float)std::exp(-2.0 * 3.14159265358979323846 * hz / sr);
     }
-    static float flush(float v) { return std::abs(v) < 1.0e-30f ? 0.0f : v; }
+    // Flush denormals AND non-finite (NaN/Inf) to 0. The non-finite catch is the
+    // safety net: a single bad sample must never be latched into a state variable
+    // and carried forward forever (which silently bricks the rig until reset).
+    static float flush(float v) { return (std::isfinite(v) && std::abs(v) >= 1.0e-30f) ? v : 0.0f; }
+    static double flushD(double v) { return std::isfinite(v) ? v : 0.0; }
 
     Slot mSlot[kSlots];
     std::atomic<bool> mAutoGain{false};
