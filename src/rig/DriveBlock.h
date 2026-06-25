@@ -12,11 +12,18 @@
 //                  model 0 "Green Drive" = the original memoryless tanh voicing;
 //                  model 1 "Green Drive II" = the reworked feedback-clip model
 //                  (see below). Both share the ~720 Hz mid hump.
-//   Black Rodent : a hard-clip distortion. HARD symmetric silicon clip (diodes
-//                  to ground) fed by a gain stage whose bass-cut + ~1 kHz hump +
-//                  ~5 kHz roll-off all live in the feedback — so, like the real
-//                  circuit, the voicing is full/flat at Drive 0 and tightens to
-//                  a mid-forward, fizz-free crunch as Drive climbs.
+//   Black Rodent : a hard-clip distortion (ProCo RAT). TWO models:
+//                  model 0 "Black Rodent" = the original simple hard-clip stand-in;
+//                  model 1 "Black Rodent II" = the circuit-fit RAT (see below). Both
+//                  are symmetric HARD clips; II adds the LM308 gain-stage voicing,
+//                  2nd-order ADAA and the "Filter" tone.
+//   Black Rodent II: the LM308 clipper amp's bass-cut + ~935 Hz hump + top roll-off
+//                  (FIT to the schematic, proco_rat_response.py) sit PRE-clip and
+//                  bloom with Drive, so mids hit the silicon diodes (to ground)
+//                  hardest and bass clips LEAST — the RAT's frequency-selective
+//                  grind. Hard clip on 2nd-order ADAA (square corners fizz most).
+//                  Tone is the passive "Filter" low-pass: darker CLOCKWISE (opposite
+//                  of a TS). Hot, calibration-referenced gain range (LM308 Gv ~2300).
 //   Round Fuzz   : a vintage germanium fuzz. Minimal EQ (keeps the highs, trims
 //                  only the deep bass, no tone control — as measured) + strongly
 //                  ASYMMETRIC clipping: a musical 2nd harmonic at low/mid Fuzz
@@ -29,13 +36,15 @@
 // float the antiderivative subtraction loses precision at small signal and
 // crackles). The legacy shapers (tanh / hard / asym) use 1st-order ADAA:
 //   y = (F1(x1)-F1(x0))/(x1-x0)  (midpoint-f fallback for tiny dx).
-// The cubic soft-clip (Green Drive II) uses 2nd-order ADAA (Parker/Bilbao):
-//   from F2, three samples, with L'Hopital fallbacks — markedly less fizz.
+// The cubic soft-clip (Green Drive II) and the hard clip (Black Rodent II) can run
+// 2nd-order ADAA (Parker/Bilbao): from F2, three samples, with L'Hopital fallbacks
+// + a peak guard — markedly less fizz. Selected per-voicing (clip 3 always; clip 1
+// when v.adaa2 is set), so model 0 keeps its byte-exact 1st-order path.
 // Zero latency, all-Off rack bit-exact.
 //
 // Base shapers:
 //   0 soft (tanh)            — Treble Boost / Overdrive v1 (asymmetry via bias)
-//   1 hard clip +/-1 (sym)   — Distortion
+//   1 hard clip +/-1 (sym)   — Distortion (1st-order ADAA, or 2nd-order if v.adaa2)
 //   2 hard clip, ASYM rails  — Fuzz (positive rail +1, negative rail -(1-bias))
 //   3 cubic soft (poly)      — Overdrive v2 (cheap F1+F2 -> 2nd-order ADAA)
 //
@@ -129,6 +138,12 @@ public:
         float emphHz;      // emphasis corner (Hz)
         float cleanBlend;  // 0..1 clean signal summed back after clipping
         float dynDepth;    // 0..1 envelope -> clean-blend modulation (touch)
+        // --- distortion (RAT) extras; 0 = behave like the legacy tilt-tone shaper ---
+        float toneFilterHz;// >0: Tone = a SWEEPABLE post-clip low-pass (the RAT
+                           //     "Filter": darker CW), this value = the darkest
+                           //     (full-CW) corner; 0 = use the tilt/treble-shelf tone
+        float adaa2;       // >0: run this clip type through 2nd-order ADAA (hard
+                           //     clip gets the polynomial F2 path); 0 = 1st-order
     };
 
     // A specific pedal MODEL inside a category (Type). A category can hold several
@@ -137,32 +152,41 @@ public:
     struct Model { const char *name, *sub; Voicing v; bool hasRange; };
 
     static const Model *modelsFor(Kind cat, int &count)
-    {                       // clip  gMin    gMax  lowCut   midHz  midDb midQ   lpHz   bias   pivot   outTrim shp post  emphDb emphHz clean  dyn
+    {                       // clip  gMin    gMax  lowCut   midHz  midDb midQ   lpHz   bias   pivot   outTrim shp post  emphDb emphHz clean  dyn   toneF  adaa2
         static const Model boost[] = {
             {"Range '65", "germanium treble boost",
-             { 0, 2.0f, 20.0f, 2600.0f,   0.0f, 0.0f, 0.7f,    0.0f, 0.20f, 2500.0f, 0.95f, 0.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.0f}, true},
+             { 0, 2.0f, 20.0f, 2600.0f,   0.0f, 0.0f, 0.7f,    0.0f, 0.20f, 2500.0f, 0.95f, 0.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.0f,   0.0f, 0.0f}, true},
             {"EP Boost", "FET clean boost",
-             { 0, 1.0f,  6.0f,  40.0f, 5000.0f, 3.0f, 0.6f,    0.0f, 0.05f, 1000.0f, 0.95f, 0.0f, 1.0f,  0.0f, 700.0f, 0.0f, 0.0f}, false},
+             { 0, 1.0f,  6.0f,  40.0f, 5000.0f, 3.0f, 0.6f,    0.0f, 0.05f, 1000.0f, 0.95f, 0.0f, 1.0f,  0.0f, 700.0f, 0.0f, 0.0f,   0.0f, 0.0f}, false},
         };
         static const Model od[] = {
             {"Green Drive", "mid-hump overdrive (v1 tanh)",
-             { 0, 1.5f, 30.0f, 560.0f,  780.0f, 6.0f, 0.7f, 1300.0f, 0.05f,  720.0f, 1.10f, 1.0f, 1.0f,  0.0f, 700.0f, 0.00f, 0.0f}, false},
+             { 0, 1.5f, 30.0f, 560.0f,  780.0f, 6.0f, 0.7f, 1300.0f, 0.05f,  720.0f, 1.10f, 1.0f, 1.0f,  0.0f, 700.0f, 0.00f, 0.0f,  0.0f, 0.0f}, false},
             {"Green Drive II", "feedback-clip overdrive (v2)",
-             { 3, 5.0f, 80.0f, 220.0f,  820.0f, 3.6f, 0.7f, 1900.0f, 0.00f, 1200.0f, 1.15f, 0.0f, 1.0f,  9.0f, 700.0f, 0.20f, 0.40f}, false},
+             { 3, 5.0f, 80.0f, 220.0f,  820.0f, 3.6f, 0.7f, 1900.0f, 0.00f, 1200.0f, 1.15f, 0.0f, 1.0f,  9.0f, 700.0f, 0.20f, 0.40f, 0.0f, 0.0f}, false},
         };
         static const Model dist[] = {
+            // model 0: the original simple hard-clip stand-in (kept byte-for-byte for A/B).
             {"Black Rodent", "hard-clip distortion",
-             { 1, 2.0f,160.0f, 300.0f, 1000.0f, 4.0f, 0.6f, 5000.0f, 0.00f, 1500.0f, 0.44f, 1.0f, 1.0f,  0.0f, 700.0f, 0.0f, 0.0f}, false},
+             { 1, 2.0f,160.0f, 300.0f, 1000.0f, 4.0f, 0.6f, 5000.0f, 0.00f, 1500.0f, 0.44f, 1.0f, 1.0f,  0.0f, 700.0f, 0.0f, 0.0f,   0.0f, 0.0f}, false},
+            // model 1: circuit-fit ProCo RAT. Pre-clip gain-stage EQ (gentle low-cut +
+            // ~935 Hz hump + top roll) FIT to the LM308 stage at a ~1 kHz-hump Distortion
+            // setting (docs/drive/proco_rat_response.py, RMS 0.03 dB), bloomed with Drive
+            // (shapeTrack 1, PRE-clip so bass clips LEAST). Symmetric HARD clip (silicon
+            // diodes to ground) on 2nd-order ADAA. Tone = the RAT "Filter" sweepable
+            // low-pass (darker CW). Hot, calibration-referenced range (LM308 Gv up to ~2300).
+            {"Black Rodent II", "ProCo RAT (LM308, diodes-to-ground)",
+             { 1, 4.0f,150.0f,  62.0f,  935.0f,17.0f, 0.5f, 4800.0f, 0.00f, 1500.0f, 0.47f, 1.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.0f, 475.0f, 1.0f}, false},
         };
         static const Model fuzz[] = {
             {"Round Fuzz", "germanium fuzz",
-             { 2, 6.0f,300.0f,  40.0f,    0.0f, 0.0f, 0.7f,    0.0f, 0.45f,  700.0f, 0.45f, 0.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.0f}, false},
+             { 2, 6.0f,300.0f,  40.0f,    0.0f, 0.0f, 0.7f,    0.0f, 0.45f,  700.0f, 0.45f, 0.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.0f,   0.0f, 0.0f}, false},
         };
         switch (cat)
         {
         case Kind::Boost:      count = 2; return boost;
         case Kind::Overdrive:  count = 2; return od;
-        case Kind::Distortion: count = 1; return dist;
+        case Kind::Distortion: count = 2; return dist;
         case Kind::Fuzz:       count = 1; return fuzz;
         default:               count = 0; return nullptr;
         }
@@ -179,7 +203,7 @@ public:
     static Voicing voicingFor(Kind c, int m)
     {
         int n = 0; const Model *a = modelsFor(c, n);
-        if (!a || n == 0) return { 0, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.7f, 0.0f, 0.0f, 700.0f, 1.0f, 0.0f, 0.0f, 0.0f, 700.0f, 0.0f, 0.0f };
+        if (!a || n == 0) return { 0, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.7f, 0.0f, 0.0f, 700.0f, 1.0f, 0.0f, 0.0f, 0.0f, 700.0f, 0.0f, 0.0f, 0.0f, 0.0f };
         return a[juce::jlimit(0, n - 1, m)].v;
     }
     static Voicing voicingFor(Kind c) { return voicingFor(c, 0); } // compat (model 0)
@@ -254,6 +278,8 @@ public:
             const bool midPost = (v.midPost > 0.5f);
             const bool useLp = (v.lpHz > 0.0f);
             const bool cubic = (v.clip == 3);
+            const bool adaa2 = (v.adaa2 > 0.5f);          // 2nd-order ADAA for this clip (hard clip)
+            const bool ratTone = (v.toneFilterHz > 0.0f); // Tone = sweepable post-clip LP (RAT "Filter")
             const double asym = (v.clip == 2) ? (double)v.bias : 0.0;     // type-2 rail
             const double inBias = (v.clip == 2) ? 0.0 : (double)v.bias;   // type 0/1/3 input bias
             float levelLin = std::pow(10.0f, s.levelDb.load() * 0.05f) * v.outTrim;
@@ -263,7 +289,18 @@ public:
             const float tilt = (s.tone.load() - 0.5f) * 2.0f;
             const float trebleG = std::pow(10.0f, (tilt * kMaxTiltDb) * 0.05f);
             const float bassG   = std::pow(10.0f, (-tilt * kMaxTiltDb) * 0.05f);
-            const float toneCoef = coefForHz(v.pivotHz, sr);
+            // RAT "Filter": one-pole LP whose corner sweeps from bright (tone 0, ~18 kHz
+            // = effectively open) DOWN to v.toneFilterHz at full CW (tone 1) -> darker
+            // clockwise, the opposite of the TS treble shelf. Else: the tilt pivot.
+            float toneCoef;
+            if (ratTone)
+            {
+                const float t = s.tone.load();
+                const float corner = std::exp(std::log(18000.0f) * (1.0f - t) + std::log(v.toneFilterHz) * t);
+                toneCoef = coefForHz(corner, sr);
+            }
+            else
+                toneCoef = coefForHz(v.pivotHz, sr);
 
             // envelope-follower coefficients (touch dynamics, clip 3)
             const float envAtk = 1.0f - (float)std::exp(-1.0 / (0.005 * sr)); // ~5 ms
@@ -301,6 +338,16 @@ public:
                     float cc = s.emphPost.processSample((float)y);
                     c = (1.0f - bEff) * cc + bEff * clean;
                 }
+                else if (adaa2)
+                {
+                    // ---- Black Rodent II: hard clip on 2nd-order ADAA (peak-guarded) ----
+                    // The pre-clip EQ (low-cut + ~935 Hz hump) is already in u, so mids
+                    // hit the diodes hardest and bass clips least (the RAT gain stage).
+                    const double xb = (double)u + inBias;
+                    const double y = clipHardADAA2(xb, adx1, adx2);
+                    adx2 = adx1; adx1 = xb;
+                    c = (float)y;
+                }
                 else
                 {
                     // ---- legacy shapers (tanh / hard / asym): 1st-order ADAA in DOUBLE ----
@@ -323,11 +370,20 @@ public:
                 const float dcOut = c - dcx + kDcR * dcy;
                 dcx = c; dcy = dcOut; c = dcOut;
 
-                // tone tilt: at tone=0.5 low+high == c (transparent).
+                // tone. RAT "Filter": pure swept low-pass (darker CW). Else the tilt
+                // (at tone=0.5 low+high == c = transparent; clip-3 fixes bass for a
+                // TS-style treble shelf).
                 low += toneCoef * (c - low);
-                const float high = c - low;
-                const float bG = cubic ? 1.0f : bassG; // clip-3: treble-shelf tone (bass fixed, TS-style)
-                const float outv = (low * bG + high * trebleG) * levelLin;
+                float toned;
+                if (ratTone)
+                    toned = low; // the low-passed signal IS the output
+                else
+                {
+                    const float high = c - low;
+                    const float bG = cubic ? 1.0f : bassG;
+                    toned = low * bG + high * trebleG;
+                }
+                const float outv = toned * levelLin;
                 mono[i] = std::isfinite(outv) ? outv : 0.0f; // never emit NaN/Inf downstream
             }
 
@@ -445,6 +501,47 @@ private:
         if (std::abs(x - x2) < TOL)
             return (cubF1(x) - cubF1(x1)) / (x - x1); // proper 1st-order ADAA (cubD used F2 -> wrong scale)
         return (2.0 / (x - x2)) * (cubD(x, x1) - cubD(x1, x2));
+    }
+
+    // ---- hard clip (type 1) 2nd-order ADAA (Black Rodent II) ----
+    // Hard clipping is the harshest shaper (square corners -> the most fold-back),
+    // so it benefits most from 2nd-order. The clamp is piecewise-polynomial, so F1
+    // and F2 are exact closed forms (no dilogarithm) -> ADAA2 is as cheap as the
+    // cubic's. f=clamp(x,-1,1):
+    //   F1(x) = x^2/2                 (|x|<=1),  |x|-1/2                 (|x|>1)  [even]
+    //   F2(x) = x^3/6                 (|x|<=1),  s*(a^2/2 - a/2 + 1/6)   (|x|>1)  [odd]
+    static double hardF(double x) { return x > 1.0 ? 1.0 : (x < -1.0 ? -1.0 : x); }
+    static double hardF1(double x) { const double a = std::abs(x); return a <= 1.0 ? 0.5 * x * x : a - 0.5; }
+    static double hardF2(double x)
+    {
+        const double a = std::abs(x);
+        if (a <= 1.0) return x * x * x / 6.0;
+        const double s = x < 0.0 ? -1.0 : 1.0;
+        return s * (0.5 * a * a - 0.5 * a + 1.0 / 6.0); // continuous: both branches = 1/6 at |x|=1
+    }
+    static double hardD(double a, double b) // (F2(a)-F2(b))/(a-b), L'Hopital -> F1(mid)
+    {
+        const double d = a - b;
+        if (std::abs(d) < 1.0e-5) return hardF1(0.5 * (a + b));
+        return (hardF2(a) - hardF2(b)) / d;
+    }
+    // Same Parker/Bilbao 2nd-order kernel + the SAME peak guard as the cubic: the
+    // x[n]==x[n-2]!=x[n-1] alternation at signal peaks would divide by zero, so fall
+    // back to well-conditioned 1st-order ADAA over the step (F1, not F2).
+    static double clipHardADAA2(double x, double x1, double x2)
+    {
+        const double TOL = 1.0e-5;
+        if (std::abs(x - x1) < TOL)
+        {
+            const double xBar = 0.5 * (x + x2);
+            const double delta = xBar - x1;
+            if (std::abs(delta) < TOL)
+                return hardF(0.5 * (xBar + x1));
+            return (2.0 / delta) * (hardF1(xBar) + (hardF2(x1) - hardF2(xBar)) / delta);
+        }
+        if (std::abs(x - x2) < TOL)
+            return (hardF1(x) - hardF1(x1)) / (x - x1); // peak guard: proper 1st-order over the step
+        return (2.0 / (x - x2)) * (hardD(x, x1) - hardD(x1, x2));
     }
 
     // ---- auto-gain: keep output level ~constant as Drive / Tone move ----
