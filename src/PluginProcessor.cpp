@@ -806,11 +806,11 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
             mChain.drive.setLevelDb(s, g("oLevel"));
             mChain.drive.setRange(s, 0); mChain.drive.setModel(s, (int)g("bModel"));
             break;
-        case 3: // Distortion
+        case 3: // Distortion (2 models: 0 Black Rodent / 1 Black Rodent II)
             mChain.drive.setDrive(s, g("dDrive"));
             mChain.drive.setTone(s, g("dTone"));
             mChain.drive.setLevelDb(s, g("dLevel"));
-            mChain.drive.setRange(s, 0); mChain.drive.setModel(s, 0);
+            mChain.drive.setRange(s, 0); mChain.drive.setModel(s, (int)g("bModel"));
             break;
         case 4: // Fuzz (no tone control)
             mChain.drive.setDrive(s, g("fDrive"));
