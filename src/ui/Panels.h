@@ -1893,13 +1893,13 @@ public:
             mProc.apvts, rig == 0 ? "cabOn" : "cabOnB", mOn);
     }
 
-    // Dim + lock this lane when its cab is bypassed or its rig is out of the path.
+    // Dim the IR graph when the cab's convolution is bypassed or its rig is out.
+    // The Low/High cut knobs stay live (they're always-on output filters), so a
+    // baked-in-speaker NAM with no IR can still use the cuts.
     void setBypassed(bool b)
     {
         if (b == mDim) return;
         mDim = b;
-        if (mHpf) mHpf->setEnabled(!b);
-        if (mLpf) mLpf->setEnabled(!b);
         repaint();
     }
 
@@ -1984,17 +1984,18 @@ public:
     {
         paintNameRow(g);
         paintResponse(g);
-        if (mDim) // bypassed / out of path: dim the whole lane
+        if (mDim) // IR bypassed / rig out: dim the graph, but the cuts stay live
         {
             g.setColour(colors::panel.withAlpha(0.62f));
-            g.fillRect(getLocalBounds());
+            auto s = getLocalBounds();
+            s.setBottom(mRespRect.getBottom() + 4);
+            g.fillRect(s);
         }
     }
 
     // Drag an IR straight from the OS file manager onto the cab to load it.
     bool isInterestedInFileDrag(const juce::StringArray &files) override
     {
-        if (mDim) return false;
         for (auto &f : files)
         {
             const auto l = f.toLowerCase();
@@ -2031,7 +2032,7 @@ private:
         {
             g.setColour(colors::captionDim);
             g.setFont(fonts::mono(11.0f));
-            g.drawText(juce::String::fromUTF8("No IR \xC2\xB7 amp runs direct"), r,
+            g.drawText(juce::String::fromUTF8("No IR \xC2\xB7 cuts only"), r,
                        juce::Justification::centredLeft);
             return;
         }

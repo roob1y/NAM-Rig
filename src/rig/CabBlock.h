@@ -45,6 +45,9 @@ public:
     // is OFF, LPF >= 20 kHz is OFF (knob extremes = out of the path, bit-exact).
     void setHpfHz(float hz) { mHpfHz.store(hz); }
     void setLpfHz(float hz) { mLpfHz.store(hz); }
+    // Bypass ONLY the IR convolution (e.g. a NAM model with the speaker baked in);
+    // the Low/High cut filters still run, so they stay usable without an IR.
+    void setConvBypassed(bool b) { mConvBypass.store(b); }
     const CutFilters &cuts() const { return mCuts; } // verification access
 
     // IR magnitude-response curve for the Cab panel display: kResPts points,
@@ -109,15 +112,15 @@ public:
         if (!mPrepared)
             return;
 
-        if (mIrLoaded.load()) // convolve only once an IR is loaded
+        if (mIrLoaded.load() && !mConvBypass.load()) // convolve when an IR is loaded and engaged
         {
             juce::dsp::AudioBlock<float> block(&mono, 1, (size_t)numSamples);
             juce::dsp::ProcessContextReplacing<float> ctx(block);
             mConv.process(ctx);
         }
 
-        // Post-cab cuts apply regardless of IR (they're the block's output
-        // filters; with both at their extremes this is a no-op, bit-exact).
+        // Post-cab cuts apply regardless of IR / convolution bypass (they're the
+        // block's output filters; both at their extremes = no-op, bit-exact).
         mCuts.update((double)mHpfHz.load(), (double)mLpfHz.load());
         if (mCuts.engaged())
             mCuts.process(mono, numSamples);
@@ -182,6 +185,7 @@ private:
     std::atomic<bool> mResValid{false};
     std::atomic<float> mHpfHz{20.0f};    // <= 20 = off
     std::atomic<float> mLpfHz{20000.0f}; // >= 20k = off
+    std::atomic<bool> mConvBypass{false}; // bypass IR convolution only (cuts stay)
     juce::String mIrName;
     std::atomic<bool> mIrLoaded{false};
     bool mPrepared = false;
