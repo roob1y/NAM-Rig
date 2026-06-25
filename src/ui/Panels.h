@@ -1525,6 +1525,12 @@ public:
         mNormalized = (normDb != 0.0f);
         if (mNormalized)
             info << "  |  norm " << (normDb > 0 ? "+" : "") << juce::String(normDb, 1) << " dB";
+        // Self-heal flag: a block hit a non-finite sample and was auto-reset. Shows
+        // it happened (and which block) so a silent NaN never goes unnoticed.
+        const auto nanN = mProc.nanRecoveries();
+        if (nanN > 0)
+            info << "  |  (!) recovered NaN x" << (int)nanN
+                 << " (" << mProc.lastNanBlock() << ")";
         if (info != mInfo.getText())
             mInfo.setText(info, juce::dontSendNotification);
     }

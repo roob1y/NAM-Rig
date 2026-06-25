@@ -87,6 +87,16 @@ public:
     // Engaged amp factor on the last block (0 = passthrough). Editor status.
     int engagedFactor(int rig = 0) const { return ampFor(rig).engagedFactor(); }
 
+    // NaN/Inf self-heal telemetry: how many times a block emitted a non-finite
+    // sample and was auto-reset (0 = healthy), and the last block that tripped.
+    juce::uint32 nanRecoveries() const { return mChain.guardReport().count; }
+    juce::String lastNanBlock() const
+    {
+        const char *n = mChain.guardReport().lastBlock;
+        return n != nullptr ? juce::String(n) : juce::String();
+    }
+    void clearNanRecoveries() { mChain.clearGuardReport(); }
+
     // Auto phase-align: probe both voices, cross-correlate, write the measured
     // lag (rigAlign) + polarity (rigPolB) to params. Suspends processing around
     // the offline render. Message thread; wired to the load/Align UI in 2d.

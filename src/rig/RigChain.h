@@ -41,7 +41,9 @@
 #include "Biquad.h"     // band-limit for the level-match measurement
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <vector>
 
@@ -213,11 +215,11 @@ public:
 
         // ---- shared mono pre ----
         if (!gate.isBypassed())
-            gate.process(ch0, numSamples);
+            { gate.process(ch0, numSamples);  heal(gate, ch0, numSamples); }
         if (!comp.isBypassed())
-            comp.process(ch0, numSamples);
+            { comp.process(ch0, numSamples);  heal(comp, ch0, numSamples); }
         if (!drive.isBypassed())
-            drive.process(ch0, numSamples);
+            { drive.process(ch0, numSamples); heal(drive, ch0, numSamples); }
 
         // ---- split into the two voice buffers ----
         float *vA = mVoiceA.data();
@@ -241,18 +243,18 @@ public:
         if (runA)
         {
             if (mInTrimA != 1.0f) scale(vA, numSamples, mInTrimA);
-            if (!amp.isBypassed()) amp.process(vA, numSamples);
-            if (!eq.isBypassed()) eq.process(vA, numSamples);
-            if (!cab.isBypassed()) cab.process(vA, numSamples);
+            if (!amp.isBypassed()) { amp.process(vA, numSamples); heal(amp, vA, numSamples); }
+            if (!eq.isBypassed())  { eq.process(vA, numSamples);  heal(eq, vA, numSamples); }
+            if (!cab.isBypassed()) { cab.process(vA, numSamples); heal(cab, vA, numSamples); }
             if (mOutTrimA != 1.0f) scale(vA, numSamples, mOutTrimA);
             alignVoice(mFdlA, vA, numSamples, compA + mAlignA, mPolA);
         }
         if (runB)
         {
             if (mInTrimB != 1.0f) scale(vB, numSamples, mInTrimB);
-            if (!ampB.isBypassed()) ampB.process(vB, numSamples);
-            if (!eqB.isBypassed()) eqB.process(vB, numSamples);
-            if (!cabB.isBypassed()) cabB.process(vB, numSamples);
+            if (!ampB.isBypassed()) { ampB.process(vB, numSamples); heal(ampB, vB, numSamples); }
+            if (!eqB.isBypassed())  { eqB.process(vB, numSamples);  heal(eqB, vB, numSamples); }
+            if (!cabB.isBypassed()) { cabB.process(vB, numSamples); heal(cabB, vB, numSamples); }
             if (mOutTrimB != 1.0f) scale(vB, numSamples, mOutTrimB);
             alignVoice(mFdlB, vB, numSamples, compB + mAlignB, mPolB);
         }
@@ -265,7 +267,10 @@ public:
         // ---- shared stereo post ----
         for (auto *b : stereoBlocks())
             if (!b->isBypassed())
+            {
                 b->process(left, right, numSamples);
+                heal(*b, left, right, numSamples);
+            }
     }
 
     // Total chain PDC in DAW samples: shared pre + the parallel voice section
@@ -295,6 +300,21 @@ public:
         gR = std::sin(a);
     }
 
+    // ---- NaN/Inf self-heal telemetry (message thread reads; audio thread writes) ----
+    // count = number of times a block emitted a non-finite sample and was auto-
+    // reset; lastBlock = name() of the most recent offender (nullptr = healthy).
+    struct GuardReport { std::uint32_t count; const char *lastBlock; };
+    GuardReport guardReport() const
+    {
+        return { mNanCount.load(std::memory_order_relaxed),
+                 mNanLast.load(std::memory_order_relaxed) };
+    }
+    void clearGuardReport()
+    {
+        mNanCount.store(0, std::memory_order_relaxed);
+        mNanLast.store(nullptr, std::memory_order_relaxed);
+    }
+
     // ---- the blocks ----
     GateBlock gate; // shared pre
     CompBlock comp;
@@ -317,6 +337,44 @@ private:
     {
         for (int i = 0; i < n; ++i)
             v[i] *= g;
+    }
+
+    // ---- NaN/Inf self-heal --------------------------------------------------
+    // If a block emits a non-finite sample its internal state is already corrupt
+    // (a NaN latched in a filter pole, the convolver's FFT partition buffers, or
+    // the model's recurrent memory) and stays corrupt — silencing the rig — until
+    // something resets it. So after each block we scan its output: on a non-finite
+    // hit we reset THAT block (clears the poisoned state), zero its output so no
+    // downstream block inherits the NaN, and bump the telemetry. When clean the
+    // scan only reads the buffer, so the clean path stays bit-exact.
+    static bool hasNonFinite(const float *x, int n)
+    {
+        for (int i = 0; i < n; ++i)
+            if (!std::isfinite(x[i]))
+                return true;
+        return false;
+    }
+    void recordTrip(const char *blockName)
+    {
+        mNanCount.fetch_add(1, std::memory_order_relaxed);
+        mNanLast.store(blockName, std::memory_order_relaxed);
+    }
+    void heal(MonoBlock &b, float *buf, int n)
+    {
+        if (!hasNonFinite(buf, n))
+            return;
+        b.reset();
+        std::fill(buf, buf + n, 0.0f);
+        recordTrip(b.name());
+    }
+    void heal(StereoBlock &b, float *l, float *r, int n)
+    {
+        if (!hasNonFinite(l, n) && !hasNonFinite(r, n))
+            return;
+        b.reset();
+        std::fill(l, l + n, 0.0f);
+        std::fill(r, r + n, 0.0f);
+        recordTrip(b.name());
     }
 
     void alignVoice(FracDelayLine &fdl, float *v, int n, double delay, float pol)
@@ -481,6 +539,9 @@ private:
     int mMaxBlock = 512; // prepared block size (probe render chunk size)
     double mSampleRate = 48000.0; // for the level-measurement band-limit filters
     bool mPrepared = false;
+
+    std::atomic<std::uint32_t> mNanCount{0};      // self-heal trip counter
+    std::atomic<const char *> mNanLast{nullptr};  // name() of last offender
 };
 
 } // namespace nam_rig
