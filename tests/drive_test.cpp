@@ -103,6 +103,16 @@ static std::vector<float> realSlotM(Kind k, int model, float drive, const std::v
     auto x = in; run(d, x); return x;
 }
 
+// Same again, but also sets the Tone knob (for the RAT "Filter" direction test).
+static std::vector<float> realSlotMT(Kind k, int model, float drive, float tone, const std::vector<float> &in)
+{
+    DriveBlock d;
+    d.setKind(0, (int)k); d.setModel(0, model); d.setDrive(0, drive);
+    d.setTone(0, tone); d.setLevelDb(0, 0.0f);
+    d.prepare({SR, BLK});
+    auto x = in; run(d, x); return x;
+}
+
 // Memoryless mirror of the cubic core (Overdrive model 1), sharing its voicing
 // pre-gain -- NO 2nd-order ADAA. Alias baseline for the cubic.
 static std::vector<float> naiveCubic(float drive, const std::vector<float> &in)
@@ -112,6 +122,34 @@ static std::vector<float> naiveCubic(float drive, const std::vector<float> &in)
     auto f = [](double x) { if (x > 1.0) return 2.0 / 3.0; if (x < -1.0) return -2.0 / 3.0; return x - x * x * x / 3.0; };
     std::vector<float> y(in.size());
     for (size_t i = 0; i < in.size(); ++i) y[i] = (float)f((double)in[i] * pg);
+    return y;
+}
+
+// Memoryless mirror of Black Rodent II (Distortion model 1): the SAME pre-clip
+// EQ (drive-scaled low-cut + ~935 Hz mid hump) + post low-pass, but a pointwise
+// hard clip instead of the 2nd-order ADAA. Alias baseline that isolates the ADAA.
+static std::vector<float> naiveDistII(float drive, const std::vector<float> &in)
+{
+    const auto v = DriveBlock::voicingFor(Kind::Distortion, 1);
+    const float pg = v.gMin * std::pow(v.gMax / v.gMin, drive);
+    const float hpC = 1.0f - (float)std::exp(-2.0 * M_PI * v.lowCutHz / SR);
+    const float lpC = 1.0f - (float)std::exp(-2.0 * M_PI * v.lpHz / SR);
+    Biquad mid = Biquad::peaking(SR, v.midHz, v.midQ, v.midDb);
+    const float sAmt = 1.0f - v.shapeTrack * (1.0f - drive);
+    const float kDcR = 0.9995f;
+    std::vector<float> y(in.size());
+    float hp = 0, lpz = 0, dcx = 0, dcy = 0;
+    for (size_t i = 0; i < in.size(); ++i)
+    {
+        float u = in[i] * pg;
+        hp += hpC * (u - hp); { const float hipassed = u - hp; u += sAmt * (hipassed - u); }
+        { const float m = mid.processSample(u); u += sAmt * (m - u); } // pre-clip mid (midPost 0)
+        const double xb = (double)u;
+        float c = (float)(xb > 1.0 ? 1.0 : (xb < -1.0 ? -1.0 : xb)); // memoryless hard clip
+        lpz += lpC * (c - lpz); c += sAmt * (lpz - c);
+        const float dcOut = c - dcx + kDcR * dcy; dcx = c; dcy = dcOut; c = dcOut;
+        y[i] = c * v.outTrim;
+    }
     return y;
 }
 
@@ -297,6 +335,84 @@ int main()
         const double midVs3k  = 20.0 * std::log10(g(780.0) / g(3000.0));
         CHECK(midVs100 > 6.0 && midVs3k > 3.0,
               "T14 v2 shaper @drive0: 780Hz +%.1f vs 100Hz, +%.1f vs 3k", midVs100, midVs3k);
+    }
+
+    // ====== Black Rodent II (Distortion model 1): circuit-fit ProCo RAT ======
+
+    // ---- T15: model 0 byte-for-byte unchanged; category now has 2 models ----
+    {
+        auto in = sine(220.0, 0.2f, 8192);
+        auto m0 = realSlotM(Kind::Distortion, 0, 0.7f, in);
+        auto def = realSlot(Kind::Distortion, 0.7f, in); // default model == 0
+        bool same = true;
+        for (size_t i = 0; i < in.size(); ++i) same = same && (m0[i] == def[i]);
+        CHECK(same, "T15 Dist model 0 == legacy default (A/B preserves the original Black Rodent)");
+        CHECK(DriveBlock::modelCount(Kind::Distortion) == 2, "T15 Distortion holds 2 models (Black Rodent + II)");
+    }
+
+    // ---- T16: 2nd-order ADAA on the HARD clip crushes alias vs a naive hard clip ----
+    // Hard clipping fizzes the most; the RAT's pre-clip mid-hump + high gain make the
+    // 2nd-order win real here (a bare hard clip showed none -- so this is measured).
+    {
+        auto in = sine(5000.0, 0.05f, 48000); // 7th/9th harmonics fold to 13 k / 3 k
+        auto adaa = realSlotMT(Kind::Distortion, 1, 1.0f, 0.0f, in); // tone bright = Filter open
+        auto naive = naiveDistII(1.0f, in);
+        const double a3 = goertzel(adaa, 3000.0), n3 = goertzel(naive, 3000.0);
+        const double a13 = goertzel(adaa, 13000.0), n13 = goertzel(naive, 13000.0);
+        CHECK(a3 < n3 * 0.3 && a13 < n13 * 0.3,
+              "T16 RAT ADAA2 cuts alias: 3k %.2e<%.2e, 13k %.2e<%.2e", a3, n3, a13, n13);
+        const double redDb = 20.0 * std::log10(n3 / std::max(a3, 1e-12));
+        CHECK(redDb > 12.0, "T16 RAT alias@3k reduced by %.1f dB (2nd-order hard clip)", redDb);
+    }
+
+    // ---- T17: model 1 never spikes (peak-guarded 2nd-order ADAA) -- maxabs sweep ----
+    // A Goertzel/THD bin averages over spikes and HIDES the 2nd-order divide-by-zero
+    // crackle; only a full-scale frequency sweep + maxabs catches it (playbook rule).
+    {
+        double worst = 0.0;
+        for (float dr = 0.0f; dr <= 1.001f; dr += 0.25f)
+            for (double f = 50.0; f <= 12000.0; f *= 1.15)
+            {
+                auto y = realSlotM(Kind::Distortion, 1, dr, sine(f, 0.5f, 8192));
+                for (float v : y) worst = std::max(worst, (double)std::fabs(v));
+            }
+        CHECK(worst < 1.5, "T17 RAT no spikes across full-scale sweep (all drives): worst |out| %.2f", worst);
+    }
+
+    // ---- T18: the "Filter" tone darkens CLOCKWISE (opposite of the TS treble shelf) ----
+    {
+        auto in = sine(3000.0, 0.02f, 16384);
+        const double bright = goertzel(realSlotMT(Kind::Distortion, 1, 0.5f, 0.0f, in), 3000.0); // CCW
+        const double dark   = goertzel(realSlotMT(Kind::Distortion, 1, 0.5f, 1.0f, in), 3000.0); // CW
+        CHECK(dark < bright * 0.5,
+              "T18 RAT Filter darker CW: 3k dark %.2e << bright %.2e (%.1fx)", dark, bright, bright / std::max(dark, 1e-12));
+    }
+
+    // ---- T19: model 1 is a mid-forward RAT voicing that blooms with Drive ----
+    // Small-signal probe (tiny amp -> stays linear even at the RAT's high gain): the
+    // ~935 Hz hump sits forward of bass+treble, and the bass tightens as Drive climbs
+    // (the LM308 gain stage's frequency-selective clipping, pre-clip + shapeTrack).
+    {
+        auto g = [&](double f, float dr) {
+            auto in = sine(f, 0.0004f, 16384);
+            return goertzel(realSlotM(Kind::Distortion, 1, dr, in), f) / goertzel(in, f);
+        };
+        const double midVs100 = 20.0 * std::log10(g(935.0, 1.0f) / g(100.0, 1.0f));
+        const double midVs5k  = 20.0 * std::log10(g(935.0, 1.0f) / g(5000.0, 1.0f));
+        CHECK(midVs100 > 8.0 && midVs5k > 8.0,
+              "T19 RAT mid-forward @drive1: 935Hz +%.1f vs 100Hz, +%.1f vs 5k", midVs100, midVs5k);
+        const double bass0 = 20.0 * std::log10(g(100.0, 0.0f) / g(1000.0, 0.0f));
+        const double bass1 = 20.0 * std::log10(g(100.0, 1.0f) / g(1000.0, 1.0f));
+        CHECK(bass1 < bass0 - 6.0,
+              "T19 RAT bass tightens with Drive: 100Hz %.1f -> %.1f dB (vs 1k)", bass0, bass1);
+    }
+
+    // ---- T20: hotter pickups drive the RAT harder (fixed clip threshold) ----
+    {
+        const double single = harmRatio(realSlotM(Kind::Distortion, 1, 0.4f, sine(220.0, 0.08f, 24000)), 220.0, 10);
+        const double humbk  = harmRatio(realSlotM(Kind::Distortion, 1, 0.4f, sine(220.0, 0.20f, 24000)), 220.0, 10);
+        CHECK(humbk > single * 1.5,
+              "T20 RAT input-dependent: humbucker THD %.2f > single-coil %.2f (drives harder)", humbk, single);
     }
 
     std::printf("\n%s (%d failure%s)\n", gFails ? "RESULT: FAIL" : "RESULT: ALL PASS", gFails, gFails == 1 ? "" : "s");
