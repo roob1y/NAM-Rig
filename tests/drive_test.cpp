@@ -270,14 +270,15 @@ int main()
     }
 
     // ---- T13: envelope dynamics -- soft picking cleans up, digging in bites ----
-    // Strongest at the edge of breakup around the mid hump. v2 (dynDepth>0) opens
-    // up far more between a quiet and a loud burst than v1 (no dynamics) does.
+    // Tested at low-to-mid drive (0.15): with the lifelike high-gain range, the
+    // touch response lives here (a cranked TS compresses). v2 opens up far more
+    // between a quiet and a loud burst than v1 does.
     {
         auto quiet = sine(660.0, 0.03f, 24000), loud = sine(660.0, 0.40f, 24000);
-        const double q1 = harmRatio(realSlotM(Kind::Overdrive, 1, 0.35f, quiet), 660.0, 8);
-        const double l1 = harmRatio(realSlotM(Kind::Overdrive, 1, 0.35f, loud),  660.0, 8);
-        const double q0 = harmRatio(realSlotM(Kind::Overdrive, 0, 0.35f, quiet), 660.0, 8);
-        const double l0 = harmRatio(realSlotM(Kind::Overdrive, 0, 0.35f, loud),  660.0, 8);
+        const double q1 = harmRatio(realSlotM(Kind::Overdrive, 1, 0.15f, quiet), 660.0, 8);
+        const double l1 = harmRatio(realSlotM(Kind::Overdrive, 1, 0.15f, loud),  660.0, 8);
+        const double q0 = harmRatio(realSlotM(Kind::Overdrive, 0, 0.15f, quiet), 660.0, 8);
+        const double l0 = harmRatio(realSlotM(Kind::Overdrive, 0, 0.15f, loud),  660.0, 8);
         const double spread1 = l1 / std::max(q1, 1e-9), spread0 = l0 / std::max(q0, 1e-9);
         CHECK(l1 > q1 * 10.0, "T13 v2 touch-responsive: loud/quiet harm spread %.1fx", spread1);
         CHECK(spread1 > spread0 * 1.3,

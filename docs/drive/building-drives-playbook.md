@@ -122,6 +122,18 @@ Notes:
   - `gMax` sets the top. A TS is moderate (we used 33); a distortion is much hotter.
   - Measure THD-vs-knob (§7) and aim for the pedal's character: TS = dirty by
     noon then compresses; high-gain = keeps climbing.
+- **Range must match the real circuit, and it's INPUT-LEVEL dependent.** The clip
+  threshold is fixed, so distortion tracks the absolute input level — a real TS's
+  effective gain is ~12..118, and `gMin 3 / gMax 33` (4× too low) left max Drive
+  barely breaking up below a hot DI. Use ~`gMin 5 / gMax 80`. Keeping the
+  input-dependence is *correct* (hot pickups drive harder, like the real pedal);
+  voice the range for the app's **calibration reference** (`CalNorm
+  kReferenceDbu`) so a calibrated guitar is level-accurate. Verify the THD-vs-knob
+  sweep at realistic levels for BOTH a single-coil (~0.08) and a humbucker
+  (~0.20) — the humbucker should clearly drive harder.
+- **Gain vs touch dynamics trade-off:** higher gain = more drive but LESS cleanup
+  at mid-Drive (everything clips). Touch response lives at low-to-mid Drive; test
+  it there. Keep `gMin` modest so soft picking still cleans up.
 - **A/B fairness:** when shipping an old + new model side by side, level-match
   them (`outTrim`) so the comparison is about tone, not loudness (within ~5 % RMS
   across the sweep).
@@ -207,6 +219,25 @@ JUCE code can't be compiled offline — review the processor/editor by hand.
   for A/B and zero preset drift.
 - **Separate clean voicing from driven character.** Small-signal EQ (fit to
   circuit) and frequency-selective clipping (emphasis) are tuned independently.
+
+### Crackle pitfalls (these caused a real, audible crackle)
+
+- **Blend clean at INPUT level, not the gained signal.** `clean = u` (post-gain)
+  summed back the 33×-amplified signal; the envelope ripples at the note pitch,
+  modulating that huge chunk in/out → spikes to ~10. Fix: `clean = u / preGain`
+  (input level — which is where the real TS's surviving clean actually sits).
+  This was the *main* crackle, and it's independent of the anti-aliasing.
+- **2nd-order ADAA divides by `x[n] − x[n-2]`, which hits zero at signal peaks**
+  (where `x[n] == x[n-2]` by symmetry while `x[n-1]` is the peak) → a divide-by-
+  zero spike of thousands. Guard it: when `|x − x[n-2]| < TOL`, fall back to the
+  **1st-order ADAA over the step** `(F1(x) − F1(x1))/(x − x1)` — note F1, *not*
+  `cubD` (which uses F2 and returns the wrong scale). With this guard + the clean
+  fix, 2nd-order ADAA is robust (worst |out| 0.9 across 50 Hz–23.5 kHz, full
+  scale, all drives). Verify any new shaper with a `maxabs` sweep, not just a
+  Goertzel/THD test — a Goertzel bin averages over spikes and hides them.
+- **NaN hygiene:** flush non-finite state (`flushD`) and never emit a non-finite
+  output sample — one bad sample latched into a filter state bricks the whole
+  rig until reset.
 
 ---
 

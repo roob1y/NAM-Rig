@@ -144,9 +144,15 @@ Tuned so the Drive and Tone *sweeps* match a real TS, not just the clipped tone:
   stage gain ≈ pot resistance, which is *exactly* the engine's existing
   `gMin·(gMax/gMin)^drive` map (equal dB per rotation; gain stays modest through
   the lower half then ramps up top). No warp added — that map is the taper.
-- **Always doing something at minimum.** Floor gain `gMin = 3.0` leaves it
-  breaking up a little even at Drive 0 (≈1–2 % THD on mids), like the real
-  circuit where the signal already nips the diodes. Range `gMin 3 → gMax 33`.
+- **Lifelike gain range, calibration-referenced.** `gMin 5 → gMax 80` ≈ the real
+  TS's 12..118. The clip threshold is FIXED, so distortion tracks the actual
+  input *level* — hot pickups/DI drive harder than weak ones, like the real
+  pedal. It's voiced for the app's calibration reference (`CalNorm
+  kReferenceDbu`); with **Calibrate Input ON** the guitar is trimmed to that
+  reference, so the response is level-accurate and consistent across interfaces.
+  Earlier `gMin 3 / gMax 33` was ~4× too weak — max Drive barely broke up below a
+  hot DI. Touch dynamics are strongest at low-to-mid Drive (a cranked TS
+  compresses), so the dynamics test (T13) measures there.
 - **Static voicing = works as a shaper.** `shapeTrack = 0`: the mid hump +
   bass-cut are present at *every* Drive, including off — so "Drive off, Tone
   past noon" gives the classic always-on TS mid-shaper/boost. Only the clipping

@@ -52,7 +52,15 @@
 //     even at Drive 0, so the pedal works as an always-on mid SHAPER (drive off,
 //     tone past noon) — like the real fixed tone stack. Only the clipping (gain
 //     + emphasis) scales with Drive; the floor gain (gMin) leaves it breaking up
-//     a little even at minimum, as the real circuit does. The mid peak (+3.6 dB
+//     a little even at minimum, as the real circuit does.
+//   * LIFELIKE gain range (gMin 5 -> gMax 80, ~the real TS's 12..118): the clip
+//     threshold is FIXED, so distortion tracks the actual input LEVEL — hot
+//     pickups/DI drive harder than weak ones, exactly like the real pedal. It is
+//     voiced for the app's calibration reference (CalNorm kReferenceDbu): with
+//     Calibrate Input ON the guitar is trimmed to that reference, so the response
+//     is level-accurate to a real guitar (and consistent across interfaces).
+//     Touch dynamics are strongest at low-to-mid Drive (a cranked TS compresses).
+//     The mid peak (+3.6 dB
 //     @ 820 Hz, Q0.7) + low-cut (220) + top LP (1900) are FIT to the measured
 //     TS808 small-signal transfer function (see docs/drive/circuit-accuracy.md):
 //     +5.5 dB hump over 200 Hz @ ~720 Hz, matched to ~1 dB. (Our first pass was
@@ -140,7 +148,7 @@ public:
             {"Green Drive", "mid-hump overdrive (v1 tanh)",
              { 0, 1.5f, 30.0f, 560.0f,  780.0f, 6.0f, 0.7f, 1300.0f, 0.05f,  720.0f, 1.10f, 1.0f, 1.0f,  0.0f, 700.0f, 0.00f, 0.0f}, false},
             {"Green Drive II", "feedback-clip overdrive (v2)",
-             { 3, 3.0f, 33.0f, 220.0f,  820.0f, 3.6f, 0.7f, 1900.0f, 0.00f, 1200.0f, 1.15f, 0.0f, 1.0f,  9.0f, 700.0f, 0.20f, 0.40f}, false},
+             { 3, 5.0f, 80.0f, 220.0f,  820.0f, 3.6f, 0.7f, 1900.0f, 0.00f, 1200.0f, 1.15f, 0.0f, 1.0f,  9.0f, 700.0f, 0.20f, 0.40f}, false},
         };
         static const Model dist[] = {
             {"Black Rodent", "hard-clip distortion",
@@ -279,7 +287,8 @@ public:
                 if (cubic)
                 {
                     // ---- Green Drive II: pre-emphasis -> cubic 2nd-order ADAA -> de-emphasis -> clean blend ----
-                    const float clean = u; // band-limited, un-clipped (for the blend)
+                    const float clean = u / preGain; // INPUT-level clean (TS-correct). Blending the
+                    // gained u summed a huge signal that the envelope ripple modulated -> crackle.
                     float aenv = std::abs(xin);
                     env += (aenv > env ? envAtk : envRel) * (aenv - env);
                     const float envN = clamp01(env * invEnvRef);
@@ -434,7 +443,7 @@ private:
         // downstream block's state (amp engine, cab convolver). Fall back to the
         // well-conditioned 1st-order ADAA over the current step.
         if (std::abs(x - x2) < TOL)
-            return cubD(x, x1);
+            return (cubF1(x) - cubF1(x1)) / (x - x1); // proper 1st-order ADAA (cubD used F2 -> wrong scale)
         return (2.0 / (x - x2)) * (cubD(x, x1) - cubD(x1, x2));
     }
 
