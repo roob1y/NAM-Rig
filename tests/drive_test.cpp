@@ -93,6 +93,35 @@ static std::vector<float> realSlot(Kind k, float drive, const std::vector<float>
     auto x = in; run(d, x); return x;
 }
 
+// Same, but selects a MODEL within the category (A/B of OD v1 vs v2).
+static std::vector<float> realSlotM(Kind k, int model, float drive, const std::vector<float> &in)
+{
+    DriveBlock d;
+    d.setKind(0, (int)k); d.setModel(0, model); d.setDrive(0, drive);
+    d.setTone(0, 0.5f); d.setLevelDb(0, 0.0f);
+    d.prepare({SR, BLK});
+    auto x = in; run(d, x); return x;
+}
+
+// Memoryless mirror of the cubic core (Overdrive model 1), sharing its voicing
+// pre-gain -- NO 2nd-order ADAA. Alias baseline for the cubic.
+static std::vector<float> naiveCubic(float drive, const std::vector<float> &in)
+{
+    const auto v = DriveBlock::voicingFor(Kind::Overdrive, 1);
+    const float pg = v.gMin * std::pow(v.gMax / v.gMin, drive);
+    auto f = [](double x) { if (x > 1.0) return 2.0 / 3.0; if (x < -1.0) return -2.0 / 3.0; return x - x * x * x / 3.0; };
+    std::vector<float> y(in.size());
+    for (size_t i = 0; i < in.size(); ++i) y[i] = (float)f((double)in[i] * pg);
+    return y;
+}
+
+// harmonic energy (n=2..N) over the fundamental -- a THD-ish "how dirty" measure.
+static double harmRatio(const std::vector<float> &y, double f0, int N)
+{
+    double fund = goertzel(y, f0), h = 0.0;
+    for (int n = 2; n <= N; ++n) h += goertzel(y, f0 * n);
+    return h / (fund + 1e-9);
+}
 
 // Small-signal magnitude at one freq relative to a reference freq (dB), at a
 // given Drive — reveals the EQ shape (low amplitude keeps the shaper ~linear).
@@ -212,6 +241,61 @@ int main()
         CHECK(lo0 > -2.0, "T10 Dist@drive0 full-range: 100Hz %.1f dB (vs 1k)", lo0);
         CHECK(lo1 < -6.0 && lo1 < lo0 - 4.0,
               "T10 Dist@drive1 tightens: 100Hz %.1f dB (vs 1k), %.1f at drive0", lo1, lo0);
+    }
+
+    // ====== Green Drive II (Overdrive model 1): reworked feedback-clip OD ======
+
+    // ---- T11: model 0 (tanh) byte-for-byte unchanged; category now has 2 models ----
+    {
+        auto in = sine(220.0, 0.2f, 8192);
+        auto m0 = realSlotM(Kind::Overdrive, 0, 0.7f, in);
+        auto def = realSlot(Kind::Overdrive, 0.7f, in); // default model == 0
+        bool same = true;
+        for (size_t i = 0; i < in.size(); ++i) same = same && (m0[i] == def[i]);
+        CHECK(same, "T11 OD model 0 == legacy default (A/B preserves the original)");
+        CHECK(DriveBlock::modelCount(Kind::Overdrive) == 2, "T11 Overdrive holds 2 models (v1 + v2)");
+    }
+
+    // ---- T12: 2nd-order ADAA on the cubic crushes alias vs a naive cubic ----
+    {
+        auto in = sine(5000.0, 0.05f, 48000); // odd harmonics fold to 3 k / 13 k
+        auto adaa = realSlotM(Kind::Overdrive, 1, 1.0f, in);
+        auto naive = naiveCubic(1.0f, in);
+        const double a3 = goertzel(adaa, 3000.0), n3 = goertzel(naive, 3000.0);
+        const double a13 = goertzel(adaa, 13000.0), n13 = goertzel(naive, 13000.0);
+        CHECK(a3 < n3 * 0.2 && a13 < n13 * 0.5,
+              "T12 ADAA2 cuts alias: 3k %.2e<%.2e, 13k %.2e<%.2e", a3, n3, a13, n13);
+        const double redDb = 20.0 * std::log10(n3 / std::max(a3, 1e-12));
+        CHECK(redDb > 15.0, "T12 alias@3k reduced by %.1f dB (2nd-order)", redDb);
+    }
+
+    // ---- T13: envelope dynamics -- soft picking cleans up, digging in bites ----
+    // Strongest at the edge of breakup around the mid hump. v2 (dynDepth>0) opens
+    // up far more between a quiet and a loud burst than v1 (no dynamics) does.
+    {
+        auto quiet = sine(660.0, 0.03f, 24000), loud = sine(660.0, 0.40f, 24000);
+        const double q1 = harmRatio(realSlotM(Kind::Overdrive, 1, 0.35f, quiet), 660.0, 8);
+        const double l1 = harmRatio(realSlotM(Kind::Overdrive, 1, 0.35f, loud),  660.0, 8);
+        const double q0 = harmRatio(realSlotM(Kind::Overdrive, 0, 0.35f, quiet), 660.0, 8);
+        const double l0 = harmRatio(realSlotM(Kind::Overdrive, 0, 0.35f, loud),  660.0, 8);
+        const double spread1 = l1 / std::max(q1, 1e-9), spread0 = l0 / std::max(q0, 1e-9);
+        CHECK(l1 > q1 * 10.0, "T13 v2 touch-responsive: loud/quiet harm spread %.1fx", spread1);
+        CHECK(spread1 > spread0 * 1.3,
+              "T13 v2 more dynamic than v1: spread %.1fx vs %.1fx", spread1, spread0);
+    }
+
+    // ---- T14: v2 is a midrange SHAPER even at DRIVE 0 (static TS voicing) ----
+    // shapeTrack=0 keeps the ~780 Hz hump + bass-cut present with the drive off,
+    // so the pedal works as an always-on mid shaper (drive off, tone past noon).
+    {
+        auto g = [&](double f) {
+            auto in = sine(f, 0.01f, 16384);
+            return goertzel(realSlotM(Kind::Overdrive, 1, 0.0f, in), f) / goertzel(in, f);
+        };
+        const double midVs100 = 20.0 * std::log10(g(780.0) / g(100.0));
+        const double midVs3k  = 20.0 * std::log10(g(780.0) / g(3000.0));
+        CHECK(midVs100 > 6.0 && midVs3k > 3.0,
+              "T14 v2 shaper @drive0: 780Hz +%.1f vs 100Hz, +%.1f vs 3k", midVs100, midVs3k);
     }
 
     std::printf("\n%s (%d failure%s)\n", gFails ? "RESULT: FAIL" : "RESULT: ALL PASS", gFails, gFails == 1 ? "" : "s");

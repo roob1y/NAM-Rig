@@ -800,11 +800,11 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
             mChain.drive.setModel(s, (int)g("bModel"));
             mChain.drive.setTone(s, 0.5f); mChain.drive.setLevelDb(s, 0.0f);
             break;
-        case 2: // Overdrive
+        case 2: // Overdrive (2 models: 0 Green Drive v1 tanh / 1 Green Drive II)
             mChain.drive.setDrive(s, g("oDrive"));
             mChain.drive.setTone(s, g("oTone"));
             mChain.drive.setLevelDb(s, g("oLevel"));
-            mChain.drive.setRange(s, 0); mChain.drive.setModel(s, 0);
+            mChain.drive.setRange(s, 0); mChain.drive.setModel(s, (int)g("bModel"));
             break;
         case 3: // Distortion
             mChain.drive.setDrive(s, g("dDrive"));
