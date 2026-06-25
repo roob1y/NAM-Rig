@@ -1,8 +1,17 @@
 # Building drives — playbook
 
-How to add a new, *accurate*, good-feeling drive/overdrive/distortion/fuzz to
-`DriveBlock`. Written so a future session can pick up cold and build the next
-pedal (SD-1, Klon, Blues Breaker, Big Muff, …) without re-deriving the method.
+How to make any `DriveBlock` voicing *accurate* and good-feeling — whether you're
+**adding a new model** (SD-1, Klon, Blues Breaker, Big Muff, …) or **reworking an
+existing one** (the current Boost / Distortion / Fuzz, the same way Green Drive
+became Green Drive II). The method is the same for all of them; the Tube Screamer
+is just the first worked example. Written so a future session can pick up cold
+without re-deriving anything.
+
+> The existing Boost/Distortion/Fuzz are *robust as-is* but not yet
+> circuit-fit/reworked. When you rework one, treat it like a fresh pedal: run the
+> whole workflow below (circuit fit → clip shape → ADAA → feel → tests). Their
+> current simplicity (1st-order ADAA, no clean blend) is why they don't crackle
+> today — a rework that adds those features must add the matching guards.
 
 Read this first, then the companions:
 [option-a-design.md](option-a-design.md) (the DSP design),
@@ -25,7 +34,7 @@ it may be simplified or voiced to taste. The circuit is ground truth.
 
 ---
 
-## 1. Workflow for a new pedal
+## 1. Workflow for any drive (new model OR reworking an existing one)
 
 1. **Research the circuit.** Pull the schematic + BOM (ElectroSmash, GeoFex,
    AionFX, Electric Druid are reliable). Identify: the gain stage topology
@@ -83,6 +92,32 @@ Adding a new shape: implement `f`, its antiderivative `F1` (for 1st-order ADAA),
 and — if you want 2nd-order — `F2`. Polynomials are gold (cheap exact F1/F2;
 `tanh` needs the dilogarithm for F2, which is why the cubic exists). The cubic
 math + ADAA formula is in [option-a-design.md](option-a-design.md).
+
+### ADAA order — when to use which (hard-won)
+
+Decide ADAA order **per shaper, when you build/rework it** — not globally.
+
+- **1st-order ADAA is the safe default.** Single guarded division
+  `(F1(x)-F1(x0))/(x-x0)` with a midpoint fallback for tiny `dx`. No catastrophic
+  cases. The current Boost/Distortion/Fuzz use it and are glitch-free (verified:
+  worst output < 1.0 across a full harsh sweep). Always start here.
+- **Reach for 2nd-order ADAA when a rework needs it** — typically a hotter or
+  sharper clipper (a reworked Distortion/Fuzz, a higher-gain OD) where 1st-order
+  still fizzes. It can cut aliasing a lot (the cubic OD measured ~50 dB vs naive
+  in the full pipeline). But it is **not free**:
+  - It divides by `x[n]-x[n-2]`, which is 0 at signal peaks → ÷0 spikes. **Must**
+    have the peak guard (§Crackle pitfalls).
+  - ~1 sample of group delay.
+  - Only **polynomial** shapers can do it cheaply (need a closed-form `F2`).
+    `tanh` and the asym-fuzz's tanh half need the dilogarithm → swap them for a
+    polynomial shape first (that's exactly why the OD's `tanh` became the cubic).
+  - **Verify it actually wins in the FULL pipeline**, per shaper. On a bare hard
+    clip / tanh, 2nd-order measured *no better* (sometimes worse) than 1st-order —
+    so confirm a real reduction before keeping it, don't assume.
+- **The crackle was Overdrive-specific because only the OD had the two triggers**
+  (a clean blend and 2nd-order ADAA). The others don't crackle *today* simply
+  because they're still simple. When you rework one to add a clean blend or
+  2nd-order ADAA, bring the matching guards with it.
 
 ---
 
@@ -241,7 +276,18 @@ JUCE code can't be compiled offline — review the processor/editor by hand.
 
 ---
 
-## 11. Next targets (same method)
+## 11. Targets (same method — new models AND reworks)
+
+**Rework the existing drives** (currently simple stand-ins; give them the GD2
+treatment — circuit-fit voicing, real shaper, ADAA, calibrated feel):
+
+| Existing model | Real circuit to fit | Likely upgrades |
+|----------------|---------------------|-----------------|
+| **Black Rodent** (Distortion) | RAT (LM308, hard clip to ground, "Filter" tone) | circuit-fit the EQ; consider 2nd-order ADAA (sharp hard clip fizzes — polynomial F2 + peak guard); calibrated gain range |
+| **Round Fuzz** (Fuzz) | Fuzz Face / Tone Bender (germanium, bias-starved, asym) | bias/sag modelling, input-impedance interaction; 2nd-order needs a polynomial recast of the tanh half |
+| **Range '65 / EP Boost** (Boost) | Rangemaster / EP-3 | input-cap voicing already there; circuit-fit the exact corners |
+
+**New models** to add alongside:
 
 | Pedal | Topology delta | Engine knobs |
 |-------|---------------|--------------|
@@ -250,4 +296,6 @@ JUCE code can't be compiled offline — review the processor/editor by hand.
 | **Blues Breaker** | softer, **symmetric**, open low end | cubic clip, gentler emphasis, less bass-cut |
 | **Big Muff** | cascaded clipping stages, scooped mids | needs a 2-stage path + a mid *scoop* (negative midDb) — bigger change |
 
-For each: research → derive curve → fit → set clip/taper/tone → test → commit.
+For each (new or rework): research → derive curve → fit → pick clip shape +
+**ADAA order (§3)** → taper/tone/range (calibrated) → crackle-guard if it gains a
+clean blend or 2nd-order ADAA → test (maxabs + suite) → commit.
