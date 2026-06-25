@@ -26,25 +26,29 @@ opt into later).
 
 Chosen because it is `tanh`-like but **polynomial**, so both the 1st *and* 2nd
 antiderivatives are cheap closed forms → real 2nd-order ADAA (no dilogarithm).
+Shipped form is **unit-slope at 0** (so small-signal gain matches the old `tanh`
+voicing) and saturates at ±2/3 (level made up by `outTrim`):
 
 ```
-f(x)  = 1.5x − 0.5x³            for |x| ≤ 1
-      = sign(x)                 for |x| > 1
-f'(x) = 1.5 − 1.5x²            (= 0 at |x|=1, so C¹-smooth into the flat region)
+f(x)  = x − x³/3               for |x| ≤ 1
+      = sign(x) · 2/3           for |x| > 1
+f'(x) = 1 − x²                 (= 0 at |x|=1, so C¹-smooth into the flat region)
 ```
 
-Antiderivatives (F1 even, F2 odd; constants chosen for continuity at |x|=1):
+Antiderivatives (F1 even, F2 odd; constants chosen for continuity at |x|=1,
+a = |x|, s = sign x):
 
 ```
 |x| ≤ 1:
-  F1(x) = 0.75x² − 0.125x⁴
-  F2(x) = 0.25x³ − 0.025x⁵
-|x| > 1   (a = |x|, s = sign x):
-  F1(x) =  a − 0.375
-  F2(x) =  s · (0.5a² − 0.375a + 0.1)
+  F1(x) = x²/2 − x⁴/12
+  F2(x) = x³/6 − x⁵/60
+|x| > 1:
+  F1(x) = (2/3)·a − 1/4
+  F2(x) = s · ((1/3)·a² − a/4 + 1/15)
 ```
 
-Check: F1(1)=0.625, F2(1)=0.225 from both branches. ✔
+Check: F1(1)=5/12≈0.4167, F2(1)=3/20=0.15 from both branches. ✔ (see
+`DriveBlock::cubF/cubF1/cubF2`.)
 
 ## 2. Second-order ADAA
 
@@ -118,20 +122,58 @@ Keeps full backward-compat: any voicing with `emphDb=0, cleanBlend=0,
 dynDepth=0` behaves like a plain shaper, and `clip 0/1/2` are untouched, so
 Boost/Dist/Fuzz are unchanged.
 
-## Verification plan (add to `tests/drive_test.cpp`)
+## Verification — implemented in `tests/drive_test.cpp`, measured results
 
-- **2nd-order alias**: hot 5 kHz sine through OD, fold-back at 3 k/13 k is
-  lower than the 1st-order path (and far below naive). Target ≥ +6 dB vs naive.
-- **Frequency-selective clipping**: at high Drive, THD/harmonic energy on a
-  100 Hz tone ≪ THD on a 1 kHz tone (bass clipped least). New, key test.
-- **Clean blend preserves dynamics**: small-signal gain ≈ unity-ish; output
-  tracks input amplitude more linearly than `cleanBlend=0`.
-- **Envelope dynamics**: a quiet burst is cleaner (less harmonic energy) than a
-  loud burst at the same Drive (with `dynDepth>0`).
-- Keep **T1–T10** green (Off bit-exact, mid-hump, etc.).
+Built/run offline per the sandbox recipe (JUCE stub in `/tmp`). The two OD
+models are exposed as **model 0 "Green Drive"** (unchanged tanh) and **model 1
+"Green Drive II"** (this rework), so the suite A/Bs them directly.
 
-Build/run offline per the sandbox recipe (JUCE stub in `/tmp`, see memory
-`namrig-offline-build`).
+| Test | What it asserts | Measured |
+|------|-----------------|----------|
+| T11 | model 0 is byte-for-byte the legacy default; category now has 2 models | exact match ✔ |
+| T12 | 2nd-order ADAA crushes alias vs a naive cubic (hot 5 kHz) | **−36.4 dB** @ 3 kHz ✔ |
+| T13 | envelope dynamics: loud/quiet harmonic spread at the edge of breakup, v2 > v1 | **59×** (v2) vs 37× (v1) ✔ |
+| T14 | v2 is a midrange SHAPER at Drive 0 (static voicing) | 780 Hz **+10.1 dB** vs 100, +7.8 vs 3k ✔ |
+| T1–T10 | unchanged engine behaviour (Off bit-exact, mid-hump, Fuzz asym, …) | all green ✔ |
+
+## Knob feel (the part players notice)
+
+Tuned so the Drive and Tone *sweeps* match a real TS, not just the clipped tone:
+
+- **Drive taper = log/audio pot.** A real TS Drive pot is a log/audio taper and the
+  stage gain ≈ pot resistance, which is *exactly* the engine's existing
+  `gMin·(gMax/gMin)^drive` map (equal dB per rotation; gain stays modest through
+  the lower half then ramps up top). No warp added — that map is the taper.
+- **Always doing something at minimum.** Floor gain `gMin = 3.0` leaves it
+  breaking up a little even at Drive 0 (≈1–2 % THD on mids), like the real
+  circuit where the signal already nips the diodes. Range `gMin 3 → gMax 33`.
+- **Static voicing = works as a shaper.** `shapeTrack = 0`: the mid hump +
+  bass-cut are present at *every* Drive, including off — so "Drive off, Tone
+  past noon" gives the classic always-on TS mid-shaper/boost. Only the clipping
+  (gain + emphasis) scales with Drive; the EQ voicing is fixed, as in the real
+  fixed tone stack. The hump itself (**+3.6 dB @ 820 Hz, low-cut 220, top LP
+  1900**) is **fit to the measured TS808 transfer function** — see
+  [circuit-accuracy.md](circuit-accuracy.md). (Our first pass was ~2× over-
+  humped; deriving it from the schematic corrected that.)
+- **Tone = treble shelf, bass fixed.** The Tone knob moves treble above ~1.2 kHz
+  (±~8 dB) and leaves the bass/low-mids put — the TS tone control, *not* the
+  engine's default symmetric tilt (which also see-sawed the bass). Measured: at
+  the extremes, 100 Hz shifts <0.3 dB while 5 kHz swings ±~8 dB.
+
+These are voicing-level changes to **v2 only** (clip 3); v1 "Green Drive" keeps
+its original taper/tilt for the A/B. Starting values — easy to fine-tune by ear
+(raise `gMin` for more grit at minimum, change `emphDb`/`cleanBlend` for more or
+less of the smooth/dynamic character).
+
+Notes from measurement:
+- **Levels matched**: model 1 `outTrim` set to **1.15** so v1/v2 sit within ~5 %
+  RMS across the Drive sweep — a fair A/B.
+- The emphasis's audible effect is mainly **softer, anti-aliased high harmonics**
+  + a tighter low end under drive; the cubic is intrinsically a touch brighter
+  than `tanh`, but those harmonics are clean (2nd-order ADAA) rather than gritty.
+  A simple "bass-THD ≪ mid-THD" metric is confounded by the existing low-cut +
+  mid-hump EQ, so it isn't asserted directly — T14 instead proves the emphasis
+  is transparent until the clipper engages.
 
 ## Sources
 

@@ -9,10 +9,13 @@ zero-latency / bit-exact-off ethos; no oversampling). See the design doc.
 
 | File | What's in it |
 |------|--------------|
+| **[building-drives-playbook.md](building-drives-playbook.md)** | **START HERE for a new pedal** — the workflow, the full toolkit, lessons learned, next targets |
 | [tube-screamer-circuit.md](tube-screamer-circuit.md) | TS808 clipping-amp circuit analysis — the reference for our Green Drive |
 | [overdrive-family.md](overdrive-family.md) | TS vs SD-1 vs Klon: symmetric/asymmetric clipping, clean-blend, what each contributes |
 | [current-driveblock.md](current-driveblock.md) | What `DriveBlock.h` does *today* (pre-rework baseline) |
 | [option-a-design.md](option-a-design.md) | The plan: cubic soft-clip + 2nd-order ADAA + pre/de-emphasis + envelope dynamics, with the math |
+| [circuit-accuracy.md](circuit-accuracy.md) | Deriving the TS808 response from the schematic (no pedal needed) + fitting our voicing to it (RMS 0.66 dB) |
+| [ts808_response.py](ts808_response.py) | The runnable derivation/fit script |
 
 ## The three audible ideas we're stealing from the real circuits
 

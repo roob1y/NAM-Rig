@@ -48,11 +48,15 @@
 //     "secret" / Klon feed-forward) -> preserves dynamics, never pure fizz.
 //   * envelope dynamics: a follower on the input nudges the clean blend so soft
 //     picking cleans up and digging in bites — touch sensitivity.
-//   * STATIC voicing (shapeTrack 0): the ~780 Hz mid hump + bass-cut are present
+//   * STATIC voicing (shapeTrack 0): the ~720 Hz mid hump + bass-cut are present
 //     even at Drive 0, so the pedal works as an always-on mid SHAPER (drive off,
 //     tone past noon) — like the real fixed tone stack. Only the clipping (gain
 //     + emphasis) scales with Drive; the floor gain (gMin) leaves it breaking up
-//     a little even at minimum, as the real circuit does.
+//     a little even at minimum, as the real circuit does. The mid peak (+3.6 dB
+//     @ 820 Hz, Q0.7) + low-cut (220) + top LP (1900) are FIT to the measured
+//     TS808 small-signal transfer function (see docs/drive/circuit-accuracy.md):
+//     +5.5 dB hump over 200 Hz @ ~720 Hz, matched to ~1 dB. (Our first pass was
+//     ~2x over-humped; the schematic, not the ear, settled it.)
 //   * TREBLE-shelf Tone (bass fixed): the Tone knob moves the treble above
 //     ~1.2 kHz and leaves bass/low-mids put — the TS tone control, not a tilt.
 //     Drive itself is the engine's log/audio-taper map (gain ~ pot resistance).
@@ -136,7 +140,7 @@ public:
             {"Green Drive", "mid-hump overdrive (v1 tanh)",
              { 0, 1.5f, 30.0f, 560.0f,  780.0f, 6.0f, 0.7f, 1300.0f, 0.05f,  720.0f, 1.10f, 1.0f, 1.0f,  0.0f, 700.0f, 0.00f, 0.0f}, false},
             {"Green Drive II", "feedback-clip overdrive (v2)",
-             { 3, 3.0f, 33.0f, 560.0f,  780.0f, 6.0f, 0.7f, 1300.0f, 0.00f, 1200.0f, 1.15f, 0.0f, 1.0f,  9.0f, 700.0f, 0.20f, 0.40f}, false},
+             { 3, 3.0f, 33.0f, 220.0f,  820.0f, 3.6f, 0.7f, 1900.0f, 0.00f, 1200.0f, 1.15f, 0.0f, 1.0f,  9.0f, 700.0f, 0.20f, 0.40f}, false},
         };
         static const Model dist[] = {
             {"Black Rodent", "hard-clip distortion",
