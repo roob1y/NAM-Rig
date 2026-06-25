@@ -837,7 +837,9 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     // Post-cab cuts ride with the cab block (Rig A).
     mChain.cab.setHpfHz(apvts.getRawParameterValue("cabHpf")->load());
     mChain.cab.setLpfHz(apvts.getRawParameterValue("cabLpf")->load());
-    mChain.cab.setBypassed(apvts.getRawParameterValue("cabOn")->load() < 0.5f);
+    // cabOn bypasses only the IR convolution; the Low/High cuts always run, so
+    // they stay usable with a baked-in-speaker NAM (no IR).
+    mChain.cab.setConvBypassed(apvts.getRawParameterValue("cabOn")->load() < 0.5f);
 
     // ---- Rig B voice (independent amp AA + EQ + cab cuts; see oversampleB) ----
     {
@@ -850,7 +852,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.eqB.setBypassed(apvts.getRawParameterValue("eqOnB")->load() < 0.5f);
     mChain.cabB.setHpfHz(apvts.getRawParameterValue("rigBcabHpf")->load());
     mChain.cabB.setLpfHz(apvts.getRawParameterValue("rigBcabLpf")->load());
-    mChain.cabB.setBypassed(apvts.getRawParameterValue("cabOnB")->load() < 0.5f);
+    mChain.cabB.setConvBypassed(apvts.getRawParameterValue("cabOnB")->load() < 0.5f);
 
     // ---- Dual-rig mixer (mode / per-rig level + pan + polarity + align) ----
     mChain.setLevelA(juce::Decibels::decibelsToGain(apvts.getRawParameterValue("rigLevelA")->load()));
