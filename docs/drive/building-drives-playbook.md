@@ -18,6 +18,8 @@ Read this first, then the companions:
 [circuit-accuracy.md](circuit-accuracy.md) (the fit method),
 [tube-screamer-circuit.md](tube-screamer-circuit.md) /
 [overdrive-family.md](overdrive-family.md) (circuit references).
+Worked reworks: [proco-rat.md](proco-rat.md) (RAT → Black Rodent II) is a full
+second example of this playbook end-to-end.
 
 ---
 
@@ -283,7 +285,7 @@ treatment — circuit-fit voicing, real shaper, ADAA, calibrated feel):
 
 | Existing model | Real circuit to fit | Likely upgrades |
 |----------------|---------------------|-----------------|
-| **Black Rodent** (Distortion) | RAT (LM308, hard clip to ground, "Filter" tone) | circuit-fit the EQ; consider 2nd-order ADAA (sharp hard clip fizzes — polynomial F2 + peak guard); calibrated gain range |
+| ~~**Black Rodent** (Distortion) → RAT~~ | **DONE — Black Rodent II** ([proco-rat.md](proco-rat.md)) | circuit-fit EQ (pre-clip mid-hump bloomed with Drive), hard clip on **2nd-order ADAA** (measured +10 dB vs 1st-order in the full pipeline — F2 + peak guard), "Filter" LP tone (darker CW), gMin 4/gMax 150 calibrated |
 | **Round Fuzz** (Fuzz) | Fuzz Face / Tone Bender (germanium, bias-starved, asym) | bias/sag modelling, input-impedance interaction; 2nd-order needs a polynomial recast of the tanh half |
 | **Range '65 / EP Boost** (Boost) | Rangemaster / EP-3 | input-cap voicing already there; circuit-fit the exact corners |
 
