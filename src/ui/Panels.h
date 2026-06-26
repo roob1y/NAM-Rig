@@ -2390,24 +2390,18 @@ public:
         const juce::String p = mPrefix;
         const bool isFront = (soloSlot >= 0);
 
-        mNum.setText(label, juce::dontSendNotification);
-        mNum.setJustificationType(juce::Justification::centred);
-        mNum.setColour(juce::Label::textColourId, colors::textDim);
-        addAndMakeVisible(mNum);
-        addAndMakeVisible(mIcon);
-
+        mBadgeText = label;                       // drawn as a coloured badge in paint()
         const juce::Colour laneCol = colors::laneColour(soloSlot);
-        mIcon.setAccent(laneCol); // tint the glyph + box border per lane
-        mIcon.onClick = [this] {   // click the icon to toggle this slot on/off
-            if (auto *prm = mApvts.getParameter(mPrefix + "On"))
-            {
-                const bool now = prm->getValue() >= 0.5f;
-                prm->beginChangeGesture();
-                prm->setValueNotifyingHost(now ? 0.0f : 1.0f);
-                prm->endChangeGesture();
-            }
-            refresh();
-        };
+        mLaneCol = laneCol;
+
+        // Explicit ON pill (new design): replaces the old click-the-icon toggle.
+        mOn.setButtonText("ON");
+        mOn.setClickingTogglesState(true);
+        mOn.getProperties().set("pill", true);
+        addAndMakeVisible(mOn);
+        mOnAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            apvts, p + "On", mOn);
+        mOn.onClick = [this] { refresh(); }; // relayout dim state when toggled
 
         mScope = std::make_unique<LaneScope>(apvts, p, laneCol);
         addAndMakeVisible(*mScope); // live LFO/effect motion for this slot
@@ -2498,23 +2492,21 @@ public:
 
         mP2Ratio = std::make_unique<LabeledKnob>(apvts, p + "P2Ratio", "Swp 2");
         addChildComponent(*mP2Ratio); // bi-phase only (Sweep Gen 2 rate ratio)
-        mSeries.setButtonText(""); // checkbox only; caption sits beneath (saves width)
+        // Series + Extreme kept (per design note) but restyled as small accent
+        // pills in the lane's right control stack, matching ON / S.
+        mSeries.setButtonText("Series");
+        mSeries.setClickingTogglesState(true);
+        mSeries.getProperties().set("pill", true);
         addChildComponent(mSeries); // bi-phase only (series/parallel routing)
         mSeriesAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             apvts, p + "Series", mSeries);
-        mSeriesLabel.setText("Series", juce::dontSendNotification);
-        mSeriesLabel.setJustificationType(juce::Justification::centred);
-        mSeriesLabel.setColour(juce::Label::textColourId, colors::textDim);
-        addChildComponent(mSeriesLabel); // bi-phase only (font sized by row height, like knob captions)
 
-        mExtreme.setButtonText(""); // checkbox only; "Extreme" caption sits beneath
-        addChildComponent(mExtreme); // phaser/uni-vibe/bi-phase only (unlocks the wild ranges)
+        mExtreme.setButtonText("Extreme");
+        mExtreme.setClickingTogglesState(true);
+        mExtreme.getProperties().set("pill", true);
+        addChildComponent(mExtreme); // chorus/flanger/phaser/vibrato/uni-vibe/bi-phase (unlocks wild ranges)
         mExtremeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             apvts, p + "Extreme", mExtreme);
-        mExtremeLabel.setText("Extreme", juce::dontSendNotification);
-        mExtremeLabel.setJustificationType(juce::Justification::centred);
-        mExtremeLabel.setColour(juce::Label::textColourId, colors::textDim);
-        addChildComponent(mExtremeLabel);
 
         // Every knob in the lane reads 0..10 by rotation (pedal-style), so the
         // mixed underlying params (Speed in Hz, the rest 0..1, Sweep 2 a ratio)
@@ -2549,6 +2541,15 @@ public:
     // just re-applies the layout for the current params (no combo hand-sync).
     void refresh() { applyType(); }
 
+    // Section routing: in PARALLEL the per-lane Mix is overridden (the lane runs
+    // full-wet, Mod Mix owns dry/wet), so grey the knob. It stays live in SERIES.
+    void setSectionParallel(bool p)
+    {
+        if (mSectionParallel == p) return;
+        mSectionParallel = p;
+        if (mMix) mMix->setEnabled(!p && mMix->isVisible());
+    }
+
     // Show/relayout the controls for the current Type/Sync/On (reads the params;
     // never touches the combo, so it's safe to call from a fresh user selection).
     void applyType()
@@ -2557,8 +2558,6 @@ public:
         const int type = (int)mApvts.getRawParameterValue(p + "Type")->load();
         const int sync = (int)mApvts.getRawParameterValue(p + "Sync")->load();
         const bool on = mApvts.getRawParameterValue(p + "On")->load() >= 0.5f;
-        mIcon.setType(type);
-        mIcon.setActive(on);
         if (type == mLastType && sync == mLastSync && on == mLastOn)
             return;
         // Only a TYPE change alters which controls are shown / their bounds. Sync
@@ -2575,6 +2574,7 @@ public:
             mDepth->setVisible(type != 2);                 // phaser: no depth knob
             mFeedback->setVisible(type == 1 || type == 2 || type == 8); // flanger/phaser/bi-phase
             mMix->setVisible(nam_rig::ModVoice::mixExposed((nam_rig::ModVoice::Type)type)); // chorus + flanger
+            mMix->setEnabled(!mSectionParallel && mMix->isVisible()); // greyed in parallel (Mod Mix owns dry/wet)
             mWave.setVisible(type == 3);                   // tremolo shape
             mRate->setVisible(!rotary);                    // rotary: slow/fast toggle, not a rate
             if (!rotary) // knob ends exactly at this effect's rate ceiling (no dead travel past the internal cap)
@@ -2602,10 +2602,8 @@ public:
             mWidth->setCaption(flanger ? "Spread" : "Width");
             mP2Ratio->setVisible(type == 8);               // bi-phase: Sweep Gen 2 ratio
             mSeries.setVisible(type == 8);                  // bi-phase: series/parallel
-            mSeriesLabel.setVisible(type == 8);
             const bool extremeable = (type == 0 || type == 1 || type == 2 || type == 4 || type == 6 || type == 8); // chorus/flanger/phaser/vibrato/uni-vibe/bi-phase
             mExtreme.setVisible(extremeable);               // unlock the wild ranges
-            mExtremeLabel.setVisible(extremeable);
         }
         mRate->setEnabled(sync == 0 || type == 9); // rate greyed when synced; ring mod ignores sync so its Freq stays live
         repaint();
@@ -2615,61 +2613,85 @@ public:
 
     void paint(juce::Graphics &g) override
     {
+        const bool on = mLastOn;
         auto b = getLocalBounds().toFloat().reduced(0.5f);
-        g.setColour(colors::panel);
-        g.fillRoundedRectangle(b, 8.0f);
-        g.setColour(colors::outline);
-        g.drawRoundedRectangle(b, 8.0f, 1.0f);
+
+        // New-design lane chip: dark inset fill, per-lane coloured border, 10px
+        // radius. The whole chip dims when the slot is off (mirrors the mockup's
+        // opacity treatment).
+        juce::Graphics::ScopedSaveState ss(g);
+        if (!on)
+            g.setOpacity(0.55f);
+        g.setColour(juce::Colour(0xff191c21)); // lane chip surface
+        g.fillRoundedRectangle(b, 10.0f);
+        g.setColour(on ? mLaneCol.withAlpha(0.85f) : colors::outline);
+        g.drawRoundedRectangle(b, 10.0f, 1.0f);
+
+        // Coloured number/letter badge (lane colour fill, near-black digit).
+        if (!mBadge.isEmpty())
+        {
+            auto badge = mBadge.toFloat();
+            g.setColour(mLaneCol);
+            g.fillRoundedRectangle(badge, 7.0f);
+            g.setColour(colors::bg);
+            g.setFont(fonts::archivo(13.0f, fonts::ExtraBold));
+            g.drawText(mBadgeText, mBadge, juce::Justification::centred);
+        }
     }
 
     void resized() override
     {
-        auto area = getLocalBounds().reduced(9, 7);
-        auto numCol = area.removeFromLeft(16);
-        mNum.setBounds(numCol); // lane number (LED removed)
-        area.removeFromLeft(6);
+        auto area = getLocalBounds().reduced(13, 8);
 
-        auto iconCol = area.removeFromLeft(62);
-        mIcon.setBounds(iconCol.withSizeKeepingCentre(62, juce::jmin(iconCol.getHeight(), 46)));
-        area.removeFromLeft(10);
+        // Coloured number/letter badge (drawn in paint()).
+        mBadge = area.removeFromLeft(26).withSizeKeepingCentre(26, 26);
+        area.removeFromLeft(14);
 
-        auto meta = area.removeFromLeft(92).withSizeKeepingCentre(92, juce::jmin(area.getHeight(), 50));
-        mType.setBounds(meta.removeFromTop(24));
-        meta.removeFromTop(4);
-        auto bottomMeta = meta.removeFromTop(22);
-        mSync.setBounds(bottomMeta.withWidth(92));          // non-rotary
-        mRotFast.setBounds(bottomMeta.removeFromLeft(52));  // rotary: slow/fast
-        area.removeFromLeft(10);
+        // Type dropdown chip + (below it) the Sync / rotary slow-fast row.
+        auto meta = area.removeFromLeft(104).withSizeKeepingCentre(104, juce::jmin(area.getHeight(), 58));
+        mType.setBounds(meta.removeFromTop(28));
+        meta.removeFromTop(5);
+        auto row2 = meta.removeFromTop(24);
+        mSync.setBounds(row2.withWidth(104));               // non-rotary
+        mRotFast.setBounds(row2.removeFromLeft(56));        // rotary: slow/fast
+        area.removeFromLeft(14);
 
-        if (mSoloSlot >= 0) // front slots only
+        // Right control stack (mockup idiom): ON over S, as accent pills. Series /
+        // Extreme pills (kept per design note) sit just left of it when shown;
+        // Tremolo's wave-shape selector takes the same right slot on the post lane.
         {
-            mSolo.setBounds(area.removeFromRight(30).withSizeKeepingCentre(30, 22));
+            auto col = area.removeFromRight(46);
+            const int btnH = 23, gap = 5;
+            const bool front = (mSoloSlot >= 0);
+            const int groupH = front ? btnH * 2 + gap : btnH;
+            auto stack = col.withSizeKeepingCentre(42, juce::jmin(area.getHeight() - 4, groupH));
+            mOn.setBounds(stack.removeFromTop(btnH));
+            if (front)
+            {
+                stack.removeFromTop(gap);
+                mSolo.setBounds(stack.removeFromTop(btnH));
+            }
             area.removeFromRight(8);
-        }
-        if (mSeries.isVisible()) // "Series" caption above a small checkbox, centred as one unit
-        {
-            auto col = area.removeFromRight(44);
-            area.removeFromRight(6);
-            const int groupH = 14 + 3 + 13; // caption (knob-size) + gap + small box
-            auto stack = col.withSizeKeepingCentre(44, groupH);
-            mSeriesLabel.setBounds(stack.removeFromTop(14));
-            stack.removeFromTop(3);
-            mSeries.setBounds(stack.withSizeKeepingCentre(13, 13));
-        }
-        if (mExtreme.isVisible()) // "Extreme" caption above a small checkbox, same idiom as Series
-        {
-            auto col = area.removeFromRight(52);
-            area.removeFromRight(6);
-            const int groupH = 14 + 3 + 13;
-            auto stack = col.withSizeKeepingCentre(52, groupH);
-            mExtremeLabel.setBounds(stack.removeFromTop(14));
-            stack.removeFromTop(3);
-            mExtreme.setBounds(stack.withSizeKeepingCentre(13, 13));
         }
         if (mWave.isVisible())
         {
             mWave.setBounds(area.removeFromRight(84).withSizeKeepingCentre(84, 24));
             area.removeFromRight(8);
+        }
+        if (mSeries.isVisible() || mExtreme.isVisible())
+        {
+            auto col = area.removeFromRight(64);
+            area.removeFromRight(8);
+            const int btnH = 21, gap = 5;
+            const int n = (mExtreme.isVisible() ? 1 : 0) + (mSeries.isVisible() ? 1 : 0);
+            auto stack = col.withSizeKeepingCentre(62, n * btnH + (n - 1) * gap);
+            if (mExtreme.isVisible())
+            {
+                mExtreme.setBounds(stack.removeFromTop(btnH));
+                if (mSeries.isVisible()) stack.removeFromTop(gap);
+            }
+            if (mSeries.isVisible())
+                mSeries.setBounds(stack.removeFromTop(btnH));
         }
 
         // Knob order (left -> right), one consistent rule across every effect:
@@ -2715,16 +2737,19 @@ private:
     int mSoloSlot = -1; // 0-based front slot for solo; -1 = post lane (no solo)
     int mLastType = -1, mLastSync = -1;
     bool mLastOn = true;
-    juce::Label mNum;
-    ModFxIcon mIcon;
+    bool mSectionParallel = false; // SERIES = per-lane Mix live; PARALLEL = greyed
+    juce::Rectangle<int> mBadge;   // coloured number/letter badge (drawn in paint)
+    juce::String mBadgeText;       // "1".."3" or "P"
+    juce::Colour mLaneCol;         // per-lane accent (badge fill + chip border)
     std::unique_ptr<LaneScope> mScope;
     juce::ComboBox mType, mWave, mSync;
     std::unique_ptr<juce::ParameterAttachment> mTypeParamAtt; // robust binding for the filtered Type list
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mWaveAtt, mSyncAtt;
+    juce::ToggleButton mOn;   // explicit on/off pill (new design)
     juce::ToggleButton mSolo; // momentary dial-in (not APVTS-attached)
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mOnAtt;
     std::unique_ptr<LabeledKnob> mRate, mDepth, mFeedback, mMix, mWidth, mDrive, mManual, mP2Ratio, mHornDrum;
     juce::ToggleButton mRotFast, mSeries, mExtreme;
-    juce::Label mSeriesLabel, mExtremeLabel; // captions beneath the small checkboxes
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mRotFastAtt, mSeriesAtt, mExtremeAtt;
 };
 
@@ -2784,9 +2809,9 @@ public:
 
     void paint(juce::Graphics &g) override
     {
-        g.setColour(colors::textDim); // header (mirrors the rack's "SIGNAL FLOW")
-        g.setFont(RigLookAndFeel::withHeight(9.0f));
-        g.drawText("MOD MIX", getLocalBounds().removeFromTop(13), juce::Justification::centred);
+        g.setColour(colors::caption); // header (mirrors the rack's "CHAIN ORDER")
+        g.setFont(fonts::archivo(9.0f, fonts::SemiBold));
+        g.drawText("PARALLEL BLEND", getLocalBounds().removeFromTop(13), juce::Justification::centred);
         auto box = getLocalBounds().toFloat(); // bordered container (matches the rack)
         box.removeFromTop(15.0f);
         box = box.reduced(1.0f);
@@ -2831,28 +2856,25 @@ public:
                 g.drawLine(juce::Line<float>(pk, p), 1.0f);
             }
 
-        g.setFont(RigLookAndFeel::withHeight(10.0f));
+        g.setFont(fonts::archivo(9.5f, fonts::Bold));
         for (int i = 0; i < 3; ++i)
         {
             const auto p = scr(r, i);
-            const float rad = 3.0f + 4.0f * (mActive[i] ? w[i] : 0.0f);
-            g.setColour(mActive[i] ? colors::laneColour(i) : colors::outline);
+            const float rad = 3.5f + 4.0f * (mActive[i] ? w[i] : 0.0f);
+            const juce::Colour lc = colors::laneColour(i);
+            // Node is ALWAYS drawn in its lane colour (dim when the slot is off) so
+            // each corner has identity even before anything is blended in.
+            g.setColour(mActive[i] ? lc : lc.withAlpha(0.30f));
             g.fillEllipse(p.x - rad, p.y - rad, rad * 2.0f, rad * 2.0f);
-            const float ly = (i == 0) ? p.y - 13.0f - rad : p.y + 3.0f + rad; // clear the (weighted) node
-            if (mActive[i]) // blend weight as a percentage, in the lane colour
-            {
-                g.setColour(colors::laneColour(i));
-                // Anchor the corner labels inward so they never clip the box edge:
-                // bottom-left reads from the node rightward, bottom-right leftward.
-                const auto just = (i == 1) ? juce::Justification::centredLeft
-                                  : (i == 2) ? juce::Justification::centredRight
-                                             : juce::Justification::centred;
-                const int lx = (i == 1) ? (int)(p.x - 2.0f)
-                               : (i == 2) ? (int)(p.x - 38.0f)
-                                          : (int)(p.x - 20.0f);
-                g.drawText(juce::String(juce::roundToInt(w[i] * 100.0f)) + "%",
-                           lx, (int)ly, 40, 11, just);
-            }
+
+            // Persistent slot-number label ("1".."3" in the lane colour); the live
+            // blend weight is appended as a % once the slot is active.
+            juce::String lbl = juce::String(i + 1);
+            if (mActive[i])
+                lbl += "  " + juce::String(juce::roundToInt(w[i] * 100.0f)) + "%";
+            const float ly = (i == 0) ? p.y - 15.0f - rad : p.y + 5.0f + rad;
+            g.setColour(mActive[i] ? lc : lc.withAlpha(0.60f));
+            g.drawText(lbl, (int)(p.x - 26.0f), (int)ly, 52, 11, juce::Justification::centred);
         }
 
         // Puck takes the blended colour of the three lane accents by weight.
@@ -2988,9 +3010,9 @@ public:
     void paint(juce::Graphics &g) override
     {
         // Header + bordered container (matches the blend pad's framing).
-        g.setColour(colors::textDim);
-        g.setFont(RigLookAndFeel::withHeight(9.0f));
-        g.drawText("SIGNAL FLOW", getLocalBounds().removeFromTop(13),
+        g.setColour(colors::caption);
+        g.setFont(fonts::archivo(9.0f, fonts::SemiBold));
+        g.drawText("CHAIN ORDER", getLocalBounds().removeFromTop(13),
                    juce::Justification::centred);
         const auto box = boxRect();
         g.setColour(colors::scopeBg);
@@ -3239,11 +3261,10 @@ public:
         mPostLane = std::make_unique<ModSlotLane>(apvts, "post", "P", -1);
         addAndMakeVisible(*mPostLane);
 
-        mRouting.addItemList({"Series", "Parallel"}, 1);
-        addAndMakeVisible(mRouting);
-        mRoutingAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-            apvts, "modRouting", mRouting);
-        mRouting.onChange = [this] { refreshRouting(); };
+        mRouting = std::make_unique<SegmentedControl>(
+            apvts, "modRouting", juce::StringArray{"Series", "Parallel"});
+        addAndMakeVisible(*mRouting);
+        mRouting->onChange = [this](int) { refreshRouting(); };
 
         mPad = std::make_unique<BlendPad>(apvts);
         addChildComponent(*mPad); // parallel only
@@ -3315,10 +3336,12 @@ public:
     // Series -- the two faces of "how the slots combine".
     void refreshRouting()
     {
-        const bool par = (mRouting.getSelectedId() == 2);
+        const bool par = (mRouting && mRouting->index() == 1);
         mPad->setVisible(par);
         mModMix->setVisible(par);
         mRack->setVisible(!par);
+        for (auto &l : mLanes) // grey each lane's Mix knob in parallel (Mod Mix owns dry/wet)
+            if (l) l->setSectionParallel(par);
         if (par == mParallel)
             return; // visibility refreshed; layout already matches the mode
         mParallel = par;
@@ -3362,6 +3385,24 @@ public:
         g.setFont(RigLookAndFeel::withHeight(9.0f));
         g.drawText("IN", mSpine.getX() - 3, mSpine.getY() - 13, 26, 11, juce::Justification::centred);
         g.drawText("OUT", mSpine.getX() - 3, (int)mPostLaneY - 5, 26, 11, juce::Justification::centred);
+
+        // POST · SPEAKER STAGE divider sitting just above the post lane: a centred
+        // caption flanked by two thin rules (mockup idiom).
+        if (!mPostDivider.isEmpty())
+        {
+            auto d = mPostDivider.toFloat();
+            auto f = fonts::archivo(9.0f, fonts::SemiBold);
+            const juce::String label = juce::String::fromUTF8("POST \xC2\xB7 SPEAKER STAGE");
+            const float tw = juce::GlyphArrangement::getStringWidth(f, label) + 4.0f;
+            const float cy = d.getCentreY();
+            const float cx = d.getCentreX();
+            g.setColour(colors::divider);
+            g.fillRect(d.getX(), cy, cx - tw * 0.5f - d.getX() - 4.0f, 1.0f);
+            g.fillRect(cx + tw * 0.5f + 4.0f, cy, d.getRight() - (cx + tw * 0.5f + 4.0f), 1.0f);
+            g.setColour(colors::caption);
+            g.setFont(f);
+            g.drawText(label, d, juce::Justification::centred);
+        }
     }
 
     void resized() override
@@ -3369,7 +3410,8 @@ public:
         // Routing toggle (Series/Parallel) sits in the header's top-right corner,
         // vertically centred in the same band as the title.
         auto hdr = getLocalBounds().removeFromTop(contentArea().getY()).reduced(16, 0);
-        mRouting.setBounds(hdr.removeFromRight(86).withSizeKeepingCentre(86, 24));
+        const int rw = mRouting ? mRouting->idealWidth() : 120;
+        mRouting->setBounds(hdr.removeFromRight(rw).withSizeKeepingCentre(rw, 26));
 
         auto area = contentArea();
         const int n = nam_rig::ModBlock::kSlots, gap = 8;
@@ -3423,8 +3465,7 @@ private:
     std::vector<float> mArrowYs;
     std::array<float, (size_t)nam_rig::ModBlock::kSlots> mLaneCenters{}; // parallel spine taps
     float mPostLaneY = 0.0f;                                             // OUT label / line end
-    juce::ComboBox mRouting;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mRoutingAtt;
+    std::unique_ptr<SegmentedControl> mRouting;
     std::unique_ptr<BlendPad> mPad;
     std::unique_ptr<ChainRack> mRack;
     std::unique_ptr<HKnob> mModMix;

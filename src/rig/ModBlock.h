@@ -378,6 +378,13 @@ public:
     void setDepth(float d) { mDepth = d; }
     void setFeedback(float f) { mFeedback = f; }   // Flanger/Phaser only
     void setMix(float m) { mMix = m; }
+    // Force the wet/dry blend to 100% wet regardless of the Mix knob. The SECTION
+    // sets this on the front slots in PARALLEL routing, where each lane runs on a
+    // dry copy and the single global Mod Mix owns the dry/wet -- so a lane's own
+    // Mix must not re-inject dry into the bus (that would double-count dry). In
+    // SERIES this is off and the per-lane Mix applies as normal. Smoothed via mMixZ
+    // so toggling routing doesn't click.
+    void setForceFullWet(bool f) { mForceFullWet = f; }
     void setManual(float m) { mManual = m; }       // Flanger: static comb position (M-126 Manual)
     void setInvert(bool inv) { mInvert = inv; }    // Flanger: phase-invert the wet/regen path
     void setP2Ratio(float r) { mP2Ratio = r; }     // Bi-Phase: Sweep Gen 2 rate as a ratio of Gen 1
@@ -524,6 +531,8 @@ public:
         float mixTarget = mixFor(ty, mMix); // only Chorus (+ Extreme flanger) use the knob
         if (ty == kFlanger && mExtreme)
             mixTarget = mMix; // Extreme TZF: uncap the flanger mix so the pure two-tape pair (deepest null) is reachable
+        if (mForceFullWet)
+            mixTarget = 1.0f; // parallel routing: lane is full wet, Mod Mix owns dry/wet
 
         // Ring-mod carrier: the Rate knob (free rate, sync ignored -- the carrier is
         // audio-rate) maps exponentially to the carrier Hz. Phase advances per
@@ -1245,6 +1254,7 @@ private:
     float mP2Ratio = 1.5f;                 // Bi-Phase Sweep Gen 2 rate ratio
     bool mSeries = false;                  // Bi-Phase series (true) / parallel (false)
     bool mExtreme = false;                 // per-slot Extreme switch (wild ranges unlocked)
+    bool mForceFullWet = false;            // section sets this in PARALLEL: lane runs 100% wet
     float mSeriesZ = 0.0f;                 // smoothed routing crossfade (de-click)
     float mWidth = 1.0f;
     int mUserWave = 0;                          // Tremolo's Shape choice
@@ -1359,7 +1369,15 @@ public:
     // runs on the dry input into its own branch, blended by the pad, then ONE
     // global Mod Mix vs dry so dry is counted once). NOTE: distinct from the
     // per-slot Bi-Phase series/parallel (setSeries) -- this is the whole section.
-    void setParallel(bool p) { mParallel = p; }
+    void setParallel(bool p)
+    {
+        mParallel = p;
+        // In parallel each front lane runs on a dry copy and is summed into the
+        // mod-bus, with one global Mod Mix owning dry/wet -- so force the lanes
+        // full-wet (their own Mix would otherwise re-inject dry). Series leaves the
+        // per-lane Mix in charge.
+        for (int s = 0; s < kSlots; ++s) mVoice[(size_t)s].setForceFullWet(p);
+    }
     bool parallel() const { return mParallel; }
     void setPad(float x, float y) { mPadX = x; mPadY = y; } // parallel blend puck (0..1 each)
     void setModMix(float m) { mModMix = m; }                // parallel: mod-bus vs dry (1 = full bus)
