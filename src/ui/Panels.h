@@ -1931,39 +1931,7 @@ public:
     // Auto tone descriptor (1-2 words) from the IR's per-zone energy, relative to
     // its own average. Pure function of the smoothed response — same data the
     // heat map shows, just named.
-    static juce::String classifyCharacter(const float *resp)
-    {
-        const double zfLo = nam_rig::CabBlock::kResFLo, zfHi = nam_rig::CabBlock::kResFHi;
-        const int P = nam_rig::CabBlock::kResPts;
-        const double lr = std::log(zfHi / zfLo);
-        auto zavg = [&](double a, double b) {
-            int i0 = juce::jlimit(0, P - 1, (int)std::round((double)(P - 1) * std::log(a / zfLo) / lr));
-            int i1 = juce::jlimit(0, P - 1, (int)std::round((double)(P - 1) * std::log(b / zfLo) / lr));
-            float s = 0.0f;
-            for (int i = i0; i <= i1; ++i) s += resp[i];
-            return s / (float)(i1 - i0 + 1);
-        };
-        const float lows = zavg(40, 120), body = zavg(120, 400), mids = zavg(400, 1500),
-                    pres = zavg(1500, 4000), fizz = zavg(4000, 8000);
-        const float tilt = 0.5f * (pres + fizz) - 0.5f * (lows + body);
-        const float scoop = 0.5f * (body + pres) - mids;
-
-        const char *t1 = (tilt > 3.0f) ? "Bright" : (tilt < -3.0f ? "Dark" : nullptr);
-        struct C { const char *w; float s; };
-        const C cs[] = {{"thick", body - 3.0f}, {"scooped", scoop - 4.0f}, {"present", pres - 3.0f},
-                        {"fizzy", fizz - 4.0f}, {"boomy", lows - 5.0f}, {"mid-forward", mids - 3.0f}};
-        const char *t2 = nullptr;
-        float best = 0.0f;
-        for (auto &c : cs) if (c.s > best) { best = c.s; t2 = c.w; }
-
-        auto cap = [](const char *w) { juce::String s(w); return s.substring(0, 1).toUpperCase() + s.substring(1); };
-        if (t1 == nullptr && t2 == nullptr) return "Balanced";
-        if (t2 != nullptr && (juce::String(t2) == "fizzy" || juce::String(t2) == "present"))
-            return cap(t2); // already implies bright; keep it to one word
-        if (t1 != nullptr && t2 != nullptr) return juce::String(t1) + ", " + t2;
-        if (t1 != nullptr) return juce::String(t1);
-        return cap(t2);
-    }
+    static juce::String classifyCharacter(const float *resp) { return nam_rig::ir::classify(resp); }
 
     void resized() override
     {

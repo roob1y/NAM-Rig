@@ -10,12 +10,12 @@
 
 #include "Blocks.h"
 #include "Biquad.h"
+#include "IrAnalysis.h"
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_dsp/juce_dsp.h>
 #include <array>
 #include <atomic>
 #include <cmath>
-#include <vector>
 
 namespace nam_rig
 {
@@ -55,8 +55,8 @@ public:
     // mean (0 dB = the IR's average level). The range is the guitar band, not the
     // full 20-20k, since a cab does nothing musical above ~6 kHz. Computed once at
     // load (message thread); copyResponseDb returns false until an IR is loaded.
-    static constexpr int kResPts = 200;
-    static constexpr double kResFLo = 40.0, kResFHi = 8000.0;
+    static constexpr int kResPts = nam_rig::ir::kResPts; // single source: rig/IrAnalysis.h
+    static constexpr double kResFLo = nam_rig::ir::kResFLo, kResFHi = nam_rig::ir::kResFHi;
     bool copyResponseDb(float *dst) const
     {
         if (!mResValid.load())
@@ -141,40 +141,7 @@ private:
     // covers any real cab IR — the audio convolution still uses the full IR.
     void computeResponse(const juce::AudioBuffer<float> &ir, double fs)
     {
-        constexpr int kOrder = 15;          // 32768-pt FFT
-        constexpr int kN = 1 << kOrder;
-        const int len = juce::jmin(ir.getNumSamples(), kN);
-        std::vector<float> buf((size_t)kN * 2, 0.0f); // real in [0,kN); FFT writes mags
-        const float *d = ir.getReadPointer(0);
-        for (int i = 0; i < len; ++i)
-            buf[(size_t)i] = d[i];
-        juce::dsp::FFT(kOrder).performFrequencyOnlyForwardTransform(buf.data());
-
-        const double binHz = fs / (double)kN;
-        const int maxBin = kN / 2;
-        const double edge = std::pow(2.0, 1.0 / 12.0); // half of a 1/6-octave band
-        std::array<float, kResPts> db{};
-        double sum = 0.0;
-        for (int k = 0; k < kResPts; ++k)
-        {
-            const double f = kResFLo * std::pow(kResFHi / kResFLo, (double)k / (double)(kResPts - 1));
-            int lo = (int)std::floor(f / edge / binHz);
-            int hi = (int)std::ceil(f * edge / binHz);
-            lo = juce::jlimit(1, maxBin, lo);
-            hi = juce::jlimit(1, maxBin, hi);
-            if (hi < lo) hi = lo;
-            double p = 0.0;
-            for (int b = lo; b <= hi; ++b)
-                p += (double)buf[(size_t)b] * (double)buf[(size_t)b];
-            const double meanP = p / (double)(hi - lo + 1);
-            const float v = (float)(10.0 * std::log10(meanP + 1.0e-24));
-            db[(size_t)k] = v;
-            sum += v;
-        }
-        const float mean = (float)(sum / (double)kResPts);
-        for (auto &v : db)
-            v -= mean; // 0 dB = the IR's own average level
-        mResDb = db;
+        nam_rig::ir::computeResponse(ir.getReadPointer(0), ir.getNumSamples(), fs, mResDb.data());
         mResValid.store(true);
     }
 
