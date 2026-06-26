@@ -3551,28 +3551,45 @@ public:
         g.setColour(colors::accent.withAlpha(0.5f));
         g.fillRoundedRectangle(left, top, 3.0f, H, 1.5f);
 
+        // Mode: Dual (R unlinked) shows two independent trains; Ping-Pong shows ONE
+        // train alternating L/R; Single shows the linked pair. (DSP: Dual overrides ping.)
+        const bool dual = mApvts.getRawParameterValue("delaySyncR")->load() > 0.5f;
+        const bool ping = !dual && mApvts.getRawParameterValue("delayPingPong")->load() >= 0.5f;
+
         // L lane sits above the centre axis, R below; their separation opens with
         // Width (at Width 0 they collapse to the centre = mono, matching the DSP).
         const float sep = (0.06f + 0.20f * width) * H;
+        auto drawTap = [&](float x, float laneCy, float h) {
+            const float halfH = (0.04f + h * 0.16f) * H; // decays with feedback (floored so far taps stay visible)
+            const float bx = left + x * W;
+            g.setColour(colors::accent.withAlpha(juce::jlimit(0.1f, 1.0f, 0.25f + h * 0.75f)));
+            g.fillRoundedRectangle(bx - 3.0f, laneCy - halfH, 6.0f, 2.0f * halfH, 3.0f);
+        };
+        // First echo sits ONE full delay-interval after the dry line (time zero) so the
+        // dry->echo1 gap matches the echo->echo gap; the train runs to the right edge
+        // (short/tight delays still fill the width), bars fading with feedback.
         auto drawLane = [&](float t, float laneCy) {
             const float sp = spacingFor(t);
-            // First echo sits ONE full delay-interval after the dry line (time zero),
-            // so the dry->echo1 gap matches the echo->echo gap = the delay time.
-            // The train runs to the right edge (so short/tight delays still fill the
-            // width); bars shrink + fade with feedback rather than cutting off early.
+            float x = sp, h = 1.0f;
+            for (int i = 0; i < 48 && x < 0.97f; ++i) { drawTap(x, laneCy, h); h *= fb; x += sp; }
+        };
+
+        if (ping) // one train, hopping top<->bottom each repeat = the L/R bounce
+        {
+            const float sp = spacingFor(timeL);
             float x = sp, h = 1.0f;
             for (int i = 0; i < 48 && x < 0.97f; ++i)
             {
-                const float halfH = (0.04f + h * 0.16f) * H; // decays with feedback (floored so far taps stay visible)
-                const float bx = left + x * W;
-                g.setColour(colors::accent.withAlpha(juce::jlimit(0.1f, 1.0f, 0.25f + h * 0.75f)));
-                g.fillRoundedRectangle(bx - 3.0f, laneCy - halfH, 6.0f, 2.0f * halfH, 3.0f);
+                drawTap(x, (i % 2 == 0) ? (cy - sep) : (cy + sep), h);
                 h *= fb;
                 x += sp;
             }
-        };
-        drawLane(timeL, cy - sep);
-        drawLane(timeR, cy + sep);
+        }
+        else
+        {
+            drawLane(timeL, cy - sep);
+            drawLane(timeR, cy + sep);
+        }
 
         g.setColour(colors::captionDim);
         g.setFont(fonts::mono(9.0f, fonts::SemiBold));
@@ -3617,13 +3634,49 @@ public:
         mSyncRKnob->slider().onValueChange = [this] { refresh(); };
         addAndMakeVisible(*mSyncRKnob);
 
-        mPingPong = std::make_unique<ToggleSwitch>(apvts, "delayPingPong");
-        addAndMakeVisible(*mPingPong);
-        mPingPong->onChange = [this](bool) { if (mTaps) mTaps->repaint(); };
-        mPpLabel.setText("Ping-Pong", juce::dontSendNotification);
-        mPpLabel.setColour(juce::Label::textColourId, colors::text);
-        mPpLabel.setJustificationType(juce::Justification::centredRight);
-        addAndMakeVisible(mPpLabel);
+        // Stereo MODE selector (replaces the Ping-Pong toggle): the highlighted
+        // segment is the always-visible identifier. Single = one linked time;
+        // Dual = independent L/R divisions (Sync R active); Ping-Pong = L/R bounce.
+        // Manual control: it drives the underlying delaySyncR (Link) + delayPingPong
+        // states the DSP already routes from, so no new params.
+        mMode = std::make_unique<SegmentedControl>(
+            juce::StringArray{"Single", "Dual", "Ping-Pong"});
+        addAndMakeVisible(*mMode);
+        mMode->onChange = [this](int i) {
+            if (i == 1) // Dual: ping off; if R is Linked, match it to L (fallback 1/4 if L is Free)
+            {
+                setParamIndex("delayPingPong", 0);
+                if ((int)mApvts.getRawParameterValue("delaySyncR")->load() == 0)
+                {
+                    const int l = (int)mApvts.getRawParameterValue("delaySync")->load();
+                    setParamIndex("delaySyncR", l >= 1 ? l : 6);
+                }
+            }
+            else if (i == 2) // Ping-Pong: R Linked + bounce on
+            {
+                setParamIndex("delaySyncR", 0);
+                setParamIndex("delayPingPong", 1);
+            }
+            else // Single: R Linked, no bounce
+            {
+                setParamIndex("delaySyncR", 0);
+                setParamIndex("delayPingPong", 0);
+            }
+            refresh();
+        };
+
+        // Guitar delay presets: a quick menu that snapshots ONLY the delay params
+        // (the rest of the rig is untouched). Fast path to a usable sound.
+        mPresetBtn.setButtonText(juce::String::fromUTF8("Presets  \xE2\x96\xBE"));
+        addAndMakeVisible(mPresetBtn);
+        mPresetBtn.onClick = [this] {
+            juce::PopupMenu m;
+            const auto &ps = delayPresets();
+            for (int i = 0; i < (int)ps.size(); ++i)
+                m.addItem(i + 1, ps[(size_t)i].name);
+            m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&mPresetBtn),
+                            [this](int r) { if (r > 0) applyDelayPreset(r - 1); });
+        };
 
         mTapsCaption.setText("ECHO TAPS", juce::dontSendNotification);
         mTapsCaption.setColour(juce::Label::textColourId, colors::caption);
@@ -3633,16 +3686,20 @@ public:
         mTaps = std::make_unique<DelayTaps>(apvts);
         addAndMakeVisible(*mTaps);
 
+        // Wow/Flutter is tape character -> it belongs to the future tape delay, not
+        // the clean one. The DSP engine keeps it (mod amount stays 0 here).
         const std::pair<const char *, const char *> defs[] = {
             {"delayTime", "Time"},        {"delayFeedback", "Feedback"},
             {"delayLowCut", "Low Cut"},   {"delayTone", "High Cut"},
-            {"delayMod", "Wow/Flutter"},  {"delayWidth", "Width"},
-            {"delayMix", "Mix"}};
+            {"delayWidth", "Width"},      {"delayMix", "Mix"}};
         for (const auto &[id, caption] : defs)
         {
             mKnobs.push_back(std::make_unique<LabeledKnob>(apvts, id, caption));
             addAndMakeVisible(*mKnobs.back());
         }
+        // Mix (last knob) reads pedal-style 0-10 off the knob ROTATION, so the skew
+        // stays invisible -- the dial just feels smooth; ears, not a percentage.
+        mKnobs.back()->setRotationReadout(10.0);
         refresh();
     }
 
@@ -3666,21 +3723,76 @@ public:
         if (syncR > 0) // dual: show the right-side division too (kSyncNames index matches)
             t += juce::String::fromUTF8(" / ") + juce::String(kSyncNames[juce::jlimit(0, 13, syncR)]);
         setHeaderRight(t + juce::String::fromUTF8("  \xC2\xB7  FB ") + juce::String(fbPct) + "%");
+
+        // Mode identifier: Dual if R unlinked, else Ping-Pong if bouncing, else Single
+        // (matches the DSP, where Dual overrides ping). Sync R is only live in Dual.
+        const bool dual = syncR > 0;
+        const bool ping = mApvts.getRawParameterValue("delayPingPong")->load() >= 0.5f;
+        if (mMode) mMode->setActive(dual ? 1 : (ping ? 2 : 0));
+        if (mSyncRKnob) mSyncRKnob->setEnabled(dual);
+        // Width is an M/S spread on the wet -> only meaningful when there's stereo
+        // delay structure (Dual or Ping-Pong); in Single it does nothing, so grey it.
+        if (mKnobs.size() > 4) mKnobs[4]->setEnabled(dual || ping); // Width (now 5th knob)
         if (mTaps) mTaps->repaint();
+    }
+
+    // Set a choice/bool parameter to an integer value (UI -> param).
+    void setParamIndex(const char *id, int idx)
+    {
+        if (auto *p = mApvts.getParameter(id))
+        {
+            p->beginChangeGesture();
+            p->setValueNotifyingHost(p->convertTo0to1((float)idx));
+            p->endChangeGesture();
+        }
+    }
+
+    // Set any param to a real-world value (convertTo0to1 handles range/skew).
+    void setParamReal(const char *id, double val)
+    {
+        if (auto *p = mApvts.getParameter(id))
+        {
+            p->beginChangeGesture();
+            p->setValueNotifyingHost(p->convertTo0to1((float)val));
+            p->endChangeGesture();
+        }
+    }
+
+    // Guitar delay presets — full snapshots of the delay block only.
+    struct DPreset { const char *name; std::vector<std::pair<const char *, double>> kv; };
+    static const std::vector<DPreset> &delayPresets()
+    {
+        static const std::vector<DPreset> p = {
+            {"Slapback",       {{"delayOn",1},{"delaySync",0},{"delaySyncR",0},{"delayTime",100},{"delayFeedback",0.00},{"delayTone",8000},{"delayLowCut",200},{"delayWidth",1.00},{"delayMix",0.25},{"delayPingPong",0}}},
+            {"Quarter",        {{"delayOn",1},{"delaySync",6},{"delaySyncR",0},{"delayTime",500},{"delayFeedback",0.30},{"delayTone",8000},{"delayLowCut",200},{"delayWidth",1.00},{"delayMix",0.28},{"delayPingPong",0}}},
+            {"Dotted Lead",    {{"delayOn",1},{"delaySync",8},{"delaySyncR",0},{"delayTime",375},{"delayFeedback",0.40},{"delayTone",6000},{"delayLowCut",270},{"delayWidth",1.00},{"delayMix",0.40},{"delayPingPong",0}}},
+            {"Gallop",         {{"delayOn",1},{"delaySync",8},{"delaySyncR",6},{"delayTime",375},{"delayFeedback",0.30},{"delayTone",5000},{"delayLowCut",250},{"delayWidth",1.00},{"delayMix",0.38},{"delayPingPong",0}}},
+            {"Ambient Wash",   {{"delayOn",1},{"delaySync",6},{"delaySyncR",0},{"delayTime",500},{"delayFeedback",0.62},{"delayTone",5000},{"delayLowCut",220},{"delayWidth",1.00},{"delayMix",0.40},{"delayPingPong",0}}},
+            {"Dub Echo",       {{"delayOn",1},{"delaySync",6},{"delaySyncR",0},{"delayTime",500},{"delayFeedback",0.21},{"delayTone",1500},{"delayLowCut",250},{"delayWidth",1.00},{"delayMix",0.50},{"delayPingPong",1}}},
+        };
+        return p;
+    }
+    void applyDelayPreset(int idx)
+    {
+        const auto &ps = delayPresets();
+        if (idx < 0 || idx >= (int)ps.size()) return;
+        for (const auto &kv : ps[(size_t)idx].kv)
+            setParamReal(kv.first, kv.second);
+        refresh();
     }
 
     void resized() override
     {
         auto body = bodyArea();
 
-        // Top strip: Sync + Sync R stepped knobs (left); Ping-Pong (right).
+        // Top strip: Sync + Sync R stepped knobs (left); mode selector (right).
         auto top = body.removeFromTop(96).reduced(24, 6);
         mSyncKnob->setBounds(top.removeFromLeft(80).reduced(3, 0));
         mSyncRKnob->setBounds(top.removeFromLeft(80).reduced(3, 0));
-        auto ppCol = top.removeFromRight(150);
-        mPpLabel.setBounds(ppCol.removeFromRight(86).withSizeKeepingCentre(86, 20));
-        ppCol.removeFromRight(6);
-        mPingPong->setBounds(ppCol.removeFromRight(46).withSizeKeepingCentre(46, 24));
+        const int mw = mMode ? mMode->idealWidth() : 240;
+        mMode->setBounds(top.removeFromRight(mw).withSizeKeepingCentre(mw, 28));
+        top.removeFromLeft(16);
+        mPresetBtn.setBounds(top.removeFromLeft(118).withSizeKeepingCentre(118, 28));
 
         // "ECHO TAPS" caption above the visualiser.
         auto capRow = body.removeFromTop(20).reduced(24, 0);
@@ -3714,9 +3826,10 @@ private:
     }
 
     juce::AudioProcessorValueTreeState &mApvts;
-    juce::Label mPpLabel, mTapsCaption;
+    juce::Label mTapsCaption;
+    juce::TextButton mPresetBtn; // delay-only preset menu
     std::unique_ptr<LabeledKnob> mSyncKnob, mSyncRKnob;
-    std::unique_ptr<ToggleSwitch> mPingPong;
+    std::unique_ptr<SegmentedControl> mMode; // Single / Dual / Ping-Pong selector
     std::unique_ptr<DelayTaps> mTaps;
     std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
 };

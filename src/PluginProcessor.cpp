@@ -356,10 +356,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("delayMod", 1), "Delay Wow/Flutter",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.15f));
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f)); // 0 on the clean delay; the tape delay will expose this
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("delayMix", 1), "Delay Mix",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.25f));
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f, 0.5f), 0.25f)); // skew: finer control low-mix
     // Right-side division: index 0 = Link (R mirrors L); 1..13 mirror
     // DelayBlock::kSyncBeats[1..13]. Unlinking = dual independent L/R delay.
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
