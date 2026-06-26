@@ -3678,6 +3678,14 @@ public:
                             [this](int r) { if (r > 0) applyDelayPreset(r - 1); });
         };
 
+        // Delay CHARACTER selector (Clean / Tape Echo) -> delayCharacter param.
+        // Tape engages the tape-echo voicing (saturation, bass/HF roll-off,
+        // wow/flutter + drift, tape glide); Clean is the transparent engine.
+        mCharacter = std::make_unique<SegmentedControl>(
+            apvts, "delayCharacter", juce::StringArray{"Clean", "Tape Echo"});
+        addAndMakeVisible(*mCharacter);
+        mCharacter->onChange = [this](int) { refresh(); };
+
         mTapsCaption.setText("ECHO TAPS", juce::dontSendNotification);
         mTapsCaption.setColour(juce::Label::textColourId, colors::caption);
         mTapsCaption.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.12f));
@@ -3793,6 +3801,12 @@ public:
         mMode->setBounds(top.removeFromRight(mw).withSizeKeepingCentre(mw, 28));
         top.removeFromLeft(16);
         mPresetBtn.setBounds(top.removeFromLeft(118).withSizeKeepingCentre(118, 28));
+        if (mCharacter)
+        {
+            top.removeFromLeft(16);
+            const int cw = mCharacter->idealWidth();
+            mCharacter->setBounds(top.removeFromLeft(cw).withSizeKeepingCentre(cw, 28));
+        }
 
         // "ECHO TAPS" caption above the visualiser.
         auto capRow = body.removeFromTop(20).reduced(24, 0);
@@ -3830,6 +3844,7 @@ private:
     juce::TextButton mPresetBtn; // delay-only preset menu
     std::unique_ptr<LabeledKnob> mSyncKnob, mSyncRKnob;
     std::unique_ptr<SegmentedControl> mMode; // Single / Dual / Ping-Pong selector
+    std::unique_ptr<SegmentedControl> mCharacter; // Clean / Tape Echo selector
     std::unique_ptr<DelayTaps> mTaps;
     std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
 };

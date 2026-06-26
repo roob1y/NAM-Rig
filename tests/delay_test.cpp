@@ -320,6 +320,134 @@ int main()
               "T10 digital echo at new time %zu (expect %zu)", at, expect);
     }
 
+    // ---- T11: Character::Clean is byte-for-byte the original (no-character) path ----
+    {
+        auto configure = [](DelayBlock &d) {
+            d.setTimeMs(220.0f);
+            d.setFeedback(0.7f);
+            d.setToneHz(6000.0f);
+            d.setLowCutHz(120.0f);
+            d.setWidth(0.8f);
+            d.setMix(0.5f);
+            d.setModAmount(0.3f);
+        };
+        DelayBlock base, clean;
+        configure(base);
+        configure(clean);
+        clean.setCharacter(DelayBlock::Character::Clean); // the ONLY difference
+        base.prepare({SR, BLK});
+        clean.prepare({SR, BLK});
+        // identical stereo input (a burst + tone so the loop, tone, lowcut, width
+        // and mod paths are all exercised)
+        std::vector<float> bl((size_t)SR, 0.0f), br = bl, cl, cr;
+        for (size_t i = 0; i < 1000; ++i)
+            bl[i] = br[i] = (float)(0.4 * std::sin(2.0 * M_PI * 330.0 * (double)i / SR));
+        cl = bl; cr = br;
+        run(base, bl, br);
+        run(clean, cl, cr);
+        double err = 0;
+        for (size_t i = 0; i < bl.size(); ++i)
+            err = std::max(err, (double)std::max(std::abs(bl[i] - cl[i]), std::abs(br[i] - cr[i])));
+        CHECK(err == 0.0, "T11 setCharacter(Clean) byte-for-byte vs default (max diff %.2e)", err);
+    }
+
+    // ---- T12: tape character darkens repeats more than the clean delay ----
+    {
+        auto tailHfRatio = [](bool tape) {
+            DelayBlock d;
+            d.setTimeMs(120.0f);
+            d.setFeedback(0.7f);
+            d.setToneHz(20000.0f); // tone knob OFF: isolate the character's own HF loss
+            d.setLowCutHz(20.0f);
+            d.setWidth(0.0f);      // mono wet -> simple
+            d.setMix(1.0f);
+            d.setModAmount(0.0f);
+            if (tape) d.setCharacter(DelayBlock::Character::Tape);
+            d.prepare({SR, BLK});
+            settle(d);
+            std::vector<float> l((size_t)SR, 0.0f), r = l;
+            l[0] = r[0] = 1.0f;
+            run(d, l, r);
+            // ratio of HF energy (one-pole HP ~3 kHz) to total energy in the tail
+            double hp = 0.0, prev = 0.0, eHi = 0.0, eAll = 0.0;
+            const double k = 1.0 - std::exp(-2.0 * M_PI * 3000.0 / SR);
+            for (size_t i = 4800; i < l.size(); ++i) {
+                hp += k * ((double)l[i] - hp);
+                const double hi = (double)l[i] - hp;
+                eHi += hi * hi; eAll += (double)l[i] * (double)l[i]; prev = hp;
+            }
+            (void)prev;
+            return eAll > 0 ? eHi / eAll : 0.0;
+        };
+        const double clean = tailHfRatio(false), tape = tailHfRatio(true);
+        CHECK(tape < clean * 0.7, "T12 tape repeats darker (HF frac tape %.4f < 0.7*clean %.4f)",
+              tape, clean * 0.7);
+    }
+
+    // ---- T13: tape saturation stays bounded + finite at hot input (alias/peak guard) ----
+    {
+        DelayBlock d;
+        d.setTimeMs(60.0f);
+        d.setFeedback(0.6f);
+        d.setToneHz(20000.0f);
+        d.setLowCutHz(20.0f);
+        d.setWidth(1.0f);
+        d.setMix(1.0f);
+        d.setModAmount(0.0f);
+        d.setCharacter(DelayBlock::Character::Tape);
+        d.prepare({SR, BLK});
+        settle(d);
+        // very hot near-Nyquist-ish sweep into the loop -> the ADAA peak guard must hold
+        std::vector<float> l((size_t)SR, 0.0f), r = l;
+        for (size_t i = 0; i < l.size(); ++i)
+            l[i] = r[i] = (float)(3.0 * std::sin(2.0 * M_PI * 5000.0 * (double)i / SR));
+        run(d, l, r);
+        double mx = 0; bool finite = true;
+        for (size_t i = 0; i < l.size(); ++i) {
+            if (!std::isfinite(l[i]) || !std::isfinite(r[i])) finite = false;
+            mx = std::max(mx, (double)std::max(std::abs(l[i]), std::abs(r[i])));
+        }
+        CHECK(finite, "T13 tape hot-input output all finite (no NaN/Inf)");
+        CHECK(mx < 8.0, "T13 tape hot-input bounded (maxabs %.3f < 8.0)", mx);
+    }
+
+    // ---- T14: tape self-oscillation at fb=1.0 sustains but stays bounded ----
+    {
+        // Feedback is normalised by the in-loop bump gain, so the tail still DECAYS
+        // through most of the knob and only self-oscillates near the top (~1.0+).
+        // Verify: at max feedback the tail sustains (vs a mid setting that decays),
+        // and the saturation keeps it bounded + finite.
+        auto tailMax = [&](float fbk) {
+            DelayBlock d;
+            d.setTimeMs(150.0f);
+            d.setFeedback(fbk);
+            d.setToneHz(20000.0f);
+            d.setLowCutHz(20.0f);
+            d.setWidth(1.0f);
+            d.setMix(1.0f);
+            d.setModAmount(0.0f);
+            d.setCharacter(DelayBlock::Character::Tape);
+            d.prepare({SR, BLK});
+            settle(d, 0.2);
+            std::vector<float> l((size_t)(SR * 8), 0.0f), r = l;
+            l[0] = r[0] = 0.5f; // seed the loop
+            run(d, l, r);
+            double mx = 0, tail = 0; bool finite = true;
+            for (size_t i = 0; i < l.size(); ++i) {
+                if (!std::isfinite(l[i])) finite = false;
+                mx = std::max(mx, (double)std::abs(l[i]));
+            }
+            for (size_t i = l.size() - (size_t)SR; i < l.size(); ++i) tail += (double)l[i] * l[i];
+            struct R { double tail, mx; bool finite; }; return R{tail, mx, finite};
+        };
+        auto hi = tailMax(1.1f);  // top of knob -> self-oscillates
+        auto mid = tailMax(0.5f); // mid -> decays to ~silence
+        CHECK(hi.finite, "T14 self-osc finite at max feedback");
+        CHECK(hi.mx < 8.0, "T14 self-osc bounded by saturation (maxabs %.3f < 8.0)", hi.mx);
+        CHECK(hi.tail > 100.0 * mid.tail + 1e-6,
+              "T14 max-fb sustains vs mid-fb decay (%.2e >> %.2e)", hi.tail, mid.tail);
+    }
+
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);
     return gFails == 0 ? 0 : 1;
 }

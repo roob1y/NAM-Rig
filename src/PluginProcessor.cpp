@@ -341,9 +341,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::NormalisableRange<float>(nam_rig::DelayBlock::kMinTimeMs,
                                        nam_rig::DelayBlock::kMaxTimeMs, 1.0f, 0.4f),
         350.0f, juce::AudioParameterFloatAttributes().withLabel("ms")));
+    // Feedback runs to 1.1 so the TAPE character can self-oscillate: its authentic
+    // band-pass loop is lossy, so the mid-band only takes off above ~unity, and the
+    // in-loop saturation bounds the runaway. The clean delay is internally clamped
+    // to kMaxFeedback (0.95) in DelayBlock::process, so the top of the range is
+    // tape-only and clean can never run away.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("delayFeedback", 1), "Delay Feedback",
-        juce::NormalisableRange<float>(0.0f, nam_rig::DelayBlock::kMaxFeedback, 0.01f),
+        juce::NormalisableRange<float>(0.0f, 1.1f, 0.01f),
         0.35f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("delayTone", 1), "Delay Tone",
@@ -372,6 +377,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::ParameterID("delayLowCut", 1), "Delay Low Cut",
         juce::NormalisableRange<float>(nam_rig::DelayBlock::kMinLowCutHz, 2000.0f, 1.0f, 0.45f),
         nam_rig::DelayBlock::kMinLowCutHz, juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    // Delay CHARACTER (like the reverb voicings): Clean = transparent engine;
+    // Tape Echo = tape-style echo (saturation, bass/HF roll-off, wow/flutter +
+    // drift, tape glide). Order must match DelayBlock::Character -- append only.
+    // Default Clean keeps the shipped delay unchanged.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("delayCharacter", 1), "Delay Character",
+        juce::StringArray{"Clean", "Tape Echo"}, 0));
 
     // --- Reverb (rig/ReverbBlock.h; verified by tests/reverb_test.cpp) ---
     // Reverb Decay/Tone/Predelay/Mod/Size are PER-CHARACTER (generated below); the UI
@@ -968,7 +980,14 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.delay.setFeedback(apvts.getRawParameterValue("delayFeedback")->load());
     mChain.delay.setToneHz(apvts.getRawParameterValue("delayTone")->load());
     mChain.delay.setLowCutHz(apvts.getRawParameterValue("delayLowCut")->load());
-    mChain.delay.setTimeMode(nam_rig::DelayBlock::TimeMode::Digital); // clean delay = crossfade (no repitch)
+    // Character drives the per-voicing loop stages + time-change feel. Clean = the
+    // transparent engine, forced to Digital (crossfade, no repitch); a tape
+    // character sets its own Tape glide inside setCharacter, so only force Digital
+    // for Clean.
+    const int delayChar = (int)apvts.getRawParameterValue("delayCharacter")->load();
+    mChain.delay.setCharacter(delayChar);
+    if (delayChar == (int)nam_rig::DelayBlock::Character::Clean)
+        mChain.delay.setTimeMode(nam_rig::DelayBlock::TimeMode::Digital);
     mChain.delay.setPingPong(apvts.getRawParameterValue("delayPingPong")->load() >= 0.5f);
     mChain.delay.setWidth(apvts.getRawParameterValue("delayWidth")->load());
     mChain.delay.setModAmount(apvts.getRawParameterValue("delayMod")->load());
