@@ -968,6 +968,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.delay.setFeedback(apvts.getRawParameterValue("delayFeedback")->load());
     mChain.delay.setToneHz(apvts.getRawParameterValue("delayTone")->load());
     mChain.delay.setLowCutHz(apvts.getRawParameterValue("delayLowCut")->load());
+    mChain.delay.setTimeMode(nam_rig::DelayBlock::TimeMode::Digital); // clean delay = crossfade (no repitch)
     mChain.delay.setPingPong(apvts.getRawParameterValue("delayPingPong")->load() >= 0.5f);
     mChain.delay.setWidth(apvts.getRawParameterValue("delayWidth")->load());
     mChain.delay.setModAmount(apvts.getRawParameterValue("delayMod")->load());

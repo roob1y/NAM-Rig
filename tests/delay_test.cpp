@@ -296,6 +296,30 @@ int main()
         CHECK(on < off * 0.6, "T9 low-cut@400 thins 80Hz repeats (on %.3e < 0.6*off %.3e)", on, off * 0.6);
     }
 
+    // ---- T10: Digital time mode — echo lands at the NEW time after a change ----
+    {
+        DelayBlock d;
+        d.setBpm(120.0);
+        d.setTimeMode(DelayBlock::TimeMode::Digital);
+        d.setSyncIndex(6); // 1/4 = 500 ms
+        d.setFeedback(0.0f);
+        d.setToneHz(20000.0f);
+        d.setLowCutHz(20.0f);
+        d.setMix(1.0f);
+        d.setModAmount(0.0f);
+        d.prepare({SR, BLK});
+        settle(d, 1.0);
+        d.setSyncIndex(9); // -> 1/8 = 250 ms; the crossfade runs during the settle
+        settle(d, 0.5);
+        std::vector<float> l((size_t)SR, 0.0f), r = l;
+        l[0] = r[0] = 1.0f;
+        run(d, l, r);
+        const size_t expect = (size_t)(0.25 * SR);
+        const size_t at = peakNear(l, expect, 400);
+        CHECK(std::llabs((long long)at - (long long)expect) <= 3,
+              "T10 digital echo at new time %zu (expect %zu)", at, expect);
+    }
+
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);
     return gFails == 0 ? 0 : 1;
 }

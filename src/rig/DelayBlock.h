@@ -44,6 +44,12 @@ public:
         0.25,       // 1/16
         1.0 / 6.0}; // 1/16T
 
+    // Time-change behaviour (a per-CHARACTER property, like the reverb voicings):
+    //   Tape    = glide the read position -> classic pitch swoop on time/sync change.
+    //   Digital = equal-power crossfade between the old and new FIXED positions ->
+    //             clean, no repitch. Wow/Flutter still modulates either way.
+    enum class TimeMode { Tape, Digital };
+
     const char *name() const override { return "Delay"; }
 
     void prepare(const BlockContext &ctx) override
@@ -60,6 +66,7 @@ public:
         // Time glide ~80 ms; mix/width zipper guard 10 ms.
         mTimeK = 1.0f - std::exp((float)(-1.0 / (0.080 * mFs)));
         mSmoothK = 1.0f - std::exp((float)(-1.0 / (0.010 * mFs)));
+        mXfadeInc = (float)(1.0 / (0.020 * mFs)); // ~20 ms digital time-change crossfade
         updateTone(true);
         updateLowCut(true);
         reset();
@@ -76,8 +83,11 @@ public:
             t.reset();
         mWow.reset();
         mFlutter.reset();
-        mTimeZ = (double)currentTimeMs();
-        mTimeZR = (double)currentTimeMsR();
+        const double b0 = (double)currentTimeMs(), b1 = (double)currentTimeMsR();
+        mBaseZ[0] = b0;
+        mBaseZ[1] = b1;
+        mTap[0] = {b0, b0, 1.0f, false}; // active, prev, xfade, fading
+        mTap[1] = {b1, b1, 1.0f, false};
         mMixZ = mMix;
         mWidthZ = mWidth;
     }
@@ -112,6 +122,7 @@ public:
         }
     }
     void setPingPong(bool pp) { mPingPong = pp; }
+    void setTimeMode(TimeMode m) { mTimeMode = m; } // per-character; clean delay = Digital
     void setWidth(float w) { mWidth = std::clamp(w, 0.0f, 1.0f); }
     void setModAmount(float m) { mModAmt = std::clamp(m, 0.0f, 1.0f); }
     void setMix(float m) { mMix = std::clamp(m, 0.0f, 1.0f); }
@@ -147,14 +158,6 @@ public:
 
         for (int i = 0; i < numSamples; ++i)
         {
-            // Per-channel time glide (double + snap; a float one-pole stalls an
-            // ulp-starved ~0.1 ms short -> echo lands a few samples early).
-            mTimeZ += (double)mTimeK * ((double)targetMsL - mTimeZ);
-            if (std::abs((double)targetMsL - mTimeZ) < 1.0e-4)
-                mTimeZ = (double)targetMsL;
-            mTimeZR += (double)mTimeK * ((double)targetMsR - mTimeZR);
-            if (std::abs((double)targetMsR - mTimeZR) < 1.0e-4)
-                mTimeZR = (double)targetMsR;
             mMixZ += mSmoothK * (mMix - mMixZ);
             mWidthZ += mSmoothK * (mWidth - mWidthZ);
 
@@ -163,16 +166,15 @@ public:
                                     + kFlutterDepthMs * (double)mFlutter.value());
             mWow.advance();
             mFlutter.advance();
-            // Read at dSmp-1 (taps read before this sample's write) so the
-            // effective delay is exactly dSmp; dSmp >= 2 keeps Hermite valid.
-            const double dSmpL = std::max(2.0, (mTimeZ + modMs) * 0.001 * mFs);
-            const double dSmpR = std::max(2.0, (mTimeZR + modMs) * 0.001 * mFs);
 
             const float dryL = left[i];
             const float dryR = stereo ? right[i] : dryL;
 
-            float wetL = mLine[0].readFrac(dSmpL - 1.0);
-            float wetR = stereo ? mLine[1].readFrac(dSmpR - 1.0) : wetL;
+            // Per-side wet read. Tape glides the read position (pitch swoop on a
+            // time/sync change); Digital crossfades old<->new fixed positions (no
+            // repitch). Wow/Flutter modulates the read in both modes.
+            float wetL = readWet(0, (double)targetMsL, modMs);
+            float wetR = stereo ? readWet(1, (double)targetMsR, modMs) : wetL;
 
             // In-loop tone shaping, re-applied every repeat: high-cut (Tone) then
             // low-cut, so the two together act as a feedback band-pass.
@@ -234,6 +236,53 @@ public:
     }
 
 private:
+    // One side's wet tap, honouring the time mode. baseTargetMs = sync-resolved
+    // base delay (no mod); modMs = wow/flutter offset, applied in both modes.
+    float readWet(int ch, double baseTargetMs, double modMs)
+    {
+        const double fsK = 0.001 * mFs;
+        if (mTimeMode == TimeMode::Tape)
+        {
+            // Glide the read position (double + snap; a float one-pole stalls an
+            // ulp-starved ~0.1 ms short -> echo lands a few samples early).
+            mBaseZ[(size_t)ch] += (double)mTimeK * (baseTargetMs - mBaseZ[(size_t)ch]);
+            if (std::abs(baseTargetMs - mBaseZ[(size_t)ch]) < 1.0e-4)
+                mBaseZ[(size_t)ch] = baseTargetMs;
+            const double d = std::max(2.0, (mBaseZ[(size_t)ch] + modMs) * fsK);
+            return mLine[(size_t)ch].readFrac(d - 1.0);
+        }
+        // Digital: on a base-time change, crossfade old->new FIXED positions (no
+        // repitch). A deadband ignores sub-sample jitter so a steady setting reads
+        // straight through; a real move (knob/sync) triggers a short crossfade.
+        TapXfade &t = mTap[(size_t)ch];
+        if (!t.fading)
+        {
+            if (std::abs(baseTargetMs - t.active) > kXfadeSnapMs)
+            {
+                t.prev = t.active;
+                t.active = baseTargetMs;
+                t.x = 0.0f;
+                t.fading = true;
+            }
+            else
+                t.active = baseTargetMs;
+        }
+        else
+            t.active = baseTargetMs; // lock the incoming tap to the latest target
+        const double dNew = std::max(2.0, (t.active + modMs) * fsK);
+        const float wetNew = mLine[(size_t)ch].readFrac(dNew - 1.0);
+        if (!t.fading)
+            return wetNew;
+        const double dPrev = std::max(2.0, (t.prev + modMs) * fsK);
+        const float wetPrev = mLine[(size_t)ch].readFrac(dPrev - 1.0);
+        t.x += mXfadeInc;
+        const float xx = std::min(1.0f, t.x);
+        if (t.x >= 1.0f)
+            t.fading = false;
+        const float g0 = std::cos(xx * 1.57079633f), g1 = std::sin(xx * 1.57079633f);
+        return g0 * wetPrev + g1 * wetNew; // equal-power -> steady level through the fade
+    }
+
     void updateTone(bool force)
     {
         mToneOn = mToneHz < 20000.0f;
@@ -277,7 +326,14 @@ private:
     int mSyncIdx = 0, mSyncIdxR = 0; // mSyncIdxR: 0 = Link (mirror L)
     bool mPingPong = false, mToneOn = true, mLowCutOn = false, mPrepared = false;
 
-    double mTimeZ = 350.0, mTimeZR = 350.0;
+    // Time-change behaviour + per-channel state.
+    static constexpr double kXfadeSnapMs = 0.3; // base move under this = no crossfade (deadband)
+    struct TapXfade { double active = 350.0, prev = 350.0; float x = 1.0f; bool fading = false; };
+    TimeMode mTimeMode = TimeMode::Tape;     // processor bakes the clean delay to Digital
+    double mBaseZ[2] = {350.0, 350.0};       // Tape: glided base delay (ms) per side
+    TapXfade mTap[2];                        // Digital: crossfade state per side
+    float mXfadeInc = 0.001f;                // per-sample ramp for the digital crossfade
+
     float mMixZ = 0.25f, mWidthZ = 1.0f;
     float mTimeK = 0.001f, mSmoothK = 0.01f;
 };

@@ -3521,12 +3521,14 @@ public:
         g.drawRoundedRectangle(r.reduced(0.5f), 11.0f, 1.0f);
 
         auto in = r.reduced(13.0f, 11.0f);
-        const float W = in.getWidth(), H = in.getHeight();
-        const float left = in.getX(), top = in.getY();
+        const float H = in.getHeight(), top = in.getY();
+        const float gutter = 16.0f;            // left margin reserved for the L / R labels
+        const float left = in.getX() + gutter; // dry bar + taps start just inside it
+        const float W = in.getRight() - left;
         const float cy = top + H * 0.5f;
 
         g.setColour(juce::Colour(0xff262c34)); // centre (L/R) axis
-        g.fillRect(in.getX(), cy - 0.5f, W, 1.0f);
+        g.fillRect(in.getX(), cy - 0.5f, in.getWidth(), 1.0f);
 
         const float rawTime = mApvts.getRawParameterValue("delayTime")->load();
         const float timeL = getTimeMs  ? getTimeMs()  : rawTime;
@@ -3534,9 +3536,15 @@ public:
         const float fb     = mApvts.getRawParameterValue("delayFeedback")->load();
         const float width  = mApvts.getRawParameterValue("delayWidth")->load();
 
-        const float tmin = nam_rig::DelayBlock::kMinTimeMs, tmax = nam_rig::DelayBlock::kMaxTimeMs;
+        // Tap spacing is PROPORTIONAL to delay time (ref: a 500 ms tap ~ 0.13 of
+        // the width), so musical ratios read true -- a 1/2 lane lands exactly twice
+        // the spacing of a 1/4 lane. Clamped only at the extremes so a very long
+        // delay keeps its first echoes on-screen and a very short one stays legible.
         auto spacingFor = [&](float t) {
-            return 0.085f + juce::jlimit(0.0f, 1.0f, (t - tmin) / (tmax - tmin)) * 0.20f;
+            // Floor low enough that every musical division stays proportional (1/16
+            // must read exactly half of 1/8); it only clamps sub-~45 ms Free times,
+            // where bars would otherwise overlap.
+            return juce::jlimit(0.012f, 0.55f, t * (0.13f / 500.0f));
         };
 
         // Dry reference bar at the far left.
@@ -3548,10 +3556,14 @@ public:
         const float sep = (0.06f + 0.20f * width) * H;
         auto drawLane = [&](float t, float laneCy) {
             const float sp = spacingFor(t);
-            float x = 0.035f, h = 1.0f;
-            for (int i = 0; i < 14 && h > 0.05f && x < 0.97f; ++i)
+            // First echo sits ONE full delay-interval after the dry line (time zero),
+            // so the dry->echo1 gap matches the echo->echo gap = the delay time.
+            // The train runs to the right edge (so short/tight delays still fill the
+            // width); bars shrink + fade with feedback rather than cutting off early.
+            float x = sp, h = 1.0f;
+            for (int i = 0; i < 48 && x < 0.97f; ++i)
             {
-                const float halfH = (0.04f + h * 0.16f) * H; // decays with feedback
+                const float halfH = (0.04f + h * 0.16f) * H; // decays with feedback (floored so far taps stay visible)
                 const float bx = left + x * W;
                 g.setColour(colors::accent.withAlpha(juce::jlimit(0.1f, 1.0f, 0.25f + h * 0.75f)));
                 g.fillRoundedRectangle(bx - 3.0f, laneCy - halfH, 6.0f, 2.0f * halfH, 3.0f);
@@ -3564,8 +3576,8 @@ public:
 
         g.setColour(colors::captionDim);
         g.setFont(fonts::mono(9.0f, fonts::SemiBold));
-        g.drawText("L", (int)left + 1, (int)top + 1, 20, 11, juce::Justification::centredLeft);
-        g.drawText("R", (int)left + 1, (int)in.getBottom() - 12, 20, 11, juce::Justification::centredLeft);
+        g.drawText("L", (int)in.getX(), (int)top + 1, 14, 11, juce::Justification::centred);
+        g.drawText("R", (int)in.getX(), (int)in.getBottom() - 12, 14, 11, juce::Justification::centred);
         g.drawText(juce::String::fromUTF8("DRY \xE2\x86\x92 FEEDBACK ECHOES \xE2\x86\x92"),
                    (int)in.getRight() - 200, (int)top + 1, 200, 11, juce::Justification::centredRight);
     }
