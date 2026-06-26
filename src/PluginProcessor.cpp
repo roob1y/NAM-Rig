@@ -360,6 +360,18 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("delayMix", 1), "Delay Mix",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.25f));
+    // Right-side division: index 0 = Link (R mirrors L); 1..13 mirror
+    // DelayBlock::kSyncBeats[1..13]. Unlinking = dual independent L/R delay.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("delaySyncR", 1), "Delay Sync R",
+        juce::StringArray{"Link", "1/1", "1/2.", "1/2", "1/2T", "1/4.", "1/4",
+                          "1/4T", "1/8.", "1/8", "1/8T", "1/16.", "1/16", "1/16T"},
+        0));
+    // Feedback Low Cut (high-pass in the loop); kMinLowCutHz default = off.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("delayLowCut", 1), "Delay Low Cut",
+        juce::NormalisableRange<float>(nam_rig::DelayBlock::kMinLowCutHz, 2000.0f, 1.0f, 0.45f),
+        nam_rig::DelayBlock::kMinLowCutHz, juce::AudioParameterFloatAttributes().withLabel("Hz")));
 
     // --- Reverb (rig/ReverbBlock.h; verified by tests/reverb_test.cpp) ---
     // Reverb Decay/Tone/Predelay/Mod/Size are PER-CHARACTER (generated below); the UI
@@ -951,9 +963,11 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
                 mChain.mod.setBpm(*bpm);
             }
     mChain.delay.setSyncIndex((int)apvts.getRawParameterValue("delaySync")->load());
+    mChain.delay.setSyncIndexR((int)apvts.getRawParameterValue("delaySyncR")->load());
     mChain.delay.setTimeMs(apvts.getRawParameterValue("delayTime")->load());
     mChain.delay.setFeedback(apvts.getRawParameterValue("delayFeedback")->load());
     mChain.delay.setToneHz(apvts.getRawParameterValue("delayTone")->load());
+    mChain.delay.setLowCutHz(apvts.getRawParameterValue("delayLowCut")->load());
     mChain.delay.setPingPong(apvts.getRawParameterValue("delayPingPong")->load() >= 0.5f);
     mChain.delay.setWidth(apvts.getRawParameterValue("delayWidth")->load());
     mChain.delay.setModAmount(apvts.getRawParameterValue("delayMod")->load());

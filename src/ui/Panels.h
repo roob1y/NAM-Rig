@@ -51,10 +51,31 @@ public:
             juce::String txt = mSlider.getTextFromValue(mSlider.getValue());
             if (!mRotationReadout && mUnit.isNotEmpty()) // pedal-style 0..10 knobs stay unitless
                 txt << ' ' << mUnit;
+            if (!mValueMenu.isEmpty()) // clickable value -> dropdown
+                txt << juce::String::fromUTF8(" \xE2\x96\xBE");
             g.setColour((mDragging ? acc : colors::text2).withMultipliedAlpha(ga));
             g.setFont(fonts::mono(11.0f, fonts::Medium));
             g.drawText(txt, mValueRect, juce::Justification::centred);
         }
+    }
+
+    // Make the value readout a clickable dropdown of discrete choices (the knob
+    // can still be turned to step). Used for the delay Sync division knobs.
+    void setValueMenu(juce::StringArray items) { mValueMenu = std::move(items); repaint(); }
+
+    void mouseDown(const juce::MouseEvent &e) override
+    {
+        if (mValueMenu.isEmpty() || !mShowValue || !isEnabled()
+            || !mValueRect.contains(e.getPosition()))
+            return;
+        juce::PopupMenu m;
+        const int cur = (int)std::lround(mSlider.getValue());
+        for (int i = 0; i < mValueMenu.size(); ++i)
+            m.addItem(i + 1, mValueMenu[i], true, i == cur);
+        m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this),
+                        [this](int r) {
+                            if (r > 0) mSlider.setValue(r - 1, juce::sendNotificationSync);
+                        });
     }
 
     void resized() override
@@ -126,6 +147,7 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mAtt;
     juce::Rectangle<int> mCaptionRect, mValueRect;
     juce::String mUnit;
+    juce::StringArray mValueMenu; // when set, the value readout is a click-to-pick dropdown
     int mCaptionH = 15, mValueH = 16;
     bool mShowValue = true, mDragging = false, mRotationReadout = false;
 };
@@ -3474,71 +3496,216 @@ private:
 };
 
 //==============================================================================
+// Echo-taps visualiser (new design "ECHO TAPS" well): a left accent bar = the dry
+// hit, then feedback echoes marching right, each shorter by Feedback, spread up/
+// down by Width, alternating L/R when Ping-Pong is on. Tap spacing tracks Time.
+// Reads the live params; the panel repaints it from the editor timer.
+class DelayTaps : public juce::Component
+{
+public:
+    explicit DelayTaps(juce::AudioProcessorValueTreeState &apvts) : mApvts(apvts) {}
+
+    // Effective sync-resolved delay time in ms per side. When set, used instead of
+    // the raw Free-time param so synced spacing tracks the tempo division. The L/R
+    // pair lets the visualiser show the dual rhythm (dotted-1/8 + 1/4, etc.).
+    std::function<float()> getTimeMs, getTimeMsR;
+
+    void paint(juce::Graphics &g) override
+    {
+        auto r = getLocalBounds().toFloat();
+        juce::ColourGradient grad(colors::wellTop, r.getX(), r.getY(),
+                                  colors::wellBot, r.getX(), r.getBottom(), false);
+        g.setGradientFill(grad);
+        g.fillRoundedRectangle(r, 11.0f);
+        g.setColour(colors::cardBorder);
+        g.drawRoundedRectangle(r.reduced(0.5f), 11.0f, 1.0f);
+
+        auto in = r.reduced(13.0f, 11.0f);
+        const float W = in.getWidth(), H = in.getHeight();
+        const float left = in.getX(), top = in.getY();
+        const float cy = top + H * 0.5f;
+
+        g.setColour(juce::Colour(0xff262c34)); // centre (L/R) axis
+        g.fillRect(in.getX(), cy - 0.5f, W, 1.0f);
+
+        const float rawTime = mApvts.getRawParameterValue("delayTime")->load();
+        const float timeL = getTimeMs  ? getTimeMs()  : rawTime;
+        const float timeR = getTimeMsR ? getTimeMsR() : timeL;
+        const float fb     = mApvts.getRawParameterValue("delayFeedback")->load();
+        const float width  = mApvts.getRawParameterValue("delayWidth")->load();
+
+        const float tmin = nam_rig::DelayBlock::kMinTimeMs, tmax = nam_rig::DelayBlock::kMaxTimeMs;
+        auto spacingFor = [&](float t) {
+            return 0.085f + juce::jlimit(0.0f, 1.0f, (t - tmin) / (tmax - tmin)) * 0.20f;
+        };
+
+        // Dry reference bar at the far left.
+        g.setColour(colors::accent.withAlpha(0.5f));
+        g.fillRoundedRectangle(left, top, 3.0f, H, 1.5f);
+
+        // L lane sits above the centre axis, R below; their separation opens with
+        // Width (at Width 0 they collapse to the centre = mono, matching the DSP).
+        const float sep = (0.06f + 0.20f * width) * H;
+        auto drawLane = [&](float t, float laneCy) {
+            const float sp = spacingFor(t);
+            float x = 0.035f, h = 1.0f;
+            for (int i = 0; i < 14 && h > 0.05f && x < 0.97f; ++i)
+            {
+                const float halfH = (0.04f + h * 0.16f) * H; // decays with feedback
+                const float bx = left + x * W;
+                g.setColour(colors::accent.withAlpha(juce::jlimit(0.1f, 1.0f, 0.25f + h * 0.75f)));
+                g.fillRoundedRectangle(bx - 3.0f, laneCy - halfH, 6.0f, 2.0f * halfH, 3.0f);
+                h *= fb;
+                x += sp;
+            }
+        };
+        drawLane(timeL, cy - sep);
+        drawLane(timeR, cy + sep);
+
+        g.setColour(colors::captionDim);
+        g.setFont(fonts::mono(9.0f, fonts::SemiBold));
+        g.drawText("L", (int)left + 1, (int)top + 1, 20, 11, juce::Justification::centredLeft);
+        g.drawText("R", (int)left + 1, (int)in.getBottom() - 12, 20, 11, juce::Justification::centredLeft);
+        g.drawText(juce::String::fromUTF8("DRY \xE2\x86\x92 FEEDBACK ECHOES \xE2\x86\x92"),
+                   (int)in.getRight() - 200, (int)top + 1, 200, 11, juce::Justification::centredRight);
+    }
+
+private:
+    juce::AudioProcessorValueTreeState &mApvts;
+};
+
+//==============================================================================
 class DelayPanel : public BlockPanel
 {
 public:
     explicit DelayPanel(juce::AudioProcessorValueTreeState &apvts)
         : BlockPanel("DELAY"), mApvts(apvts)
     {
-        mSyncLabel.setText("Sync", juce::dontSendNotification);
-        mSyncLabel.setColour(juce::Label::textColourId, colors::textDim);
-        addAndMakeVisible(mSyncLabel);
-        mSync.addItemList({"Free", "1/1", "1/2.", "1/2", "1/2T", "1/4.", "1/4",
-                           "1/4T", "1/8.", "1/8", "1/8T", "1/16.", "1/16", "1/16T"},
-                          1);
-        addAndMakeVisible(mSync);
-        mSyncAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-            apvts, "delaySync", mSync);
+        // Sync divisions as stepped knobs (cleaner than long button rows): the
+        // value readout shows the division name. The right knob's first step is
+        // "Link" (mirror L); the rest unlock the dual rhythm.
+        const juce::StringArray divsL{"Free", "1/1", "1/2.", "1/2", "1/2T", "1/4.", "1/4",
+                                      "1/4T", "1/8.", "1/8", "1/8T", "1/16.", "1/16", "1/16T"};
+        juce::StringArray divsR = divsL;
+        divsR.set(0, "Link"); // right knob: first step links to the left
 
-        mPingPong.setButtonText("Ping-Pong");
-        mPingPong.getProperties().set("pill", true);
-        addAndMakeVisible(mPingPong);
-        mPpAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            apvts, "delayPingPong", mPingPong);
+        mSyncKnob = std::make_unique<LabeledKnob>(apvts, "delaySync", "Sync");
+        mSyncKnob->slider().textFromValueFunction =
+            [](double v) { return juce::String(kSyncName(false, (int)std::lround(v))); };
+        mSyncKnob->slider().updateText();
+        mSyncKnob->setValueMenu(divsL);
+        mSyncKnob->slider().onValueChange = [this] { refresh(); };
+        addAndMakeVisible(*mSyncKnob);
+
+        mSyncRKnob = std::make_unique<LabeledKnob>(apvts, "delaySyncR", "Sync R");
+        mSyncRKnob->slider().textFromValueFunction =
+            [](double v) { return juce::String(kSyncName(true, (int)std::lround(v))); };
+        mSyncRKnob->slider().updateText();
+        mSyncRKnob->setValueMenu(divsR);
+        mSyncRKnob->slider().onValueChange = [this] { refresh(); };
+        addAndMakeVisible(*mSyncRKnob);
+
+        mPingPong = std::make_unique<ToggleSwitch>(apvts, "delayPingPong");
+        addAndMakeVisible(*mPingPong);
+        mPingPong->onChange = [this](bool) { if (mTaps) mTaps->repaint(); };
+        mPpLabel.setText("Ping-Pong", juce::dontSendNotification);
+        mPpLabel.setColour(juce::Label::textColourId, colors::text);
+        mPpLabel.setJustificationType(juce::Justification::centredRight);
+        addAndMakeVisible(mPpLabel);
+
+        mTapsCaption.setText("ECHO TAPS", juce::dontSendNotification);
+        mTapsCaption.setColour(juce::Label::textColourId, colors::caption);
+        mTapsCaption.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.12f));
+        addAndMakeVisible(mTapsCaption);
+
+        mTaps = std::make_unique<DelayTaps>(apvts);
+        addAndMakeVisible(*mTaps);
 
         const std::pair<const char *, const char *> defs[] = {
             {"delayTime", "Time"},        {"delayFeedback", "Feedback"},
-            {"delayTone", "Tone"},        {"delayMod", "Wow/Flutter"},
-            {"delayWidth", "Width"},      {"delayMix", "Mix"}};
+            {"delayLowCut", "Low Cut"},   {"delayTone", "High Cut"},
+            {"delayMod", "Wow/Flutter"},  {"delayWidth", "Width"},
+            {"delayMix", "Mix"}};
         for (const auto &[id, caption] : defs)
         {
             mKnobs.push_back(std::make_unique<LabeledKnob>(apvts, id, caption));
             addAndMakeVisible(*mKnobs.back());
         }
+        refresh();
     }
 
-    void refresh() // time knob is owned by the sync division when sync != Free
+    // Wire the visualiser to the processor's sync-resolved delay times (per side)
+    // so synced tap spacing follows the tempo divisions, not just the Free knob.
+    void setTimeProvider(std::function<float()> f) { if (mTaps) mTaps->getTimeMs = std::move(f); }
+    void setTimeProviderR(std::function<float()> f) { if (mTaps) mTaps->getTimeMsR = std::move(f); }
+
+    void refresh() // time knob is owned by the sync division when sync != Free; header shows time + FB
     {
         const int sync = (int)mApvts.getRawParameterValue("delaySync")->load();
-        mKnobs[0]->setEnabled(sync == 0);
+        const int syncR = (int)mApvts.getRawParameterValue("delaySyncR")->load();
+        mKnobs[0]->setEnabled(sync == 0); // Time knob owned by the division when synced
+
+        static const char *kSyncNames[] = {"Free", "1/1", "1/2.", "1/2", "1/2T", "1/4.", "1/4",
+                                           "1/4T", "1/8.", "1/8", "1/8T", "1/16.", "1/16", "1/16T"};
+        const int fbPct = juce::roundToInt(mApvts.getRawParameterValue("delayFeedback")->load() * 100.0f);
+        juce::String t = (sync == 0)
+                             ? juce::String((int)mApvts.getRawParameterValue("delayTime")->load()) + " ms"
+                             : juce::String(kSyncNames[juce::jlimit(0, 13, sync)]);
+        if (syncR > 0) // dual: show the right-side division too (kSyncNames index matches)
+            t += juce::String::fromUTF8(" / ") + juce::String(kSyncNames[juce::jlimit(0, 13, syncR)]);
+        setHeaderRight(t + juce::String::fromUTF8("  \xC2\xB7  FB ") + juce::String(fbPct) + "%");
+        if (mTaps) mTaps->repaint();
     }
 
     void resized() override
     {
-        // Sync + Ping-Pong in the header-right.
-        auto hr = headerArea();
-        mPingPong.setBounds(hr.removeFromRight(96).withSizeKeepingCentre(96, 26));
-        hr.removeFromRight(10);
-        mSync.setBounds(hr.removeFromRight(110).withSizeKeepingCentre(110, 28));
-        hr.removeFromRight(8);
-        mSyncLabel.setBounds(hr.removeFromRight(42).withSizeKeepingCentre(42, 20));
-        mSyncLabel.setJustificationType(juce::Justification::centredRight);
+        auto body = bodyArea();
 
-        auto area = bodyArea().reduced(24, 14)
-                        .withSizeKeepingCentre(bodyArea().getWidth() - 48,
-                                               juce::jmin(bodyArea().getHeight() - 28, 170));
-        const int w = area.getWidth() / (int)mKnobs.size();
+        // Top strip: Sync + Sync R stepped knobs (left); Ping-Pong (right).
+        auto top = body.removeFromTop(96).reduced(24, 6);
+        mSyncKnob->setBounds(top.removeFromLeft(80).reduced(3, 0));
+        mSyncRKnob->setBounds(top.removeFromLeft(80).reduced(3, 0));
+        auto ppCol = top.removeFromRight(150);
+        mPpLabel.setBounds(ppCol.removeFromRight(86).withSizeKeepingCentre(86, 20));
+        ppCol.removeFromRight(6);
+        mPingPong->setBounds(ppCol.removeFromRight(46).withSizeKeepingCentre(46, 24));
+
+        // "ECHO TAPS" caption above the visualiser.
+        auto capRow = body.removeFromTop(20).reduced(24, 0);
+        mTapsCaption.setBounds(capRow.removeFromLeft(120).withSizeKeepingCentre(120, 16));
+
+        // Knob row at the bottom; the visualiser well fills the middle.
+        auto area = body.reduced(24, 0);
+        area.removeFromTop(2);
+        area.removeFromBottom(14);
+        auto knobRow = area.removeFromBottom(96);
+        area.removeFromBottom(12);
+        mTaps->setBounds(area);
+
+        const int kw = juce::jmin(108, knobRow.getWidth() / (int)mKnobs.size());
+        auto row = knobRow.withSizeKeepingCentre(kw * (int)mKnobs.size(),
+                                                 juce::jmin(knobRow.getHeight(), 92));
         for (auto &k : mKnobs)
-            k->setBounds(area.removeFromLeft(w).reduced(6, 0));
+            k->setBounds(row.removeFromLeft(kw).reduced(6, 0));
     }
 
 private:
+    // Division names for the Sync knob readouts/menus (index = choice value).
+    static const char *kSyncName(bool right, int i)
+    {
+        static const char *L[] = {"Free", "1/1", "1/2.", "1/2", "1/2T", "1/4.", "1/4",
+                                  "1/4T", "1/8.", "1/8", "1/8T", "1/16.", "1/16", "1/16T"};
+        static const char *R[] = {"Link", "1/1", "1/2.", "1/2", "1/2T", "1/4.", "1/4",
+                                  "1/4T", "1/8.", "1/8", "1/8T", "1/16.", "1/16", "1/16T"};
+        i = juce::jlimit(0, 13, i);
+        return right ? R[i] : L[i];
+    }
+
     juce::AudioProcessorValueTreeState &mApvts;
-    juce::ComboBox mSync;
-    juce::Label mSyncLabel;
-    juce::ToggleButton mPingPong;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mSyncAtt;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mPpAtt;
+    juce::Label mPpLabel, mTapsCaption;
+    std::unique_ptr<LabeledKnob> mSyncKnob, mSyncRKnob;
+    std::unique_ptr<ToggleSwitch> mPingPong;
+    std::unique_ptr<DelayTaps> mTaps;
     std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
 };
 

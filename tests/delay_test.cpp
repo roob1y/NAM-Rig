@@ -237,6 +237,65 @@ int main()
         CHECK(err < 1e-6, "T7 mix=0 mono-aliased dry error %.2e < 1e-6", err);
     }
 
+    // ---- T8: dual L/R times (independent right division; Link mirrors L) ----
+    {
+        DelayBlock d;
+        d.setBpm(120.0);
+        d.prepare({SR, BLK});
+        d.setSyncIndex(6);  // L = 1/4 = 500 ms
+        d.setSyncIndexR(9); // R = 1/8 = 250 ms -> dual
+        CHECK(std::abs(d.currentTimeMs() - 500.0) < 0.01, "T8 L = %.2f ms (want 500)", d.currentTimeMs());
+        CHECK(std::abs(d.currentTimeMsR() - 250.0) < 0.01, "T8 R = %.2f ms (want 250)", d.currentTimeMsR());
+        CHECK(d.dualTime(), "T8 unlinked R -> dualTime() true");
+        d.setSyncIndexR(0); // Link mirrors L
+        CHECK(std::abs(d.currentTimeMsR() - 500.0) < 0.01, "T8 Link R = %.2f (mirror L 500)", d.currentTimeMsR());
+        CHECK(!d.dualTime(), "T8 Link -> dualTime() false");
+
+        // Echoes land independently: L at 500 ms, R at 250 ms.
+        d.setSyncIndex(6);
+        d.setSyncIndexR(9);
+        d.setFeedback(0.0f);
+        d.setToneHz(20000.0f);
+        d.setLowCutHz(20.0f);
+        d.setWidth(1.0f);
+        d.setMix(1.0f);
+        d.setModAmount(0.0f);
+        settle(d);
+        std::vector<float> l((size_t)SR, 0.0f), r = l;
+        l[0] = r[0] = 1.0f;
+        run(d, l, r);
+        const size_t expL = (size_t)(0.5 * SR), expR = (size_t)(0.25 * SR);
+        const size_t atL = peakNear(l, expL, 300), atR = peakNear(r, expR, 300);
+        CHECK(std::llabs((long long)atL - (long long)expL) <= 2, "T8 L echo at %zu (expect %zu)", atL, expL);
+        CHECK(std::llabs((long long)atR - (long long)expR) <= 2, "T8 R echo at %zu (expect %zu)", atR, expR);
+    }
+
+    // ---- T9: feedback low-cut thins bass build-up in the repeats ----
+    {
+        auto tailEnergy = [&](float lowCutHz) {
+            DelayBlock d;
+            d.setTimeMs(120.0f);
+            d.setFeedback(0.7f);
+            d.setToneHz(20000.0f); // high-cut off
+            d.setLowCutHz(lowCutHz);
+            d.setWidth(1.0f);
+            d.setMix(1.0f);
+            d.setModAmount(0.0f);
+            d.prepare({SR, BLK});
+            settle(d);
+            std::vector<float> l((size_t)SR, 0.0f), r = l;
+            for (size_t i = 0; i < 480; ++i) // short 80 Hz burst at the start
+                l[i] = r[i] = (float)(0.5 * std::sin(2.0 * M_PI * 80.0 * (double)i / SR));
+            run(d, l, r);
+            double e = 0; // energy left in the tail (where the repeats live)
+            for (size_t i = 4800; i < l.size(); ++i) e += (double)l[i] * l[i];
+            return e;
+        };
+        const double off = tailEnergy(20.0f);  // low-cut off
+        const double on = tailEnergy(400.0f);   // low-cut at 400 Hz
+        CHECK(on < off * 0.6, "T9 low-cut@400 thins 80Hz repeats (on %.3e < 0.6*off %.3e)", on, off * 0.6);
+    }
+
     std::printf("\n%s (%d FAIL)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);
     return gFails == 0 ? 0 : 1;
 }
