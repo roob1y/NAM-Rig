@@ -3553,8 +3553,11 @@ public:
 
         // Mode: Dual (R unlinked) shows two independent trains; Ping-Pong shows ONE
         // train alternating L/R; Single shows the linked pair. (DSP: Dual overrides ping.)
-        const bool dual = mApvts.getRawParameterValue("delaySyncR")->load() > 0.5f;
-        const bool ping = !dual && mApvts.getRawParameterValue("delayPingPong")->load() >= 0.5f;
+        // Tape characters are mono: the DSP forces ping-pong/dual off, so the visualiser
+        // shows a single linked train for them regardless of the stored params.
+        const bool tapeChar = (int)mApvts.getRawParameterValue("delayCharacter")->load() != 0;
+        const bool dual = !tapeChar && mApvts.getRawParameterValue("delaySyncR")->load() > 0.5f;
+        const bool ping = !tapeChar && !dual && mApvts.getRawParameterValue("delayPingPong")->load() >= 0.5f;
 
         // L lane sits above the centre axis, R below; their separation opens with
         // Width (at Width 0 they collapse to the centre = mono, matching the DSP).
@@ -3698,7 +3701,7 @@ public:
         mCharacter = std::make_unique<SegmentedControl>(
             apvts, "delayCharacter", juce::StringArray{"Clean", "Tape Echo", "Space Tape"});
         addAndMakeVisible(*mCharacter);
-        mCharacter->onChange = [this](int) { refresh(); };
+        mCharacter->onChange = [this](int) { refresh(); resized(); }; // relayout: Tape Echo drops the Sync R slot
 
         mTapsCaption.setText("ECHO TAPS", juce::dontSendNotification);
         mTapsCaption.setColour(juce::Label::textColourId, colors::caption);
@@ -3733,7 +3736,15 @@ public:
     void refresh() // time knob is owned by the sync division when sync != Free; header shows time + FB
     {
         const int sync = (int)mApvts.getRawParameterValue("delaySync")->load();
-        const int syncR = (int)mApvts.getRawParameterValue("delaySyncR")->load();
+        const int chr = (int)mApvts.getRawParameterValue("delayCharacter")->load();
+        const bool space = chr == 2;   // Space Tape (multi-head)
+        const bool tape = chr != 0;    // any tape character = MONO
+        // Ping-pong + dual (independent L/R) are STEREO digital-delay tricks; the tape
+        // characters are authentically mono and the DSP forces them off for a tape
+        // character, so mirror that here -- treat Sync R / ping as Link/off for the
+        // header + mode badge, hide the stereo Mode selector + Sync R, and grey Width.
+        const int syncR = tape ? 0 : (int)mApvts.getRawParameterValue("delaySyncR")->load();
+        const bool ping = !tape && mApvts.getRawParameterValue("delayPingPong")->load() >= 0.5f;
         mKnobs[0]->setEnabled(sync == 0); // Time knob owned by the division when synced
 
         static const char *kSyncNames[] = {"Free", "1/1", "1/2.", "1/2", "1/2T", "1/4.", "1/4",
@@ -3749,20 +3760,18 @@ public:
         // Mode identifier: Dual if R unlinked, else Ping-Pong if bouncing, else Single
         // (matches the DSP, where Dual overrides ping). Sync R is only live in Dual.
         const bool dual = syncR > 0;
-        const bool ping = mApvts.getRawParameterValue("delayPingPong")->load() >= 0.5f;
         if (mMode) mMode->setActive(dual ? 1 : (ping ? 2 : 0));
         if (mSyncRKnob) mSyncRKnob->setEnabled(dual);
         // Width is an M/S spread on the wet -> only meaningful when there's stereo
         // delay structure (Dual or Ping-Pong); in Single it does nothing, so grey it.
         if (mKnobs.size() > 4) mKnobs[4]->setEnabled(dual || ping); // Width (now 5th knob)
 
-        // Space Tape: the Head Mode knob replaces Sync R + the stereo Mode selector
-        // (it's a mono multi-head echo). Time = the base/head-1 (Repeat Rate).
-        const bool space = (int)mApvts.getRawParameterValue("delayCharacter")->load() == 2; // Space Tape
+        // Tape characters are MONO: hide the stereo Mode selector + Sync R (Clean-only),
+        // grey Width. Space Tape additionally swaps in the multi-head Mode knob.
         if (mHeadKnob) mHeadKnob->setVisible(space);
-        if (mSyncRKnob) mSyncRKnob->setVisible(!space);
-        if (mMode) mMode->setVisible(!space);
-        if (space && mKnobs.size() > 4) mKnobs[4]->setEnabled(false); // Width n/a (mono)
+        if (mSyncRKnob) mSyncRKnob->setVisible(!tape);
+        if (mMode) mMode->setVisible(!tape);
+        if (tape && mKnobs.size() > 4) mKnobs[4]->setEnabled(false); // Width n/a (mono tape)
 
         if (mTaps) mTaps->repaint();
     }
@@ -3819,8 +3828,13 @@ public:
         // Top strip: Sync + Sync R stepped knobs (left); mode selector (right).
         auto top = body.removeFromTop(96).reduced(24, 6);
         mSyncKnob->setBounds(top.removeFromLeft(80).reduced(3, 0));
-        mSyncRKnob->setBounds(top.removeFromLeft(80).reduced(3, 0));
-        if (mHeadKnob) mHeadKnob->setBounds(mSyncRKnob->getBounds()); // same slot (Space Tape)
+        // Second slot holds Sync R (Clean) or the multi-head Mode knob (Space Tape).
+        // Tape Echo is mono with no dual, so it claims no slot -> no empty gap.
+        if ((int)mApvts.getRawParameterValue("delayCharacter")->load() != 1) // not Tape Echo
+        {
+            mSyncRKnob->setBounds(top.removeFromLeft(80).reduced(3, 0));
+            if (mHeadKnob) mHeadKnob->setBounds(mSyncRKnob->getBounds()); // same slot (Space Tape)
+        }
         const int mw = mMode ? mMode->idealWidth() : 240;
         mMode->setBounds(top.removeFromRight(mw).withSizeKeepingCentre(mw, 28));
         top.removeFromLeft(16);

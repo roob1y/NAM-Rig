@@ -983,8 +983,14 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
                 mChain.delay.setBpm(*bpm);
                 mChain.mod.setBpm(*bpm);
             }
+    const int delayChar = (int)apvts.getRawParameterValue("delayCharacter")->load();
+    // Ping-pong + dual (independent L/R, via Sync R unlinked) are STEREO digital-delay
+    // tricks; both tape characters are authentically mono (Space Tape already ignores
+    // them), so they are Clean-only -- forced off for a tape character regardless of the
+    // stored param, so the controls can't contradict the character.
+    const bool delayTape = (delayChar != (int)nam_rig::DelayBlock::Character::Clean);
     mChain.delay.setSyncIndex((int)apvts.getRawParameterValue("delaySync")->load());
-    mChain.delay.setSyncIndexR((int)apvts.getRawParameterValue("delaySyncR")->load());
+    mChain.delay.setSyncIndexR(delayTape ? 0 : (int)apvts.getRawParameterValue("delaySyncR")->load());
     mChain.delay.setTimeMs(apvts.getRawParameterValue("delayTime")->load());
     mChain.delay.setFeedback(apvts.getRawParameterValue("delayFeedback")->load());
     mChain.delay.setToneHz(apvts.getRawParameterValue("delayTone")->load());
@@ -993,12 +999,11 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     // transparent engine, forced to Digital (crossfade, no repitch); a tape
     // character sets its own Tape glide inside setCharacter, so only force Digital
     // for Clean.
-    const int delayChar = (int)apvts.getRawParameterValue("delayCharacter")->load();
     mChain.delay.setCharacter(delayChar);
     mChain.delay.setHeadMode((int)apvts.getRawParameterValue("delayHeadMode")->load());
     if (delayChar == (int)nam_rig::DelayBlock::Character::Clean)
         mChain.delay.setTimeMode(nam_rig::DelayBlock::TimeMode::Digital);
-    mChain.delay.setPingPong(apvts.getRawParameterValue("delayPingPong")->load() >= 0.5f);
+    mChain.delay.setPingPong(!delayTape && apvts.getRawParameterValue("delayPingPong")->load() >= 0.5f);
     mChain.delay.setWidth(apvts.getRawParameterValue("delayWidth")->load());
     mChain.delay.setModAmount(apvts.getRawParameterValue("delayMod")->load());
     mChain.delay.setMix(apvts.getRawParameterValue("delayMix")->load());
