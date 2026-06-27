@@ -142,6 +142,18 @@ struct Biquad
         return q;
     }
 
+    // One-pole high-pass (6 dB/oct) as a biquad: H = g(1 - z^-1)/(1 - g z^-1), g = e^{-2pi f0/fs}.
+    // Blocks DC; gentler than the 2-pole highpass -> matches a tape echo's soft low-end shed
+    // (the multi-head reference loses sub-bass slowly down the tail, ~-4 dB/pass at 40 Hz).
+    static Biquad highpass1(double fs, double f0)
+    {
+        const double g = std::exp(-2.0 * kPi * f0 / fs);
+        Biquad q;
+        q.b0 = (float)g; q.b1 = (float)(-g); q.b2 = 0.0f;
+        q.a1 = (float)(-g); q.a2 = 0.0f;
+        return q;
+    }
+
     // Analytic |H(e^{j2πf/fs})| from the live coefficients (for verification).
     double magnitudeAt(double fs, double f) const
     {

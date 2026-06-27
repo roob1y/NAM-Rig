@@ -72,5 +72,28 @@ inline double cubicADAA2(double x, double x1, double x2)
     return (2.0 / (x - x2)) * (cubD(x, x1) - cubD(x1, x2));
 }
 
+// ---- normalized asymmetric tanh soft-clip + 1st-order ADAA (Space Tape saturation) ----
+// s(x) = (tanh(g(x+b)) - tanh(g b)) / g : unit passband (s'(0)=sech^2(gb)~1), DC-removed.
+// The bias b makes it ASYMMETRIC -> a smooth FULL harmonic series (even AND odd, like a
+// real asymmetric tape record transfer), which the odd-only cubic + cosh-even cannot make
+// (no H5, H4 too low). 1st-order ADAA via the closed-form antiderivative
+// S(x) = log(cosh(g(x+b)))/g^2 - (tanh(gb)/g) x  -- cheap (no dilogarithm, unlike a 2nd-order
+// tanh ADAA), and the gentle saturation + in-loop gap-loss keep aliasing inaudible. Bounded
+// (|tanh|<1) so it still tames the feedback loop.
+inline double tanhShape(double x, double g, double b)
+{
+    return (std::tanh(g * (x + b)) - std::tanh(g * b)) / g;
+}
+inline double tanhAnti(double x, double g, double b)
+{
+    return std::log(std::cosh(g * (x + b))) / (g * g) - std::tanh(g * b) / g * x;
+}
+inline double tanhADAA1(double x, double x1, double g, double b)
+{
+    const double TOL = 1.0e-6;
+    if (std::abs(x - x1) < TOL) return tanhShape(0.5 * (x + x1), g, b);
+    return (tanhAnti(x, g, b) - tanhAnti(x1, g, b)) / (x - x1);
+}
+
 } // namespace sat
 } // namespace nam_rig

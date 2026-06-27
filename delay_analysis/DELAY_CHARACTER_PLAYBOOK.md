@@ -98,6 +98,43 @@ cut (the reference's bump and cut are both broad and mirror each other); closing
 it would need the in-loop bump and output cut to be matched arbitrary shapes —
 not worth the topology for ~3 dB on one band. Ears are the final judge.
 
+## Space Tape — fitted result
+
+Fit to the measured multi-head reference (echo-only mode 1, **head 1 = 250 ms = a
+1/8 @120 SYNC capture** — above the free-mode 69–177 ms cap, so the harnesses gained
+`--sync N --bpm B` to drive the engine in sync; `--sync 9 --bpm 120` reproduces it).
+Validated dry: our wet lands within **7 samples** + a few % of the wet capture, so
+`delay_ref/se_*.wav` are the true dry inputs and the level is pinned. Final voicing:
+`sat 2.0, asym 0.06, bump +1.0 dB @ 300 Hz Q0.6, gap-loss 1-pole 2.2 kHz,
+outBass +6 dB @ 240 Hz (LOW-SHELF boost, outBassQ 0), preamp off,
+loopHpHz 50 (an IN-LOOP 1-pole high-pass — the character's own sub-bass shed)`.
+
+The loop is a BAND-PASS, not just a low-pass: the reference SHEDS sub-bass down the
+tail (40 Hz −12.7→−37 dB across the train; reliable repeat-by-repeat octband) the same
+way it sheds highs. Without an in-loop high-pass ours instead BUILDS sub-bass (lows are
+uncut so they dominate the tail → boom). `loopHpHz 50` (1-pole = −4 dB/pass @40 Hz)
+matches the reference's −3.4 dB/pass shed. This is a CHARACTER trait, separate from the
+user Low Cut utility. MEASUREMENT TRAP: a low-corner HP rings on transients, so a
+CLICK-driven tail render makes it look like it BUILDS bass — verify in-loop LF with a
+STEADY tone through the loop, never an impulse (the per-pass/tilt/single-repeat LF panels
+are click-contaminated; the impulse capture's lows disagree with the tail's by ~24 dB).
+Likewise the saturation-growth panel is inflated by echo overlap in the ref capture (the
+harmonics are the trustworthy sat metric), and the per-pass HF "rise" is the noise floor.
+
+Distinct from Tape exactly as the table predicts: a low-end **boost** (not Tape's
+peaking cut), a **small** in-loop bloom (+2.3 vs Tape's +14), a **brighter 1-pole**
+gap-loss. Match: single-repeat within ~1 dB 80 Hz–4 kHz (slightly bright at 6 k = the
+1-pole's gentleness, on-character); per-pass bloom +2.4/+2.3 @ 250/330 vs ref +2.2/+2.3.
+
+Harmonics — the key dimension (Space Tape shipped with `satAsym 0`, odd-only, margin
+−82 dB). The reference is **richer/more driven** than Tape's (near-balanced, even-odd
+margin only **−3 dB**, NOT Tape's strongly-even +22): `sat 2.0` sets the odd **H3 −31
+= ref**, `asym 0.06` (the cosh even-gen) sets **H2 −35 = ref**, margin **−4 ≈ −3**.
+Cross-checked by the real-dry levels null (H2/H3 exact). H4/H5/H6 sit below the
+reference's flatter even series — the cubic+cosh topology limit (fixed `kEvenShape`;
+same class as Tape's accepted H5 gap); the dominant H2/H3 + the even/odd balance match.
+`delay_test` stays 34/34 (Clean byte-exact, loop bounded). Ears are the final judge.
+
 ## The saturation HARMONIC null — the dimension the battery used to miss (2026-06-27)
 
 The Tape voicing matched every magnitude panel **and** the level-domain saturation

@@ -54,6 +54,11 @@ int main(int argc, char** argv)
     const float impAmp = OV(argc, argv, "--impAmp", 0.5f);  // match the reference dry impulse (0.5)
     const char* fbArg = argval(argc, argv, "--fb", "");
     const std::string out = argval(argc, argv, "--out", "out.f32");
+    // Sync drive: the multi-head reference captures are SYNCED (head 1 = 250 ms = 1/8 @120,
+    // above the free-mode 69-177 ms cap), so the Space Tape fit must drive the engine in sync.
+    // --sync N indexes kSyncBeats (9 = 1/8); --bpm sets the tempo. 0 = free (the old behaviour).
+    const int syncIdx = std::atoi(argval(argc, argv, "--sync", "0"));
+    const float bpm = OV(argc, argv, "--bpm", 120.0f);
 
     const double SR = 48000.0;
     const int BLK = 512;
@@ -80,6 +85,7 @@ int main(int argc, char** argv)
         v.preampShelfHz = OV(argc, argv, "--ppHz",  v.preampShelfHz);
         v.satDrive      = OV(argc, argv, "--sat",   v.satDrive);
         v.satAsym       = OV(argc, argv, "--asym",  v.satAsym);
+        v.loopHpHz      = OV(argc, argv, "--loopHp", v.loopHpHz);
         v.wowMul        = OV(argc, argv, "--wowM",  v.wowMul);
         v.flutterMul    = OV(argc, argv, "--flutM", v.flutterMul);
         d.setTapeVoicingOverride(v);
@@ -87,10 +93,11 @@ int main(int argc, char** argv)
 
     d.setTimeMs(timeMs);
     d.setToneHz(8000.0f);   // default knob -> voiced gap-loss corner (no extra darkening)
-    d.setLowCutHz(20.0f);   // feedback low-cut off
+    d.setLowCutHz(OV(argc, argv, "--loCut", 20.0f)); // user Low Cut utility (default off here)
     d.setWidth(0.0f);       // mono wet
     d.setMix(1.0f);         // 100% wet -> the echo train
     d.setModAmount(0.0f);   // tape characters drive their own wow/flutter
+    d.setBpm((double)bpm); d.setSyncIndex(syncIdx); // sync N -> currentTimeMs = beat*60000/bpm
 
     float fb; double durSec;
     if      (test == "impulse") { fb = 0.0f;  durSec = 2.5; }   // feedback down -> single repeat

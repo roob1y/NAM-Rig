@@ -79,8 +79,9 @@ public:
         0b011, 0b110, 0b101, 0b111,  // 8-11 +rev:     H1+2, H2+3, H1+3, all
         0b000};                      // 12 reverb only (no echo)
     static bool spaceTapeReverbOn(int mode) { return mode >= 4; } // modes 5-11 + reverb-only
-    // Real multi-head tape echo heads are ~1:1.9:2.76 (not the reissue's idealised 1:2:3).
-    static constexpr std::array<float, 3> kHeadRatio = {1.0f, 1.9f, 2.76f};
+    // Multi-head tape echo head spacing, MEASURED from the reference (1:1.95:2.79; close to the
+    // documented ~1:1.9:2.76, not the reissue's idealised 1:2:3).
+    static constexpr std::array<float, 3> kHeadRatio = {1.0f, 1.95f, 2.79f};
     // Authentic head-1 (Repeat Rate) span; the Time knob remaps onto this for Space Tape.
     static constexpr float kStHead1MinMs = 69.0f, kStHead1MaxMs = 177.0f;
 
@@ -117,6 +118,10 @@ public:
         float preampShelfHz;   // OUTPUT-once presence PEAK (preamp brightness; a peaking band
         float preampShelfDb;   //   applied once, not recirculated); 0 dB = off
         float fbCeiling;       // effective feedback ceiling for this character (<= kMaxFeedbackHard)
+        float loopHpHz;        // IN-LOOP high-pass corner (Hz): the low side of the tape character's
+                               //   BAND-PASS loop (2-pole Q0.5; pairs with the gap-loss LP). Sheds
+                               //   lows down the tail like the measured multi-head reference. 0 =
+                               //   off. Part of the CHARACTER -- NOT the user Low Cut (a utility).
     };
 
     static DelayVoicing voicingFor(Character c)
@@ -124,16 +129,32 @@ public:
         switch (c)
         {
         case Character::SpaceTape:
-            // multi-head tape echo voicing, fit to a MEASURED reference (echo-only modes). It is
-            // VERY different from the single-head Tape: flat/boosted bass (low-shelf BOOST, not
-            // cut), a SMALLER low-mid bloom, and a BRIGHTER, gentler HF roll-off.
-            //   in-loop: bump +2.5dB@300 (Q0.6); gap-loss 1-POLE ~2k (a gentle
-            //   ~6dB/oct HF roll-off, vs the single-head Tape's 2-pole); sat 1.4.
-            //   output-once: low-shelf +2.5dB@180 (the multi-head tape echo's full low end).
-            //   Head ratios 1:1.9:2.76 (processSpaceTape).
-            //          tm  sat  asym hbHz  hbDb  hbQ  gapHz  obHz  obDb  wowM   flutM  drHz  drMs   ppHz   ppDb fbCeil
-            return { TimeMode::Tape, 1.4f, 0.0f, 300.0f, 2.5f, 0.6f, 2000.0f, 180.0f, 2.5f, 0.0f,
-                     0.05f, 0.055f, 0.5f, 0.05f, 2500.0f, 0.0f, 1.10f };
+            // multi-head tape echo voicing, fit to a MEASURED reference via CONTROLLED steady-tone
+            // probes (delay_references/dry_probes/ driven through the reference at a single fixed
+            // setting; cap_low/high/taps captures). The reference is a MID-FOCUSED BAND-PASS, NOT
+            // the fat/bright thing the earlier click-contaminated captures implied. Fitted clean:
+            //   - SINGLE-REPEAT (steady-tone EQ, the reliable metric): a band-pass = a steep low
+            //     roll-off (2-pole HP ~110 Hz Q0.5: -8.7dB@80, -17.5@40) x a 2-pole gap-loss
+            //     (~5 kHz Q0.5, voiced 7000 to offset the fractional-read HF loss: -3.3@4k,
+            //     -10.9@8k), FLAT 450 Hz-1.4 kHz. NO low-mid bump, NO bass boost (the old outBass
+            //     low-shelf was fit to click-contaminated lows). Matches within ~0.8 dB 40 Hz-8 kHz.
+            //   - The band-pass is IN-LOOP (loopHpHz HP + gap-loss LP both recirculate), so the tail
+            //     SHEDS lows AND highs and sustains the mids -- matches the cap_high energy map.
+            //   - SATURATION: the reference is a gentle ASYMMETRIC soft-clip -- a smooth FULL
+            //     harmonic series, even~=odd at each level (H2 -37, H3 -38, H4 -55, H5 -59, H6 -76;
+            //     pairs ~18 dB apart). The odd-cubic + cosh-even can't make that (no H5, H4 far too
+            //     low), so Space Tape uses a normalized asymmetric TANH on 1st-order ADAA instead
+            //     (tapeSat branch): satDrive = the tanh g (sharpness), satAsym = the bias b (sets
+            //     the even amount). g 2.0 / b 0.04 -> H2 -36 / H3 -35 (dominant pair matched) + a
+            //     real H4/H5/H6 series (~-64/-67/-92; below the ref but PRESENT, not at the floor --
+            //     the tanh's H3->H5 falloff is a touch steeper than the unit's). Rise ~+19 dB over
+            //     the level sweep (ref ~+17.6, mildly compressive). gapLossHz 5500 retuned for the
+            //     tanh's slight HF lift. Gap-loss/EQ match within ~0.6 dB.
+            //   - WOW/FLUTTER ~0.9% (the multi-head unit is genuinely wobbly -- measured on a pure
+            //     440 Hz carrier; far more than Tape's ~0.1%). Head ratios 1:1.95:2.79 (measured).
+            //          tm  sat(g) asym(b) hbHz hbDb  hbQ  gapHz  obHz  obDb  obQ  wowM   flutM  drHz  drMs   ppHz   ppDb fbCeil loopHp
+            return { TimeMode::Tape, 2.0f, 0.04f, 300.0f, 0.0f, 0.6f, 5500.0f, 240.0f, 0.0f, 0.0f,
+                     0.37f, 0.40f, 0.5f, 0.05f, 2500.0f, 0.0f, 1.10f, 110.0f };
         case Character::Tape:
             // Tape-echo voicing fit to a MEASURED tape-echo reference with the metric
             // battery (delay_analysis/), split into PER-PASS (in-loop) and ONCE
@@ -157,11 +178,11 @@ public:
             //   single-repeat hump). gap-loss 2-pole ~2.1 kHz.
             //          sat   asym   hbHz  hbDb   hbQ   gapHz  obHz  obDb   obQ   wowM   flutM  drHz  drMs   ppHz   ppDb fbCeil
             return { TimeMode::Tape, 0.06f, 0.0015f, 260.0f, 14.0f, 0.35f, 2100.0f, 260.0f, -13.0f, 0.35f,
-                     0.05f, 0.055f, 0.5f, 0.05f, 3500.0f, 4.0f, 1.10f };
+                     0.05f, 0.055f, 0.5f, 0.05f, 3500.0f, 4.0f, 1.10f, 0.0f };
         case Character::Clean:
         default:
             return { TimeMode::Digital, 0.0f, 0.0f, 0.0f, 0.0f, 0.7f, 0.0f, 0.0f, 0.0f, 0.0f,
-                     0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, kMaxFeedback };
+                     0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, kMaxFeedback, 0.0f };
         }
     }
 
@@ -206,6 +227,8 @@ public:
         for (auto &t : mLowCut)
             t.reset();
         for (auto &t : mHeadBump)
+            t.reset();
+        for (auto &t : mLoopHp)
             t.reset();
         for (auto &t : mOutBass)
             t.reset();
@@ -382,6 +405,13 @@ public:
                 wetL = mHeadBump[0].processSample(wetL);
                 wetR = stereo ? mHeadBump[1].processSample(wetR) : wetL;
             }
+            // In-loop sub-bass shed (the tape character's own low-end roll, compounds down the
+            // tail). Voiced per character (Space Tape); off for Tape/Clean so they are unchanged.
+            if (mTapeOn && mLoopHpOn)
+            {
+                wetL = mLoopHp[0].processSample(wetL);
+                wetR = stereo ? mLoopHp[1].processSample(wetR) : wetL;
+            }
 
             // In-loop tone shaping, re-applied every repeat: high-cut (Tone) then
             // low-cut, so the two together act as a feedback band-pass.
@@ -466,7 +496,7 @@ public:
         }
         if (mTapeOn)
         {
-            for (auto *arr : {&mHeadBump, &mOutBass, &mPreamp})
+            for (auto *arr : {&mHeadBump, &mLoopHp, &mOutBass, &mPreamp})
                 for (auto &t : *arr)
                 {
                     if (std::abs(t.z1) < 1.0e-30f) t.z1 = 0.0f;
@@ -538,6 +568,7 @@ private:
 
             // Shared tape playback EQ (head bump + gap-loss + low cut) then record sat.
             if (mHeadOn) wet = mHeadBump[0].processSample(wet);
+            if (mLoopHpOn) wet = mLoopHp[0].processSample(wet);
             if (mToneOn) wet = mTone[0].processSample(wet);
             if (mLowCutOn) wet = mLowCut[0].processSample(wet);
             wet = tapeSat(0, wet);
@@ -555,7 +586,7 @@ private:
             if (stereo) right[i] = o; // authentic mono
         }
 
-        for (auto *arr : {&mTone, &mLowCut, &mHeadBump, &mOutBass, &mPreamp})
+        for (auto *arr : {&mTone, &mLowCut, &mHeadBump, &mLoopHp, &mOutBass, &mPreamp})
             for (auto &t : *arr)
             {
                 if (std::abs(t.z1) < 1.0e-30f) t.z1 = 0.0f;
@@ -568,6 +599,18 @@ private:
     // Per-channel two-sample history; output is bounded and NaN-guarded.
     float tapeSat(int ch, float x)
     {
+        if (mCharacter == Character::SpaceTape)
+        {
+            // Space Tape: a normalized asymmetric tanh (g = satDrive, bias b = satAsym) on
+            // 1st-order ADAA -> a smooth FULL harmonic series (H2..H6, even AND odd) matching
+            // the measured multi-head reference, which the odd-cubic + cosh-even cannot make
+            // (no H5, H4 too low). Bounded by tanh so it still tames the loop.
+            const double y = sat::tanhADAA1((double)x, mSatX1[(size_t)ch],
+                                            (double)mVoicing.satDrive, (double)mVoicing.satAsym);
+            mSatX1[(size_t)ch] = (double)x;
+            const float o = (float)y;
+            return std::isfinite(o) ? o : 0.0f;
+        }
         const double drive = (double)mVoicing.satDrive;
         const double asym  = (double)mVoicing.satAsym;       // even-harmonic (2nd) amount
         const double xb = (double)x * drive;
@@ -617,6 +660,14 @@ private:
         mHeadOn = mTapeOn && mVoicing.headBumpDb != 0.0f && mVoicing.headBumpHz > 0.0f;     // IN-LOOP bloom
         mOutBassOn = mTapeOn && mVoicing.outBassDb != 0.0f && mVoicing.outBassHz > 0.0f;    // OUTPUT bass thin
         mPreampOn = mTapeOn && mVoicing.preampShelfDb != 0.0f && mVoicing.preampShelfHz > 0.0f; // OUTPUT HF lift
+        mLoopHpOn = mTapeOn && mVoicing.loopHpHz > 0.0f;                                          // IN-LOOP sub-bass shed
+        if (mLoopHpOn || force)
+        {
+            const auto c = mLoopHpOn
+                ? Biquad::highpass(mFs, std::min((double)mVoicing.loopHpHz, 0.45 * mFs), 0.5)
+                : Biquad::identity();
+            for (auto &t : mLoopHp) { const float z1 = t.z1, z2 = t.z2; t = c; t.z1 = z1; t.z2 = z2; }
+        }
         if (mHeadOn || force)
         {
             const auto c = (mHeadOn)
@@ -723,7 +774,7 @@ private:
             // roll-off); Tape/Clean keep the 2-pole High Cut.
             const double cz = std::min((double)corner, 0.45 * mFs);
             const auto coeffs = (mCharacter == Character::SpaceTape)
-                ? Biquad::lowpass1(mFs, cz)
+                ? Biquad::lowpass(mFs, cz, 0.5)   // 2-pole gap-loss Q0.5 (the measured HF roll)
                 : Biquad::lowpass(mFs, cz);
             for (auto &t : mTone)
             {
@@ -758,6 +809,7 @@ private:
     std::array<FracDelayLine, 2> mLine;
     std::array<Biquad, 2> mTone, mLowCut;
     std::array<Biquad, 2> mHeadBump;          // tape: IN-LOOP low-mid bloom
+    std::array<Biquad, 2> mLoopHp;            // tape: IN-LOOP sub-bass shed (1-pole HP, voiced)
     std::array<Biquad, 2> mOutBass, mPreamp;  // tape: OUTPUT-once bass thin + HF lift
     Lfo mWow, mFlutter, mDrift;               // mDrift = slow random transport wander (tape)
 
@@ -767,6 +819,7 @@ private:
     int mSyncIdx = 0, mSyncIdxR = 0; // mSyncIdxR: 0 = Link (mirror L)
     bool mPingPong = false, mToneOn = true, mLowCutOn = false, mPrepared = false;
     bool mTapeOn = false, mHeadOn = false, mOutBassOn = false, mPreampOn = false; // tape stage gates
+    bool mLoopHpOn = false; // tape: in-loop sub-bass shed engaged (voicing.loopHpHz > 0)
     float mLoopPeakGain = 1.0f; // tape: in-loop peak gain, normalises feedback so the knob feel is sane
     bool mMultiHead = false;    // SpaceTape: multi-head read path active
     int mHeadMode = 0;          // SpaceTape: head combination (index into kHeadMask)

@@ -32,6 +32,10 @@ int main(int argc, char** argv)
     const std::string out = argval(argc, argv, "--out", "out.f32");
     const float timeMs    = OV(argc, argv, "--time", 350.0f);
     const float fb        = OV(argc, argv, "--fb", 0.0f);
+    // Sync drive (see delay_render.cpp): the Space Tape reference is a synced 250 ms (1/8 @120)
+    // capture, so the null test must drive the engine in sync to land the echoes on the reference.
+    const int syncIdx     = std::atoi(argval(argc, argv, "--sync", "0"));
+    const float bpm       = OV(argc, argv, "--bpm", 120.0f);
     const double SR = 48000.0; const int BLK = 512;
 
     // read mono float32 input
@@ -61,16 +65,18 @@ int main(int argc, char** argv)
         v.preampShelfHz = OV(argc, argv, "--ppHz",  v.preampShelfHz);
         v.satDrive      = OV(argc, argv, "--sat",   v.satDrive);
         v.satAsym       = OV(argc, argv, "--asym",  v.satAsym);
+        v.loopHpHz      = OV(argc, argv, "--loopHp", v.loopHpHz);
         v.wowMul        = OV(argc, argv, "--wowM",  v.wowMul);
         v.flutterMul    = OV(argc, argv, "--flutM", v.flutterMul);
         d.setTapeVoicingOverride(v);
     }
     d.setTimeMs(timeMs);
     d.setToneHz(8000.0f);
-    d.setLowCutHz(20.0f);
+    d.setLowCutHz(OV(argc, argv, "--loCut", 20.0f)); // user Low Cut utility (default off here)
     d.setWidth(0.0f);
     d.setMix(1.0f);
     d.setModAmount(0.0f);
+    d.setBpm((double)bpm); d.setSyncIndex(syncIdx);
     d.setFeedback(fb);
     d.prepare({SR, BLK});
 
