@@ -51,7 +51,7 @@ int main(int argc, char** argv)
     const std::string test = argval(argc, argv, "--test", "impulse");
     const int mode = std::atoi(argval(argc, argv, "--mode", "0"));
     const float timeMs = OV(argc, argv, "--time", 350.0f);
-    const float impAmp = OV(argc, argv, "--impAmp", 1.0f);
+    const float impAmp = OV(argc, argv, "--impAmp", 0.5f);  // match the reference dry impulse (0.5)
     const char* fbArg = argval(argc, argv, "--fb", "");
     const std::string out = argval(argc, argv, "--out", "out.f32");
 
@@ -74,10 +74,14 @@ int main(int argc, char** argv)
         v.headBumpQ     = OV(argc, argv, "--hbQ",   v.headBumpQ);
         v.gapLossHz     = OV(argc, argv, "--gapHz", v.gapLossHz);
         v.outBassDb     = OV(argc, argv, "--obDb",  v.outBassDb);
+        v.outBassQ      = OV(argc, argv, "--obQ",   v.outBassQ);
         v.outBassHz     = OV(argc, argv, "--obHz",  v.outBassHz);
         v.preampShelfDb = OV(argc, argv, "--ppDb",  v.preampShelfDb);
         v.preampShelfHz = OV(argc, argv, "--ppHz",  v.preampShelfHz);
         v.satDrive      = OV(argc, argv, "--sat",   v.satDrive);
+        v.satAsym       = OV(argc, argv, "--asym",  v.satAsym);
+        v.wowMul        = OV(argc, argv, "--wowM",  v.wowMul);
+        v.flutterMul    = OV(argc, argv, "--flutM", v.flutterMul);
         d.setTapeVoicingOverride(v);
     }
 
@@ -91,7 +95,7 @@ int main(int argc, char** argv)
     float fb; double durSec;
     if      (test == "impulse") { fb = 0.0f;  durSec = 2.5; }   // feedback down -> single repeat
     else if (test == "tail")    { fb = 0.55f; durSec = 9.0; }
-    else if (test == "levels")  { fb = 0.20f; durSec = 2.95; }
+    else if (test == "levels")  { fb = 0.0f;  durSec = 2.95; }   // single pass -> clean saturation harmonics
     else if (test == "sustain") { fb = 0.0f;  durSec = 5.0; }
     else { std::fprintf(stderr, "unknown --test '%s'\n", test.c_str()); return 1; }
     if (fbArg[0]) fb = (float)std::atof(fbArg);
@@ -113,7 +117,11 @@ int main(int argc, char** argv)
     else if (test == "tail")    { L[0] = 1.0f; }
     else if (test == "levels")
     {
-        const float amp[5] = {0.05f, 0.10f, 0.20f, 0.40f, 0.80f};
+        // 1 kHz tone (matches the measured reference levels capture), stepping up to
+        // the TRUE calibrated operating ceiling ~0.30 (the reference's hottest dry burst),
+        // NOT an arbitrary 0.80 -- so the saturation knee + harmonic character are exercised
+        // at the real operating point. The harmonic null lives in the top burst.
+        const float amp[5] = {0.05f, 0.10f, 0.16f, 0.22f, 0.30f};
         const size_t onN = (size_t)(0.30 * SR), cyc = (size_t)(0.50 * SR), edge = (size_t)(0.005 * SR);
         for (int s = 0; s < 5; ++s)
         {
@@ -123,7 +131,7 @@ int main(int argc, char** argv)
                 float w = 1.0f;
                 if (i < edge) w = 0.5f * (1.0f - std::cos((float)M_PI * i / edge));
                 else if (i > onN - edge) w = 0.5f * (1.0f - std::cos((float)M_PI * (onN - i) / edge));
-                L[base + i] = amp[s] * w * std::sin(2.0f * (float)M_PI * 440.0f * i / (float)SR);
+                L[base + i] = amp[s] * w * std::sin(2.0f * (float)M_PI * 1000.0f * i / (float)SR);
             }
         }
     }

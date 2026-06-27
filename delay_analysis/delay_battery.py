@@ -25,6 +25,13 @@
 #   5. SATURATION: output vs input level (knee) from the level sweep.
 #   6. WOW/FLUTTER: instantaneous pitch of a sustained tone -> depth % + rate,
 #      slow wow (~0.5-1 Hz) vs flutter (~6 Hz). Target ~0.1 % peak (subtle).
+#      (Caveat: a non-pure dry test tone inflates this; drive a clean carrier.)
+#   6b. SAT HARMONICS (even vs odd): the harmonic SERIES of the hottest level burst.
+#      Real tape is EVEN-dominant (2nd harmonic, warm, asymmetric record transfer);
+#      a symmetric soft-clipper is ODD-dominant (3rd, hollow). This is the dimension
+#      the saturation CURVE (#5) and the magnitude spectra (#1-3) are all blind to:
+#      a symmetric clipper can match every one of those panels and still sound wrong.
+#      Found by a null test (delay_analysis/null_probe.py); regression-locked here.
 #   7. SPACE TAPE head taps land at 1 : 1.9 : 2.76.
 #   8. Loudness-match BEFORE any A/B; ears are the final judge -- the metrics
 #      localise problems, they don't certify a match.
@@ -98,10 +105,14 @@ def single_repeat_spectrum(x):
     seg = x[ons[0]:ons[0] + win]
     return norm_at(octband(seg), FC), T
 
-def per_pass_transfer(x, npairs=6, clean_floor=0.08):
-    """Mean rep[n+1]/rep[n] band ratio (dB) over the CLEAN echoes only -> in-loop EQ.
-    Stops once an echo falls below clean_floor of the first (≈ −22 dB): later, quieter
-    repeats are into the noise floor and corrupt the HF ratio (it goes positive)."""
+def per_pass_transfer(x, npairs=6, clean_floor=0.04, floor_db=70.0):
+    """rep[n+1]/rep[n] band ratio (dB) -> the in-loop EQ. Gated PER BAND by a noise
+    floor: a band only counts in a pair where BOTH repeats clear (pair-peak − floor_db).
+    Without this, the quiet later repeats' HF sits at the capture noise floor and the
+    ratio there goes to ~0 -> a FALSE plateau that makes the reference's HF look like it
+    'carries on' while ours rolls off. The true in-loop HF roll is steep; only the loud
+    early repeats measure it honestly (low bands keep more pairs for SNR). Mind: this is
+    the in-loop transfer, NOT the single-repeat -- see the playbook."""
     on, T, ons = echo_onsets(x, n=npairs + 2)
     win = int(min(T * 0.9, 0.30) * SR)
     specs, first = [], None
@@ -112,9 +123,17 @@ def per_pass_transfer(x, npairs=6, clean_floor=0.08):
         if first is None: first = pk
         if pk < clean_floor * first or pk < 1e-5: break
         specs.append(octband(seg))
-    ratios = [specs[i + 1] - specs[i] for i in range(len(specs) - 1)]
-    if not ratios: return np.full_like(FC, np.nan), T, 0
-    return np.nanmean(ratios, axis=0), T, len(ratios)
+    if len(specs) < 2: return np.full_like(FC, np.nan), T, 0
+    out = np.full_like(FC, np.nan)
+    for b in range(len(FC)):
+        vals = []
+        for i in range(len(specs) - 1):
+            a, c = specs[i][b], specs[i + 1][b]
+            pkref = max(np.nanmax(specs[i]), np.nanmax(specs[i + 1]))
+            if a > pkref - floor_db and c > pkref - floor_db:
+                vals.append(c - a)
+        if vals: out[b] = np.mean(vals)
+    return out, T, len(specs) - 1
 
 # ---------- feature fits ----------
 def head_bump_fit(curve_db, fcs=FC, band=(120, 800)):
@@ -201,6 +220,37 @@ def wow_flutter(x):
         s = (fr >= lo) & (fr <= hi)
         return fr[s][np.argmax(D[s])] if np.any(s) and np.max(D[s]) > 0 else np.nan
     return dict(depth=depth, wow=peak_in(0.2, 2.0), flut=peak_in(4.0, 9.0), f0=f0)
+
+# ---------- saturation harmonic character (even vs odd) ----------
+def harmonic_profile(x, f0=None):
+    """Even-vs-odd harmonic character of the in-loop saturation, from the HOTTEST level
+    burst. THE dimension the level-domain saturation curve (burst-RMS growth) and the
+    magnitude spectra are both BLIND to: they see compression amount and tone, but not
+    whether the distortion is 2nd-harmonic (EVEN -> warm, asymmetric tape) or 3rd (ODD
+    -> hollow, a symmetric soft-clipper). A symmetric clipper nulls the magnitude/sat
+    panels yet sounds wrong because its repeats are odd-distorted. Returns dB rel f0."""
+    e = smooth_env(x, 480); thr = 0.08 * e.max()
+    hot = e > thr; runs = []; i = 0
+    while i < len(hot):
+        if hot[i]:
+            j = i
+            while j < len(hot) and hot[j]: j += 1
+            if j - i > int(0.05 * SR): runs.append((i, j))
+            i = j
+        else: i += 1
+    if not runs: return None
+    a, b = runs[-1]
+    seg = x[a + 1500:b - 1500] if (b - a) > 4000 else x[a:b]   # steady middle of the burst
+    w = seg * np.hanning(len(seg)); X = np.abs(np.fft.rfft(w)); fr = np.fft.rfftfreq(len(seg), 1 / SR)
+    if f0 is None:  # auto-detect the carrier (ref levels = 1 kHz; tolerate others)
+        lo = (fr > 200) & (fr < 4000); f0 = fr[lo][np.argmax(X[lo])]
+    def amp(fh):
+        k = int(np.argmin(np.abs(fr - fh))); return X[max(0, k - 3):k + 4].max()
+    base = amp(f0) + 1e-12
+    H = {h: 20 * np.log10(amp(h * f0) / base + 1e-12) for h in range(2, 7)}
+    evn = 10 * np.log10(sum(10 ** (H[h] / 10) for h in (2, 4, 6)) + 1e-30)
+    odd = 10 * np.log10(sum(10 ** (H[h] / 10) for h in (3, 5)) + 1e-30)
+    return dict(f0=f0, H=H, even=evn, odd=odd, margin=evn - odd)
 
 # ---------- space-tape head taps ----------
 def head_taps(x, nheads=3, window=2.5):
@@ -295,12 +345,18 @@ def main():
     # RELATIVE to the flat passband (~1 kHz) so it reads as the true in-loop boost.
     ppN = norm_at(ppO, FC, 1000.0)
     ppbumpO = head_bump_fit(ppN); ppgapO = gap_loss(ppN)
-    # ---- output tilt = single - per-pass ----
-    tiltO = srO - ppO
-    tiltR = (srR - ppR) if (srR is not None and ppR is not None) else None
+    # ---- output tilt = single - per-pass (BOTH normalised @1k) ----
+    # The per-pass MUST be normalised here: its raw level carries the per-repeat feedback
+    # decay, which differs between ours and the reference (different fb), and would inject a
+    # bogus offset into the tilt. Normalising both isolates the genuine once-at-output stage.
+    tiltO = srO - ppN
+    tiltR = (srR - norm_at(ppR, FC, 1000.0)) if (srR is not None and ppR is not None) else None
     # ---- saturation ----
     satO = burst_levels(ours('levels'))
     sx = ref('levels'); satR = burst_levels(sx) if sx is not None else None
+    # ---- saturation HARMONIC character (even vs odd) -- the dimension the curve misses ----
+    shO = harmonic_profile(ours('levels'))
+    shR = harmonic_profile(sx) if sx is not None else None
     # ---- wow/flutter ----
     wfO = wow_flutter(ours('sustain'))
     wx = ref('sustain'); wfR = wow_flutter(wx) if wx is not None else None
@@ -318,6 +374,14 @@ def main():
     if wfR: print(f" WOW/FLUTTER ref:  depth {wfR['depth']:.2f}%  wow {wfR['wow']:.2f} Hz  flutter {wfR['flut']:.2f} Hz")
     print(f" SATURATION ours burst RMS steps: {np.array2string(satO, precision=3)}")
     if satR is not None: print(f" SATURATION ref  burst RMS steps: {np.array2string(satR, precision=3)}")
+    if shO:
+        print(f" SAT HARMONICS ours @{shO['f0']:.0f}Hz: " + " ".join(f"H{h}{shO['H'][h]:+.0f}" for h in range(2, 7))
+              + f"  EVEN {shO['even']:+.0f} / ODD {shO['odd']:+.0f} dB  (even-odd margin {shO['margin']:+.0f} dB)")
+    if shR:
+        print(f" SAT HARMONICS ref  @{shR['f0']:.0f}Hz: " + " ".join(f"H{h}{shR['H'][h]:+.0f}" for h in range(2, 7))
+              + f"  EVEN {shR['even']:+.0f} / ODD {shR['odd']:+.0f} dB  (even-odd margin {shR['margin']:+.0f} dB)")
+        print(f"   -> tape is EVEN-dominant (warm); a symmetric clipper reads ODD-dominant here"
+              f" while matching every magnitude/sat panel. Δmargin {shO['margin']-shR['margin']:+.0f} dB")
     if a.char == 'space':
         print(f" HEAD TAPS ours: {np.array2string(tapsO*1000, precision=1)} ms  ratios {np.array2string(ratO, precision=3)}  (target 1 : 1.9 : 2.76)")
         rh = ref('heads')
@@ -359,15 +423,29 @@ def main():
     ax.set_title('saturation: output growth vs input step'); ax.set_ylabel('dB rel step1'); ax.set_xlabel('step'); ax.legend(); ax.grid(alpha=.3)
 
     ax = plt.subplot(2, 3, 5)
-    # wow/flutter pitch trace (ours)
-    su = ours('sustain'); on, T, ons = echo_onsets(su); seg = su[ons[0]:ons[0] + int(2.0 * SR)]
-    if len(seg) > int(0.3 * SR):
+    # wow/flutter pitch trace as % pitch DEVIATION (zoomed) so the subtle wobble is visible;
+    # bandpass the carrier first (the saturation harmonics otherwise jitter the estimate),
+    # and overlay the reference. depth is the 99th-pctile |dev|.
+    def pitch_dev(x, f0=440.0, dur=2.0):
+        on, T, ons = echo_onsets(x); seg = x[ons[0]:ons[0] + int(dur * SR)]
+        if len(seg) < int(0.3 * SR): return None, None
+        Xb = np.fft.rfft(seg); fr = np.fft.rfftfreq(len(seg), 1 / SR)
+        Xb[(fr < f0 - 60) | (fr > f0 + 60)] = 0; seg = np.fft.irfft(Xb, len(seg))
         inst = hilbert_inst_freq(seg); aa = np.abs(seg[1:]); g = aa > 0.2 * aa.max()
         tt = np.arange(len(inst))[g] / SR; iv = inst[g]
-        m = (iv > 300) & (iv < 600)
-        ax.plot(tt[m], iv[m], color='#c0392b', lw=.6)
-    ax.axhline(440, color='g', ls=':', alpha=.6)
-    ax.set_title(f"wow/flutter pitch trace (depth {wfO['depth']:.2f}%)"); ax.set_ylabel('Hz'); ax.set_xlabel('s'); ax.grid(alpha=.3)
+        keep = (iv > f0 - 80) & (iv < f0 + 80); tt, iv = tt[keep], iv[keep]
+        return tt, (iv / np.median(iv) - 1.0) * 100.0
+    tO, dO = pitch_dev(ours('sustain'))
+    if tO is not None: ax.plot(tO, dO, color='#c0392b', lw=.5, label=f"ours {wfO['depth']:.2f}%")
+    wxs = ref('sustain')
+    if wxs is not None:
+        tR, dR = pitch_dev(wxs)
+        if tR is not None: ax.plot(tR, dR, color='#222', lw=.5, alpha=.7,
+                                   label=f"ref {wfR['depth']:.2f}%" if wfR else 'ref')
+    ax.axhline(0, color='g', ls=':', alpha=.6)
+    ax.set_ylim(-1.0, 1.0)  # ±1% -> subtle analogue wobble is readable
+    ax.set_title('wow/flutter pitch deviation (%) — zoomed'); ax.set_ylabel('% dev'); ax.set_xlabel('s')
+    ax.legend(fontsize=8); ax.grid(alpha=.3)
 
     ax = plt.subplot(2, 3, 6)
     if a.char == 'space' and tapsO is not None:
@@ -377,8 +455,18 @@ def main():
         tgt = tapsO[0] * np.array([1, 1.9, 2.76]) * 1000
         ax.stem(tgt, 0.8 * np.ones(3), linefmt='g:', markerfmt='g^', basefmt=' ')
         ax.set_title('head taps (red=ours, green=target 1:1.9:2.76)'); ax.set_xlabel('ms'); ax.set_ylim(0, 1.2)
+    elif shO is not None:
+        # SATURATION HARMONIC CHARACTER: even (2nd, warm/tape) vs odd (3rd, hollow/clipper).
+        # The headline metric the level-domain saturation curve + magnitude spectra MISS.
+        hs = np.arange(2, 7); wbar = 0.38
+        ax.bar(hs - wbar / 2, [shO['H'][h] for h in hs], wbar, color='#c0392b', label='ours')
+        if shR is not None:
+            ax.bar(hs + wbar / 2, [shR['H'][h] for h in hs], wbar, color='#222', label='reference')
+        ax.set_title('SAT HARMONICS rel f0 (even=warm/tape, odd=hollow)\n'
+                     f"ours margin {shO['margin']:+.0f} dB" + (f" / ref {shR['margin']:+.0f} dB" if shR else ""))
+        ax.set_xlabel('harmonic'); ax.set_ylabel('dB rel f0'); ax.set_xticks(hs)
+        ax.legend(); ax.grid(alpha=.3, axis='y')
     else:
-        # tail decay envelope as a self-oscillation/decay sanity panel
         tl = ours('tail'); env = smooth_env(tl, 480)
         ax.plot(np.arange(len(env)) / SR, 20 * np.log10(env / env.max() + 1e-12), color='#c0392b', lw=.6)
         ax.set_title('tail decay envelope (ours)'); ax.set_ylabel('dB'); ax.set_xlabel('s'); ax.set_ylim(-80, 2); ax.grid(alpha=.3)

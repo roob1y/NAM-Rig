@@ -98,6 +98,65 @@ cut (the reference's bump and cut are both broad and mirror each other); closing
 it would need the in-loop bump and output cut to be matched arbitrary shapes —
 not worth the topology for ~3 dB on one band. Ears are the final judge.
 
+## The saturation HARMONIC null — the dimension the battery used to miss (2026-06-27)
+
+The Tape voicing matched every magnitude panel **and** the level-domain saturation
+curve, yet the repeats sounded different ("more tapey"). Reason: those metrics only
+measure **how much** the saturation compresses (a level-domain curve) and the tonal
+**magnitude** — neither sees the **harmonic series**, i.e. whether the distortion is
+**even (2nd, warm, asymmetric tape)** or **odd (3rd, hollow, a symmetric clipper)**.
+
+How it was found — **null tests** (`delay_analysis/null_probe.py`), driving the real
+engine with the EXACT dry inputs that produced the wet captures (`delay_ref/` ->
+`delay_references/`, validated: our wet output lands within **3 samples** and **3 %**
+of the reference, so the dry files are the true inputs and the operating LEVEL is
+pinned — no guessing the sweep amplitudes):
+- **impulse** null (single echo, near-linear): residual was **magnitude-dominated,
+  NOT phase** (forcing the magnitude to match collapsed the residual; group delay was
+  negligible). So it is not a filter-phase problem.
+- **levels** null at the **calibrated level** (the reference sweep is a **1 kHz** tone
+  topping at the true operating ceiling **0.30**, NOT 0.80 — the old `delay_render`
+  assumed hot 0.80 steps): the reference is **even-dominant** (H2 grows −69→−54 dB with
+  level, H3 far below at −75) — and **essentially LINEAR** (compression ratios
+  1.00/1.00/1.00/0.999: it adds 2nd-harmonic warmth **without compressing**). Our old
+  cubic was **odd-only** (H3 −31 dB, H2 at the noise floor) and over-compressing
+  (satDrive 1.2 fit to imagined 0.80 inputs). Harmonic-vector distance to the
+  reference dropped **~335×** after the fix.
+- **sustain** null: looked like 10× excess wow/flutter, but that was a **measurement
+  artifact** — the dry reference tone itself isn't a pure sine (it reads ~0.4 % on the
+  same estimator; a synthetic sine reads 0). Driven with a **pure** carrier (the
+  battery's `sustain`), ours and the reference both read ~0.05 %. **wow/flutter was
+  left unchanged.** Always drive a clean carrier for the wow/flutter metric.
+
+The engine fix (`tapeSat`): keep the odd ADAA cubic only for **loop-bounding** at a
+**gentle** drive (so it is near-linear at the operating level, matching the reference's
+linearity and killing the 3rd harmonic), and add an **even-harmonic generator** for the
+2nd-harmonic warmth. A bare square gives only a lone 2nd — but the reference has a
+smooth **even SERIES** (H2 −54, H4 −94, H6 −124, each ~−18 dB on the previous), so the
+generator is a **clamped `cosh`** of the (pre-drive) sample: `satAsym·(cosh(kEvenShape·
+clamp(x))−1)`, whose x²+x⁴+… expansion makes H2 plus a tapering H4/H6. `kEvenShape`
+(=2.0) sets the H4/H2 spread; clamped so it can't run away in the loop, band-limited by
+the in-loop gap-loss LP so it doesn't alias, DC-blocked so nothing accumulates. `satAsym`
+sets the even amount independently of the bounding drive. Fitted result: **satDrive 1.2
+→ 0.10, satAsym 0 → 0.003** — H2/H3/H4 within ~2 dB of the reference, even/odd margin
++20 dB ≈ the reference's +22. (H5 stays at the floor: the pure cubic makes no 5th
+harmonic, but at −108 dB it is inaudible; a richer odd path could add it.) `delay_test`
+stays green (T13/T14 bound the loop; T11 Clean byte-exact — Clean never calls `tapeSat`).
+
+Two measurement lessons baked in here:
+- **The levels render must be SINGLE-PASS (fb 0).** Feedback recirculation compounds the
+  saturation and inflates the harmonics, so the battery's harmonic read no longer matches
+  the (near-single-pass) reference. `delay_render` levels now renders at fb 0.
+- **The per-pass HF transfer is noise-floor-limited.** Averaging the quiet later repeats
+  drives the HF ratio toward 0 dB → a FALSE plateau that makes the reference look like its
+  HF "carries on" while ours rolls off. The TRUE in-loop roll (loud early repeats only) is
+  steep for both and they agree within ~3 dB. `per_pass_transfer` now gates each band by a
+  per-pair noise floor (loud repeats only for HF, more pairs for LF). Don't read the raw
+  averaged per-pass HF as a real transfer.
+
+The battery prints **SAT HARMONICS** (even/odd + margin) and a harmonic bar panel, so this
+dimension is regression-visible.
+
 ## Capture requirements (what makes a reference usable)
 The battery is only as good as the `delay_ref/` captures. A usable set is rendered
 through the reference plugin at **100 % wet**, noise/ducking OFF, tape-age centred,

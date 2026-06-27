@@ -93,13 +93,23 @@ public:
         TimeMode timeMode;     // time-change feel (Tape glide = pitch swoop)
         float satDrive;        // record level into the tape soft-clip; 0 = no saturation.
                                //   gentle below ~1/satDrive, compresses above -> bounds the loop.
+        float satAsym;         // even-harmonic amount: 0 = symmetric (the odd-only cubic; pure
+                               //   3rd-harmonic). >0 adds a clamped-cosh EVEN harmonic series
+                               //   (strong 2nd, tapering 4th/6th) like real tape's asymmetric
+                               //   record transfer -- the warmth the level-domain saturation
+                               //   curve AND the magnitude spectra are both blind to. DC-blocked
+                               //   in-loop so nothing accumulates. Fit to the reference harmonic
+                               //   null (delay_analysis/null_probe.py).
         float headBumpHz;      // IN-LOOP low-mid "head bump" peak (builds the tape bloom across
         float headBumpDb;      //   repeats); 0 dB = off
         float headBumpQ;
         float gapLossHz;       // head-gap HF roll-off (IN-LOOP): caps the High Cut at this corner
                                //   (knob darkens further, never brighter); 0 = no cap.
-        float outBassHz;       // OUTPUT-once bass thinning: low-shelf corner (applied once, NOT
-        float outBassDb;       //   recirculated -> thins the echo without compounding the tail).
+        float outBassHz;       // OUTPUT-once bass shaping: corner/centre (applied once, NOT
+        float outBassDb;       //   recirculated -> shapes timbre without compounding the tail).
+        float outBassQ;        //   >0 = PEAKING cut at outBassHz (cancels the in-loop head-bump
+                               //   on the single repeat so the bloom only lives in the tail);
+                               //   0 = low-shelf (Space Tape's full low-end boost).
         float wowMul;          // multiplier on the base wow depth (kWowDepthMs)
         float flutterMul;      // multiplier on the base flutter depth (kFlutterDepthMs)
         float driftHz;         // slow random pitch drift rate (worn-transport wander); 0 = off
@@ -121,8 +131,8 @@ public:
             //   ~6dB/oct HF roll-off, vs the single-head Tape's 2-pole); sat 1.4.
             //   output-once: low-shelf +2.5dB@180 (the multi-head tape echo's full low end).
             //   Head ratios 1:1.9:2.76 (processSpaceTape).
-            //          tm  sat  hbHz  hbDb  hbQ  gapHz  obHz  obDb  wowM   flutM  drHz  drMs   ppHz   ppDb fbCeil
-            return { TimeMode::Tape, 1.4f, 300.0f, 2.5f, 0.6f, 2000.0f, 180.0f, 2.5f,
+            //          tm  sat  asym hbHz  hbDb  hbQ  gapHz  obHz  obDb  wowM   flutM  drHz  drMs   ppHz   ppDb fbCeil
+            return { TimeMode::Tape, 1.4f, 0.0f, 300.0f, 2.5f, 0.6f, 2000.0f, 180.0f, 2.5f, 0.0f,
                      0.05f, 0.055f, 0.5f, 0.05f, 2500.0f, 0.0f, 1.10f };
         case Character::Tape:
             // Tape-echo voicing fit to a MEASURED tape-echo reference with the metric
@@ -139,12 +149,18 @@ public:
             //     step sits just under the soft-clip clamp). wow/flutter ~0.1% peak;
             //     Tape glide; fb ceiling 1.10 (the in-loop sat tames runaway).
             //   Residual ~3dB @ 250Hz (single/tilt) = the peak-bump-vs-shelf-cut floor.
-            //          sat  hbHz  hbDb  hbQ   gapHz  obHz  obDb  wowM   flutM  drHz  drMs   ppHz   ppDb fbCeil
-            return { TimeMode::Tape, 1.2f, 260.0f, 9.5f, 0.50f, 1950.0f, 560.0f, -8.5f,
-                     0.05f, 0.055f, 0.5f, 0.05f, 2200.0f, 6.0f, 1.10f };
+            //   The in-loop head bump is BIG (+14 @260) -> the reference's strong tail bloom
+            //   (per-pass ~+13.7 dB); the output-once stage CANCELS it on the single repeat
+            //   with a matching PEAKING cut (-13 @260, same 0.35 Q) so the single echo stays
+            //   flat at 250 with full lows, while the bloom only compounds down the tail.
+            //   Preamp presence peak moved to 3.5 kHz (was a 2 kHz lift that doubled the
+            //   single-repeat hump). gap-loss 2-pole ~2.1 kHz.
+            //          sat   asym   hbHz  hbDb   hbQ   gapHz  obHz  obDb   obQ   wowM   flutM  drHz  drMs   ppHz   ppDb fbCeil
+            return { TimeMode::Tape, 0.06f, 0.0015f, 260.0f, 14.0f, 0.35f, 2100.0f, 260.0f, -13.0f, 0.35f,
+                     0.05f, 0.055f, 0.5f, 0.05f, 3500.0f, 4.0f, 1.10f };
         case Character::Clean:
         default:
-            return { TimeMode::Digital, 0.0f, 0.0f, 0.0f, 0.7f, 0.0f, 0.0f, 0.0f,
+            return { TimeMode::Digital, 0.0f, 0.0f, 0.0f, 0.0f, 0.7f, 0.0f, 0.0f, 0.0f, 0.0f,
                      0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, kMaxFeedback };
         }
     }
@@ -200,6 +216,7 @@ public:
         mDrift.reset();
         mDriftZ = 0.0;
         mSatX1[0] = mSatX1[1] = mSatX2[0] = mSatX2[1] = 0.0; // tape saturation ADAA history
+        mDcX1[0] = mDcX1[1] = mDcY1[0] = mDcY1[1] = 0.0;      // tape asym DC-blocker state
         const double b0 = (double)currentTimeMs(), b1 = (double)currentTimeMsR();
         mBaseZ[0] = b0;
         mBaseZ[1] = b1;
@@ -552,11 +569,29 @@ private:
     float tapeSat(int ch, float x)
     {
         const double drive = (double)mVoicing.satDrive;
+        const double asym  = (double)mVoicing.satAsym;       // even-harmonic (2nd) amount
         const double xb = (double)x * drive;
         const double y = sat::cubicADAA2(xb, mSatX1[(size_t)ch], mSatX2[(size_t)ch]);
         mSatX2[(size_t)ch] = mSatX1[(size_t)ch];
         mSatX1[(size_t)ch] = xb;
-        const float out = (float)(y / drive);
+        double yb = y / drive;
+        if (asym != 0.0)
+        {
+            // The odd cubic alone is 3rd-harmonic only; real tape's warmth is an EVEN
+            // harmonic SERIES (strong 2nd, tapering 4th/6th) from an asymmetric record
+            // transfer. A clamped cosh adds exactly that smooth even series -- a bare
+            // square would give only a lone 2nd. Taken from the PRE-drive sample so the
+            // even amount is set by satAsym alone (independent of the bounding drive) and
+            // stays bounded in the loop; the in-loop gap-loss LP band-limits it so it does
+            // not alias; a one-pole DC blocker removes its DC so nothing accumulates down
+            // the tail. Symmetric tape (asym 0) skips this -> bit-identical to before.
+            const double xc = (double)x > 1.0 ? 1.0 : ((double)x < -1.0 ? -1.0 : (double)x);
+            const double in = yb + asym * (std::cosh(kEvenShape * xc) - 1.0);
+            yb = in - mDcX1[(size_t)ch] + kDcBlockR * mDcY1[(size_t)ch];
+            mDcX1[(size_t)ch] = in;
+            mDcY1[(size_t)ch] = yb;
+        }
+        const float out = (float)yb;
         return std::isfinite(out) ? out : 0.0f;
     }
 
@@ -593,8 +628,12 @@ private:
         if (mOutBassOn || force)
         {
             const auto c = (mOutBassOn)
-                ? Biquad::lowshelf(mFs, std::min((double)mVoicing.outBassHz, 0.45 * mFs),
-                                   (double)mVoicing.outBassDb)
+                ? ((mVoicing.outBassQ > 0.0f)  // >0 = PEAKING cut (cancels the in-loop bump on
+                                               //   the single pass while the bloom compounds);
+                   ? Biquad::peaking(mFs, std::min((double)mVoicing.outBassHz, 0.45 * mFs),
+                                     (double)mVoicing.outBassQ, (double)mVoicing.outBassDb)
+                   : Biquad::lowshelf(mFs, std::min((double)mVoicing.outBassHz, 0.45 * mFs),
+                                      (double)mVoicing.outBassDb))  // 0 = low-shelf (Space Tape)
                 : Biquad::identity();
             for (auto &t : mOutBass) { const float z1 = t.z1, z2 = t.z2; t = c; t.z1 = z1; t.z2 = z2; }
         }
@@ -745,6 +784,9 @@ private:
     Character mCharacter = Character::Clean;
     DelayVoicing mVoicing = voicingFor(Character::Clean);
     double mSatX1[2] = {0.0, 0.0}, mSatX2[2] = {0.0, 0.0}; // tape saturation ADAA history
+    double mDcX1[2] = {0.0, 0.0}, mDcY1[2] = {0.0, 0.0};   // tape asym DC-blocker (only when satAsym>0)
+    static constexpr double kDcBlockR = 0.9995;            // ~3.8 Hz one-pole DC blocker pole
+    static constexpr double kEvenShape = 2.0;              // cosh even-harmonic richness (sets H4/H2 spread)
     double mDriftZ = 0.0;                                  // smoothed random drift state
     float mDriftK = 0.001f;                                // drift smoother coefficient
 
