@@ -1,0 +1,133 @@
+// delay_render.cpp — offline, no-DAW render of the NAM Rig delay CHARACTERS,
+// straight from the committed engine in src/rig/DelayBlock.h (no verbatim copy,
+// so it can never drift). Compiles the real DelayBlock with a tiny JUCE stub.
+//
+//   build:  g++ -std=c++17 -O2 -I../src -Istub delay_render.cpp -o delay_render
+//           (create stub/juce_audio_basics/juce_audio_basics.h containing "#pragma once")
+//   run:    ./delay_render --char tape|space --mode N --test impulse|levels|sustain|tail \
+//                          [--time MS] [--fb F] --out x.f32
+//
+// Output is interleaved stereo float32 (L,R). Both tape characters are MONO
+// (L==R) — we write the mono line into both channels so the Python battery
+// (which reshapes -1,2) reads it like the reverb renders. Rendered 100% wet
+// (mix=1) so the file IS the echo train, with the High Cut knob at its default
+// (~8 kHz) so the in-loop gap-loss sits at the VOICED corner (the knob remap
+// lands default at gapLossHz — see DelayBlock::updateTone). Low Cut off.
+//
+// The test signals mirror the private reference captures in delay_ref/:
+//   impulse  unit impulse  -> a few clean repeats (single-repeat spectrum, taps)
+//   tail     unit impulse, higher feedback -> long repeat train (per-pass transfer)
+//   levels   5 geometric 440 Hz tone-burst steps (300 ms on / 200 ms off) (saturation)
+//   sustain  a long continuous 440 Hz tone at feedback 0 -> ONE clean delayed
+//            tap whose instantaneous pitch is the transport wow/flutter (no
+//            overlapping repeats to beat against and inflate the reading)
+#include "rig/DelayBlock.h"
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <cmath>
+#include <vector>
+#include <string>
+#include <algorithm>
+
+using namespace nam_rig;
+
+static const char* argval(int argc, char** argv, const char* key, const char* dflt)
+{
+    for (int i = 1; i + 1 < argc; ++i)
+        if (std::strcmp(argv[i], key) == 0) return argv[i + 1];
+    return dflt;
+}
+
+int main(int argc, char** argv)
+{
+    const std::string ch   = argval(argc, argv, "--char", "tape");
+    const std::string test = argval(argc, argv, "--test", "impulse");
+    const int  mode    = std::atoi(argval(argc, argv, "--mode", "0"));
+    const float timeMs = (float)std::atof(argval(argc, argv, "--time", "350"));
+    const char* fbArg  = argval(argc, argv, "--fb", "");
+    const std::string out = argval(argc, argv, "--out", "out.f32");
+
+    const double SR = 48000.0;
+    const int BLK = 512;
+
+    DelayBlock d;
+    if      (ch == "tape")  d.setCharacter(DelayBlock::Character::Tape);
+    else if (ch == "space") d.setCharacter(DelayBlock::Character::SpaceTape);
+    else if (ch == "clean") d.setCharacter(DelayBlock::Character::Clean);
+    else { std::fprintf(stderr, "unknown --char '%s'\n", ch.c_str()); return 1; }
+    if (ch == "space") d.setHeadMode(mode);
+
+    d.setTimeMs(timeMs);
+    d.setToneHz(8000.0f);   // default knob -> voiced gap-loss corner (no extra darkening)
+    d.setLowCutHz(20.0f);   // feedback low-cut off
+    d.setWidth(0.0f);       // mono wet
+    d.setMix(1.0f);         // 100% wet -> the echo train
+    d.setModAmount(0.0f);   // tape characters drive their own wow/flutter via the voicing
+
+    // per-test feedback + duration
+    float fb; double durSec;
+    if      (test == "impulse") { fb = 0.25f; durSec = 2.5; }
+    else if (test == "tail")    { fb = 0.55f; durSec = 9.0; }
+    else if (test == "levels")  { fb = 0.20f; durSec = 2.95; }
+    else if (test == "sustain") { fb = 0.0f; durSec = 5.0; }  // fb 0 -> single clean tap
+    else { std::fprintf(stderr, "unknown --test '%s'\n", test.c_str()); return 1; }
+    if (fbArg[0]) fb = (float)std::atof(fbArg);
+    d.setFeedback(fb);
+
+    d.prepare({SR, BLK});
+
+    // settle the glide / drift smoothers on 1 s of silence
+    {
+        std::vector<float> z((size_t)SR, 0.0f), z2 = z;
+        for (size_t p = 0; p < z.size(); p += BLK)
+            d.process(z.data() + p, z2.data() + p, (int)std::min<size_t>(BLK, z.size() - p));
+    }
+
+    const size_t N = (size_t)(durSec * SR);
+    std::vector<float> L(N, 0.0f), R;
+
+    if (test == "impulse" || test == "tail")
+    {
+        L[0] = 1.0f;                       // unit impulse (dry; removed at mix=1)
+    }
+    else if (test == "levels")
+    {
+        const float amp[5] = {0.05f, 0.10f, 0.20f, 0.40f, 0.80f}; // geometric dry sweep
+        const size_t onN = (size_t)(0.30 * SR), cyc = (size_t)(0.50 * SR);
+        for (int s = 0; s < 5; ++s)
+        {
+            const size_t base = (size_t)s * cyc;
+            for (size_t i = 0; i < onN && base + i < N; ++i)
+            {
+                // 5 ms raised-cosine edges so the step's onset doesn't splatter
+                float w = 1.0f;
+                const size_t edge = (size_t)(0.005 * SR);
+                if (i < edge) w = 0.5f * (1.0f - std::cos((float)M_PI * i / edge));
+                else if (i > onN - edge) w = 0.5f * (1.0f - std::cos((float)M_PI * (onN - i) / edge));
+                L[base + i] = amp[s] * w * std::sin(2.0f * (float)M_PI * 440.0f * i / (float)SR);
+            }
+        }
+    }
+    else // sustain — long continuous tone (10 ms fade-in only)
+    {
+        const size_t edge = (size_t)(0.010 * SR);
+        for (size_t i = 0; i < N; ++i)
+        {
+            float w = (i < edge) ? 0.5f * (1.0f - std::cos((float)M_PI * i / edge)) : 1.0f;
+            L[i] = 0.22f * w * std::sin(2.0f * (float)M_PI * 440.0f * i / (float)SR);
+        }
+    }
+    R = L;
+
+    for (size_t p = 0; p < N; p += BLK)
+        d.process(L.data() + p, R.data() + p, (int)std::min<size_t>(BLK, N - p));
+
+    FILE* fo = std::fopen(out.c_str(), "wb");
+    if (!fo) { std::perror("out"); return 1; }
+    for (size_t i = 0; i < N; ++i) { float s[2] = {L[i], R[i]}; std::fwrite(s, sizeof(float), 2, fo); }
+    std::fclose(fo);
+    std::fprintf(stderr, "rendered %s/%s mode%d time%.0f fb%.2f: %zu frames (%.2fs) -> %s\n",
+                 ch.c_str(), test.c_str(), mode, timeMs, fb, N, durSec, out.c_str());
+    return 0;
+}
