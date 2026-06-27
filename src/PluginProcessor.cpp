@@ -349,7 +349,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("delayFeedback", 1), "Delay Feedback",
         juce::NormalisableRange<float>(0.0f, 1.1f, 0.01f),
-        0.35f));
+        0.40f)); // classic 'add-and-play' default: a few clear repeats
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("delayTone", 1), "Delay Tone",
         juce::NormalisableRange<float>(1000.0f, 20000.0f, 10.0f, 0.5f), 8000.0f,
@@ -364,7 +364,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f)); // 0 on the clean delay; the tape delay will expose this
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("delayMix", 1), "Delay Mix",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f, 0.5f), 0.25f)); // skew: finer control low-mix
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f, 0.5f), 0.30f)); // skew: finer control low-mix; classic ~30% wet default
     // Right-side division: index 0 = Link (R mirrors L); 1..13 mirror
     // DelayBlock::kSyncBeats[1..13]. Unlinking = dual independent L/R delay.
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
@@ -376,7 +376,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("delayLowCut", 1), "Delay Low Cut",
         juce::NormalisableRange<float>(nam_rig::DelayBlock::kMinLowCutHz, 2000.0f, 1.0f, 0.45f),
-        nam_rig::DelayBlock::kMinLowCutHz, juce::AudioParameterFloatAttributes().withLabel("Hz")));
+        90.0f, juce::AudioParameterFloatAttributes().withLabel("Hz"))); // gentle feedback HPF so stacked repeats don't build up muddy
     // Delay CHARACTER (like the reverb voicings): Clean = transparent engine;
     // Tape Echo = tape-style echo; Space Tape = multi-head tape echo (3 playback
     // heads at 1x/2x/3x, mono). Order must match DelayBlock::Character -- append
