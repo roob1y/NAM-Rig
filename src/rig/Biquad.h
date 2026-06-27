@@ -131,6 +131,17 @@ struct Biquad
         return q;
     }
 
+    // One-pole low-pass (6 dB/oct) as a biquad: y = k*x + (1-k)*y[-1]. Gentler than
+    // the 2-pole lowpass -> matches a tape echo's soft HF roll-off (multi-head unit).
+    static Biquad lowpass1(double fs, double f0)
+    {
+        const double k = 1.0 - std::exp(-2.0 * kPi * f0 / fs);
+        Biquad q;
+        q.b0 = (float)k; q.b1 = 0.0f; q.b2 = 0.0f;
+        q.a1 = (float)(-(1.0 - k)); q.a2 = 0.0f;
+        return q;
+    }
+
     // Analytic |H(e^{j2πf/fs})| from the live coefficients (for verification).
     double magnitudeAt(double fs, double f) const
     {

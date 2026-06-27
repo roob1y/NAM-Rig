@@ -3634,6 +3634,20 @@ public:
         mSyncRKnob->slider().onValueChange = [this] { refresh(); };
         addAndMakeVisible(*mSyncRKnob);
 
+        // Space Tape MODE dial — the multi-head tape echo's 11 echo modes + Reverb-only. Stepped
+        // knob with click-to-pick menu (like Sync). Shown only for Space Tape
+        // (replaces Sync R). Modes 5-11/Reverb auto-engage the rig Spring.
+        const juce::StringArray headNames{"1 Head 1", "2 Head 2", "3 Head 3", "4 Heads 2+3",
+                                          "5 Head 1 +Rev", "6 Head 2 +Rev", "7 Head 3 +Rev",
+                                          "8 Heads 1+2 +Rev", "9 Heads 2+3 +Rev",
+                                          "10 Heads 1+3 +Rev", "11 All +Rev", "12 Reverb Only"};
+        mHeadKnob = std::make_unique<LabeledKnob>(apvts, "delayHeadMode", "Mode");
+        mHeadKnob->slider().textFromValueFunction =
+            [headNames](double v) { return headNames[juce::jlimit(0, 11, (int)std::lround(v))]; };
+        mHeadKnob->slider().updateText();
+        mHeadKnob->setValueMenu(headNames);
+        addChildComponent(*mHeadKnob); // visibility toggled in refresh()
+
         // Stereo MODE selector (replaces the Ping-Pong toggle): the highlighted
         // segment is the always-visible identifier. Single = one linked time;
         // Dual = independent L/R divisions (Sync R active); Ping-Pong = L/R bounce.
@@ -3682,7 +3696,7 @@ public:
         // Tape engages the tape-echo voicing (saturation, bass/HF roll-off,
         // wow/flutter + drift, tape glide); Clean is the transparent engine.
         mCharacter = std::make_unique<SegmentedControl>(
-            apvts, "delayCharacter", juce::StringArray{"Clean", "Tape Echo"});
+            apvts, "delayCharacter", juce::StringArray{"Clean", "Tape Echo", "Space Tape"});
         addAndMakeVisible(*mCharacter);
         mCharacter->onChange = [this](int) { refresh(); };
 
@@ -3741,6 +3755,15 @@ public:
         // Width is an M/S spread on the wet -> only meaningful when there's stereo
         // delay structure (Dual or Ping-Pong); in Single it does nothing, so grey it.
         if (mKnobs.size() > 4) mKnobs[4]->setEnabled(dual || ping); // Width (now 5th knob)
+
+        // Space Tape: the Head Mode knob replaces Sync R + the stereo Mode selector
+        // (it's a mono multi-head echo). Time = the base/head-1 (Repeat Rate).
+        const bool space = (int)mApvts.getRawParameterValue("delayCharacter")->load() == 2; // Space Tape
+        if (mHeadKnob) mHeadKnob->setVisible(space);
+        if (mSyncRKnob) mSyncRKnob->setVisible(!space);
+        if (mMode) mMode->setVisible(!space);
+        if (space && mKnobs.size() > 4) mKnobs[4]->setEnabled(false); // Width n/a (mono)
+
         if (mTaps) mTaps->repaint();
     }
 
@@ -3797,6 +3820,7 @@ public:
         auto top = body.removeFromTop(96).reduced(24, 6);
         mSyncKnob->setBounds(top.removeFromLeft(80).reduced(3, 0));
         mSyncRKnob->setBounds(top.removeFromLeft(80).reduced(3, 0));
+        if (mHeadKnob) mHeadKnob->setBounds(mSyncRKnob->getBounds()); // same slot (Space Tape)
         const int mw = mMode ? mMode->idealWidth() : 240;
         mMode->setBounds(top.removeFromRight(mw).withSizeKeepingCentre(mw, 28));
         top.removeFromLeft(16);
@@ -3842,7 +3866,7 @@ private:
     juce::AudioProcessorValueTreeState &mApvts;
     juce::Label mTapsCaption;
     juce::TextButton mPresetBtn; // delay-only preset menu
-    std::unique_ptr<LabeledKnob> mSyncKnob, mSyncRKnob;
+    std::unique_ptr<LabeledKnob> mSyncKnob, mSyncRKnob, mHeadKnob;
     std::unique_ptr<SegmentedControl> mMode; // Single / Dual / Ping-Pong selector
     std::unique_ptr<SegmentedControl> mCharacter; // Clean / Tape Echo selector
     std::unique_ptr<DelayTaps> mTaps;

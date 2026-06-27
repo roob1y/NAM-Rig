@@ -63,7 +63,26 @@ public:
     // the per-character loop stages below. Default is Clean so the engine is
     // byte-for-byte the original delay unless a character is selected -- order
     // is the parameter StringArray order, append only.
-    enum class Character { Clean = 0, Tape = 1 };
+    // SpaceTape = the multi-head tape echo: the SAME tape voicing as
+    // Tape, but three playback heads read one tape loop at 1x/2x/3x the base time,
+    // selected in combinations by the head mode. Mono (authentic).
+    enum class Character { Clean = 0, Tape = 1, SpaceTape = 2 };
+
+    // multi-head tape echo mode dial: 11 echo modes + reverb-only (12 positions). Each is a head
+    // combination (bit0=H1, bit1=H2, bit2=H3; 0 = reverb only, no echo). Modes 5-11
+    // and Reverb also engage the spring -> handled by the rig's Spring reverb, wired
+    // from the processor (spaceTapeReverbOn) when Space Tape is active.
+    static constexpr int kNumHeadModes = 12;
+    static constexpr std::array<int, 12> kStHeadMask = {
+        0b001, 0b010, 0b100, 0b110,  // 1-4 echo only: H1, H2, H3, H2+3
+        0b001, 0b010, 0b100,         // 5-7 +rev:      H1, H2, H3
+        0b011, 0b110, 0b101, 0b111,  // 8-11 +rev:     H1+2, H2+3, H1+3, all
+        0b000};                      // 12 reverb only (no echo)
+    static bool spaceTapeReverbOn(int mode) { return mode >= 4; } // modes 5-11 + reverb-only
+    // Real multi-head tape echo heads are ~1:1.9:2.76 (not the reissue's idealised 1:2:3).
+    static constexpr std::array<float, 3> kHeadRatio = {1.0f, 1.9f, 2.76f};
+    // Authentic head-1 (Repeat Rate) span; the Time knob remaps onto this for Space Tape.
+    static constexpr float kStHead1MinMs = 69.0f, kStHead1MaxMs = 177.0f;
 
     // What a character switches on in the feedback loop. All-zero = behaves like
     // the clean delay (a plain transparent shaper). Every nonlinear/colour stage
@@ -94,6 +113,17 @@ public:
     {
         switch (c)
         {
+        case Character::SpaceTape:
+            // multi-head tape echo voicing, fit to a MEASURED reference (echo-only modes). It is
+            // VERY different from the single-head Tape: flat/boosted bass (low-shelf BOOST, not
+            // cut), a SMALLER low-mid bloom, and a BRIGHTER, gentler HF roll-off.
+            //   in-loop: bump +2.5dB@300 (Q0.6); gap-loss 1-POLE ~2k (a gentle
+            //   ~6dB/oct HF roll-off, vs the single-head Tape's 2-pole); sat 1.4.
+            //   output-once: low-shelf +2.5dB@180 (the multi-head tape echo's full low end).
+            //   Head ratios 1:1.9:2.76 (processSpaceTape).
+            //          tm  sat  hbHz  hbDb  hbQ  gapHz  obHz  obDb  wowM   flutM  drHz  drMs   ppHz   ppDb fbCeil
+            return { TimeMode::Tape, 1.4f, 300.0f, 2.5f, 0.6f, 2000.0f, 180.0f, 2.5f,
+                     0.05f, 0.055f, 0.5f, 0.05f, 2500.0f, 0.0f, 1.10f };
         case Character::Tape:
             // Tape-echo voicing fit to a MEASURED reference, split into PER-PASS
             // (in-loop) and ONCE (output) stages from a multi-repeat tail capture
@@ -107,7 +137,7 @@ public:
             //   - saturation gentle (ref ~linear, feedback asymptote ~0.85); wow/
             //     flutter ~0.1% peak; Tape glide; fb ceiling 1.10 (sat tames runaway).
             //          sat  hbHz  hbDb  hbQ  gapHz  obHz  obDb  wowM   flutM  drHz  drMs   ppHz   ppDb fbCeil
-            return { TimeMode::Tape, 1.2f, 330.0f, 4.0f, 0.6f, 2000.0f, 480.0f, -6.0f,
+            return { TimeMode::Tape, 1.2f, 330.0f, 4.0f, 0.6f, 2100.0f, 480.0f, -6.0f,
                      0.05f, 0.055f, 0.5f, 0.05f, 1400.0f, 4.0f, 1.10f };
         case Character::Clean:
         default:
@@ -121,8 +151,10 @@ public:
     void prepare(const BlockContext &ctx) override
     {
         mFs = ctx.sampleRate;
+        // 3x headroom so Space Tape head 3 (reads at ~2.76x the base time) fits when
+        // the base follows the full Time/Sync range.
         const int maxDelay =
-            (int)std::ceil((kMaxTimeMs + kWowDepthMs + kFlutterDepthMs + 4.0) * 0.001 * mFs);
+            (int)std::ceil((3.0 * (kMaxTimeMs + kWowDepthMs + kFlutterDepthMs) + 4.0) * 0.001 * mFs);
         for (auto &d : mLine)
             d.prepare(maxDelay);
         mWow.prepare(mFs);
@@ -213,7 +245,8 @@ public:
     void setCharacter(Character c)
     {
         mCharacter = c;
-        mTapeOn = (c != Character::Clean);
+        mTapeOn = (c != Character::Clean);        // tape voicing engaged for Tape + SpaceTape
+        mMultiHead = (c == Character::SpaceTape); // multi-head read path
         mVoicing = voicingFor(c);
         if (mTapeOn)
         {
@@ -229,8 +262,11 @@ public:
     }
     void setCharacter(int c)
     {
-        setCharacter(c == (int)Character::Tape ? Character::Tape : Character::Clean);
+        setCharacter(c == (int)Character::SpaceTape ? Character::SpaceTape
+                     : c == (int)Character::Tape ? Character::Tape : Character::Clean);
     }
+    // multi-head tape echo head combination (0..kNumHeadModes-1); only used by the SpaceTape character.
+    void setHeadMode(int m) { mHeadMode = std::clamp(m, 0, kNumHeadModes - 1); }
     void setWidth(float w) { mWidth = std::clamp(w, 0.0f, 1.0f); }
     void setModAmount(float m) { mModAmt = std::clamp(m, 0.0f, 1.0f); }
     void setMix(float m) { mMix = std::clamp(m, 0.0f, 1.0f); }
@@ -259,6 +295,7 @@ public:
 
     void process(float *left, float *right, int numSamples) override
     {
+        if (mMultiHead) { processSpaceTape(left, right, numSamples); return; }
         const bool stereo = (left != right);
         const float targetMsL = currentTimeMs();
         const float targetMsR = stereo ? currentTimeMsR() : targetMsL;
@@ -408,6 +445,93 @@ public:
     }
 
 private:
+    // Multi-head tape echo: one tape loop read by up to 3 playback heads at
+    // 1x/2x/3x the base time (the head mode picks the combo), summed, shaped by the
+    // shared tape playback EQ + record saturation, and re-recorded for feedback.
+    // Mono (authentic). Reuses the tape voicing, glide, wow/flutter and the
+    // bump-normalised feedback. The base (head 1) time = the Repeat Rate (Time knob).
+    void processSpaceTape(float *left, float *right, int numSamples)
+    {
+        const bool stereo = (left != right);
+        const int mask = kStHeadMask[(size_t)std::clamp(mHeadMode, 0, kNumHeadModes - 1)];
+        int nActive = 0;
+        float leadingRatio = 1.0f; // ratio of the lowest active head (for sync snapping)
+        bool gotLead = false;
+        for (int h = 0; h < 3; ++h)
+            if (mask & (1 << h))
+            {
+                ++nActive;
+                if (!gotLead) { leadingRatio = kHeadRatio[(size_t)h]; gotLead = true; }
+            }
+        const float tapGain = nActive > 0 ? 1.0f / std::sqrt((float)nActive) : 1.0f;
+
+        // Head 1 = Repeat Rate; heads 2/3 follow at the fixed ratios. FREE: the Time
+        // knob maps onto the authentic multi-head tape echo tape-speed span (~69-177ms head 1; from
+        // the service-manual 12-40 cm/s capstan + the 1:1.9:2.76 head spacing). SYNC:
+        // the LEADING ACTIVE head lands on the host division (base = division /
+        // leadingRatio), like the multi-head tape echo emulations, so single-head modes sit on the grid.
+        const float baseTarget = (mSyncIdx > 0)
+            ? currentTimeMs() / leadingRatio
+            : kStHead1MinMs + (std::clamp(mTimeMs, kMinTimeMs, kMaxTimeMs) - kMinTimeMs)
+                              / (kMaxTimeMs - kMinTimeMs) * (kStHead1MaxMs - kStHead1MinMs);
+        const float fb = std::min(mFeedback, mVoicing.fbCeiling) / mLoopPeakGain;
+        const double fsK = 0.001 * mFs;
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            mMixZ += mSmoothK * (mMix - mMixZ);
+            const double wv = (double)mWow.value(), fv = (double)mFlutter.value();
+            mDriftZ += (double)mDriftK * ((double)mDrift.value() - mDriftZ);
+            const double modMs = (double)mVoicing.wowMul * kWowDepthMs * wv
+                               + (double)mVoicing.flutterMul * kFlutterDepthMs * fv
+                               + (double)mVoicing.driftDepthMs * mDriftZ;
+            mDrift.advance(); mWow.advance(); mFlutter.advance();
+
+            // Glide the base time -> tape-speed pitch ramp on a Repeat-Rate change.
+            mBaseZ[0] += (double)mTimeK * ((double)baseTarget - mBaseZ[0]);
+            if (std::abs((double)baseTarget - mBaseZ[0]) < 1.0e-4) mBaseZ[0] = baseTarget;
+            const double base = mBaseZ[0];
+
+            const float dry = stereo ? 0.5f * (left[i] + right[i]) : left[i]; // mono sum in
+
+            // Sum active playback heads (head k reads at k x base; wow/flutter scales
+            // with head distance, so a further head wobbles k x as much).
+            float wet = 0.0f;
+            for (int h = 0; h < 3; ++h)
+                if (mask & (1 << h))
+                {
+                    const double d = std::max(2.0, (double)kHeadRatio[(size_t)h] * (base + modMs) * fsK);
+                    wet += mLine[0].readFrac6(d - 1.0);
+                }
+            wet *= tapGain;
+
+            // Shared tape playback EQ (head bump + gap-loss + low cut) then record sat.
+            if (mHeadOn) wet = mHeadBump[0].processSample(wet);
+            if (mToneOn) wet = mTone[0].processSample(wet);
+            if (mLowCutOn) wet = mLowCut[0].processSample(wet);
+            wet = tapeSat(0, wet);
+
+            mLine[0].write(dry + fb * wet); // re-record (feedback)
+
+            float outw = wet; // output-once shaping (not recirculated)
+            if (mOutBassOn) outw = mOutBass[0].processSample(outw);
+            if (mPreampOn) outw = mPreamp[0].processSample(outw);
+
+            // Reverb-only mode (no heads): pass dry through so the rig Spring has
+            // signal (otherwise full Mix would mute it).
+            const float o = (nActive == 0) ? dry : (1.0f - mMixZ) * dry + mMixZ * outw;
+            left[i] = o;
+            if (stereo) right[i] = o; // authentic mono
+        }
+
+        for (auto *arr : {&mTone, &mLowCut, &mHeadBump, &mOutBass, &mPreamp})
+            for (auto &t : *arr)
+            {
+                if (std::abs(t.z1) < 1.0e-30f) t.z1 = 0.0f;
+                if (std::abs(t.z2) < 1.0e-30f) t.z2 = 0.0f;
+            }
+    }
+
     // Tape record-level soft-clip on 2nd-order ADAA (shared kernel, Saturation.h).
     // Transparent below ~1/satDrive, compresses above -> bounds the feedback loop.
     // Per-channel two-sample history; output is bounded and NaN-guarded.
@@ -526,17 +650,25 @@ private:
         // down ~kTapeHiCutMin (very dark), full up ~kTapeHiCutMax (brighter than
         // the real unit, by choice). Clean is unchanged (literal Hz).
         float corner = mToneHz;
-        if (mTapeOn)
+        if (mTapeOn && mVoicing.gapLossHz > 0.0f)
         {
-            const double lo = std::log(1000.0), hi = std::log(20000.0);
-            const double pos = (std::log((double)std::clamp(mToneHz, 1000.0f, 20000.0f)) - lo) / (hi - lo);
-            const double cl = std::log((double)kTapeHiCutMin), ch = std::log((double)kTapeHiCutMax);
-            corner = (float)std::exp(cl + pos * (ch - cl));
+            // Remap the High Cut knob onto a per-character tape span centred so the
+            // knob default (~8k) lands at the voiced gap-loss corner (gapLossHz).
+            const double ln = std::log(1000.0), hn = std::log(20000.0);
+            const double pos = (std::log((double)std::clamp(mToneHz, 1000.0f, 20000.0f)) - ln) / (hn - ln);
+            const double lo = std::log(0.143 * (double)mVoicing.gapLossHz);
+            const double hi = std::log(2.4 * (double)mVoicing.gapLossHz);
+            corner = (float)std::exp(lo + pos * (hi - lo));
         }
         mToneOn = corner < 20000.0f;
         if (mToneOn || force)
         {
-            const auto coeffs = Biquad::lowpass(mFs, std::min((double)corner, 0.45 * mFs));
+            // Space Tape uses a 1-pole gap-loss (the multi-head tape echo's gentle ~6 dB/oct HF
+            // roll-off); Tape/Clean keep the 2-pole High Cut.
+            const double cz = std::min((double)corner, 0.45 * mFs);
+            const auto coeffs = (mCharacter == Character::SpaceTape)
+                ? Biquad::lowpass1(mFs, cz)
+                : Biquad::lowpass(mFs, cz);
             for (auto &t : mTone)
             {
                 const float z1 = t.z1, z2 = t.z2; // keep state, swap coefficients
@@ -580,6 +712,8 @@ private:
     bool mPingPong = false, mToneOn = true, mLowCutOn = false, mPrepared = false;
     bool mTapeOn = false, mHeadOn = false, mOutBassOn = false, mPreampOn = false; // tape stage gates
     float mLoopPeakGain = 1.0f; // tape: in-loop peak gain, normalises feedback so the knob feel is sane
+    bool mMultiHead = false;    // SpaceTape: multi-head read path active
+    int mHeadMode = 0;          // SpaceTape: head combination (index into kHeadMask)
 
     // Time-change behaviour + per-channel state.
     static constexpr double kXfadeSnapMs = 0.3; // base move under this = no crossfade (deadband)

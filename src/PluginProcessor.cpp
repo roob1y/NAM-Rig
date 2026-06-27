@@ -378,12 +378,21 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::NormalisableRange<float>(nam_rig::DelayBlock::kMinLowCutHz, 2000.0f, 1.0f, 0.45f),
         nam_rig::DelayBlock::kMinLowCutHz, juce::AudioParameterFloatAttributes().withLabel("Hz")));
     // Delay CHARACTER (like the reverb voicings): Clean = transparent engine;
-    // Tape Echo = tape-style echo (saturation, bass/HF roll-off, wow/flutter +
-    // drift, tape glide). Order must match DelayBlock::Character -- append only.
-    // Default Clean keeps the shipped delay unchanged.
+    // Tape Echo = tape-style echo; Space Tape = multi-head tape echo (3 playback
+    // heads at 1x/2x/3x, mono). Order must match DelayBlock::Character -- append
+    // only. Default Clean keeps the shipped delay unchanged.
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("delayCharacter", 1), "Delay Character",
-        juce::StringArray{"Clean", "Tape Echo"}, 0));
+        juce::StringArray{"Clean", "Tape Echo", "Space Tape"}, 0));
+    // Space Tape MODE dial (the multi-head tape echo's 11 echo modes + Reverb-only). Modes 5-11
+    // and Reverb engage the rig's Spring reverb (auto-wired in the processor); modes
+    // 1-4 are echo only. Order must match DelayBlock::kStHeadMask -- append only.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("delayHeadMode", 1), "Delay Mode",
+        juce::StringArray{"1 Head 1", "2 Head 2", "3 Head 3", "4 Heads 2+3",
+                          "5 Head 1 +Rev", "6 Head 2 +Rev", "7 Head 3 +Rev",
+                          "8 Heads 1+2 +Rev", "9 Heads 2+3 +Rev", "10 Heads 1+3 +Rev",
+                          "11 All +Rev", "12 Reverb Only"}, 3));
 
     // --- Reverb (rig/ReverbBlock.h; verified by tests/reverb_test.cpp) ---
     // Reverb Decay/Tone/Predelay/Mod/Size are PER-CHARACTER (generated below); the UI
@@ -986,6 +995,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     // for Clean.
     const int delayChar = (int)apvts.getRawParameterValue("delayCharacter")->load();
     mChain.delay.setCharacter(delayChar);
+    mChain.delay.setHeadMode((int)apvts.getRawParameterValue("delayHeadMode")->load());
     if (delayChar == (int)nam_rig::DelayBlock::Character::Clean)
         mChain.delay.setTimeMode(nam_rig::DelayBlock::TimeMode::Digital);
     mChain.delay.setPingPong(apvts.getRawParameterValue("delayPingPong")->load() >= 0.5f);
@@ -994,9 +1004,17 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.delay.setMix(apvts.getRawParameterValue("delayMix")->load());
     mChain.delay.setBypassed(apvts.getRawParameterValue("delayOn")->load() < 0.5f);
 
+    // Space Tape auto-spring: the multi-head tape echo mode dial engages the spring for modes
+    // 5-11 + Reverb (echo-only modes 1-4 force it off). When Space Tape is active it
+    // drives the rig's Spring reverb from the head mode, overriding the manual reverb.
+    int stReverbOverride = 0; // 0 none, +1 force Spring on, -1 force off
+    if (delayChar == (int)nam_rig::DelayBlock::Character::SpaceTape)
+        stReverbOverride = nam_rig::DelayBlock::spaceTapeReverbOn(
+            (int)apvts.getRawParameterValue("delayHeadMode")->load()) ? 1 : -1;
     {
         using RB = nam_rig::ReverbBlock;
-        const int rt = (int)apvts.getRawParameterValue("revType")->load();
+        int rt = (int)apvts.getRawParameterValue("revType")->load();
+        if (stReverbOverride == 1) rt = (int)RB::kSpring; // Space Tape -> rig Spring
         const RB::Type T = (RB::Type)rt;
         mChain.reverb.setType(rt);
         auto pv = [&](const char *knob) { return apvts.getRawParameterValue(juce::String(RB::paramId(knob, rt)))->load(); };
@@ -1015,7 +1033,11 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.reverb.setSwell(apvts.getRawParameterValue("revSwell")->load());
     mChain.reverb.setPitch((int)apvts.getRawParameterValue("revPitch")->load());
     mChain.reverb.setInputFilterHz(apvts.getRawParameterValue("revInputFilter")->load());
-    mChain.reverb.setBypassed(apvts.getRawParameterValue("reverbOn")->load() < 0.5f);
+    // Reverb on/off: user param, unless Space Tape's mode dial overrides it.
+    const bool userReverbOff = apvts.getRawParameterValue("reverbOn")->load() < 0.5f;
+    mChain.reverb.setBypassed(stReverbOverride == 1 ? false
+                              : stReverbOverride == -1 ? true
+                                                       : userReverbOff);
 
     mChain.process(buffer);
 
