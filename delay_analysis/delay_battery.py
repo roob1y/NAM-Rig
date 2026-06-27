@@ -94,19 +94,23 @@ def norm_at(curve, fcs, f0=1000.0):
 
 def single_repeat_spectrum(x):
     on, T, ons = echo_onsets(x)
-    win = int(min(T * 0.9, 0.30) * SR)
+    win = int(max(min(T * 0.9, 0.30), 0.12) * SR)  # >=120 ms so low bands are resolved
     seg = x[ons[0]:ons[0] + win]
     return norm_at(octband(seg), FC), T
 
-def per_pass_transfer(x, npairs=5):
-    """Mean rep[n+1]/rep[n] band ratio (dB) over consecutive echoes -> in-loop EQ."""
+def per_pass_transfer(x, npairs=6, clean_floor=0.08):
+    """Mean rep[n+1]/rep[n] band ratio (dB) over the CLEAN echoes only -> in-loop EQ.
+    Stops once an echo falls below clean_floor of the first (≈ −22 dB): later, quieter
+    repeats are into the noise floor and corrupt the HF ratio (it goes positive)."""
     on, T, ons = echo_onsets(x, n=npairs + 2)
     win = int(min(T * 0.9, 0.30) * SR)
-    specs = []
+    specs, first = [], None
     for o in ons:
         if o + win >= len(x): break
         seg = x[o:o + win]
-        if np.max(np.abs(seg)) < 1e-5: break
+        pk = np.max(np.abs(seg))
+        if first is None: first = pk
+        if pk < clean_floor * first or pk < 1e-5: break
         specs.append(octband(seg))
     ratios = [specs[i + 1] - specs[i] for i in range(len(specs) - 1)]
     if not ratios: return np.full_like(FC, np.nan), T, 0
@@ -171,9 +175,14 @@ def wow_flutter(x):
     """depth % (peak) + dominant rate of slow (wow) and fast (flutter) pitch wobble."""
     on, T, ons = echo_onsets(x)
     seg = x[ons[0]:]
-    # bandpass around 440 Hz (RBJ, FFT) to isolate the carrier
     seg = seg[:int(2.5 * SR)] if len(seg) > int(2.5 * SR) else seg
     if len(seg) < int(0.3 * SR): return dict(depth=np.nan, wow=np.nan, flut=np.nan)
+    # tight FFT bandpass around the 440 Hz carrier FIRST — drops the saturation
+    # harmonics and interpolation noise floor that otherwise inflate the apparent
+    # pitch wobble (a non-monochromatic signal has a jittery instantaneous freq).
+    Xb = np.fft.rfft(seg); frb = np.fft.rfftfreq(len(seg), 1 / SR)
+    Xb[(frb < 380) | (frb > 500)] = 0
+    seg = np.fft.irfft(Xb, len(seg))
     inst = hilbert_inst_freq(seg)
     # keep where the carrier is present (amp gate)
     a = np.abs(seg[1:])
@@ -194,19 +203,23 @@ def wow_flutter(x):
     return dict(depth=depth, wow=peak_in(0.2, 2.0), flut=peak_in(4.0, 9.0), f0=f0)
 
 # ---------- space-tape head taps ----------
-def head_taps(x, nheads=3):
-    env = smooth_env(x, w=120)
-    on = int(np.argmax(env > 0.05 * (env.max() + 1e-20)))
-    # find the first nheads local maxima after onset within the first echo group
-    seg = env[on:on + int(0.7 * SR)]
-    pk = []
-    thr = 0.10 * seg.max()
+def head_taps(x, nheads=3, window=2.5):
+    # absolute envelope peaks in the first `window` s (>=8% of peak, >=15 ms apart).
+    # NOT anchored to a 5% onset (that latched onto pre-echo filter smear and read a
+    # spurious ~2 ms tap-1). Returns tap times (s) and ratios to the first tap.
+    e = smooth_env(x, w=120)
+    pk = e.max() + 1e-20
+    seg = e[:int(window * SR)]
+    thr = 0.08 * pk
+    sep = int(0.015 * SR)
+    peaks = []
     i = 1
-    while i < len(seg) - 1 and len(pk) < 12:
+    while i < len(seg) - 1 and len(peaks) < 8:
         if seg[i] > thr and seg[i] >= seg[i - 1] and seg[i] > seg[i + 1]:
-            if not pk or i - pk[-1] > int(0.02 * SR): pk.append(i)
+            if not peaks or i - peaks[-1] >= sep: peaks.append(i)
+            elif seg[i] > seg[peaks[-1]]: peaks[-1] = i
         i += 1
-    taps = np.array(pk[:nheads]) / SR
+    taps = np.array(peaks[:nheads]) / SR
     ratios = taps / taps[0] if len(taps) else taps
     return taps, ratios
 
@@ -220,30 +233,51 @@ def main():
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     pre = 'tape' if a.char == 'tape' else 'space'
-    rpre = 'ref' if a.char == 'tape' else 'se'
     od = a.ours_dir
 
+    # Reference layout, auto-detected:
+    #   NEW = <ref-dir>/<tape_echo|space_tape>/<test>.wav  (the WET captures)
+    #   OLD = <ref-dir>/<ref|se>_<test>.wav                 (legacy delay_ref names)
+    def refpath(test):
+        if not a.ref_dir: return None
+        sub = 'tape_echo' if a.char == 'tape' else 'space_tape'
+        newp = os.path.join(a.ref_dir, sub, f'{test}.wav')
+        if os.path.exists(newp): return newp
+        rpre = 'ref' if a.char == 'tape' else 'se'
+        name = 'ref_sustain.wav' if (test == 'sustain' and a.char == 'tape') else f'{rpre}_{test}.wav'
+        oldp = os.path.join(a.ref_dir, name)
+        return oldp if os.path.exists(oldp) else None
+
     sets = {
-        'impulse': (f'{od}/{pre}_impulse.f32', f'{a.ref_dir}/{rpre}_impulse.wav' if a.ref_dir else None),
-        'tail':    (f'{od}/{pre}_tail.f32',    f'{a.ref_dir}/{rpre}_tail.wav' if a.ref_dir else None),
-        'levels':  (f'{od}/{pre}_levels.f32',  f'{a.ref_dir}/{rpre}_levels.wav' if a.ref_dir else None),
-        'sustain': (f'{od}/{pre}_sustain.f32', f'{a.ref_dir}/ref_sustain.wav' if (a.ref_dir and a.char=='tape') else None),
+        'impulse': (f'{od}/{pre}_impulse.f32', refpath('impulse')),
+        'tail':    (f'{od}/{pre}_tail.f32',    refpath('tail')),
+        'levels':  (f'{od}/{pre}_levels.f32',  refpath('levels')),
+        'sustain': (f'{od}/{pre}_sustain.f32', refpath('sustain') if a.char == 'tape' else None),
     }
     if a.char == 'space':
-        sets['heads'] = (f'{od}/space_heads.f32', f'{a.ref_dir}/se_heads.wav' if a.ref_dir else None)
+        sets['heads'] = (f'{od}/space_heads.f32', refpath('heads'))
 
     print(f"\n===== DELAY BATTERY — {a.char.upper()} — ours vs reference =====")
 
-    # reference validity gate
+    # reference validity gate. Only the TAIL needs a multi-repeat train; a
+    # single-repeat impulse (feedback all the way down) is exactly what the
+    # single-repeat spectrum wants, so don't reject it for lacking a train.
+    def usable(k, x):
+        pk = float(np.max(np.abs(x)))
+        if pk < 1e-4: return False, "silent — unusable"
+        if k == 'tail':
+            ok, msg = has_echo_train(x)
+            return ok, ("USABLE " + msg if ok else "NO ECHO TRAIN — unusable")
+        return True, f"USABLE (single repeat / tone, peak {pk:.3f})"
     ref_ok = {}
     if a.ref_dir:
         for k, (_, rp) in sets.items():
             if rp and os.path.exists(rp):
-                ok, msg = has_echo_train(load_ref(rp))
+                ok, msg = usable(k, load_ref(rp))
                 ref_ok[k] = ok
-                print(f"  ref {os.path.basename(rp):16s}: {'USABLE' if ok else 'NO ECHO TRAIN — unusable'} ({msg})")
+                print(f"  ref {os.path.basename(rp):14s} [{k:7s}]: {msg}")
         if not any(ref_ok.values()):
-            print("  !! every reference lacks an echo train -> reference overlays skipped; ours profiled standalone.")
+            print("  !! no usable references -> overlays skipped; ours profiled standalone.")
 
     def ours(k): return load_ours(sets[k][0])
     def ref(k):

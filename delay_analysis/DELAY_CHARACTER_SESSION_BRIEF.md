@@ -125,10 +125,27 @@ Suggested graph sheet (one PNG per character): single-repeat spectrum (ours vs r
 
 ---
 
-## 8. First moves for the new chat
+## 8. Status & first moves
 
-1. Read `src/rig/DelayBlock.h` (`DelayVoicing`, `voicingFor`, `processSpaceTape`, the filter stages) and `reverb_analysis/reverb_battery.py`.
-2. Build the render harness + battery (§6); confirm the offline build (§4).
-3. Profile `delay_ref/` references and our matching renders; produce the graphs.
-4. Report the ours/ref/Δ verdict per character and per metric; flag any gaps (e.g. per-pass HF too bright, bump too strong, wrong output tilt).
-5. Only then propose voicing tweaks — by ear, with A/B demos.
+**Done (Tape Echo):** the battery + tooling are built and the **Tape Echo voicing
+is fit to the reference and committed**. See `delay_analysis/`:
+- `delay_battery.py` (metrics + graphs), `delay_render.cpp` (real-engine render
+  harness, with `--override` voicing args), `delay_demo.cpp` (guitar A/B renders),
+  `delay_fit.py` / `delay_fit_staged.py` (the fitters), `DELAY_CHARACTER_PLAYBOOK.md`
+  (verdict-reading + the staged-fit method + measurement lessons).
+- The **wet** reference captures live in `delay_references/<tape_echo|space_tape>/`
+  (NOT `delay_ref/`, which was dry placeholder signals — do not confuse them; neither
+  folder is committed). Offline build per §4; `delay_test` is 33/33.
+- Engine: `voicingFor(Tape)` refit + the preamp is now a **peaking** band (was a
+  high-shelf). `setTapeVoicingOverride()` is the analysis hook the fitters use.
+
+**Next (Space Tape):** repeat the fit for the multi-head character.
+1. Read `DELAY_CHARACTER_PLAYBOOK.md` (esp. the fitting method + lessons) and the
+   `voicingFor(SpaceTape)` / `processSpaceTape` in `src/rig/DelayBlock.h`.
+2. Confirm the offline build (§4), then run the battery on `--char space` vs
+   `delay_references/space_tape/` (impulse, tail, levels, heads).
+3. Fit with `delay_fit_staged.py` adapted for Space Tape (1-pole gap-loss, smaller
+   bloom, bass BOOST not cut). Note: `heads.wav` from the first capture was a
+   single-head mode, not all-heads — re-capture all-heads if you need to validate
+   the 1:1.9:2.76 tap spacing against a reference (ours already matches spec).
+4. Apply to `voicingFor(SpaceTape)`, keep `delay_test` green, lock the battery.

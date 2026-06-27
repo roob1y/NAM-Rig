@@ -104,8 +104,8 @@ public:
         float flutterMul;      // multiplier on the base flutter depth (kFlutterDepthMs)
         float driftHz;         // slow random pitch drift rate (worn-transport wander); 0 = off
         float driftDepthMs;    //   drift depth in ms
-        float preampShelfHz;   // OUTPUT-once high-shelf (FET-preamp brightness, applied once, not
-        float preampShelfDb;   //   recirculated); 0 dB = off
+        float preampShelfHz;   // OUTPUT-once presence PEAK (preamp brightness; a peaking band
+        float preampShelfDb;   //   applied once, not recirculated); 0 dB = off
         float fbCeiling;       // effective feedback ceiling for this character (<= kMaxFeedbackHard)
     };
 
@@ -125,20 +125,23 @@ public:
             return { TimeMode::Tape, 1.4f, 300.0f, 2.5f, 0.6f, 2000.0f, 180.0f, 2.5f,
                      0.05f, 0.055f, 0.5f, 0.05f, 2500.0f, 0.0f, 1.10f };
         case Character::Tape:
-            // Tape-echo voicing fit to a MEASURED reference, split into PER-PASS
-            // (in-loop) and ONCE (output) stages from a multi-repeat tail capture
-            // (the single-repeat fit alone gave the wrong tail). Measured:
-            //   - PER-PASS (rep[n+1]/rep[n]): low-mid BLOOM +5.7dB @ 330Hz (Q0.6),
-            //     flat bass, gap-loss HF roll (2-pole LP ~2 kHz). This is what makes
-            //     the tail darken+bloom correctly instead of thinning.
-            //   - ONCE at output: bass thinning low-shelf -6dB @ 480Hz + FET-preamp
-            //     high-shelf +4dB @ 1.4kHz. Applied once (NOT recirculated), so they
-            //     shape the timbre without compounding down the tail.
-            //   - saturation gentle (ref ~linear, feedback asymptote ~0.85); wow/
-            //     flutter ~0.1% peak; Tape glide; fb ceiling 1.10 (sat tames runaway).
-            //          sat  hbHz  hbDb  hbQ  gapHz  obHz  obDb  wowM   flutM  drHz  drMs   ppHz   ppDb fbCeil
-            return { TimeMode::Tape, 1.2f, 330.0f, 4.0f, 0.6f, 2100.0f, 480.0f, -6.0f,
-                     0.05f, 0.055f, 0.5f, 0.05f, 1400.0f, 4.0f, 1.10f };
+            // Tape-echo voicing fit to a MEASURED tape-echo reference with the metric
+            // battery (delay_analysis/), split into PER-PASS (in-loop) and ONCE
+            // (output) stages from a multi-repeat tail capture (a single-repeat fit
+            // alone gives the wrong tail). Fitted to the reference graphs:
+            //   - PER-PASS (rep[n+1]/rep[n]): broad low-mid BLOOM +9.5dB @ 260Hz (Q0.50)
+            //     + gap-loss HF roll (2-pole LP ~1.95 kHz). Drives the tail darken+bloom.
+            //   - ONCE at output: bass-thinning low-shelf -8.5dB @ 560Hz + a presence
+            //     PEAK +6dB @ 2.2kHz (a 2 kHz lift that falls again by 4 kHz, matching
+            //     the reference HF lift -- a PEAKING band, NOT a rising shelf). Applied
+            //     once, so they shape timbre without compounding down the tail.
+            //   - saturation 1.2 (matches the reference level-sweep compression; the top
+            //     step sits just under the soft-clip clamp). wow/flutter ~0.1% peak;
+            //     Tape glide; fb ceiling 1.10 (the in-loop sat tames runaway).
+            //   Residual ~3dB @ 250Hz (single/tilt) = the peak-bump-vs-shelf-cut floor.
+            //          sat  hbHz  hbDb  hbQ   gapHz  obHz  obDb  wowM   flutM  drHz  drMs   ppHz   ppDb fbCeil
+            return { TimeMode::Tape, 1.2f, 260.0f, 9.5f, 0.50f, 1950.0f, 560.0f, -8.5f,
+                     0.05f, 0.055f, 0.5f, 0.05f, 2200.0f, 6.0f, 1.10f };
         case Character::Clean:
         default:
             return { TimeMode::Digital, 0.0f, 0.0f, 0.0f, 0.7f, 0.0f, 0.0f, 0.0f,
@@ -265,6 +268,17 @@ public:
         setCharacter(c == (int)Character::SpaceTape ? Character::SpaceTape
                      : c == (int)Character::Tape ? Character::Tape : Character::Clean);
     }
+
+    // Offline voicing-analysis hook: inject a tape voicing to audition / fit candidates
+    // (used by delay_analysis/delay_render + delay_fit_staged.py). Call AFTER
+    // setCharacter(Tape|SpaceTape). No effect on the default audio path -- the
+    // processor never calls this, so Clean stays byte-for-byte the original engine.
+    void setTapeVoicingOverride(const DelayVoicing &v)
+    {
+        mVoicing = v;
+        if (mPrepared) { updateTapeFilters(false); updateTone(false); updateLowCut(false); }
+    }
+    DelayVoicing currentVoicing() const { return mVoicing; } // for verification
     // multi-head tape echo head combination (0..kNumHeadModes-1); only used by the SpaceTape character.
     void setHeadMode(int m) { mHeadMode = std::clamp(m, 0, kNumHeadModes - 1); }
     void setWidth(float w) { mWidth = std::clamp(w, 0.0f, 1.0f); }
@@ -586,9 +600,12 @@ private:
         }
         if (mPreampOn || force)
         {
+            // OUTPUT-once presence peak: a ~2 kHz lift that falls again above, matching the
+            // measured reference HF lift (a peaking band, NOT a rising high-shelf). Q ~0.7.
+            // SpaceTape leaves this off (preampShelfDb = 0), so only Tape is affected.
             const auto c = (mPreampOn)
-                ? Biquad::highshelf(mFs, std::min((double)mVoicing.preampShelfHz, 0.45 * mFs),
-                                    (double)mVoicing.preampShelfDb)
+                ? Biquad::peaking(mFs, std::min((double)mVoicing.preampShelfHz, 0.45 * mFs),
+                                  0.7, (double)mVoicing.preampShelfDb)
                 : Biquad::identity();
             for (auto &t : mPreamp) { const float z1 = t.z1, z2 = t.z2; t = c; t.z1 = z1; t.z2 = z2; }
         }

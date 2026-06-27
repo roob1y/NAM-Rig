@@ -52,6 +52,52 @@ The battery does exactly this: it derives the once-stage as `single-repeat − p
 If the single-repeat + per-pass + tilt panels don't separate these two, the
 characters are wrong before you even reach the reference.
 
+## Fitting a voicing to the graphs (the method that worked for Tape)
+
+Match the metrics by RENDERING candidate voicings through the real engine and
+minimising band error — `delay_render` takes voicing overrides (`--hbDb --hbHz
+--hbQ --gapHz --obDb --obHz --ppDb --ppHz --sat`, via `setTapeVoicingOverride`),
+and `delay_fit_staged.py` coordinate-descends them. **Fit in dependency order**,
+each stage pinned before the next:
+
+1. **Saturation (satDrive)** — to the level-sweep compression. Pin it first; it
+   couples into the bloom through loop level.
+2. **Per-pass / in-loop** (bump Db/Hz/Q, gap-loss) — to the CLEAN-pair per-pass.
+3. **Output-once** (outBass, preamp) — to the near-linear single repeat.
+
+Hard-won measurement lessons (all now baked into the battery + fitter):
+- **Per-pass: use clean (above-noise) early echo pairs only.** Averaging in the
+  quiet later pairs corrupts the HF (the ratio goes positive). The reference's
+  true bloom is bigger than the all-pairs average shows (+13 dB, not +10).
+- **Fit gap-loss from the single-repeat HF, not the per-pass HF** — the tail HF
+  above ~1.5 kHz is noise floor.
+- **Render the single-repeat at LOW level** (`--impAmp ~0.12`, near-linear) to
+  match a feedback-down quiet reference impulse. A unit impulse over-saturates
+  its own bump and forces an impossibly deep output cut.
+- **Keep the output bass-cut corner below 1 kHz** so it doesn't drag down the
+  @1k normalisation point and make the low-mid read hot.
+- **The loop couples everything:** a bigger in-loop bump re-hardens the
+  saturation top (hotter loop into the clipper) and worsens the single-repeat
+  250 Hz — so there's a balance, not a perfect simultaneous match.
+
+## Tape Echo — fitted result (committed)
+
+Fit to the measured tape-echo reference with the battery. Final voicing:
+`sat 1.2, bump +9.5 dB @ 260 Hz Q0.50, gap-loss 2-pole 1.95 kHz, outBass
+−8.5 dB @ 560 Hz (low-shelf), preamp +6 dB @ 2.2 kHz (PEAKING)`.
+
+One engine change shipped with it: the **preamp went from a high-shelf to a
+peaking band** — the reference's HF lift is a 2 kHz peak that falls again by
+4 kHz, not a rising shelf. (`updateTapeFilters`, `Biquad::peaking` Q0.7;
+SpaceTape leaves it off so only Tape is affected.) `delay_test` stays 33/33.
+
+Match achieved: saturation top-to-bottom ✓, per-pass bloom centre dead-on,
+output tilt within ~1.6 dB except a **~3 dB residual at 250 Hz** (single/tilt).
+That residual is the structural floor of a peaking-bump cancelled by a low-shelf
+cut (the reference's bump and cut are both broad and mirror each other); closing
+it would need the in-loop bump and output cut to be matched arbitrary shapes —
+not worth the topology for ~3 dB on one band. Ears are the final judge.
+
 ## Capture requirements (what makes a reference usable)
 The battery is only as good as the `delay_ref/` captures. A usable set is rendered
 through the reference plugin at **100 % wet**, noise/ducking OFF, tape-age centred,
