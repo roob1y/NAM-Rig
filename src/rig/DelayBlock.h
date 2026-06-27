@@ -156,29 +156,33 @@ public:
             return { TimeMode::Tape, 2.0f, 0.04f, 300.0f, 0.0f, 0.6f, 5500.0f, 240.0f, 0.0f, 0.0f,
                      0.37f, 0.40f, 0.5f, 0.05f, 2500.0f, 0.0f, 1.10f, 110.0f };
         case Character::Tape:
-            // Tape-echo voicing fit to a MEASURED tape-echo reference with the metric
-            // battery (delay_analysis/), split into PER-PASS (in-loop) and ONCE
-            // (output) stages from a multi-repeat tail capture (a single-repeat fit
-            // alone gives the wrong tail). Fitted to the reference graphs:
-            //   - PER-PASS (rep[n+1]/rep[n]): broad low-mid BLOOM +9.5dB @ 260Hz (Q0.50)
-            //     + gap-loss HF roll (2-pole LP ~1.95 kHz). Drives the tail darken+bloom.
-            //   - ONCE at output: bass-thinning low-shelf -8.5dB @ 560Hz + a presence
-            //     PEAK +6dB @ 2.2kHz (a 2 kHz lift that falls again by 4 kHz, matching
-            //     the reference HF lift -- a PEAKING band, NOT a rising shelf). Applied
-            //     once, so they shape timbre without compounding down the tail.
-            //   - saturation 1.2 (matches the reference level-sweep compression; the top
-            //     step sits just under the soft-clip clamp). wow/flutter ~0.1% peak;
-            //     Tape glide; fb ceiling 1.10 (the in-loop sat tames runaway).
-            //   Residual ~3dB @ 250Hz (single/tilt) = the peak-bump-vs-shelf-cut floor.
-            //   The in-loop head bump is BIG (+14 @260) -> the reference's strong tail bloom
-            //   (per-pass ~+13.7 dB); the output-once stage CANCELS it on the single repeat
-            //   with a matching PEAKING cut (-13 @260, same 0.35 Q) so the single echo stays
-            //   flat at 250 with full lows, while the bloom only compounds down the tail.
-            //   Preamp presence peak moved to 3.5 kHz (was a 2 kHz lift that doubled the
-            //   single-repeat hump). gap-loss 2-pole ~2.1 kHz.
-            //          sat   asym   hbHz  hbDb   hbQ   gapHz  obHz  obDb   obQ   wowM   flutM  drHz  drMs   ppHz   ppDb fbCeil
-            return { TimeMode::Tape, 0.06f, 0.0015f, 260.0f, 14.0f, 0.35f, 2100.0f, 260.0f, -13.0f, 0.35f,
-                     0.05f, 0.055f, 0.5f, 0.05f, 3500.0f, 4.0f, 1.10f, 0.0f };
+            // Single-head tape-echo voicing RE-FIT via the CONTROLLED steady-tone probe method
+            // (delay_analysis/CONTROLLED_PROBE_METHOD.md): dry_main/dry_perpass driven through the
+            // reference at ONE fixed setting, 500 ms repeat; cap_low (lowest fb) + cap_high (fb 3,
+            // ~5 repeats/burst). The older battery fit (click-contaminated) kept full lows on the
+            // single repeat; the controlled probes show the reference is a MID-FOCUSED BAND-PASS.
+            //   - SINGLE-REPEAT (steady-tone EQ, the reliable metric): a band-pass = 2-pole in-loop
+            //     HP (loopHpHz 260, Q0.5: -9@159, -21@79, -29@55) x 2-pole gap-loss LP (gapLossHz
+            //     2175; -1.8@2k, -5.3@2.8k, -11@4k). FLAT 630 Hz-1.4 kHz, NO presence peak (the old
+            //     +4@3.5k was click-noise). Matches within ~1 dB 80 Hz-2.8 kHz; sub-60 Hz slightly
+            //     under-rolled (single 2-pole vs the reference's steeper skirt -- but it sits at
+            //     -30..-47 dB, below guitar low E) and 8 kHz steeper on the unit (already -40 dB).
+            //   - PER-PASS (cap_high rep[n+1]/rep[n]): an IN-LOOP low-mid BLOOM, +5 dB/pass @ ~300
+            //     rel 1 kHz (250:+5.1, 402:+5.1, 632:+3.2). Built with headBump +13 @280 Q0.72
+            //     IN-LOOP (compounds down the tail) and an EXACTLY MIRRORED outBass PEAKING cut
+            //     -13 @280 Q0.72 OUTPUT-once, so they cancel on the single repeat (single-repeat EQ
+            //     stays the clean band-pass) while the bloom only lives in the tail.
+            //   - SATURATION: the reference is essentially LINEAR at level (growth +0.06 dB over the
+            //     sweep) with a very clean EVEN-DOMINANT series (echo H2 -54, H3 -76, H4 -93). Even
+            //     >> odd, so the odd-cubic + cosh-even path FITS (unlike Space Tape's full asym
+            //     series, which needs tanhADAA1): satDrive 0.11 (cubic -> H3), satAsym 0.004 (cosh
+            //     -> H2/H4). Re-fit AFTER the EQ (level into the saturator couples to the band).
+            //   - WOW/FLUTTER ~0.32% (measured on the pure-440 echo; matches the current 0.05/0.055
+            //     within the measurement floor). Tape glide; fb ceiling 1.10 (loop normaliser +
+            //     in-loop sat tame the +13 bump's runaway).
+            //          sat   asym   hbHz  hbDb   hbQ   gapHz  obHz  obDb   obQ   wowM   flutM  drHz  drMs   ppHz  ppDb fbCeil loopHp
+            return { TimeMode::Tape, 0.11f, 0.004f, 280.0f, 13.0f, 0.72f, 2175.0f, 280.0f, -13.0f, 0.72f,
+                     0.05f, 0.055f, 0.5f, 0.05f, 3500.0f, 0.0f, 1.10f, 260.0f };
         case Character::Clean:
         default:
             return { TimeMode::Digital, 0.0f, 0.0f, 0.0f, 0.0f, 0.7f, 0.0f, 0.0f, 0.0f, 0.0f,
@@ -653,7 +657,15 @@ private:
             const double lpAtBump = (mVoicing.gapLossHz > 0.0f)
                 ? 1.0 / std::sqrt(1.0 + std::pow((double)mVoicing.headBumpHz / (double)mVoicing.gapLossHz, 4.0))
                 : 1.0;
-            mLoopPeakGain = std::max(1.0f, (float)(bump * lpAtBump));
+            // The in-loop HP (loopHpHz) also attenuates the bump frequency, so the true
+            // in-loop peak is lower than bump*lpAtBump. Fold the HP magnitude at the bump
+            // freq in -- otherwise feedback is over-tamed and the knob never reaches
+            // self-oscillation when loopHpHz > 0 (the band-pass Tape voicing).
+            const double hpAtBump = (mVoicing.loopHpHz > 0.0f)
+                ? Biquad::highpass(mFs, std::min((double)mVoicing.loopHpHz, 0.45 * mFs), 0.5)
+                      .magnitudeAt(mFs, (double)mVoicing.headBumpHz)
+                : 1.0;
+            mLoopPeakGain = std::max(1.0f, (float)(bump * lpAtBump * hpAtBump));
         }
         else
             mLoopPeakGain = 1.0f;
