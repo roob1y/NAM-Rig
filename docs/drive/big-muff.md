@@ -73,8 +73,13 @@ s2 = y1 * kMuffStage2Gain          // fixed inter-stage gain
 s2 = highpass(s2, 80) ; s2 = lowpass(s2, 1300)   // inter-stage HP + Miller LP
 y2 = cubicSoftClip_ADAA2(s2)       // STAGE 2 (soft, 2nd-order ADAA)
 c  = y2
-// shared post: mid SCOOP (post-clip notch) -> top LP -> DC block -> Tone tilt -> Level
+// shared post: top LP (lpHz) -> DC block -> PASSIVE TONE-STACK biquad (§3) -> Level
 ```
+
+The post tone shaping is the **real passive tone stack** (a per-block biquad driven by
+the Tone knob, §3), which replaces the engine's generic see-saw tilt **and** the old
+static scoop notch for this model. It needed no new `Voicing` field — it's keyed on
+`muffStages > 1` — just biquad state (`mtX1/mtX2/mtY1/mtY2`) on the slot.
 
 Each cubic stage runs **2nd-order ADAA** (peak-guarded), so the double clip never
 spikes (worst |out| 0.56 across a full-scale freq/Drive sweep). The heavy pre-clip
@@ -91,24 +96,27 @@ a wall, not a transparent feedback-clip OD).
 
 Derived + fit in `big_muff_response.py`:
 
-- **Mid SCOOP** = a static post-clip RBJ notch fit to ElectroSmash's **measured**
-  tone-noon response (the published curve is ground truth where it exists): `midHz
-  1000, midQ 0.80, midDb −6.5` → matches the 1 kHz / −6.5 dB notch to **RMS 0.22 dB**.
-  (A full nodal solve of the passive network is in the script as a cross-check — it
-  confirms the scoop lives at ~0.7–1.3 kHz, but its exact interior depth is very
-  sensitive to the poorly-specified source/load impedances, so we fit the measured
-  curve.) `midPost 1` (post both clips, like the real tone stack), `shapeTrack 0`
-  (static — the tone stack is a fixed network).
+- **Tone / scoop = the REAL passive tone stack** (not a tilt, and not a separate
+  static notch). The Big Muff tone control is a **passive network** — a treble
+  high-pass and a bass low-pass blended by the Tone pot — so it can only *attenuate*
+  (it has insertion loss), never boost. We derive its 2nd-order transfer function
+  `H(s, tone)` by nodal analysis (`Rsrc 15k, Ct 2.2n, Rt 22k, Cb 22n, pot 100k, load
+  100k` — values tuned so the idealised topology reproduces the measured Muff
+  behaviour), **bilinear-transform it to a biquad, and recompute the coefficients per
+  block from the knob**. Behaviour: **CCW** = bass low-pass (full, dark); **noon** =
+  scooped ~800 Hz (the famous mid dip emerges from the blend); **CW** = treble
+  high-pass (thinner, upper-mid forward). It is **passive** — measured peak ≤ −2.8 dB
+  at every position, so the loudness gradient is *gentle* (CCW only ~1.5× noon), the
+  natural fuller-bass/thinner-treble of a real Muff, **not** the old engine see-saw
+  tilt that actively boosted the lows +9 dB (that gave a huge CCW low end + a quiet
+  CW — the bug this replaced). `midDb 0` (no separate notch — the tone stack owns the
+  scoop).
 - **Band-limiting**: `lowCutHz 80` (the clip-stage HP 55/94 Hz), `muffLpHz 1300`
-  (the Miller LPs, applied pre each clip), `lpHz 1600` (a gentle post LP — recovery
-  is flat but we keep it dark). Measured small-signal voice (re 300 Hz): full lows
-  (150 Hz −0.4 dB), scooped mids (1 kHz −9.9 dB), dark top (3 kHz −22 dB, 5 kHz
-  −35 dB) — the narrow, bassy, dark Muff signature.
-- **Tone** = the engine **see-saw tilt** at `pivotHz 1000` (the scoop centre): noon =
-  flat (the scoop shows through), CCW = bass/dark, CW = bright/scooped-out. This is
-  the real Muff Tone (a bass LP / treble HP blend), not the RAT "Filter" or a TS
-  treble shelf. (The softPoly bass-fix is bypassed for the cascade so the full
-  see-saw applies.)
+  (the Miller LPs, applied pre each clip), `lpHz 1600` (the post-clip Miller roll —
+  mimics clip-2's feedback cap rolling its own output harmonics, so the top stays
+  smooth). Measured small-signal voice at noon (re 300 Hz): full lows (150 Hz +2 dB),
+  scooped mids (1 kHz −10 dB), dark top (3 kHz −25 dB) — the narrow, bassy, dark Muff
+  signature, now with the scoop coming from the real network.
 
 ---
 
@@ -155,15 +163,17 @@ The `fTone` param is new (unreleased dev branch, so no preset drift).
 
 ## 6. Tests (drive_test.cpp T52–T57) + build
 
-- **T52** existing Fuzz models byte-exact; Fuzz holds 3 / Distortion back to 2; scoop
-  is a notch (midDb < 0); cascade enabled (muffStages 2).
-- **T53** the Muff voice: full lows, ~10 dB mid scoop, ~22 dB-dark top.
-- **T54** the cascade **compresses**: input ×8 → output ×1.14.
-- **T55** dual-ADAA cascade **never spikes**: worst |out| 0.56, all finite.
-- **T56** Tone see-saw (bass CCW, treble CW).
+- **T52** existing Fuzz models byte-exact; Fuzz holds 3 / Distortion back to 2; cascade
+  enabled (muffStages 2); scoop is in the tone stack, not a static notch (midDb 0).
+- **T53** the Muff voice: full lows, ~10 dB mid scoop, ~25 dB-dark top.
+- **T54** the cascade **compresses**: input ×8 → output ×1.13.
+- **T55** cascade + dual ADAA + tone-stack biquad **never spike**: worst |out| 0.97,
+  all finite (swept across Drive **and** Tone).
+- **T56** Tone = the real passive tone stack: morphs bass-CCW / treble-CW **and** is
+  passive (CCW only ~1.5× noon — guards against an active-tilt regression).
 - **T57** input-level dependent (humbucker drives harder).
 
-Offline build **green: 96 CHECKs, 0 failures**, and a full **324-config regression
+Offline build **green: 98 CHECKs, 0 failures**, and a full **324-config regression
 byte-exact vs HEAD** (every shipped Boost/OD/Dist/Fuzz model — the new fields zero-fill
 and the Muff just moved categories). UI/processor edits are JUCE (reviewed by hand —
 captions/comments + the new `fTone` param + a model-keyed branch identical in shape to

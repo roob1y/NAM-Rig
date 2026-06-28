@@ -928,7 +928,7 @@ int main()
         CHECK(DriveBlock::modelCount(Kind::Distortion) == 2, "T52 Distortion back to 2 (Muff left)");
         const auto v = DriveBlock::voicingFor(Kind::Fuzz, 2);
         CHECK(v.muffStages > 1.0f, "T52 Violet Ram runs the 2-stage cascade (muffStages %.0f)", v.muffStages);
-        CHECK(v.midDb < 0.0f, "T52 Violet Ram tone-stack scoop is a NOTCH (midDb %.1f < 0)", v.midDb);
+        CHECK(v.midDb == 0.0f, "T52 Violet Ram scoop is in the passive tone stack, not a static notch (midDb %.1f)", v.midDb);
     }
 
     // ---- T53: the Muff VOICE -- full lows, scooped ~1 kHz mids, dark top ----
@@ -974,12 +974,19 @@ int main()
         CHECK(worst < 1.5, "T55 Violet Ram no spikes (dual ADAA cascade): worst |out| %.2f", worst);
     }
 
-    // ---- T56: Tone is the real Muff see-saw (bass up CCW, treble up CW) ----
+    // ---- T56: Tone = the REAL passive Big Muff tone stack (not the active tilt) ----
+    // The network is a treble-HP / bass-LP blend, so it morphs CCW=bass/dark -> noon
+    // scooped -> CW=treble/bright. Crucially it is PASSIVE: it only attenuates, so the
+    // loudness gradient is gentle (CCW < ~1.8x noon) instead of the old see-saw tilt's
+    // huge +9 dB active bass boost (which made CCW enormous and CW quiet).
     {
         auto gl = [&](float t) { auto in = sine(120.0, 0.1f, 16384); return goertzel(realSlotMT(Kind::Fuzz, 2, 0.5f, t, in), 120.0); };
         auto gh = [&](float t) { auto in = sine(3500.0, 0.1f, 16384); return goertzel(realSlotMT(Kind::Fuzz, 2, 0.5f, t, in), 3500.0); };
-        CHECK(gl(0.0f) > gl(1.0f) * 2.0, "T56 Violet Ram Tone CCW = bass: low %.3f (CCW) > %.3f (CW)", gl(0.0f), gl(1.0f));
-        CHECK(gh(1.0f) > gh(0.0f) * 1.5, "T56 Violet Ram Tone CW = treble: high %.3f (CW) > %.3f (CCW)", gh(1.0f), gh(0.0f));
+        CHECK(gl(0.0f) > gl(1.0f) * 1.5, "T56 Tone morph: bass fuller CCW %.3f > %.3f CW", gl(0.0f), gl(1.0f));
+        CHECK(gh(1.0f) > gh(0.0f) * 1.5, "T56 Tone morph: treble fuller CW %.3f > %.3f CCW", gh(1.0f), gh(0.0f));
+        const double rc = rms(realSlotMT(Kind::Fuzz, 2, 0.5f, 0.0f, sine(220.0, 0.15f, 16384)));
+        const double rn = rms(realSlotMT(Kind::Fuzz, 2, 0.5f, 0.5f, sine(220.0, 0.15f, 16384)));
+        CHECK(rc / rn < 1.8, "T56 PASSIVE tone stack: CCW/noon level %.2f (gentle gradient, no active boost)", rc / rn);
     }
 
     // ---- T57: input-level dependent -- a humbucker drives the Muff harder ----

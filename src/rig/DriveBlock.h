@@ -325,7 +325,7 @@ public:
             // controllable crunch at low Sustain, gMax 55 + the inter-stage gain = the
             // full saturated wall + max sustain at the top. Calibration-referenced.
             {"Violet Ram", "EHX Big Muff (Ram's Head, 2-stage)",
-             { 3, 3.0f, 55.0f,  80.0f, 1000.0f,-6.5f, 0.80f,1600.0f, 0.00f, 1000.0f, 0.80f, 0.0f, 1.0f,  0.0f, 700.0f, 0.0f, 0.0f,   0.0f, 0.0f, 0.0f, 0.0f, 2.0f, 1300.0f}, false},
+             { 3, 3.0f, 55.0f,  80.0f,    0.0f, 0.0f, 0.7f, 1600.0f, 0.00f, 1000.0f, 2.00f, 0.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.0f,   0.0f, 0.0f, 0.0f, 0.0f, 2.0f, 1300.0f}, false},
         };
         switch (cat)
         {
@@ -476,6 +476,35 @@ public:
             else
                 toneCoef = coefForHz(v.pivotHz, sr);
 
+            // ---- passive Big Muff TONE STACK (cascade only): the REAL network, not a
+            // tilt. A treble high-pass + bass low-pass blended by the Tone pot ->
+            // PASSIVE (it can only attenuate, never boost), so CCW is full/dark, CW is
+            // thin/bright, noon is scooped ~800 Hz, and the loudness gradient is gentle
+            // (the old see-saw tilt actively boosted the lows +9 dB -> a huge, loud low
+            // end CCW + a quiet CW; this fixes that). 2nd-order nodal solve (Rsrc 15k,
+            // Ct 2.2n, Rt 22k, Cb 22n, pot 100k, load 100k) bilinear-discretised,
+            // coeffs recomputed per block from the knob. Derivation: big_muff_response.py.
+            float mtB0 = 1.0f, mtB1 = 0.0f, mtB2 = 0.0f, mtA1 = 0.0f, mtA2 = 0.0f;
+            if (cascade)
+            {
+                const double tn = (double)s.tone.load();
+                const double Rpt = (1.0 - tn) * 100000.0 + 1.0; // treble half of the 100k pot
+                const double Rpb = tn * 100000.0 + 1.0;         // bass half
+                const double b2 = 266200000.0 * Rpb;
+                const double b1 = 550000000000.0 * Rpb + 550000000000.0 * Rpt + 12100000000000000.0;
+                const double b0 = 250000000000000000000.0;
+                const double a2 = 4477.0 * Rpb * Rpt + 487630000.0 * Rpb + 447700000.0 * Rpt + 3993000000000.0;
+                const double a1 = 5500000.0 * Rpb * Rpt + 2667500000000.0 * Rpb + 753500000000.0 * Rpt + 217415000000000000.0;
+                const double a0 = 2500000000000000.0 * Rpb + 342500000000000000000.0;
+                const double K = 2.0 * sr;                  // bilinear s = K(1-z^-1)/(1+z^-1)
+                const double d0 = a2 * K * K + a1 * K + a0;  // normaliser
+                mtB0 = (float)((b2 * K * K + b1 * K + b0) / d0);
+                mtB1 = (float)((-2.0 * b2 * K * K + 2.0 * b0) / d0);
+                mtB2 = (float)((b2 * K * K - b1 * K + b0) / d0);
+                mtA1 = (float)((-2.0 * a2 * K * K + 2.0 * a0) / d0);
+                mtA2 = (float)((a2 * K * K - a1 * K + a0) / d0);
+            }
+
             // envelope-follower coefficients (touch dynamics, clip 3)
             const float envAtk = 1.0f - (float)std::exp(-1.0 / (0.005 * sr)); // ~5 ms
             const float envRel = 1.0f - (float)std::exp(-1.0 / (0.120 * sr)); // ~120 ms
@@ -489,6 +518,7 @@ public:
             float shx1 = s.shX1, shy1 = s.shY1;
             double adx1b = s.adaaX1b, adx2b = s.adaaX2b; // Big Muff stage-2 ADAA history
             float mLpPre = s.mLpPre, mHpInt = s.mHpInt, mLpInt = s.mLpInt; // cascade Miller LPs / inter HP
+            float mtx1 = s.mtX1, mtx2 = s.mtX2, mty1 = s.mtY1, mty2 = s.mtY2; // Muff tone-stack biquad state
 
             for (int i = 0; i < numSamples; ++i)
             {
@@ -614,7 +644,14 @@ public:
                 // TS-style treble shelf).
                 low += toneCoef * (c - low);
                 float toned;
-                if (ratTone)
+                if (cascade)
+                {
+                    // passive Big Muff tone stack (the real network), Direct Form I
+                    const float y = mtB0 * c + mtB1 * mtx1 + mtB2 * mtx2 - mtA1 * mty1 - mtA2 * mty2;
+                    mtx2 = mtx1; mtx1 = c; mty2 = mty1; mty1 = y;
+                    toned = y;
+                }
+                else if (ratTone)
                     toned = low; // the low-passed signal IS the output
                 else if (trebleShelf)
                 {
@@ -638,6 +675,7 @@ public:
             s.shX1 = flush(shx1); s.shY1 = flush(shy1);
             s.adaaX1b = flushD(adx1b); s.adaaX2b = flushD(adx2b);
             s.mLpPre = flush(mLpPre); s.mHpInt = flush(mHpInt); s.mLpInt = flush(mLpInt);
+            s.mtX1 = flush(mtx1); s.mtX2 = flush(mtx2); s.mtY1 = flush(mty1); s.mtY2 = flush(mty2);
         }
     }
 
@@ -674,6 +712,7 @@ private:
         // Big Muff 2-stage cascade state (only used when muffStages>1):
         double adaaX1b = 0.0, adaaX2b = 0.0; // stage-2 cubic 2nd-order ADAA history
         float mLpPre = 0.0f, mHpInt = 0.0f, mLpInt = 0.0f; // pre-clip Miller LP, inter-stage HP, inter-stage Miller LP
+        float mtX1 = 0.0f, mtX2 = 0.0f, mtY1 = 0.0f, mtY2 = 0.0f; // passive Muff tone-stack biquad (Direct Form I)
         int lastKind = -1;
         Biquad mid;     // pre/post-shaper peak (state preserved across blocks)
         Biquad emphPre, emphPost; // pre/de-emphasis pair (clip 3)
@@ -682,6 +721,7 @@ private:
             hp = lp = toneLp = dcX1 = dcY1 = 0.0f; x0 = 0.0;
             adaaX1 = adaaX2 = 0.0; env = 0.0f; gpk = 0.0f; shX1 = shY1 = 0.0f;
             adaaX1b = adaaX2b = 0.0; mLpPre = mHpInt = mLpInt = 0.0f;
+            mtX1 = mtX2 = mtY1 = mtY2 = 0.0f;
             lastKind = -1; mid.reset(); emphPre.reset(); emphPost.reset();
         }
     };
@@ -886,7 +926,7 @@ private:
         static const float D[6]  = {1.229f, 0.568f, 0.310f, 0.242f, 0.223f, 0.214f};
         static const float F[6]  = {0.543f, 0.367f, 0.302f, 0.280f, 0.273f, 0.271f};
         static const float F1[6] = {0.439f, 0.371f, 0.346f, 0.338f, 0.335f, 0.334f}; // Round Fuzz II (asym cubic, pink-noise ref)
-        static const float F2[6] = {0.599f, 0.399f, 0.315f, 0.284f, 0.273f, 0.269f}; // Violet Ram (Big Muff 2-stage cascade, pink-noise ref; compresses as both stages saturate)
+        static const float F2[6] = {0.591f, 0.395f, 0.314f, 0.284f, 0.273f, 0.269f}; // Violet Ram (Big Muff 2-stage cascade, pink-noise ref; compresses as both stages saturate)
         const float *t = (k == Kind::Boost) ? (model <= 0 ? B0 : model == 1 ? B1 : model == 2 ? B2 : B3)
                        : (k == Kind::Overdrive) ? (model >= 3 ? O3 : model == 2 ? O2 : O)
                        : (k == Kind::Distortion) ? D
@@ -902,7 +942,7 @@ private:
         static const float O[5]  = {0.472f, 0.757f, 1.000f, 0.851f, 0.548f};
         static const float D[5]  = {0.450f, 0.725f, 1.000f, 0.916f, 0.609f};
         static const float F[5]  = {0.533f, 0.833f, 1.000f, 0.773f, 0.485f};
-        static const float F2[5] = {0.371f, 0.619f, 1.000f, 1.350f, 1.171f}; // Violet Ram (Big Muff see-saw Tone, pink-noise ref)
+        static const float F2[5] = {0.671f, 0.836f, 1.000f, 1.154f, 1.277f}; // Violet Ram (Big Muff PASSIVE tone stack, pink-noise ref; gentle gradient)
         // Round Fuzz models pin Tone to 0.5 (no tone) -> F centre is unity; the Muff
         // (model 2) is the only fuzz with a real Tone knob, so it gets its own table.
         const float *t = (k == Kind::Boost) ? (model <= 0 ? B0 : model == 1 ? B1 : B0)

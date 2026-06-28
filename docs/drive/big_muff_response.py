@@ -140,6 +140,41 @@ print("  pre-clip HP (tighten lows)   lowCutHz ~ 80 Hz   (clip stages HP 55/94 H
 print("  Miller LP before EACH clip   muffLpHz ~ 1300 Hz (booster 1.2k, clips 1.78k/1.17k)")
 print("  gentle post LP               lpHz     ~ 1600 Hz (recovery ~flat; keep it dark)")
 print("  -> shipped: clip=3 cubic x2 (muffStages=2), lowCutHz=80 muffLpHz=1300 lpHz=1600")
-print("     scoop midHz=1000 midQ=0.80 midDb=-6.5 (post-clip, static; ElectroSmash measured)")
-print("     Tone = the engine see-saw tilt @ pivot 1000 Hz (real Muff bass/treble blend)")
 print("     bias=0 (symmetric back-to-back diode clipping); moderate gMin / high-ceiling gMax")
+
+# ============================================================================
+# FINAL TONE / SCOOP = the REAL passive tone stack (implemented in the engine).
+# The early version used a STATIC notch (above) + the engine see-saw TILT as the
+# Tone control. That tilt is ACTIVE: full-CCW it boosted the lows +9 dB (a huge,
+# loud low end) and full-CW it cut them + lifted absent treble (quiet) -- NOT how
+# a passive Muff tone stack behaves. Replaced with the real network below.
+#
+# The Big Muff tone control is PASSIVE: a treble high-pass (Ct) + a bass low-pass
+# (Rt,Cb) blended by the Tone pot, driven from the clip-2 collector (Rsrc) and
+# loaded by the recovery stage (Rload). Passive -> it only ATTENUATES (insertion
+# loss), never boosts. We solve the 2nd-order network for H(s, tone), and the
+# ENGINE bilinear-transforms it to a biquad whose coeffs are recomputed per block
+# from the Tone knob (tone=1 -> treble/CW, tone=0 -> bass/CCW).
+#
+# Component values are tuned so the idealised topology reproduces the MEASURED Muff
+# behaviour (a ~800 Hz interior scoop at noon, dark LP at CCW, bright HP at CW,
+# passive insertion loss): Rsrc=15k, Ct=2.2nF, Rt=22k, Cb=22nF, pot=100k, load=100k.
+def tonestack_H(f, tone, Rsrc=15e3, Ct=2.2e-9, Rt=22e3, Cb=22e-9, Rpot=100e3, Rload=100e3):
+    jw = 1j * TwoPi * f
+    Ysrc=1/Rsrc; Yct=jw*Ct; Yrt=1/Rt; Ycb=jw*Cb
+    Ypt=1/max((1-tone)*Rpot,1.0); Ypb=1/max(tone*Rpot,1.0); Yld=1/Rload
+    H=np.zeros_like(f,dtype=complex)
+    for i,_ in enumerate(f):
+        Y=np.array([[Ysrc+Yct[i]+Yrt,-Yct[i],-Yrt,0],[-Yct[i],Yct[i]+Ypt,0,-Ypt],
+                    [-Yrt,0,Yrt+Ycb[i]+Ypb,-Ypb],[0,-Ypt,-Ypb,Ypt+Ypb+Yld]],dtype=complex)
+        H[i]=np.linalg.solve(Y,np.array([Ysrc,0,0,0],dtype=complex))[3]
+    return H
+
+print("\nPASSIVE tone stack H(s) — the REAL Tone control (implemented as a per-block biquad):")
+fg=np.geomspace(40,15000,400)
+for tone,lab in [(0.0,'CCW/bass'),(0.5,'noon'),(1.0,'CW/treble')]:
+    h=np.abs(tonestack_H(fg,tone)); db=20*np.log10(h)
+    band=(fg>=300)&(fg<=2500); nf=fg[band][np.argmin(db[band])]
+    print(f"  {lab:10}: peak={db.max():5.2f}dB (<=0 = PASSIVE)  notch@{nf:5.0f}Hz  120Hz={db[np.argmin(np.abs(fg-120))]:5.1f}  4k={db[np.argmin(np.abs(fg-4000))]:5.1f}")
+print("  Engine: bilinear biquad, Rpt=(1-tone)*100k, Rpb=tone*100k, coeffs from the nodal")
+print("  solve (see DriveBlock.h cascade tone section). midDb=0 (scoop now lives in the stack).")
