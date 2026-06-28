@@ -434,7 +434,7 @@ int main()
         bool same0 = true;
         for (size_t i = 0; i < in.size(); ++i) same0 = same0 && (m0[i] == def[i]);
         CHECK(same0, "T21 Boost model 0 == legacy default (A/B preserves the original Range '65)");
-        CHECK(DriveBlock::modelCount(Kind::Boost) == 3, "T21 Boost holds 3 models (Range '65 / EP Boost / Range '65 II)");
+        CHECK(DriveBlock::modelCount(Kind::Boost) >= 3, "T21 Boost holds the reworked Range '65 II model");
     }
 
     // ---- T22: the voicing is a treble-boost high-pass; the Range switch moves the corner ----
@@ -492,6 +492,60 @@ int main()
                     for (float v : y) worst = std::max(worst, (double)std::fabs(v));
                 }
         CHECK(worst < 1.5, "T25 Range '65 II no spikes across full-scale sweep: worst |out| %.2f", worst);
+    }
+
+    // ====== EP Boost II (Boost model 3): Echoplex EP-3 / Xotic EP Booster ======
+
+    // ---- T26: model 1 (EP Boost) byte-for-byte unchanged; category now has 4 models ----
+    {
+        auto in = sine(220.0, 0.2f, 8192);
+        auto m1 = realSlotM(Kind::Boost, 1, 0.7f, in);
+        bool finite = true;
+        for (float v : m1) finite = finite && std::isfinite(v);
+        CHECK(finite, "T26 Boost model 1 (EP Boost) renders cleanly (stand-in preserved)");
+        CHECK(DriveBlock::modelCount(Kind::Boost) == 4,
+              "T26 Boost holds 4 models (Range '65 / EP Boost / Range '65 II / EP Boost II)");
+    }
+
+    // ---- T27: EP Boost II is FULL-RANGE with a gentle presence lift (NOT a treble HP) ----
+    // Unlike the Rangemaster (model 2), the EP keeps its bass and only gently lifts the
+    // presence -> 80 Hz ~unchanged vs 200 Hz, a few dB up by 5 kHz; and at 80 Hz it passes
+    // FAR more than the Rangemaster's high-pass.
+    {
+        const double lo = boostG(3, 0, 80.0, 0.3f), ref = boostG(3, 0, 200.0, 0.3f);
+        const double pres = boostG(3, 0, 5000.0, 0.3f);
+        const double loDb = 20.0 * std::log10(lo / ref), presDb = 20.0 * std::log10(pres / ref);
+        CHECK(loDb > -1.5 && presDb > 2.0,
+              "T27 EP full-range + presence: 80Hz %.1f dB, 5k +%.1f dB (vs 200Hz)", loDb, presDb);
+        const double epBass = boostG(3, 0, 80.0, 0.3f), rmBass = boostG(2, 0, 80.0, 0.3f);
+        CHECK(epBass > rmBass * 4.0,
+              "T27 EP keeps bass vs Rangemaster's HP: 80Hz EP %.3e >> RM %.3e (%.1fx)", epBass, rmBass, epBass / rmBass);
+    }
+
+    // ---- T28: high headroom -- mostly clean, far cleaner than the Rangemaster; mild JFET warmth ----
+    {
+        auto thd = [&](int model, float drive) {
+            return harmRatio(realSlotM(Kind::Boost, model, drive, sine(1500.0, 0.08f, 24000)), 1500.0, 10);
+        };
+        const double ep = thd(3, 0.5f), rm = thd(2, 0.5f);
+        CHECK(ep < 0.05 && ep < rm * 0.5,
+              "T28 EP stays clean at noon: THD %.3f (< 0.05 and << Rangemaster %.3f)", ep, rm);
+        // subtle JFET even-harmonic warmth present when pushed (small bias)
+        auto y = realSlotM(Kind::Boost, 3, 0.8f, sine(1500.0, 0.15f, 24000));
+        const double h2h1 = goertzel(y, 3000.0) / (goertzel(y, 1500.0) + 1e-9);
+        CHECK(h2h1 > 0.01, "T28 EP JFET even-harmonic warmth: h2/h1 %.3f", h2h1);
+    }
+
+    // ---- T29: model 3 never spikes across a full-scale sweep (all drives) ----
+    {
+        double worst = 0.0;
+        for (float dr = 0.0f; dr <= 1.001f; dr += 0.25f)
+            for (double f = 50.0; f <= 12000.0; f *= 1.2)
+            {
+                auto y = realSlotM(Kind::Boost, 3, dr, sine(f, 0.5f, 8192));
+                for (float v : y) worst = std::max(worst, (double)std::fabs(v));
+            }
+        CHECK(worst < 1.5, "T29 EP Boost II no spikes across full-scale sweep: worst |out| %.2f", worst);
     }
 
     std::printf("\n%s (%d failure%s)\n", gFails ? "RESULT: FAIL" : "RESULT: ALL PASS", gFails, gFails == 1 ? "" : "s");

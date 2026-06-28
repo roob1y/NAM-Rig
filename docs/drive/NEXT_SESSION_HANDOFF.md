@@ -121,9 +121,23 @@ stay byte-for-byte; there are regression tests asserting model 0 == legacy).
   worked example in [`rangemaster.md`](rangemaster.md). **UNCOMMITTED** — offline
   build green (drive_test 42 CHECKs all pass), pending commit on Windows + play-test.
 
-Current model inventory: Boost (3: Range '65, EP Boost, Range '65 II), Overdrive
-(2: Green Drive, Green Drive II), Distortion (2: Black Rodent, Black Rodent II),
-Fuzz (1: Round Fuzz).
+- **EP Boost II** (Boost model 3, Echoplex EP-3 / Xotic EP Booster): the pure EP-3
+  JFET common-source stage measures ~FLAT across audio (fit `ep3_response.py`) — its
+  character is clean headroom + very high input Z + JFET 2nd-harmonic, FULL-RANGE
+  (opposite of the Rangemaster). Voiced as the Xotic EP Booster: full bass
+  (`lowCut 15`) + a gentle broad presence shelf (low-Q peak ~5 kHz, +4 dB) + a small
+  JFET `bias 0.10` for warmth. High headroom — mostly clean (THD ~1–5% single-coil
+  across the sweep), a little hair only when cranked. `gMin 1.3/gMax 6`,
+  `outTrim 0.74` A/B-matches the stand-in. Tests T26–T29; worked example in
+  [`ep3.md`](ep3.md). **UNCOMMITTED** — offline build green (drive_test 44 CHECKs),
+  pending commit on Windows + play-test. Voiced to the **Xotic** flavor by choice
+  (Robbie's call); the pure-EP-3 flat alternative is noted in the doc if he wants it.
+
+Current model inventory: Boost (4: Range '65, EP Boost, Range '65 II, EP Boost II),
+Overdrive (2: Green Drive, Green Drive II), Distortion (2: Black Rodent, Black
+Rodent II), Fuzz (1: Round Fuzz). **NB: `bModel` is now 0..3 = FULL for Boost** —
+adding a 5th Boost model needs the `bModel` param range widened (PluginProcessor.cpp
+`bModel` AudioParameterInt 0,3 → 0,4 + the UI menu IDs).
 
 ---
 
@@ -137,7 +151,9 @@ treatment):
 | Model | Real circuit to fit | Notes |
 |-------|--------------------|-------|
 | **Round Fuzz** (Fuzz) | Fuzz Face / Tone Bender (germanium, bias-starved, asym) | model sag + input-impedance interaction; 2nd-order ADAA needs a polynomial recast of the tanh half |
-| **EP Boost** (Boost) | EP-3 (Echoplex preamp) | input-cap voicing there; circuit-fit the exact corners + FET stage. (Range '65 → **DONE** as Range '65 II, model 2.) |
+
+Boost reworks both **DONE**: Range '65 → **Range '65 II** (model 2), EP Boost →
+**EP Boost II** (model 3). Boost's `bModel` slots (0..3) are now full.
 
 **New models** to add alongside (add, don't replace):
 

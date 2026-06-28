@@ -8,9 +8,17 @@
 //   Boost        : germanium treble booster ("Range '65") / FET clean boost
 //                  ("EP Boost"). Range '65 = a one-pole input-cap high-pass
 //                  (the 3-way switch moves the corner) + soft germanium clip.
-//                  THREE models: 0 "Range '65" (the original stand-in, kept
-//                  byte-for-byte), 1 "EP Boost", 2 "Range '65 II" = the circuit-fit
-//                  Dallas Rangemaster (see below).
+//                  FOUR models: 0 "Range '65" (the original stand-in, kept
+//                  byte-for-byte), 1 "EP Boost" (original stand-in), 2 "Range '65 II"
+//                  = the circuit-fit Dallas Rangemaster, 3 "EP Boost II" = the
+//                  circuit-fit Echoplex EP-3 / Xotic EP Booster (see below).
+//   EP Boost II  : the Maestro Echoplex EP-3 preamp (single JFET common-source) as the
+//                  Xotic EP Booster. The pure EP-3 stage is ~FLAT across audio (fit
+//                  ep3_response.py) -- the character is clean headroom + very high
+//                  input Z + JFET 2nd-harmonic, FULL-RANGE (opposite of the
+//                  Rangemaster). Voiced as the EP Booster: a gentle broad presence
+//                  high-shelf (low-Q peak ~5 kHz, +4 dB) + full low end + a small JFET
+//                  bias for warmth. High headroom: mostly clean, a little hair maxed.
 //   Range '65 II : the Dallas Rangemaster (OC44 germanium common-emitter), FIT to
 //                  the schematic (rangemaster_response.py): the whole audio-band
 //                  voicing is the 5nF input cap into the ~12k input impedance = a
@@ -185,6 +193,19 @@ public:
             // network is fixed, so it shapes even at Drive 0. Calibration-referenced.
             {"Range '65 II", "Dallas Rangemaster (OC44 germanium)",
              { 0, 4.0f, 80.0f, 2653.0f,   0.0f, 0.0f, 0.7f,    0.0f, 0.30f, 2500.0f, 0.50f, 0.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.0f,   0.0f, 0.0f}, true},
+            // model 3: Echoplex EP-3 preamp / Xotic EP Booster (single JFET common-source).
+            // The PURE EP-3 stage measures essentially FLAT across the audio band (the
+            // Cin/Rgate HPF sits ~3 Hz, the source is unbypassed, the 220 pF roll is
+            // >70 kHz) -- its magic is clean headroom + very high input Z + subtle JFET
+            // 2nd-harmonic, NOT an EQ. It is FULL-RANGE (the opposite of the Rangemaster's
+            // treble-only high-pass). "EP Boost" as a pedal = the Xotic EP Booster, which
+            // adds gentle TONE-SHAPING: a broad presence high-shelf + full low end. We fit
+            // our low-Q pre-shaper peak (midHz 5000, Q 0.35, +4 dB) to that gentle shelf
+            // (docs/drive/ep3_response.py, RMS 0.35 dB), low-cut at ~15 Hz (full bass).
+            // High-headroom CLEAN soft (tanh) clip with a small off-centre bias for the
+            // JFET even-harmonic warmth -> mostly clean, a little hair only when cranked.
+            {"EP Boost II", "Echoplex EP-3 / Xotic EP Booster (JFET)",
+             { 0, 1.3f,  6.0f,  15.0f, 5000.0f, 4.0f, 0.35f,   0.0f, 0.10f, 1200.0f, 0.74f, 0.0f, 1.0f,  0.0f, 700.0f, 0.0f, 0.0f,   0.0f, 0.0f}, false},
         };
         static const Model od[] = {
             {"Green Drive", "mid-hump overdrive (v1 tanh)",
@@ -211,7 +232,7 @@ public:
         };
         switch (cat)
         {
-        case Kind::Boost:      count = 3; return boost;
+        case Kind::Boost:      count = 4; return boost;
         case Kind::Overdrive:  count = 2; return od;
         case Kind::Distortion: count = 2; return dist;
         case Kind::Fuzz:       count = 1; return fuzz;
@@ -592,10 +613,11 @@ private:
         static const float B0[6] = {1.505f, 0.988f, 0.639f, 0.416f, 0.278f, 0.197f};
         static const float B1[6] = {1.203f, 0.846f, 0.597f, 0.425f, 0.307f, 0.228f};
         static const float B2[6] = {1.556f, 0.916f, 0.557f, 0.378f, 0.295f, 0.260f}; // Range '65 II (Rangemaster, pink-noise ref)
+        static const float B3[6] = {1.073f, 0.801f, 0.601f, 0.456f, 0.352f, 0.279f}; // EP Boost II (clean boost, pink-noise ref)
         static const float O[6]  = {0.666f, 0.435f, 0.296f, 0.212f, 0.161f, 0.129f};
         static const float D[6]  = {1.229f, 0.568f, 0.310f, 0.242f, 0.223f, 0.214f};
         static const float F[6]  = {0.543f, 0.367f, 0.302f, 0.280f, 0.273f, 0.271f};
-        const float *t = (k == Kind::Boost) ? (model <= 0 ? B0 : model == 1 ? B1 : B2)
+        const float *t = (k == Kind::Boost) ? (model <= 0 ? B0 : model == 1 ? B1 : model == 2 ? B2 : B3)
                        : (k == Kind::Overdrive) ? O
                        : (k == Kind::Distortion) ? D : F;
         return lerpTbl(t, 6, drive);
