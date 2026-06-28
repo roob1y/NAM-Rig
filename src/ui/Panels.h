@@ -1330,11 +1330,18 @@ private:
             break;
         }
         case 3:
-            mDrive->rebind(mApvts, p + "dDrive"); mDrive->setCaption("Dist");
-            mTone->rebind(mApvts, p + "dTone");   mTone->setCaption("Filter");
+        {
+            // Violet Ram (Big Muff, model 2) shows the Muff's own control names
+            // (Sustain / Tone / Volume); the RAT models (Black Rodent / II) keep
+            // Dist / Filter / Volume. Captions only -- the params (dDrive/dTone/
+            // dLevel) are unchanged, so presets/automation are intact.
+            const bool muff = (model == 2);
+            mDrive->rebind(mApvts, p + "dDrive"); mDrive->setCaption(muff ? "Sustain" : "Dist");
+            mTone->rebind(mApvts, p + "dTone");   mTone->setCaption(muff ? "Tone" : "Filter");
             mLevel->rebind(mApvts, p + "dLevel"); mLevel->setCaption("Volume");
             mDrive->setVisible(true); mTone->setVisible(true); mLevel->setVisible(true);
             break;
+        }
         case 4:
             mDrive->rebind(mApvts, p + "fDrive"); mDrive->setCaption("Fuzz");
             mLevel->rebind(mApvts, p + "fLevel"); mLevel->setCaption("Volume");

@@ -347,7 +347,7 @@ int main()
         bool same = true;
         for (size_t i = 0; i < in.size(); ++i) same = same && (m0[i] == def[i]);
         CHECK(same, "T15 Dist model 0 == legacy default (A/B preserves the original Black Rodent)");
-        CHECK(DriveBlock::modelCount(Kind::Distortion) == 2, "T15 Distortion holds 2 models (Black Rodent + II)");
+        CHECK(DriveBlock::modelCount(Kind::Distortion) == 3, "T15 Distortion holds 3 models (Black Rodent + II + Violet Ram)");
     }
 
     // ---- T16: 2nd-order ADAA on the HARD clip crushes alias vs a naive hard clip ----
@@ -909,6 +909,83 @@ int main()
         CHECK(trebUp > 6.0, "T51 Klon Treble boosts above the shelf: 3k +%.1f dB (CW vs noon)", trebUp);
         CHECK(trebUp > trebDn * 1.5,
               "T51 Klon treble shelf asymmetric (+18/-8): boost +%.1f dB >> cut +%.1f dB", trebUp, trebDn);
+    }
+
+    // ====== Violet Ram (Distortion model 2): circuit-fit EHX Big Muff (Ram's Head) ======
+
+    // ---- T52: existing Distortion models stay byte-exact; the category now holds 3 ----
+    // The new 2-stage CASCADE + scoop fields zero-fill, so models 0/1 are untouched.
+    {
+        auto in = sine(220.0, 0.2f, 8192);
+        auto m0 = realSlotM(Kind::Distortion, 0, 0.7f, in);
+        auto def = realSlot(Kind::Distortion, 0.7f, in);
+        bool same = true;
+        for (size_t i = 0; i < in.size(); ++i) same = same && (m0[i] == def[i]);
+        CHECK(same, "T52 Distortion model 0 still byte-exact after adding Violet Ram");
+        CHECK(DriveBlock::modelCount(Kind::Distortion) == 3, "T52 Distortion holds 3 models (bModel 0..3)");
+        const auto v = DriveBlock::voicingFor(Kind::Distortion, 2);
+        CHECK(v.muffStages > 1.0f, "T52 Violet Ram runs the 2-stage cascade (muffStages %.0f)", v.muffStages);
+        CHECK(v.midDb < 0.0f, "T52 Violet Ram tone-stack scoop is a NOTCH (midDb %.1f < 0)", v.midDb);
+    }
+
+    // ---- T53: the Muff VOICE -- full lows, scooped ~1 kHz mids, dark top ----
+    // Small-signal (diodes ~linear) reveals the EQ: the bass is full (the Muff is
+    // bassy), the ~1 kHz tone-stack scoop + the Miller LPs pull the mids down hard,
+    // and the top is steeply rolled (the narrow, dark Muff bandwidth).
+    {
+        auto g = [&](double f) {
+            auto in = sine(f, 0.004f, 16384);
+            return goertzel(realSlotM(Kind::Distortion, 2, 0.0f, in), f) / goertzel(in, f);
+        };
+        const double g300 = g(300.0);
+        const double bass   = 20.0 * std::log10(g(150.0) / g300);  // ~full lows
+        const double scoop  = 20.0 * std::log10(g300 / g(1000.0)); // mid scoop + LP
+        const double dark   = 20.0 * std::log10(g300 / g(3000.0)); // dark top
+        CHECK(std::fabs(bass) < 3.0, "T53 Violet Ram keeps full lows: 150Hz %.1f dB re 300", bass);
+        CHECK(scoop > 6.0, "T53 Violet Ram mid scoop: 1kHz %.1f dB below 300Hz", scoop);
+        CHECK(dark  > 12.0, "T53 Violet Ram dark/narrow top: 3kHz %.1f dB below 300Hz", dark);
+    }
+
+    // ---- T54: the two cascaded soft clips COMPRESS (the Muff sustain wall) ----
+    // Both stages clip, so an 8x louder input barely raises the output -- the dense,
+    // squashed Big Muff dynamic. A single shaper would compress far less.
+    {
+        const double lo = rms(realSlotM(Kind::Distortion, 2, 0.5f, sine(220.0, 0.05f, 16384)));
+        const double hi = rms(realSlotM(Kind::Distortion, 2, 0.5f, sine(220.0, 0.40f, 16384)));
+        CHECK(hi / lo < 2.0, "T54 Violet Ram cascade compresses: input x8 -> output x%.2f", hi / lo);
+    }
+
+    // ---- T55: the cascade + dual 2nd-order ADAA never spikes (maxabs sweep) ----
+    // Two cubic clips, each on 2nd-order ADAA (each peak-guarded), plus the Miller
+    // LPs: the safety net is that NO sample blows up across a full-scale freq/Drive
+    // sweep (a single Inf would brick the downstream amp/cab).
+    {
+        double worst = 0.0; bool finite = true;
+        for (float dr = 0.0f; dr <= 1.001f; dr += 0.25f)
+            for (double f = 50.0; f <= 16000.0; f *= 1.2)
+            {
+                auto y = realSlotM(Kind::Distortion, 2, dr, sine(f, 0.5f, 8192));
+                for (float v : y) { worst = std::max(worst, (double)std::fabs(v)); finite = finite && std::isfinite(v); }
+            }
+        CHECK(finite, "T55 Violet Ram emits only finite samples across the sweep");
+        CHECK(worst < 1.5, "T55 Violet Ram no spikes (dual ADAA cascade): worst |out| %.2f", worst);
+    }
+
+    // ---- T56: Tone is the real Muff see-saw (bass up CCW, treble up CW) ----
+    {
+        auto gl = [&](float t) { auto in = sine(120.0, 0.1f, 16384); return goertzel(realSlotMT(Kind::Distortion, 2, 0.5f, t, in), 120.0); };
+        auto gh = [&](float t) { auto in = sine(3500.0, 0.1f, 16384); return goertzel(realSlotMT(Kind::Distortion, 2, 0.5f, t, in), 3500.0); };
+        CHECK(gl(0.0f) > gl(1.0f) * 2.0, "T56 Violet Ram Tone CCW = bass: low %.3f (CCW) > %.3f (CW)", gl(0.0f), gl(1.0f));
+        CHECK(gh(1.0f) > gh(0.0f) * 1.5, "T56 Violet Ram Tone CW = treble: high %.3f (CW) > %.3f (CCW)", gh(1.0f), gh(0.0f));
+    }
+
+    // ---- T57: input-level dependent -- a humbucker drives the Muff harder ----
+    // The clip threshold is fixed (calibration-referenced), so a hotter pickup clips
+    // more for the same knob -- like the real pedal.
+    {
+        const double sc = harmRatio(realSlotM(Kind::Distortion, 2, 0.3f, sine(660.0, 0.08f, 24000)), 660.0, 12);
+        const double hb = harmRatio(realSlotM(Kind::Distortion, 2, 0.3f, sine(660.0, 0.20f, 24000)), 660.0, 12);
+        CHECK(hb > sc + 0.05, "T57 Violet Ram humbucker drives harder: THD %.3f (HB) > %.3f (SC)", hb, sc);
     }
 
     std::printf("\n%s (%d failure%s)\n", gFails ? "RESULT: FAIL" : "RESULT: ALL PASS", gFails, gFails == 1 ? "" : "s");
