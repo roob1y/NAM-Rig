@@ -68,3 +68,16 @@ drive.ps1
 delay_ref/
 delay_ref/ delay_references/
 delay_references/
+
+# delay_analysis scratch: session prompts/briefs + demo & render outputs (local only)
+delay_analysis/demos/
+delay_analysis/outputs/
+delay_analysis/SPACE_TAPE_TIMING_PROMPT.md
+delay_analysis/SPACE_TAPE_VOICING_BRIEF.md
+delay_analysis/TAPE_ECHO_REVOICE_PROMPT.md
+
+# design exploration scratch (local only)
+Guitar plugin design exploration/
+
+# local agent/editor config
+.claude/
