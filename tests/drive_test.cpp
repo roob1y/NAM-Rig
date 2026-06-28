@@ -415,6 +415,85 @@ int main()
               "T20 RAT input-dependent: humbucker THD %.2f > single-coil %.2f (drives harder)", humbk, single);
     }
 
+    // ====== Range '65 II (Boost model 2): circuit-fit Dallas Rangemaster ======
+
+    // small-signal magnitude of a specific Boost MODEL + RANGE at one freq (linear).
+    auto boostG = [&](int model, int rng, double f, float drive) {
+        auto in = sine(f, 0.005f, 16384);
+        DriveBlock d; d.setKind(0, (int)Kind::Boost); d.setModel(0, model);
+        d.setRange(0, rng); d.setDrive(0, drive); d.setTone(0, 0.5f); d.prepare({SR, BLK});
+        auto x = in; run(d, x);
+        return goertzel(x, f) / goertzel(in, f);
+    };
+
+    // ---- T21: models 0 & 1 byte-for-byte unchanged; category now has 3 models ----
+    {
+        auto in = sine(220.0, 0.2f, 8192);
+        auto m0 = realSlotM(Kind::Boost, 0, 0.7f, in);
+        auto def = realSlot(Kind::Boost, 0.7f, in); // default model == 0
+        bool same0 = true;
+        for (size_t i = 0; i < in.size(); ++i) same0 = same0 && (m0[i] == def[i]);
+        CHECK(same0, "T21 Boost model 0 == legacy default (A/B preserves the original Range '65)");
+        CHECK(DriveBlock::modelCount(Kind::Boost) == 3, "T21 Boost holds 3 models (Range '65 / EP Boost / Range '65 II)");
+    }
+
+    // ---- T22: the voicing is a treble-boost high-pass; the Range switch moves the corner ----
+    // Whole audio-band voicing = the 5nF input cap into ~12k Zin -> 1st-order HP ~2.65 kHz.
+    {
+        const double hi = boostG(2, 0, 3000.0, 0.3f);   // treble passband
+        const double lo = boostG(2, 0, 150.0, 0.3f);    // below the corner (cut)
+        CHECK(hi > lo * 4.0, "T22 Range '65 II treble-boost: 3k %.3e >> 150Hz %.3e (%.1fx)", hi, lo, hi / lo);
+        // Range switch: Full (47nF, ~282 Hz corner) passes far more low end than Treble (5nF, ~2.6 kHz)
+        const double full300 = boostG(2, 2, 300.0, 0.3f);
+        const double treb300 = boostG(2, 0, 300.0, 0.3f);
+        CHECK(full300 > treb300 * 2.0,
+              "T22 Range switch moves corner: 300Hz Full %.3e > Treble %.3e (%.1fx)", full300, treb300, full300 / treb300);
+    }
+
+    // ---- T23: germanium ASYMMETRY -- the off-centre bias gives even harmonics ----
+    // model 2 (bias 0.30, the Rangemaster's deliberately off-centre operating point)
+    // sits clearly above the gentler original stand-in (bias 0.20). Tested in the
+    // passband (1.5 kHz) where the treble booster has full gain.
+    {
+        auto h2h1 = [&](int model) {
+            auto y = realSlotM(Kind::Boost, model, 0.6f, sine(1500.0, 0.15f, 24000));
+            return goertzel(y, 3000.0) / (goertzel(y, 1500.0) + 1e-9);
+        };
+        const double m2 = h2h1(2), m0 = h2h1(0);
+        CHECK(m2 > 0.06 && m2 > m0 * 1.8,
+              "T23 Range '65 II germanium asymmetry: h2/h1 %.3f > original %.3f", m2, m0);
+    }
+
+    // ---- T24: the gain range is the REAL Gv (~80), so it drives much harder than the stand-in ----
+    // The stand-in's gMax 20 was ~4x too low (the early-TS bug); model 2's gMax 80 = gm*Rc.
+    // Also input-level dependent: hotter pickups drive the fixed soft-clip threshold harder.
+    {
+        auto thd = [&](int model, float drive, float amp) {
+            return harmRatio(realSlotM(Kind::Boost, model, drive, sine(1500.0, amp, 24000)), 1500.0, 10);
+        };
+        const double v2full = thd(2, 1.0f, 0.08f), v0full = thd(0, 1.0f, 0.08f);
+        CHECK(v2full > v0full * 1.5,
+              "T24 Range '65 II drives harder than stand-in at full: THD %.3f > %.3f", v2full, v0full);
+        const double single = thd(2, 0.5f, 0.08f), humbk = thd(2, 0.5f, 0.20f);
+        CHECK(humbk > single * 1.5,
+              "T24 input-dependent: humbucker THD %.3f > single-coil %.3f (drives harder)", humbk, single);
+    }
+
+    // ---- T25: model 2 never spikes across a full-scale sweep (all drives, all ranges) ----
+    {
+        double worst = 0.0;
+        for (int rng = 0; rng <= 2; ++rng)
+            for (float dr = 0.0f; dr <= 1.001f; dr += 0.25f)
+                for (double f = 50.0; f <= 12000.0; f *= 1.2)
+                {
+                    DriveBlock d; d.setKind(0, (int)Kind::Boost); d.setModel(0, 2);
+                    d.setRange(0, rng); d.setDrive(0, dr); d.setTone(0, 0.5f); d.prepare({SR, BLK});
+                    auto y = sine(f, 0.5f, 8192); run(d, y);
+                    for (float v : y) worst = std::max(worst, (double)std::fabs(v));
+                }
+        CHECK(worst < 1.5, "T25 Range '65 II no spikes across full-scale sweep: worst |out| %.2f", worst);
+    }
+
     std::printf("\n%s (%d failure%s)\n", gFails ? "RESULT: FAIL" : "RESULT: ALL PASS", gFails, gFails == 1 ? "" : "s");
     return gFails ? 1 : 0;
 }
