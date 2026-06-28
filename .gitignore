@@ -68,3 +68,13 @@ drive.ps1
 delay_ref/
 delay_ref/ delay_references/
 delay_references/
+
+# delay_analysis: keep docs (.md) — ignore only demo wavs & render outputs (regenerable)
+delay_analysis/demos/
+delay_analysis/outputs/
+
+# design exploration scratch (local only)
+Guitar plugin design exploration/
+
+# local agent/editor config
+.claude/

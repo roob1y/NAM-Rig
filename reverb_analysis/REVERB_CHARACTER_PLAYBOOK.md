@@ -141,3 +141,25 @@ Verified end-to-end on Plate. The cleanest mental model for matching a reference
   centroid stall). The win is supplying that population STATISTICALLY (stochastic velvet / convolution)
   rather than recursively — same energy, no fingerprints. Build future characters this way from the
   start: FDN = dark body only; onset = convolved/derived early kernel; top/late HF = low-level velvet.
+
+## When the IR is NOT the whole story — controlled probes for NONLINEAR / TIME-VARYING reverbs
+Everything above matches the **linear** fingerprint, and an IR is the *complete* description of a
+linear, time-invariant system — for a clean Room/Hall/Plate (modelled linearly) it's all you need,
+and a swept (ESS) IR already avoids the click/LF problems. But an IR is captured at ONE level and
+assumes time-invariance, so it is **blind to** two dimensions that define some characters:
+- **Nonlinearity / level-dependence** — a **Spring** saturates, drips and chirps; a driven plate
+  edges up. The tail behaves differently when you hit it hard. The IR (one level) can't see it, and
+  the linear battery (EDR/C80/centroid) is blind to it.
+- **Time-variance / modulation** — modulated/chorused tails, spring flutter. An IR smears these into
+  a static decay.
+
+Fix: complement the IR with the **controlled-probe method used for the delay characters** (full
+recipe in `delay_analysis/CONTROLLED_PROBE_METHOD.md`). Drive the reference reverb with KNOWN dry
+probes and compare against your engine driven by the IDENTICAL dry (the null idea):
+- a **multi-level tone-burst sweep** → how the harmonics / compression grow with input level (the
+  nonlinear character — spring overdrive, drip onset). Match the harmonic SERIES, not just amount.
+- a **sustained pure carrier** → the tail's pitch / amplitude modulation (chorus, flutter) via the
+  wow/flutter estimator (bandpass + Hilbert; use a pure tone or it inflates).
+Keep the IR + this handbook as the primary tool for the linear body/onset/tail; add these two probes
+ONLY for characters where nonlinearity or modulation matters — **Spring first** (the most nonlinear),
+then anything you'd push into drive. Generic names only; ears + the residual are the final judge.
