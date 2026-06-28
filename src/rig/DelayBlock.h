@@ -520,25 +520,21 @@ private:
         const bool stereo = (left != right);
         const int mask = kStHeadMask[(size_t)std::clamp(mHeadMode, 0, kNumHeadModes - 1)];
         int nActive = 0;
-        float leadingRatio = 1.0f; // ratio of the lowest active head (for sync snapping)
-        bool gotLead = false;
         for (int h = 0; h < 3; ++h)
-            if (mask & (1 << h))
-            {
-                ++nActive;
-                if (!gotLead) { leadingRatio = kHeadRatio[(size_t)h]; gotLead = true; }
-            }
+            if (mask & (1 << h)) ++nActive;
         const float tapGain = nActive > 0 ? 1.0f / std::sqrt((float)nActive) : 1.0f;
 
-        // Head 1 = Repeat Rate; heads 2/3 follow at the fixed ratios. FREE: the Time
-        // knob maps onto the authentic multi-head tape echo tape-speed span (~69-177ms head 1; from
-        // the service-manual 12-40 cm/s capstan + the 1:1.9:2.76 head spacing). SYNC:
-        // the LEADING ACTIVE head lands on the host division (base = division /
-        // leadingRatio), like the multi-head tape echo emulations, so single-head modes sit on the grid.
+        // Head 1 = Repeat Rate; heads 2/3 always follow at the fixed kHeadRatio
+        // multiples. The TARGET TIME sets head 1 DIRECTLY (so the displayed/synced
+        // time IS head 1's tap), exactly like the multi-head tape echo: the repeat-
+        // rate head sits on the time, the other heads ride their fixed gaps.
+        //   FREE: head 1 = the Time knob (mTimeMs).
+        //   SYNC: head 1 = the host division (currentTimeMs()); heads 2/3 fall at
+        //         1.95x / 2.79x of it (authentic fixed-head spacing, off the grid).
+        // The delay line is sized for 3x kMaxTimeMs (head 3 = 2.79x full range).
         const float baseTarget = (mSyncIdx > 0)
-            ? currentTimeMs() / leadingRatio
-            : kStHead1MinMs + (std::clamp(mTimeMs, kMinTimeMs, kMaxTimeMs) - kMinTimeMs)
-                              / (kMaxTimeMs - kMinTimeMs) * (kStHead1MaxMs - kStHead1MinMs);
+            ? currentTimeMs()
+            : std::clamp(mTimeMs, kMinTimeMs, kMaxTimeMs);
         const float fb = std::min(mFeedback, mVoicing.fbCeiling) / mLoopPeakGain;
         const double fsK = 0.001 * mFs;
 
