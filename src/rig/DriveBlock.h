@@ -8,18 +8,17 @@
 //   Boost        : germanium treble booster ("Range '65") / FET clean boost
 //                  ("EP Boost"). Range '65 = a one-pole input-cap high-pass
 //                  (the 3-way switch moves the corner) + soft germanium clip.
-//                  FOUR models: 0 "Range '65" (the original stand-in, kept
-//                  byte-for-byte), 1 "EP Boost" (original stand-in), 2 "Range '65 II"
-//                  = the circuit-fit Dallas Rangemaster, 3 "EP Boost II" = the
-//                  circuit-fit Echoplex EP-3 / Xotic EP Booster (see below).
-//   EP Boost II  : the Maestro Echoplex EP-3 preamp (single JFET common-source) as the
+//                  TWO models: 0 "Range '65" = the circuit-fit Dallas Rangemaster,
+//                  1 "EP Boost" = the circuit-fit Echoplex EP-3 / Xotic EP Booster
+//                  (see below). The v1 stand-ins have been removed from the catalog.
+//   EP Boost     : the Maestro Echoplex EP-3 preamp (single JFET common-source) as the
 //                  Xotic EP Booster. The pure EP-3 stage is ~FLAT across audio (fit
 //                  ep3_response.py) -- the character is clean headroom + very high
 //                  input Z + JFET 2nd-harmonic, FULL-RANGE (opposite of the
 //                  Rangemaster). Voiced as the EP Booster: a gentle broad presence
 //                  high-shelf (low-Q peak ~5 kHz, +4 dB) + full low end + a small JFET
 //                  bias for warmth. High headroom: mostly clean, a little hair maxed.
-//   Range '65 II : the Dallas Rangemaster (OC44 germanium common-emitter), FIT to
+//   Range '65    : the Dallas Rangemaster (OC44 germanium common-emitter), FIT to
 //                  the schematic (rangemaster_response.py): the whole audio-band
 //                  voicing is the 5nF input cap into the ~12k input impedance = a
 //                  1st-order high-pass at ~2.65 kHz, flat above (it is a TREBLE
@@ -28,12 +27,12 @@
 //                  full Volume (gMax 80, vs the stand-in's 20). Soft germanium clip
 //                  (tanh) with an off-centre bias -> asymmetric even-harmonic warmth
 //                  + soft compression when strummed hard.
-//   Green Drive  : a green-box mid-hump overdrive (TS-style). FOUR models:
-//                  model 0 "Green Drive" = the original memoryless tanh voicing;
-//                  model 1 "Green Drive II" = the reworked feedback-clip model
-//                  (see below); model 2 "Super Drive" = the Boss SD-1 (see below);
-//                  model 3 "Gold Horse" = the Klon Centaur (see below). 0-2 share
-//                  the ~720 Hz mid hump; the Klon's is a broader ~1 kHz band-pass.
+//   Green Drive  : a green-box mid-hump overdrive (TS-style). FOUR OD models:
+//                  model 0 "Green Drive" = the feedback-clip TS808; model 1
+//                  "Super Drive" = the Boss SD-1; model 2 "Gold Horse" = the Klon
+//                  Centaur; model 3 "Breaker Drive" = the Marshall Bluesbreaker
+//                  (all see below). 0-1 share the ~720 Hz mid hump; the Klon's is a
+//                  broader ~1 kHz band-pass. The v1 tanh stand-in has been removed.
 //   Super Drive  : the Boss SD-1 Super Overdrive (OD-1 lineage). Small-signal
 //                  voicing ~= the TS808 (fit to the schematic, RMS 0.63 dB), but
 //                  the identity is ASYMMETRIC clipping: 3 diodes (2+1) = a ~2:1
@@ -50,12 +49,10 @@
 //                  from the RAW input (restores the lows the mid-focused clip drops) +
 //                  shapeTrack bloom (near-clean boost at low Drive). Bright/open top,
 //                  lots of output (also a boost). See docs/drive/klon.md.
-//   Black Rodent : a hard-clip distortion (ProCo RAT). TWO models:
-//                  model 0 "Black Rodent" = the original simple hard-clip stand-in;
-//                  model 1 "Black Rodent II" = the circuit-fit RAT (see below). Both
-//                  are symmetric HARD clips; II adds the LM308 gain-stage voicing,
-//                  2nd-order ADAA and the "Filter" tone.
-//   Black Rodent II: the LM308 clipper amp's bass-cut + ~935 Hz hump + top roll-off
+//   Black Rodent : a hard-clip distortion (ProCo RAT). ONE model (0): the circuit-fit
+//                  RAT (see below) -- symmetric HARD clip with the LM308 gain-stage
+//                  voicing, 2nd-order ADAA and the "Filter" tone. (v1 stand-in removed.)
+//   Black Rodent : the LM308 clipper amp's bass-cut + ~935 Hz hump + top roll-off
 //                  (FIT to the schematic, proco_rat_response.py) sit PRE-clip and
 //                  bloom with Drive, so mids hit the silicon diodes (to ground)
 //                  hardest and bass clips LEAST — the RAT's frequency-selective
@@ -74,10 +71,10 @@
 // float the antiderivative subtraction loses precision at small signal and
 // crackles). The legacy shapers (tanh / hard / asym) use 1st-order ADAA:
 //   y = (F1(x1)-F1(x0))/(x1-x0)  (midpoint-f fallback for tiny dx).
-// The cubic soft-clip (Green Drive II) and the hard clip (Black Rodent II) can run
+// The cubic soft-clip (Green Drive) and the hard clip (Black Rodent) can run
 // 2nd-order ADAA (Parker/Bilbao): from F2, three samples, with L'Hopital fallbacks
 // + a peak guard — markedly less fizz. Selected per-voicing (clip 3 always; clip 1
-// when v.adaa2 is set), so model 0 keeps its byte-exact 1st-order path.
+// when v.adaa2 is set).
 // Zero latency, all-Off rack bit-exact.
 //
 // Base shapers:
@@ -86,7 +83,7 @@
 //   2 hard clip, ASYM rails  — Fuzz (positive rail +1, negative rail -(1-bias))
 //   3 cubic soft (poly)      — Overdrive v2 (cheap F1+F2 -> 2nd-order ADAA)
 //
-// Green Drive II authentic-TS extras (clip 3 only, all zero-latency):
+// Green Drive authentic-TS extras (clip 3 only, all zero-latency):
 //   * pre/de-emphasis high-shelf pair around ~700 Hz: boosts mids/highs INTO
 //     the clipper and cuts them after -> bass is clipped LEAST (the TS feedback
 //     HPF) and the clip corners are softened (the 51 pF cap). Net small-signal
@@ -213,11 +210,7 @@ public:
     static const Model *modelsFor(Kind cat, int &count)
     {                       // clip  gMin    gMax  lowCut   midHz  midDb midQ   lpHz   bias   pivot   outTrim shp post  emphDb emphHz clean  dyn   toneF  adaa2
         static const Model boost[] = {
-            {"Range '65", "germanium treble boost",
-             { 0, 2.0f, 20.0f, 2600.0f,   0.0f, 0.0f, 0.7f,    0.0f, 0.20f, 2500.0f, 0.95f, 0.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.0f,   0.0f, 0.0f}, true},
-            {"EP Boost", "FET clean boost",
-             { 0, 1.0f,  6.0f,  40.0f, 5000.0f, 3.0f, 0.6f,    0.0f, 0.05f, 1000.0f, 0.95f, 0.0f, 1.0f,  0.0f, 700.0f, 0.0f, 0.0f,   0.0f, 0.0f}, false},
-            // model 2: circuit-fit Dallas Rangemaster (OC44 germanium, common-emitter).
+            // model 0: circuit-fit Dallas Rangemaster (OC44 germanium, common-emitter).
             // The voicing is a single 1st-order high-pass = the 5nF input cap into the
             // ~12k input impedance, fc ~2.65 kHz, FLAT above (no peak / no top roll) --
             // FIT to the schematic (docs/drive/rangemaster_response.py, RMS 0.01 dB). The
@@ -230,9 +223,9 @@ public:
             // deliberately asymmetric operating point) -> even-harmonic warmth + soft
             // compression when strummed hard. Static (shapeTrack 0): the input-cap
             // network is fixed, so it shapes even at Drive 0. Calibration-referenced.
-            {"Range '65 II", "Dallas Rangemaster (OC44 germanium)",
+            {"Range '65", "Germanium Treble Boost",
              { 0, 4.0f, 80.0f, 2653.0f,   0.0f, 0.0f, 0.7f,    0.0f, 0.30f, 2500.0f, 0.50f, 0.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.0f,   0.0f, 0.0f}, true},
-            // model 3: Echoplex EP-3 preamp / Xotic EP Booster (single JFET common-source).
+            // model 1: Echoplex EP-3 preamp / Xotic EP Booster (single JFET common-source).
             // The PURE EP-3 stage measures essentially FLAT across the audio band (the
             // Cin/Rgate HPF sits ~3 Hz, the source is unbypassed, the 220 pF roll is
             // >70 kHz) -- its magic is clean headroom + very high input Z + subtle JFET
@@ -243,13 +236,12 @@ public:
             // (docs/drive/ep3_response.py, RMS 0.35 dB), low-cut at ~15 Hz (full bass).
             // High-headroom CLEAN soft (tanh) clip with a small off-centre bias for the
             // JFET even-harmonic warmth -> mostly clean, a little hair only when cranked.
-            {"EP Boost II", "Echoplex EP-3 / Xotic EP Booster (JFET)",
+            {"EP Boost", "Clean Full-Range Boost",
              { 0, 1.3f,  6.0f,  15.0f, 5000.0f, 4.0f, 0.35f,   0.0f, 0.10f, 1200.0f, 0.74f, 0.0f, 1.0f,  0.0f, 700.0f, 0.0f, 0.0f,   0.0f, 0.0f}, false},
         };
         static const Model od[] = {
-            {"Green Drive", "mid-hump overdrive (v1 tanh)",
-             { 0, 1.5f, 30.0f, 560.0f,  780.0f, 6.0f, 0.7f, 1300.0f, 0.05f,  720.0f, 1.10f, 1.0f, 1.0f,  0.0f, 700.0f, 0.00f, 0.0f,  0.0f, 0.0f}, false},
-            {"Green Drive II", "feedback-clip overdrive (v2)",
+            // model 0: the reworked feedback-clip TS808 (was "Green Drive II").
+            {"Green Drive", "Mid-Hump Overdrive",
              { 3, 5.0f, 80.0f, 220.0f,  820.0f, 3.6f, 0.7f, 1900.0f, 0.00f, 1200.0f, 1.15f, 0.0f, 1.0f,  9.0f, 700.0f, 0.20f, 0.40f, 0.0f, 0.0f}, false},
             // model 2: circuit-fit Boss SD-1 Super Overdrive (OD-1 lineage, uPC4558
             // feedback-clip). Small-signal voicing is ~the TS808 (fit sd1_response.py,
@@ -264,7 +256,7 @@ public:
             // pot + 0.9V 1S2473 diodes) + a touch more output (outTrim 1.25). Same
             // feedback-clip feel as GD2: pre/de-emphasis (bass clips least), small clean
             // blend + touch dynamics. Static (shapeTrack 0), mid post-clip, calibrated.
-            {"Super Drive", "Boss SD-1 (asymmetric overdrive)",
+            {"Super Drive", "Asymmetric Overdrive",
              { 4, 6.0f,120.0f, 160.0f,  900.0f, 5.0f, 0.5f, 2000.0f, 0.35f, 1200.0f, 1.25f, 0.0f, 1.0f, 10.0f, 700.0f, 0.15f, 0.40f, 0.0f, 0.0f}, false},
             // model 3: circuit-fit Klon Centaur (TL072 + germanium diodes-to-ground).
             // NOT a TS: the op-amp gain stage is a ~1 kHz BAND-PASS (fit klon_response.py,
@@ -281,7 +273,7 @@ public:
             // treble-shelf corner ~408 Hz, approximated by the engine tilt). Calibrated.
             // tone = ACTIVE treble shelf (trebleShelfDb 18 @ pivot 408 Hz): the real
             // Klon high-shelf (bass fixed, +18/-8 dB), noon = flat. NOT the engine tilt.
-            {"Gold Horse", "Klon Centaur (transparent overdrive)",
+            {"Gold Horse", "Transparent Overdrive",
              { 1, 2.0f, 70.0f, 210.0f,  980.0f, 3.2f, 0.3f, 4700.0f, 0.00f,  408.0f, 0.95f, 1.0f, 0.0f,  0.0f, 700.0f, 0.50f, 0.30f, 0.0f, 1.0f, 0.0f, 18.0f}, false},
             // model 4: circuit-fit Marshall Bluesbreaker (the early-'90s pedal, the
             // King of Tone / Timmy / Morning Glory ancestor). A TL072 non-inverting
@@ -304,35 +296,30 @@ public:
             // than GD2 (gMin/gMax) -- clean till pushed, "fairly low output, breaks up late"
             // (the real pedal). Treble-shelf tone (bass fixed, soft-poly path), pivot 1200.
             // Calibration-referenced. See docs/drive/bluesbreaker.md.
-            {"Breaker Drive", "Marshall Bluesbreaker (soft symmetric OD)",
+            {"Breaker Drive", "Soft Low-Gain Overdrive",
              { 3, 3.0f, 48.0f,  20.0f, 4000.0f, 4.7f, 0.68f,13000.0f, 0.00f, 1200.0f, 1.15f, 0.0f, 0.0f,  5.0f, 700.0f, 0.22f, 0.45f, 0.0f, 0.0f}, false},
         };
         static const Model dist[] = {
-            // model 0: the original simple hard-clip stand-in (kept byte-for-byte for A/B).
-            {"Black Rodent", "hard-clip distortion",
-             { 1, 2.0f,160.0f, 300.0f, 1000.0f, 4.0f, 0.6f, 5000.0f, 0.00f, 1500.0f, 0.44f, 1.0f, 1.0f,  0.0f, 700.0f, 0.0f, 0.0f,   0.0f, 0.0f}, false},
-            // model 1: circuit-fit ProCo RAT. Pre-clip gain-stage EQ (gentle low-cut +
+            // model 0: circuit-fit ProCo RAT. Pre-clip gain-stage EQ (gentle low-cut +
             // ~935 Hz hump + top roll) FIT to the LM308 stage at a ~1 kHz-hump Distortion
             // setting (docs/drive/proco_rat_response.py, RMS 0.03 dB), bloomed with Drive
             // (shapeTrack 1, PRE-clip so bass clips LEAST). Symmetric HARD clip (silicon
             // diodes to ground) on 2nd-order ADAA. Tone = the RAT "Filter" sweepable
             // low-pass (darker CW). Hot, calibration-referenced range (LM308 Gv up to ~2300).
-            {"Black Rodent II", "ProCo RAT (LM308, diodes-to-ground)",
+            {"Black Rodent", "Hard-Clip Distortion",
              { 1, 4.0f,150.0f,  62.0f,  935.0f,17.0f, 0.5f, 4800.0f, 0.00f, 1500.0f, 0.47f, 1.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.0f, 475.0f, 1.0f}, false},
         };
         static const Model fuzz[] = {
-            {"Round Fuzz", "germanium fuzz",
-             { 2, 6.0f,300.0f,  40.0f,    0.0f, 0.0f, 0.7f,    0.0f, 0.45f,  700.0f, 0.45f, 0.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.0f,   0.0f, 0.0f}, false},
-            // model 1: circuit-fit germanium Fuzz Face (AC128, the "round" one). Voicing is
+            // model 0: circuit-fit germanium Fuzz Face (AC128, the "round" one). Voicing is
             // just a bass trim (one-pole low-cut ~50 Hz, fit fuzz_face_response.py), flat &
             // bright above (NO top roll). The identity is the ASYMMETRIC cubic clip (type 4):
             // persistent asymmetry at all gains (cold-biased Q1) -> soft for small signals,
             // a tilted square when cranked; 2nd-order ADAA (polynomial, no dilog). dynDepth
             // gives the touch/volume cleanup (soft picking -> cleaner); gate gives the
             // bias-starved "velcro"/splat on decay. Hot, calibration-referenced gain range.
-            {"Round Fuzz II", "Fuzz Face (AC128 germanium, asym + gate)",
+            {"Round Fuzz", "Germanium Fuzz",
              { 4, 8.0f,200.0f,  50.0f,    0.0f, 0.0f, 0.7f,    0.0f, 0.45f,  700.0f, 0.65f, 0.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.50f,  0.0f, 0.0f, 0.6f}, false},
-            // model 2: circuit-fit EHX Big Muff Pi (Ram's Head '73). Filed under FUZZ
+            // model 1: circuit-fit EHX Big Muff Pi (Ram's Head '73). Filed under FUZZ
             // (it is marketed/perceived as a fuzz, though technically a diode distortion).
             // The Muff is NOT a single shaper -- it is TWO consecutive SOFT-clip stages
             // (silicon 1N914 back-to-back diodes in each transistor's collector->base
@@ -351,15 +338,15 @@ public:
             // bias 0 (symmetric clipping). MODERATE default / HIGH-gain ceiling: gMin 3 =
             // controllable crunch at low Sustain, gMax 55 + the inter-stage gain = the
             // full saturated wall + max sustain at the top. Calibration-referenced.
-            {"Violet Ram", "EHX Big Muff (Ram's Head, 2-stage)",
+            {"Violet Ram", "Big-Muff Sustain Fuzz",
              { 3, 3.0f, 55.0f,  70.0f,    0.0f, 0.0f, 0.7f, 1170.0f, 0.00f, 1000.0f, 1.38f, 0.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.0f,   0.0f, 0.0f, 0.0f, 0.0f, 2.0f, 1200.0f, 1780.0f}, false},
         };
         switch (cat)
         {
-        case Kind::Boost:      count = 4; return boost;
-        case Kind::Overdrive:  count = 5; return od;
-        case Kind::Distortion: count = 2; return dist;
-        case Kind::Fuzz:       count = 3; return fuzz;
+        case Kind::Boost:      count = 2; return boost;
+        case Kind::Overdrive:  count = 4; return od;
+        case Kind::Distortion: count = 1; return dist;
+        case Kind::Fuzz:       count = 2; return fuzz;
         default:               count = 0; return nullptr;
         }
     }
@@ -452,7 +439,7 @@ public:
             const bool midPost = (v.midPost > 0.5f);
             const bool useLp = (v.lpHz > 0.0f);
             const bool cubic = (v.clip == 3);
-            const bool asymCubic = (v.clip == 4);         // asymmetric cubic fuzz (Round Fuzz II)
+            const bool asymCubic = (v.clip == 4);         // asymmetric cubic fuzz (Round Fuzz)
             const bool cascade = (v.muffStages > 1.0f);   // Big Muff 2-stage soft-clip cascade
             const float millerCoef = (v.muffLpHz > 0.0f) ? coefForHz(v.muffLpHz, sr) : 0.0f; // input-booster Miller LP (pre clip 1)
             const float interMillerHz = (v.muffInterLpHz > 0.0f) ? v.muffInterLpHz : v.muffLpHz; // clip-1 Miller (pre clip 2): distinct higher corner
@@ -617,7 +604,7 @@ public:
                 }
                 else if (adaa2)
                 {
-                    // ---- hard clip on 2nd-order ADAA (peak-guarded): Black Rodent II
+                    // ---- hard clip on 2nd-order ADAA (peak-guarded): Black Rodent
                     // (RAT) and Gold Horse (Klon). The pre-clip EQ (low-cut + mid hump) is
                     // already in u, so mids hit the diodes hardest and bass clips least. ----
                     const double xb = (double)u + inBias;
@@ -629,7 +616,7 @@ public:
                     // mid-focused clipped path drops. Clean is at INPUT level (xin, NOT the
                     // gained signal -> no crackle). The envelope nudges it (touch: soft
                     // picking cleans up). With cleanBlend 0 AND dynDepth 0 this is a no-op,
-                    // so Black Rodent II stays byte-exact.
+                    // so Black Rodent stays byte-exact.
                     if (v.cleanBlend > 0.0f || v.dynDepth > 0.0f)
                     {
                         const float aenv = std::abs(xin);
@@ -839,7 +826,7 @@ private:
         return (2.0 / (x - x2)) * (cubD(x, x1) - cubD(x1, x2));
     }
 
-    // ---- asymmetric cubic soft-clip (type 4, Round Fuzz II) ----
+    // ---- asymmetric cubic soft-clip (type 4, Round Fuzz) ----
     // The germanium fuzz clips ASYMMETRICALLY at ALL gains (a cold-biased stage:
     // one semicycle swings further than the other), so a symmetric shaper + DC bias
     // won't do -- at high gain a biased odd shaper just squares up symmetrically.
@@ -888,7 +875,7 @@ private:
         return (2.0 / (x - x2)) * (asymD(x, x1, kn) - asymD(x1, x2, kn));
     }
 
-    // ---- hard clip (type 1) 2nd-order ADAA (Black Rodent II) ----
+    // ---- hard clip (type 1) 2nd-order ADAA (Black Rodent) ----
     // Hard clipping is the harshest shaper (square corners -> the most fold-back),
     // so it benefits most from 2nd-order. The clamp is piecewise-polynomial, so F1
     // and F2 are exact closed forms (no dilogarithm) -> ADAA2 is as cheap as the
@@ -947,39 +934,37 @@ private:
     // Boost) a single category table can't level. Tone table stays relative.
     static float driveMakeup(Kind k, int model, float drive)
     {
-        static const float B0[6] = {1.505f, 0.988f, 0.639f, 0.416f, 0.278f, 0.197f};
-        static const float B1[6] = {1.203f, 0.846f, 0.597f, 0.425f, 0.307f, 0.228f};
-        static const float B2[6] = {1.556f, 0.916f, 0.557f, 0.378f, 0.295f, 0.260f}; // Range '65 II (Rangemaster, pink-noise ref)
-        static const float B3[6] = {1.073f, 0.801f, 0.601f, 0.456f, 0.352f, 0.279f}; // EP Boost II (clean boost, pink-noise ref)
-        static const float O[6]  = {0.666f, 0.435f, 0.296f, 0.212f, 0.161f, 0.129f};
+        static const float B2[6] = {1.556f, 0.916f, 0.557f, 0.378f, 0.295f, 0.260f}; // Range '65 (Rangemaster, pink-noise ref)
+        static const float B3[6] = {1.073f, 0.801f, 0.601f, 0.456f, 0.352f, 0.279f}; // EP Boost (clean boost, pink-noise ref)
+        static const float O[6]  = {0.666f, 0.435f, 0.296f, 0.212f, 0.161f, 0.129f};  // Green Drive (mid-hump OD)
         static const float O2[6] = {0.438f, 0.410f, 0.401f, 0.398f, 0.396f, 0.396f}; // Super Drive (SD-1, asym cubic, pink-noise ref; near-flat = the clipper compresses)
-        static const float O3[6] = {0.427f, 0.322f, 0.240f, 0.206f, 0.199f, 0.201f}; // Gold Horse (Klon, hard clip + heavy clean blend, pink-noise ref)
-        static const float D[6]  = {1.229f, 0.568f, 0.310f, 0.242f, 0.223f, 0.214f};
-        static const float F[6]  = {0.543f, 0.367f, 0.302f, 0.280f, 0.273f, 0.271f};
-        static const float F1[6] = {0.439f, 0.371f, 0.346f, 0.338f, 0.335f, 0.334f}; // Round Fuzz II (asym cubic, pink-noise ref)
+        static const float O3[6] = {0.427f, 0.322f, 0.240f, 0.206f, 0.199f, 0.201f}; // Gold Horse / Breaker Drive (hard/soft clip + clean blend, pink-noise ref)
+        static const float D[6]  = {1.229f, 0.568f, 0.310f, 0.242f, 0.223f, 0.214f};  // Black Rodent (ProCo RAT)
+        static const float F1[6] = {0.439f, 0.371f, 0.346f, 0.338f, 0.335f, 0.334f}; // Round Fuzz (asym cubic, pink-noise ref)
         static const float F2[6] = {0.587f, 0.396f, 0.316f, 0.286f, 0.275f, 0.272f}; // Violet Ram (Big Muff 2-stage cascade, pink-noise ref; compresses as both stages saturate)
-        const float *t = (k == Kind::Boost) ? (model <= 0 ? B0 : model == 1 ? B1 : model == 2 ? B2 : B3)
-                       : (k == Kind::Overdrive) ? (model >= 3 ? O3 : model == 2 ? O2 : O)
+        // model indices are now compact (v1 stand-ins removed): Boost 0 Range '65 / 1 EP Boost;
+        // OD 0 Green Drive / 1 Super Drive / 2 Gold Horse / 3 Breaker Drive; Fuzz 0 Round Fuzz / 1 Violet Ram.
+        const float *t = (k == Kind::Boost) ? (model <= 0 ? B2 : B3)
+                       : (k == Kind::Overdrive) ? (model >= 2 ? O3 : model == 1 ? O2 : O)
                        : (k == Kind::Distortion) ? D
-                       : (model <= 0 ? F : model == 1 ? F1 : F2);
+                       : (model <= 0 ? F1 : F2);
         return lerpTbl(t, 6, drive);
     }
     static float toneMakeup(Kind k, int model, float tone)
     {
         static const float B0[5] = {0.604f, 0.895f, 1.000f, 0.767f, 0.490f};
-        static const float B1[5] = {0.499f, 0.789f, 1.000f, 0.818f, 0.522f};
         // Boost has no user Tone (processor pins it to 0.5) -> the centre point is unity;
-        // Range '65 II reuses B0's symmetric tilt table (Tone never moves in the UI).
+        // both Boost models reuse B0's symmetric tilt table (Tone never moves in the UI).
         static const float O[5]  = {0.472f, 0.757f, 1.000f, 0.851f, 0.548f};
         static const float D[5]  = {0.450f, 0.725f, 1.000f, 0.916f, 0.609f};
         static const float F[5]  = {0.533f, 0.833f, 1.000f, 0.773f, 0.485f};
         static const float F2[5] = {0.858f, 0.952f, 1.000f, 0.994f, 0.929f}; // Violet Ram (Big Muff PASSIVE tone stack, pink-noise ref; very gentle gradient)
-        // Round Fuzz models pin Tone to 0.5 (no tone) -> F centre is unity; the Muff
-        // (model 2) is the only fuzz with a real Tone knob, so it gets its own table.
-        const float *t = (k == Kind::Boost) ? (model <= 0 ? B0 : model == 1 ? B1 : B0)
+        // Round Fuzz pins Tone to 0.5 (no tone) -> F centre is unity; the Muff (model 1)
+        // is the only fuzz with a real Tone knob, so it gets its own table.
+        const float *t = (k == Kind::Boost) ? B0
                        : (k == Kind::Overdrive) ? O
                        : (k == Kind::Distortion) ? D
-                       : (model == 2 ? F2 : F);
+                       : (model == 1 ? F2 : F);
         return lerpTbl(t, 5, tone);
     }
 

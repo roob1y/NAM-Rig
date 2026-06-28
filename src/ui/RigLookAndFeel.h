@@ -68,8 +68,15 @@ namespace colors
     }
 
     // Drive-pedal accent / tint pairs (per model family). first = bright accent
-    // (LED, knob arcs), second = enclosure tint.
-    struct AccentPair { juce::Colour accent, tint; };
+    // (knob arcs, footswitch), second = enclosure tint, third = jewel LED colour
+    // (defaults to the accent when not given, so the LED tracks the accent unless a
+    // model deliberately overrides it -- e.g. Violet Ram is chrome with a violet LED).
+    struct AccentPair
+    {
+        juce::Colour accent, tint, led;
+        AccentPair(juce::Colour a = {}, juce::Colour t = {}, juce::Colour l = {})
+            : accent(a), tint(t), led(l.isTransparent() ? a : l) {}
+    };
     inline AccentPair driveAccent(int kind) // 0 boost,1 od,2 dist,3 fuzz,4 fuzz-alt
     {
         switch (kind)
@@ -79,6 +86,38 @@ namespace colors
         case 2: return {juce::Colour(0xffcfd5dd), juce::Colour(0xff3a4049)}; // Black Rodent
         case 3: return {juce::Colour(0xffcaa6f0), juce::Colour(0xff8a5cc6)}; // Round Fuzz
         case 4: return {juce::Colour(0xffff7d6b), juce::Colour(0xffa23d31)}; // Range '65
+        default: return {accent, accentDim};
+        }
+    }
+
+    // Per-MODEL accent / tint / LED, keyed by (drive type, model index). Each real
+    // pedal gets its own livery. The v1 stand-ins are gone, so indices are compact:
+    // Boost 0 Range '65 / 1 EP Boost; OD 0 Green Drive / 1 Super Drive / 2 Gold Horse
+    // / 3 Breaker Drive; Dist 0 Black Rodent; Fuzz 0 Round Fuzz / 1 Violet Ram.
+    // type: 1 boost,2 od,3 dist,4 fuzz.
+    inline AccentPair driveModelAccent(int type, int model)
+    {
+        using C = juce::Colour;
+        switch (type)
+        {
+        case 1: // Boost
+            return (model == 0)
+                       ? AccentPair{C(0xffff7d6b), C(0xffa23d31)}  // Range '65 (warm red)
+                       : AccentPair{C(0xfff0d68a), C(0xffc79a3e)}; // EP Boost  (gold)
+        case 2: // Overdrive
+            switch (model)
+            {
+            case 1:  return {C(0xfff2c230), C(0xffb8902a)};        // Super Drive   (Boss SD-1, yellow)
+            case 2:  return {C(0xffe0b347), C(0xff8a6622)};        // Gold Horse    (Klon, gold)
+            case 3:  return {C(0xff5b9bd5), C(0xff2f5d8a)};        // Breaker Drive (Bluesbreaker, blue)
+            default: return {C(0xff3fd45f), C(0xff3f9d57)};        // Green Drive   (0)
+            }
+        case 3: // Distortion: Black Rodent
+            return {C(0xffcfd5dd), C(0xff3a4049)};
+        case 4: // Fuzz
+            return (model == 1)
+                       ? AccentPair{C(0xffd7dde2), C(0xff5a626b), C(0xffb06bd8)} // Violet Ram (Big Muff): chrome body, VIOLET LED
+                       : AccentPair{C(0xffcaa6f0), C(0xff8a5cc6)};               // Round Fuzz (lavender)
         default: return {accent, accentDim};
         }
     }

@@ -130,12 +130,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
             juce::ParameterID(pid + "bRange", 1), lbl + "Boost Range",
             juce::StringArray{"Treble", "Mid", "Full"}, 0)); // treble-boost cap switch
-        // Shared per-slot model index across ALL drive categories. Range 0..4 so the
-        // largest category (Overdrive: 5 models incl. Breaker Drive) is reachable; the
-        // model menu clamps to each category's modelCount, so smaller categories ignore
-        // the extra index. Default 0.
+        // Shared per-slot model index across ALL drive categories. Range 0..3 so the
+        // largest category (Overdrive: 4 models, up to Breaker Drive at index 3) is
+        // reachable; the model menu clamps to each category's modelCount, so smaller
+        // categories ignore the extra index. Default 0.
         params.push_back(std::make_unique<juce::AudioParameterInt>(
-            juce::ParameterID(pid + "bModel", 1), lbl + "Boost Model", 0, 4, 0));
+            juce::ParameterID(pid + "bModel", 1), lbl + "Boost Model", 0, 3, 0));
         // Overdrive: Drive / Tone / Level.
         params.push_back(std::make_unique<juce::AudioParameterFloat>(
             juce::ParameterID(pid + "oDrive", 1), lbl + "OD Drive",
@@ -170,7 +170,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
             juce::NormalisableRange<float>(-12.0f, 12.0f, 0.1f), 0.0f,
             juce::AudioParameterFloatAttributes().withLabel("dB")));
         params.push_back(std::make_unique<juce::AudioParameterBool>(
-            juce::ParameterID(pid + "fGate", 1), lbl + "Fuzz Gate", true)); // bias-starved splat (Round Fuzz II)
+            juce::ParameterID(pid + "fGate", 1), lbl + "Fuzz Gate", true)); // bias-starved splat (Round Fuzz)
     }
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID("driveAutoGain", 1), "Drive Auto Gain", false));
@@ -849,26 +849,26 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
             mChain.drive.setModel(s, (int)g("bModel"));
             mChain.drive.setTone(s, 0.5f); mChain.drive.setLevelDb(s, 0.0f);
             break;
-        case 2: // Overdrive (4 models: 0 Green Drive v1 / 1 Green Drive II / 2 Super Drive = SD-1 / 3 Gold Horse = Klon)
+        case 2: // Overdrive (4 models: 0 Green Drive (TS808) / 1 Super Drive (SD-1) / 2 Gold Horse (Klon) / 3 Breaker Drive (Bluesbreaker))
             mChain.drive.setDrive(s, g("oDrive"));
             mChain.drive.setTone(s, g("oTone"));
             mChain.drive.setLevelDb(s, g("oLevel"));
             mChain.drive.setRange(s, 0); mChain.drive.setModel(s, (int)g("bModel"));
             break;
-        case 3: // Distortion (2 models: 0 Black Rodent / 1 Black Rodent II)
+        case 3: // Distortion (1 model: 0 Black Rodent = ProCo RAT)
             mChain.drive.setDrive(s, g("dDrive"));
             mChain.drive.setTone(s, g("dTone"));
             mChain.drive.setLevelDb(s, g("dLevel"));
             mChain.drive.setRange(s, 0); mChain.drive.setModel(s, (int)g("bModel"));
             break;
-        case 4: // Fuzz (3 models: 0 Round Fuzz / 1 Round Fuzz II / 2 Violet Ram)
+        case 4: // Fuzz (2 models: 0 Round Fuzz (Fuzz Face) / 1 Violet Ram (Big Muff))
             mChain.drive.setDrive(s, g("fDrive"));
-            // Round Fuzz models have no tone (pinned 0.5); the Big Muff (model 2)
+            // Round Fuzz has no tone (pinned 0.5); the Big Muff (model 1)
             // exposes the Muff Tone scoop via fTone.
-            mChain.drive.setTone(s, (int)g("bModel") == 2 ? g("fTone") : 0.5f);
+            mChain.drive.setTone(s, (int)g("bModel") == 1 ? g("fTone") : 0.5f);
             mChain.drive.setLevelDb(s, g("fLevel"));
             mChain.drive.setRange(s, 0); mChain.drive.setModel(s, (int)g("bModel"));
-            mChain.drive.setGateOn(s, g("fGate") > 0.5f); // bias-starved gate (Round Fuzz II)
+            mChain.drive.setGateOn(s, g("fGate") > 0.5f); // bias-starved gate (Round Fuzz)
             break;
         default: break; // Off
         }

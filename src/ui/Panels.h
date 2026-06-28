@@ -1007,43 +1007,104 @@ private:
 
 // Monochrome silkscreen art glyph per drive family, drawn from the design's
 // 64x48-viewBox paths, scaled/centred into box.
-inline void paintDriveGlyph(juce::Graphics &g, int type, juce::Rectangle<float> box, juce::Colour col)
+// Per-MODEL silkscreen art, one motif per real pedal. The category
+// representatives keep the exact glyphs shipped today (sparkle, hill, rat, round
+// wave); the off-category models get their own. All art is authored on a shared
+// 64x48 viewBox. type: 1 boost, 2 od, 3 dist, 4 fuzz.
+inline void paintDriveGlyph(juce::Graphics &g, int type, int model,
+                            juce::Rectangle<float> box, juce::Colour col)
 {
-    juce::Path p;
-    bool fill = false;
+    enum Motif { None, Spark, Hill, Rat, RoundWave, Germanium, Sd1, Klon, Bluesbreaker, BigMuff };
+    Motif motif = None;
     switch (type)
     {
-    case 1: // Boost -> twin sparkle (filled)
+    case 1: motif = (model == 0) ? Germanium : Spark; break;                       // Range '65 / EP Boost
+    case 2: motif = (model == 1) ? Sd1 : (model == 2) ? Klon
+                  : (model == 3) ? Bluesbreaker : Hill; break;                     // SD-1 / Klon / BB / Green Drive
+    case 3: motif = Rat; break;                                                    // Black Rodent
+    case 4: motif = (model == 1) ? BigMuff : RoundWave; break;                     // Violet Ram / Round Fuzz
+    default: return;
+    }
+
+    const float s = juce::jmin(box.getWidth() / 64.0f, box.getHeight() / 48.0f);
+    const auto xf = juce::AffineTransform::scale(s)
+                        .translated(box.getCentreX() - 32.0f * s, box.getCentreY() - 24.0f * s);
+    g.setColour(col);
+
+    // ---- multi-part motifs (mixed fill + stroke): drawn directly with the xf ----
+    if (motif == Bluesbreaker) // combo amp + speaker
+    {
+        juce::Path lines;
+        lines.addRoundedRectangle(15.0f, 9.0f, 34.0f, 30.0f, 3.0f);           // cabinet
+        lines.startNewSubPath(15, 16); lines.lineTo(49, 16);                  // control-panel divider
+        lines.addEllipse(24.5f, 19.5f, 15.0f, 15.0f);                         // speaker (cx32 cy27 r7.5)
+        g.strokePath(lines, juce::PathStrokeType(2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded), xf);
+        juce::Path dots;                                                      // 3 panel knobs + speaker dust-cap
+        dots.addEllipse(21.0f - 1.1f, 12.5f - 1.1f, 2.2f, 2.2f);
+        dots.addEllipse(27.0f - 1.1f, 12.5f - 1.1f, 2.2f, 2.2f);
+        dots.addEllipse(33.0f - 1.1f, 12.5f - 1.1f, 2.2f, 2.2f);
+        dots.addEllipse(32.0f - 1.8f, 27.0f - 1.8f, 3.6f, 3.6f);
+        g.fillPath(dots, xf);
+        return;
+    }
+
+    // ---- single-path motifs: pre-transform the path (keeps the existing glyphs
+    //      pixel-for-pixel) then fill or stroke ----
+    juce::Path p;
+    bool fill = false;
+    float w = 2.0f * s + 0.4f;
+    switch (motif)
+    {
+    case Spark: // EP Boost -> twin sparkle (filled)
         p.startNewSubPath(28, 7);  p.quadraticTo(28, 23, 44, 23); p.quadraticTo(28, 23, 28, 39);
         p.quadraticTo(28, 23, 12, 23); p.quadraticTo(28, 23, 28, 7); p.closeSubPath();
         p.startNewSubPath(47, 9);  p.quadraticTo(47, 16, 54, 16); p.quadraticTo(47, 16, 47, 23);
         p.quadraticTo(47, 16, 40, 16); p.quadraticTo(47, 16, 47, 9); p.closeSubPath();
         fill = true; break;
-    case 2: // Overdrive -> smooth hill (stroked)
+    case Hill: // Green Drive -> smooth mid-hump
         p.startNewSubPath(8, 33); p.cubicTo(19, 33, 23, 15, 32, 15); p.cubicTo(41, 15, 45, 33, 56, 33);
         break;
-    case 3: // Distortion -> rodent (stroked)
+    case Rat: // Black Rodent -> rodent
         p.startNewSubPath(53, 27); p.cubicTo(46, 21, 36, 20, 27, 22); p.cubicTo(18, 24, 12, 26, 12, 30);
         p.cubicTo(12, 34, 19, 36, 28, 34); p.cubicTo(38, 33, 47, 32, 53, 27); p.closeSubPath();
         p.startNewSubPath(36, 21); p.cubicTo(33, 13, 39, 8, 42, 10); p.cubicTo(45, 12, 46, 16, 44, 21);
         p.startNewSubPath(14, 31); p.cubicTo(8, 33, 3, 31, 3, 25); p.cubicTo(3, 21, 5, 18, 8, 17);
         break;
-    case 4: // Fuzz -> round wave (stroked)
+    case RoundWave: // Round Fuzz -> hard-clipped round wave
         p.startNewSubPath(4, 24); p.cubicTo(5, 14, 9, 13, 13, 13); p.lineTo(20, 13);
         p.cubicTo(24, 13, 25, 35, 29, 35); p.lineTo(36, 35); p.cubicTo(40, 35, 41, 13, 45, 13);
         p.lineTo(52, 13); p.cubicTo(56, 13, 58, 19, 60, 24);
         p.applyTransform(juce::AffineTransform(0.82f, 0.0f, 5.76f, 0.0f, 1.0f, 0.0f));
         break;
+    case Germanium: // Range '65 -> germanium transistor (TO can + 3 legs), from range-65.svg
+        p.startNewSubPath(22, 27); p.lineTo(22, 19); p.quadraticTo(22, 13, 28, 13);
+        p.lineTo(36, 13); p.quadraticTo(42, 13, 42, 19); p.lineTo(42, 27); p.closeSubPath(); // can body
+        p.startNewSubPath(27, 27); p.lineTo(25, 39);                                          // leg
+        p.startNewSubPath(32, 27); p.lineTo(32, 39);                                          // leg
+        p.startNewSubPath(37, 27); p.lineTo(39, 39);                                          // leg
+        break;
+    case Sd1: // Super Drive -> asymmetric soft-clip wave
+        p.startNewSubPath(4, 24); p.cubicTo(7, 12, 13, 11, 19, 11); p.cubicTo(25, 11, 26, 24, 32, 24);
+        p.cubicTo(38, 24, 39, 32, 45, 32); p.cubicTo(51, 32, 57, 32, 60, 24);
+        break;
+    case Klon: // Gold Horse -> simple bow & arrow (archer motif, minimal line art)
+        p.startNewSubPath(40, 9); p.quadraticTo(14, 16, 14, 24); p.quadraticTo(14, 32, 40, 39); // bow limb
+        p.startNewSubPath(40, 9); p.lineTo(40, 39);                                              // bowstring
+        p.startNewSubPath(16, 24); p.lineTo(54, 24);                                             // arrow shaft
+        p.startNewSubPath(54, 24); p.lineTo(48, 20); p.startNewSubPath(54, 24); p.lineTo(48, 28);// arrowhead
+        break;
+    case BigMuff: // Violet Ram -> pi symbol (a touch bolder)
+        p.startNewSubPath(13, 16); p.cubicTo(22, 14, 42, 14, 51, 16);
+        p.startNewSubPath(24, 16); p.cubicTo(24, 25, 23, 31, 20, 35);
+        p.startNewSubPath(41, 16); p.lineTo(41, 32); p.cubicTo(41, 35, 43, 35, 46, 34);
+        w = 3.0f * s + 0.4f; break;
     default: return;
     }
-    const float s = juce::jmin(box.getWidth() / 64.0f, box.getHeight() / 48.0f);
-    p.applyTransform(juce::AffineTransform::scale(s)
-                         .translated(box.getCentreX() - 32.0f * s, box.getCentreY() - 24.0f * s));
-    g.setColour(col);
+    p.applyTransform(xf);
     if (fill)
         g.fillPath(p);
     else
-        g.strokePath(p, juce::PathStrokeType(2.0f * s + 0.4f, juce::PathStrokeType::curved,
+        g.strokePath(p, juce::PathStrokeType(w, juce::PathStrokeType::curved,
                                              juce::PathStrokeType::rounded));
 }
 
@@ -1122,7 +1183,7 @@ public:
     void paint(juce::Graphics &g) override
     {
         auto b = getLocalBounds().toFloat().reduced(1.0f);
-        const auto pair = colors::driveAccent(accentIndex());
+        const auto pair = colors::driveModelAccent(mLastType, mLastModel);
         const juce::Colour tint = mActive ? pair.tint : juce::Colour(0xff343a43);
 
         // Enclosure: neutral base + tint wash, pre-composited into one opaque
@@ -1144,14 +1205,17 @@ public:
         g.drawText(mKindStr, mHeaderRect, juce::Justification::centredLeft);
         auto jewel = juce::Rectangle<float>(13.0f, 13.0f).withCentre(
             {(float)mHeaderRect.getRight() - 6.5f, (float)mHeaderRect.getCentreY()});
-        if (mActive) fx::glowEllipse(g, jewel, pair.accent, 13, 0.6f, 6, 0.55f);
-        g.setColour(mActive ? pair.accent : juce::Colour(0xff2a2f37));
+        // Jewel uses the model's LED colour (= accent for every pedal except those
+        // that override it, e.g. Violet Ram = chrome body with a violet LED).
+        if (mActive) fx::glowEllipse(g, jewel, pair.led, 13, 0.6f, 6, 0.55f);
+        g.setColour(mActive ? pair.led : juce::Colour(0xff2a2f37));
         g.fillEllipse(jewel);
 
-        // Silkscreen art glyph (hidden when the Fuzz Gate toggle occupies this area).
-        if (mLastType != 0 && !(mGateSeg && mGateSeg->isVisible()))
-            paintDriveGlyph(g, mLastType, mGlyphRect.toFloat(),
-                            mActive ? pair.accent.withAlpha(0.85f) : juce::Colour(0xff5a616b));
+        // Silkscreen art glyph (the Fuzz Gate toggle now lives up in the knob row,
+        // so the art always shows for an active pedal type).
+        if (mLastType != 0)
+            paintDriveGlyph(g, mLastType, mLastModel, mGlyphRect.toFloat(),
+                            mActive ? pair.led.withAlpha(0.85f) : juce::Colour(0xff5a616b));
 
         // Model-name pill + sub.
         auto pill = mPillRect.toFloat();
@@ -1203,11 +1267,17 @@ public:
         LabeledKnob *ks[3] = {mDrive.get(), mTone.get(), mLevel.get()};
         int nVis = 0;
         for (auto *k : ks) if (k->isVisible()) ++nVis;
-        if (nVis > 0)
+        // Round Fuzz's Off/Gate toggle rides up in the knob row as a trailing
+        // column (instead of sitting down in the silkscreen area), so the art shows.
+        const bool gateInRow = mGateSeg->isVisible();
+        const int nSlots = nVis + (gateInRow ? 1 : 0);
+        if (nSlots > 0)
         {
-            const int gap = (nVis == 2) ? 16 : 0; // two-knob pedals: extra breathing room
-            const int kw = juce::jmin(78, juce::jmax(1, (knobRow.getWidth() - gap * (nVis - 1)) / nVis));
-            auto grp = knobRow.withSizeKeepingCentre(kw * nVis + gap * (nVis - 1), knobRow.getHeight());
+            // Non-gate pedals keep their exact shipped spacing (2 knobs = 16, else 0);
+            // only Round Fuzz's extra gate column introduces a gap at 3 slots.
+            const int gap = gateInRow ? 8 : ((nVis == 2) ? 16 : 0);
+            const int kw = juce::jmin(78, juce::jmax(1, (knobRow.getWidth() - gap * (nSlots - 1)) / nSlots));
+            auto grp = knobRow.withSizeKeepingCentre(kw * nSlots + gap * (nSlots - 1), knobRow.getHeight());
             bool first = true;
             for (auto *k : ks)
                 if (k->isVisible())
@@ -1216,6 +1286,19 @@ public:
                     k->setBounds(grp.removeFromLeft(kw).reduced(3, 0));
                     first = false;
                 }
+            if (gateInRow) // Off/Gate as a vertical 2-cell column, level with the knob dials
+            {
+                if (!first) grp.removeFromLeft(gap);
+                auto cell = grp.removeFromLeft(kw);
+                mGateSeg->setVertical(true);
+                const int sw = juce::jlimit(36, mGateSeg->idealCellWidth(), kw);
+                const int sh = 58;
+                int dialCy = knobRow.getCentreY();
+                for (auto *k : ks)
+                    if (k->isVisible())
+                        dialCy = k->getBounds().getY() + k->slider().getBounds().getCentreY();
+                mGateSeg->setBounds(cell.getCentreX() - sw / 2, dialCy - sh / 2, sw, sh);
+            }
         }
 
         // Range '65 (Boost): Treble/Mid/Full stacked vertically (equal size) to
@@ -1231,23 +1314,10 @@ public:
             const int sh = 58;
             mRangeSeg->setBounds(kb.getRight() + 10, dialCy - sh / 2, sw, sh);
         }
-
-        // Fuzz Gate (Off/Gate): a horizontal toggle centred in the decorative glyph
-        // area (the glyph is hidden while it's shown), so it never collides with the
-        // two Fuzz knobs or the footswitch.
-        if (mGateSeg->isVisible())
-        {
-            mGateSeg->setVertical(false);
-            const int gw = juce::jmin(mGateSeg->idealWidth(), getWidth() - 40);
-            mGateSeg->setBounds(juce::Rectangle<int>(juce::jmax(72, gw), 30).withCentre(mGlyphRect.getCentre()));
-        }
+        // (Fuzz Off/Gate toggle is now positioned up in the knob row above.)
     }
 
 private:
-    int accentIndex() const // map drive type -> driveAccent palette index
-    {
-        switch (mLastType) { case 1: return 0; case 2: return 1; case 3: return 2; case 4: return 3; default: return 5; }
-    }
     int curModel() const { return juce::jmax(0, mModel.getSelectedItemIndex()); }
 
     void showMenu()
@@ -1319,12 +1389,12 @@ private:
         case 2:
         {
             // Per-model control names match each real pedal: Gold Horse (Klon,
-            // model 3) = Gain/Treble/Output; Breaker Drive (Bluesbreaker, model 4)
-            // = Gain/Tone/Volume; the TS-family OD models (Green Drive / GD II /
-            // Super Drive) keep Drive/Tone/Level. Only the captions differ -- the
-            // params (oDrive/oTone/oLevel) are unchanged, so presets/automation are intact.
-            const bool klon = (model == 3);
-            const bool bb   = (model == 4); // Breaker Drive (Marshall Bluesbreaker)
+            // model 2) = Gain/Treble/Output; Breaker Drive (Bluesbreaker, model 3)
+            // = Gain/Tone/Volume; the TS-family OD models (Green Drive / Super Drive)
+            // keep Drive/Tone/Level. Only the captions differ -- the params
+            // (oDrive/oTone/oLevel) are unchanged, so presets/automation are intact.
+            const bool klon = (model == 2);
+            const bool bb   = (model == 3); // Breaker Drive (Marshall Bluesbreaker)
             mDrive->rebind(mApvts, p + "oDrive"); mDrive->setCaption((klon || bb) ? "Gain" : "Drive");
             mTone->rebind(mApvts, p + "oTone");   mTone->setCaption(klon ? "Treble" : "Tone");
             mLevel->rebind(mApvts, p + "oLevel"); mLevel->setCaption(klon ? "Output" : (bb ? "Volume" : "Level"));
@@ -1339,10 +1409,10 @@ private:
             break;
         case 4:
         {
-            // Round Fuzz models = Fuzz / Volume (no tone). The Big Muff (Violet Ram,
-            // model 2) is filed under Fuzz but exposes its own Sustain / Tone / Volume
+            // Round Fuzz = Fuzz / Volume (no tone). The Big Muff (Violet Ram, model 1)
+            // is filed under Fuzz but exposes its own Sustain / Tone / Volume
             // (the only fuzz with a Tone knob -- bound to fTone, shown only here).
-            const bool muff = (model == 2);
+            const bool muff = (model == 1);
             mDrive->rebind(mApvts, p + "fDrive"); mDrive->setCaption(muff ? "Sustain" : "Fuzz");
             mTone->rebind(mApvts, p + "fTone");   mTone->setCaption("Tone");
             mLevel->rebind(mApvts, p + "fLevel"); mLevel->setCaption("Volume");
@@ -1355,7 +1425,7 @@ private:
         }
         // Knob value-ring colour follows the pedal: accent when engaged, neutral
         // grey when bypassed (so the colour drains like the rest of the pedal).
-        const juce::Colour knobAcc = mActive ? colors::driveAccent(accentIndex()).accent
+        const juce::Colour knobAcc = mActive ? colors::driveModelAccent(type, model).led
                                              : juce::Colour(0xff5a616b);
         for (auto *k : {mDrive.get(), mTone.get(), mLevel.get()})
             k->setAccent(knobAcc);
@@ -1366,9 +1436,9 @@ private:
                             : juce::String(nam_rig::DriveBlock::modelSub(cat, model));
         mRangeSeg->setVisible(nam_rig::DriveBlock::modelHasRange(cat, model));
         mRangeSeg->setEnabled(mActive); // drains its colour when the pedal is bypassed
-        mGateSeg->setVisible(nam_rig::DriveBlock::modelHasGate(cat, model)); // Round Fuzz II only
+        mGateSeg->setVisible(nam_rig::DriveBlock::modelHasGate(cat, model)); // Round Fuzz only
         mGateSeg->setEnabled(mActive);
-        mOn.setAccent(colors::driveAccent(accentIndex()).accent);
+        mOn.setAccent(colors::driveModelAccent(type, model).led); // footswitch glow tracks the LED (= accent, except Violet Ram = violet)
         mOn.setLit(mActive);
     }
 
