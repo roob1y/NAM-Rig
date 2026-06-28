@@ -77,12 +77,18 @@ Super Drive).
   the Klon's famous *boost* comes from the per-slot **Level** knob, kept safe so the
   parallel clean sum doesn't overshoot the amp). Calibration-referenced; humbucker
   drives harder than single-coil (fixed clip threshold).
-- **Tone (Treble):** the **real Klon active treble shelf** — a high-shelf at
-  `pivotHz 408`, **bass below it fixed**, treble above it swinging asymmetrically
-  **+18 dB (full CW) to −8 dB (full CCW)** (`trebleShelfDb 18`, cut = 0.44×), flat at
-  noon. The circuit's Gvmax = (RV2+R23)/R21 = +18.24 dB, Gvmin = −8 dB. (New voicing
-  field `trebleShelfDb`; 0 = the legacy tilt, so every other model is byte-exact.
-  The panel labels this knob **Treble**.)
+- **Tone (Treble):** the **real Klon active treble shelf** — a **proper 1st-order
+  high-shelf**, zero fixed at `pivotHz 408`, **pole at 408·G** (rides up with the
+  knob, bilinear-discretised, recomputed per block). LF passband stays **flat** even
+  at full boost (measured **+0.26 dB @ 100 Hz**, matching the derived circuit's
+  +0.25 dB — the first low/high-*blend* attempt leaked ~+6 dB and was replaced).
+  Treble swings asymmetrically **+18 dB (full CW) to −8 dB (full CCW)**
+  (`trebleShelfDb 18`, cut = 0.44×), flat at noon. Circuit: Gvmax = (RV2+R23)/R21 =
+  +18.24 dB, Gvmin = −8 dB, fc = 1/(2π·R22·C14) = 408 Hz. Because it's a *boost*
+  shelf (passband fixed), turning Treble up genuinely **raises level** (+11.7 dB
+  broadband CCW→CW) — the authentic Klon behaviour, unlike a level-neutral tilt.
+  (New voicing field `trebleShelfDb`; 0 = the legacy tilt → every other model
+  byte-exact. Panel labels this knob **Treble**.)
 
 Engine note: two small additions, both zero-fill/guarded so all other models stay
 byte-exact — (1) the hard-clip branch does an optional clean blend

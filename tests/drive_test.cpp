@@ -901,10 +901,11 @@ int main()
         const double bassMove = 20.0 * std::log10(g(50.0, 0.95f) / g(50.0, 0.05f));   // bass should NOT move
         const double trebUp   = 20.0 * std::log10(g(3000.0, 0.95f) / g(3000.0, 0.5f)); // boost vs noon
         const double trebDn   = 20.0 * std::log10(g(3000.0, 0.5f) / g(3000.0, 0.05f)); // noon vs cut
-        // a real 1st-order shelf leaks a little into the lows; bass must move FAR less
-        // than the treble (essentially fixed vs the ~16 dB treble swing), not be perfect.
-        CHECK(std::fabs(bassMove) < 3.0 && std::fabs(bassMove) < trebUp * 0.25,
-              "T51 Klon treble shelf keeps bass ~fixed: 50Hz moves %.1f dB vs treble %.1f dB", bassMove, trebUp);
+        // proper zero@pivot / pole@pivot*G shelf keeps the passband flat (the real
+        // Klon: ~+0.25 dB @ 100 Hz at full boost) -- a tight bound guards against the
+        // leaky low/high-blend shelf (which moved the bass ~2 dB) regressing back.
+        CHECK(std::fabs(bassMove) < 1.0,
+              "T51 Klon treble shelf keeps bass FIXED: 50Hz moves %.1f dB vs treble %.1f dB", bassMove, trebUp);
         CHECK(trebUp > 6.0, "T51 Klon Treble boosts above the shelf: 3k +%.1f dB (CW vs noon)", trebUp);
         CHECK(trebUp > trebDn * 1.5,
               "T51 Klon treble shelf asymmetric (+18/-8): boost +%.1f dB >> cut +%.1f dB", trebUp, trebDn);

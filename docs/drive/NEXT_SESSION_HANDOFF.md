@@ -207,10 +207,14 @@ stay byte-for-byte; there are regression tests asserting model 0 == legacy).
   control names) while the TS-family OD models keep Drive/Tone/Level — captions only,
   params (oDrive/oTone/oLevel) unchanged (Panels.h `configure()` case 2, keyed on
   `model == 3`). **Treble = the real Klon active high-shelf** (DONE): new voicing
-  field `trebleShelfDb` (0 = legacy tilt → all other models byte-exact); when >0 the
-  Tone is a high-shelf at `pivotHz` with bass fixed and an asymmetric +18/−8 dB range
-  (cut = 0.44× boost), noon = flat. Gold Horse = `trebleShelfDb 18 @ pivot 408`. Test
-  T51. Tone audit of the other drives: GD II (TS) + Super Drive (SD-1) already use a
+  field `trebleShelfDb` (0 = legacy tilt → all other models byte-exact). Implemented
+  as a **proper 1st-order high-shelf** (zero fixed at `pivotHz`, **pole at
+  pivotHz·G**, bilinear, per-block coeffs, one state pair `shX1/shY1`) so the LF
+  passband stays FLAT at full boost (measured +0.26 dB @ 100 Hz vs the derived
+  circuit's +0.25 dB). An earlier low/high-*blend* shelf leaked ~+6 dB into the lows
+  and was replaced. Asymmetric +18/−8 dB (cut = 0.44× boost), noon = flat, and a
+  *boost* shelf so Treble-up raises level (+11.7 dB broadband, authentic, vs a tilt's
+  ~neutral). Gold Horse = `trebleShelfDb 18 @ pivot 408`. Test T51. Tone audit of the other drives: GD II (TS) + Super Drive (SD-1) already use a
   proper treble shelf (the cubic/asym-cubic `softPoly` path forces bass-fixed); Black
   Rodent II = the RAT "Filter" LP (its real tone); Boost/Fuzz have no tone control;
   the v1 legacy stand-ins (Green Drive 0, Black Rodent 0) keep the symmetric tilt by

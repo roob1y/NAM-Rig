@@ -419,6 +419,20 @@ public:
                 : (tilt * kMaxTiltDb);
             const float trebleG = std::pow(10.0f, trebleDb * 0.05f);
             const float bassG   = trebleShelf ? 1.0f : std::pow(10.0f, (-tilt * kMaxTiltDb) * 0.05f);
+            // Klon active treble shelf = a PROPER 1st-order high-shelf, bilinear-discretised:
+            // zero fixed at pivotHz, POLE at pivotHz*trebleG (rides up with the knob). This
+            // keeps the passband flat even at full boost (the real Klon: +0.25 dB @ 100 Hz),
+            // unlike the low/high blend which leaked ~+6 dB. noon (trebleG=1) -> exactly flat.
+            float shB0 = 1.0f, shB1 = 0.0f, shA1 = 0.0f;
+            if (trebleShelf)
+            {
+                const double aa = sr / (3.14159265358979323846 * (double)v.pivotHz); // 2*SR/wz
+                const double bb = aa / (double)trebleG;                              // 2*SR/wp, wp=wz*G
+                const double inv = 1.0 / (1.0 + bb);
+                shB0 = (float)((1.0 + aa) * inv);
+                shB1 = (float)((1.0 - aa) * inv);
+                shA1 = (float)((1.0 - bb) * inv);
+            }
             // RAT "Filter": one-pole LP whose corner sweeps from bright (tone 0, ~18 kHz
             // = effectively open) DOWN to v.toneFilterHz at full CW (tone 1) -> darker
             // clockwise, the opposite of the TS treble shelf. Else: the tilt pivot.
@@ -442,6 +456,7 @@ public:
             float dcx = s.dcX1, dcy = s.dcY1;
             double x0 = s.x0, adx1 = s.adaaX1, adx2 = s.adaaX2;
             float env = s.env, gpk = s.gpk;
+            float shx1 = s.shX1, shy1 = s.shY1;
 
             for (int i = 0; i < numSamples; ++i)
             {
@@ -547,6 +562,12 @@ public:
                 float toned;
                 if (ratTone)
                     toned = low; // the low-passed signal IS the output
+                else if (trebleShelf)
+                {
+                    // proper 1st-order high-shelf (Klon): flat passband, treble boost/cut
+                    const float sh = shB0 * c + shB1 * shx1 - shA1 * shy1;
+                    shx1 = c; shy1 = sh; toned = sh;
+                }
                 else
                 {
                     const float high = c - low;
@@ -560,6 +581,7 @@ public:
             s.hp = flush(hp); s.lp = flush(lpz); s.toneLp = flush(low);
             s.dcX1 = flush(dcx); s.dcY1 = flush(dcy); s.x0 = flushD(x0);
             s.adaaX1 = flushD(adx1); s.adaaX2 = flushD(adx2); s.env = flush(env); s.gpk = flush(gpk);
+            s.shX1 = flush(shx1); s.shY1 = flush(shy1);
         }
     }
 
@@ -583,13 +605,14 @@ private:
         double adaaX1 = 0.0, adaaX2 = 0.0; // 2nd-order ADAA history (cubic, double)
         float env = 0.0f; // envelope follower (touch dynamics)
         float gpk = 0.0f; // gate peak-hold (relative bias-starved gate)
+        float shX1 = 0.0f, shY1 = 0.0f; // Klon treble-shelf 1st-order filter state
         int lastKind = -1;
         Biquad mid;     // pre/post-shaper peak (state preserved across blocks)
         Biquad emphPre, emphPost; // pre/de-emphasis pair (clip 3)
         void resetState()
         {
             hp = lp = toneLp = dcX1 = dcY1 = 0.0f; x0 = 0.0;
-            adaaX1 = adaaX2 = 0.0; env = 0.0f; gpk = 0.0f;
+            adaaX1 = adaaX2 = 0.0; env = 0.0f; gpk = 0.0f; shX1 = shY1 = 0.0f;
             lastKind = -1; mid.reset(); emphPre.reset(); emphPost.reset();
         }
     };
