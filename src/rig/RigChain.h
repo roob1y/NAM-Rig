@@ -169,15 +169,27 @@ public:
         settleCab(cabB);
         reset();
 
+        // Pink (equal-energy-per-octave) probe — roughly guitar's spectral
+        // balance, so the nonlinear amp distorts it like it would real playing
+        // (white noise over-drives the highs). Paul Kellett economy pink filter,
+        // then normalized to ~0.15 RMS so the amp sees a sensible drive level.
         std::vector<float> a((size_t)n), b((size_t)n);
         std::uint32_t s = 0x9e3779b9u;
+        float k0 = 0.0f, k1 = 0.0f, k2 = 0.0f;
+        double sq = 0.0;
         for (int i = 0; i < n; ++i)
         {
             s = s * 1103515245u + 12345u;
-            const float v = 0.25f * (float)((int)((s >> 16) & 0x7fff) - 16384) / 16384.0f;
-            a[(size_t)i] = v;
-            b[(size_t)i] = v;
+            const float w = (float)((int)((s >> 16) & 0x7fff) - 16384) / 16384.0f;
+            k0 = 0.99765f * k0 + w * 0.0990460f;
+            k1 = 0.96300f * k1 + w * 0.2965164f;
+            k2 = 0.57000f * k2 + w * 1.0526913f;
+            const float p = k0 + k1 + k2 + w * 0.1848f;
+            a[(size_t)i] = p;
+            sq += (double)p * p;
         }
+        const float norm = (sq > 0.0) ? (float)(0.15 / std::sqrt(sq / (double)n)) : 1.0f;
+        for (int i = 0; i < n; ++i) { a[(size_t)i] *= norm; b[(size_t)i] = a[(size_t)i]; }
 
         renderVoice(0, a.data(), n, true); // withTrims = include cal/normalize
         reset();
@@ -441,9 +453,11 @@ private:
     }
 
     // Offline-render one voice (amp->eq->cab) in place, chunked by the prepared
-    // block size so the convolver never sees an oversized block. Bypass flags
-    // are ignored. withTrims folds in the cal/normalize trims (for level
-    // measurement); alignment leaves them out (gain doesn't shift the lag).
+    // block size so the convolver never sees an oversized block. Block on/off
+    // (isBypassed) flags are ignored, but the cab's IR convolution self-gates on
+    // its own conv-bypass (cabOn) so the measurement reflects the real path.
+    // withTrims folds in the cal/normalize trims (for level measurement);
+    // alignment leaves them out (gain doesn't shift the lag).
     void renderVoice(int rig, float *buf, int n, bool withTrims = false)
     {
         AmpBlock &a = rig ? ampB : amp;
@@ -477,17 +491,19 @@ private:
         return cnt > 0 ? std::sqrt(sum / (double)cnt) : 0.0;
     }
 
-    // Bracket the guitar-loudness band (~80 Hz .. 2.5 kHz) before the RMS so
-    // subsonics and distortion fizz don't skew the level measure. The LPF is
-    // deliberately well below any standard loudness curve: distortion fizz lives
-    // ~4-10 kHz and we don't hear it as proportionally loud, so cutting it hard
-    // keeps a crunchy amp from being over-counted (and matched too quiet). Uses
-    // the same verified RBJ Biquads the EQ/cab run.
+    // Guitar-weighted loudness filter before the RMS — K-weighting's idea (boost
+    // the presence region the ear is most sensitive to) but with the fizz rolled
+    // off so a crunchy amp isn't over-counted. HP 80 (drop subsonics) -> +3.5 dB
+    // presence shelf @2.5k (so a brighter amp reads as the louder it sounds) ->
+    // LP 5.5k (cut the 6-10k distortion fizz we don't hear as proportionally
+    // loud). Same verified RBJ Biquads the EQ/cab run; tune the shelf/LP by ear.
     void bandLimit(float *x, int n) const
     {
         Biquad hp = Biquad::highpass(mSampleRate, 80.0);
-        Biquad lp = Biquad::lowpass(mSampleRate, 2500.0);
+        Biquad shelf = Biquad::highshelf(mSampleRate, 2500.0, 3.5);
+        Biquad lp = Biquad::lowpass(mSampleRate, 5500.0);
         hp.process(x, n);
+        shelf.process(x, n);
         lp.process(x, n);
     }
 

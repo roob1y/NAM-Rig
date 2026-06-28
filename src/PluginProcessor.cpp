@@ -341,10 +341,22 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::NormalisableRange<float>(nam_rig::DelayBlock::kMinTimeMs,
                                        nam_rig::DelayBlock::kMaxTimeMs, 1.0f, 0.4f),
         350.0f, juce::AudioParameterFloatAttributes().withLabel("ms")));
+    // Right-side FREE time: the independent R delay when DUAL is on and the main
+    // delay is unsynced (the synced case uses delaySyncR instead).
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("delayTimeR", 1), "Delay Time R",
+        juce::NormalisableRange<float>(nam_rig::DelayBlock::kMinTimeMs,
+                                       nam_rig::DelayBlock::kMaxTimeMs, 1.0f, 0.4f),
+        350.0f, juce::AudioParameterFloatAttributes().withLabel("ms")));
+    // Feedback runs to 1.1 so the TAPE character can self-oscillate: its authentic
+    // band-pass loop is lossy, so the mid-band only takes off above ~unity, and the
+    // in-loop saturation bounds the runaway. The clean delay is internally clamped
+    // to kMaxFeedback (0.95) in DelayBlock::process, so the top of the range is
+    // tape-only and clean can never run away.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("delayFeedback", 1), "Delay Feedback",
-        juce::NormalisableRange<float>(0.0f, nam_rig::DelayBlock::kMaxFeedback, 0.01f),
-        0.35f));
+        juce::NormalisableRange<float>(0.0f, 1.1f, 0.01f),
+        0.40f)); // classic 'add-and-play' default: a few clear repeats
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("delayTone", 1), "Delay Tone",
         juce::NormalisableRange<float>(1000.0f, 20000.0f, 10.0f, 0.5f), 8000.0f,
@@ -356,10 +368,38 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("delayMod", 1), "Delay Wow/Flutter",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.15f));
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f)); // 0 on the clean delay; the tape delay will expose this
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("delayMix", 1), "Delay Mix",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.25f));
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f, 0.5f), 0.30f)); // skew: finer control low-mix; classic ~30% wet default
+    // Right-side division: index 0 = Link (R mirrors L); 1..13 mirror
+    // DelayBlock::kSyncBeats[1..13]. Unlinking = dual independent L/R delay.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("delaySyncR", 1), "Delay Sync R",
+        juce::StringArray{"Link", "1/1", "1/2.", "1/2", "1/2T", "1/4.", "1/4",
+                          "1/4T", "1/8.", "1/8", "1/8T", "1/16.", "1/16", "1/16T"},
+        0));
+    // Feedback Low Cut (high-pass in the loop); kMinLowCutHz default = off.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("delayLowCut", 1), "Delay Low Cut",
+        juce::NormalisableRange<float>(nam_rig::DelayBlock::kMinLowCutHz, 2000.0f, 1.0f, 0.45f),
+        90.0f, juce::AudioParameterFloatAttributes().withLabel("Hz"))); // gentle feedback HPF so stacked repeats don't build up muddy
+    // Delay CHARACTER (like the reverb voicings): Clean = transparent engine;
+    // Tape Echo = tape-style echo; Space Tape = multi-head tape echo (3 playback
+    // heads at 1x/2x/3x, mono). Order must match DelayBlock::Character -- append
+    // only. Default Clean keeps the shipped delay unchanged.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("delayCharacter", 1), "Delay Character",
+        juce::StringArray{"Clean", "Tape Echo", "Space Tape"}, 0));
+    // Space Tape MODE dial (the multi-head tape echo's 11 echo modes + Reverb-only). Modes 5-11
+    // and Reverb engage the rig's Spring reverb (auto-wired in the processor); modes
+    // 1-4 are echo only. Order must match DelayBlock::kStHeadMask -- append only.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("delayHeadMode", 1), "Delay Mode",
+        juce::StringArray{"1 Head 1", "2 Head 2", "3 Head 3", "4 Heads 2+3",
+                          "5 Head 1 +Rev", "6 Head 2 +Rev", "7 Head 3 +Rev",
+                          "8 Heads 1+2 +Rev", "9 Heads 2+3 +Rev", "10 Heads 1+3 +Rev",
+                          "11 All +Rev", "12 Reverb Only"}, 3));
 
     // --- Reverb (rig/ReverbBlock.h; verified by tests/reverb_test.cpp) ---
     // Reverb Decay/Tone/Predelay/Mod/Size are PER-CHARACTER (generated below); the UI
@@ -950,19 +990,44 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
                 mChain.delay.setBpm(*bpm);
                 mChain.mod.setBpm(*bpm);
             }
+    const int delayChar = (int)apvts.getRawParameterValue("delayCharacter")->load();
+    // Ping-pong + dual (independent L/R, via Sync R unlinked) are STEREO digital-delay
+    // tricks; both tape characters are authentically mono (Space Tape already ignores
+    // them), so they are Clean-only -- forced off for a tape character regardless of the
+    // stored param, so the controls can't contradict the character.
+    const bool delayTape = (delayChar != (int)nam_rig::DelayBlock::Character::Clean);
     mChain.delay.setSyncIndex((int)apvts.getRawParameterValue("delaySync")->load());
+    mChain.delay.setSyncIndexR(delayTape ? 0 : (int)apvts.getRawParameterValue("delaySyncR")->load());
     mChain.delay.setTimeMs(apvts.getRawParameterValue("delayTime")->load());
+    mChain.delay.setTimeMsR(apvts.getRawParameterValue("delayTimeR")->load());
     mChain.delay.setFeedback(apvts.getRawParameterValue("delayFeedback")->load());
     mChain.delay.setToneHz(apvts.getRawParameterValue("delayTone")->load());
-    mChain.delay.setPingPong(apvts.getRawParameterValue("delayPingPong")->load() >= 0.5f);
+    mChain.delay.setLowCutHz(apvts.getRawParameterValue("delayLowCut")->load());
+    // Character drives the per-voicing loop stages + time-change feel. Clean = the
+    // transparent engine, forced to Digital (crossfade, no repitch); a tape
+    // character sets its own Tape glide inside setCharacter, so only force Digital
+    // for Clean.
+    mChain.delay.setCharacter(delayChar);
+    mChain.delay.setHeadMode((int)apvts.getRawParameterValue("delayHeadMode")->load());
+    if (delayChar == (int)nam_rig::DelayBlock::Character::Clean)
+        mChain.delay.setTimeMode(nam_rig::DelayBlock::TimeMode::Digital);
+    mChain.delay.setPingPong(!delayTape && apvts.getRawParameterValue("delayPingPong")->load() >= 0.5f);
     mChain.delay.setWidth(apvts.getRawParameterValue("delayWidth")->load());
     mChain.delay.setModAmount(apvts.getRawParameterValue("delayMod")->load());
     mChain.delay.setMix(apvts.getRawParameterValue("delayMix")->load());
     mChain.delay.setBypassed(apvts.getRawParameterValue("delayOn")->load() < 0.5f);
 
+    // Space Tape auto-spring: the multi-head tape echo mode dial engages the spring for modes
+    // 5-11 + Reverb (echo-only modes 1-4 force it off). When Space Tape is active it
+    // drives the rig's Spring reverb from the head mode, overriding the manual reverb.
+    int stReverbOverride = 0; // 0 none, +1 force Spring on, -1 force off
+    if (delayChar == (int)nam_rig::DelayBlock::Character::SpaceTape)
+        stReverbOverride = nam_rig::DelayBlock::spaceTapeReverbOn(
+            (int)apvts.getRawParameterValue("delayHeadMode")->load()) ? 1 : -1;
     {
         using RB = nam_rig::ReverbBlock;
-        const int rt = (int)apvts.getRawParameterValue("revType")->load();
+        int rt = (int)apvts.getRawParameterValue("revType")->load();
+        if (stReverbOverride == 1) rt = (int)RB::kSpring; // Space Tape -> rig Spring
         const RB::Type T = (RB::Type)rt;
         mChain.reverb.setType(rt);
         auto pv = [&](const char *knob) { return apvts.getRawParameterValue(juce::String(RB::paramId(knob, rt)))->load(); };
@@ -981,7 +1046,11 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.reverb.setSwell(apvts.getRawParameterValue("revSwell")->load());
     mChain.reverb.setPitch((int)apvts.getRawParameterValue("revPitch")->load());
     mChain.reverb.setInputFilterHz(apvts.getRawParameterValue("revInputFilter")->load());
-    mChain.reverb.setBypassed(apvts.getRawParameterValue("reverbOn")->load() < 0.5f);
+    // Reverb on/off: user param, unless Space Tape's mode dial overrides it.
+    const bool userReverbOff = apvts.getRawParameterValue("reverbOn")->load() < 0.5f;
+    mChain.reverb.setBypassed(stReverbOverride == 1 ? false
+                              : stReverbOverride == -1 ? true
+                                                       : userReverbOff);
 
     mChain.process(buffer);
 

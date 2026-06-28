@@ -128,6 +128,10 @@ public:
     float compGrDb() const { return mChain.comp.grDb(); }
     float compInDb() const { return mChain.comp.inPeakDb(); }
     float compOutDb() const { return mChain.comp.outPeakDb(); }
+    // Effective delay time in ms AFTER sync resolution (division x host BPM), so
+    // the UI tap visualiser tracks tempo-synced spacing, not just the Free knob.
+    float delayTimeMs() const { return mChain.delay.currentTimeMs(); }
+    float delayTimeMsR() const { return mChain.delay.currentTimeMsR(); } // right side (Link mirrors L)
 
     // --- Parameters ---
     juce::AudioProcessorValueTreeState apvts;

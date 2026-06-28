@@ -1,40 +1,57 @@
 #pragma once
 #include "PluginProcessor.h"
 #include "ui/RigLookAndFeel.h"
+#include "ui/IrTagCache.h"
 
 namespace nam_rig::ui
 {
 
-// .wav/.aif filter with an optional live name substring (the search box). Folders
-// always pass so the user can navigate the whole tree at any depth.
+// .wav/.aif filter for the file pane, with an optional name substring and tone
+// tag (the search box + chips). Folders always pass.
 class IrFileFilter : public juce::FileFilter
 {
 public:
     IrFileFilter() : juce::FileFilter("Impulse responses") {}
-    juce::String search;
+    juce::String search;      // name substring
+    juce::String tagFilter;   // tone tag substring ("" = no tag filter)
+    IrTagCache *cache = nullptr;
     bool isFileSuitable(const juce::File &f) const override
     {
         const auto e = f.getFileExtension().toLowerCase();
         if (e != ".wav" && e != ".aif" && e != ".aiff") return false;
-        return search.isEmpty() || f.getFileName().containsIgnoreCase(search);
+        if (search.isNotEmpty() && !f.getFileName().containsIgnoreCase(search)) return false;
+        // Tag check runs on the directory-scan thread and is cached, so the first
+        // filtered pass analyzes (background), later ones are instant.
+        if (tagFilter.isNotEmpty() && cache != nullptr && !cache->tagFor(f).containsIgnoreCase(tagFilter))
+            return false;
+        return true;
     }
+    bool isDirectorySuitable(const juce::File &) const override { return false; } // files pane: no folders
+};
+
+// Folders-only filter for the left pane.
+class DirOnlyFilter : public juce::FileFilter
+{
+public:
+    DirOnlyFilter() : juce::FileFilter("Folders") {}
+    bool isFileSuitable(const juce::File &) const override { return false; }
     bool isDirectorySuitable(const juce::File &) const override { return true; }
 };
 
-// A "load into this cab" target. Accepts the browser's internal drag (a file path
-// in the drag description) AND files dragged from the OS file manager.
+// A "load into this cab" target. Accepts the browser's internal drag (a file row
+// dragged from the file list) AND files dragged from the OS file manager.
 class IrDropZone : public juce::Component,
                    public juce::DragAndDropTarget,
                    public juce::FileDragAndDropTarget
 {
 public:
     std::function<void(const juce::File &)> onFile;
-    std::function<juce::File()> getFile; // the tree's currently-selected file
+    std::function<juce::File()> getFile; // the file list's currently-selected file
     IrDropZone(juce::String label) : mLabel(std::move(label)) {}
 
     void setIrName(const juce::String &n) { if (n != mIr) { mIr = n; repaint(); } }
 
-    // --- internal drag (a row dragged out of the folder tree) ---
+    // --- internal drag (a row dragged out of the file list) ---
     bool isInterestedInDragSource(const SourceDetails &) override
     {
         return getFile && getFile().existsAsFile();
@@ -92,9 +109,9 @@ private:
     bool mOver = false;
 };
 
-// IR library overlay: a folder tree over a user-chosen root + a name filter, with
-// Cab A / Cab B drop targets. Drag the selected-IR chip onto a cab, double-click a
-// file to load it into the cab you opened this from, or drop files from the OS.
+// IR library overlay: TWO PANES — folders on the left, the selected folder's IRs
+// on the right. Drag a file onto Cab A / Cab B (or drop OS files); name box + tag
+// chips filter the file pane; selecting a file previews its tone tag.
 class IrBrowser : public juce::Component,
                   public juce::DragAndDropContainer,
                   private juce::FileBrowserListener
@@ -104,33 +121,61 @@ public:
     std::function<void()> onClose;
 
     IrBrowser()
-        : mThread("ir-scan"), mList(&mFilter, mThread), mTree(mList),
+        : mThread("ir-scan"),
+          mFolderList(&mFolderFilter, mThread), mFolders(mFolderList),
+          mFileContents(&mFilter, mThread), mFiles(mFileContents),
           mZoneA("CAB A"), mZoneB("CAB B")
     {
         mThread.startThread();
 
-        addAndMakeVisible(mTree);
-        mTree.addListener(this);
-        mTree.setColour(juce::TreeView::backgroundColourId, juce::Colour(0xff121419));
-        mTree.setDragAndDropDescription("ir"); // makes tree rows draggable onto the cab zones
+        addAndMakeVisible(mFolders);
+        mFolders.setColour(juce::TreeView::backgroundColourId, juce::Colour(0xff121419));
+        mFolderSel.onSel = [this] { folderSelected(); };
+        mFolders.addListener(&mFolderSel);
+
+        addAndMakeVisible(mFiles);
+        mFiles.setColour(juce::TreeView::backgroundColourId, juce::Colour(0xff121419));
+        mFiles.setDragAndDropDescription("ir"); // file rows draggable onto the cab zones
+        mFiles.addListener(this);
 
         mSearch.setTextToShowWhenEmpty(juce::String::fromUTF8("Filter by name\xE2\x80\xA6"), colors::captionDim);
         mSearch.setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff15181e));
         mSearch.setColour(juce::TextEditor::outlineColourId, colors::cardBorder);
-        mSearch.onTextChange = [this] { mFilter.search = mSearch.getText().trim(); mList.refresh(); };
+        mSearch.onTextChange = [this] { mFilter.search = mSearch.getText().trim(); mFileContents.refresh(); };
         addAndMakeVisible(mSearch);
+
+        // Tone-tag filter chips (cached analysis; cheap after the first pass).
+        mFilter.cache = &mCache;
+        mTags = juce::StringArray{"All", "Dark", "Bright", "Scooped", "Thick", "Present", "Fizzy"};
+        for (int i = 0; i < mTags.size(); ++i)
+        {
+            auto *c = new juce::ToggleButton(mTags[i]);
+            c->setButtonText(mTags[i]);
+            c->getProperties().set("pill", true);
+            c->setRadioGroupId(7001);
+            c->setClickingTogglesState(true);
+            c->onClick = [this, i] {
+                if (mTagChips[i]->getToggleState())
+                {
+                    mFilter.tagFilter = (i == 0) ? juce::String() : mTags[i];
+                    mFileContents.refresh();
+                }
+            };
+            addAndMakeVisible(c);
+            mTagChips.add(c);
+        }
+        mTagChips[0]->setToggleState(true, juce::dontSendNotification); // "All"
 
         mChooseBtn.setButtonText(juce::String::fromUTF8("Change folder\xE2\x80\xA6"));
         mChooseBtn.onClick = [this] { chooseRoot(); };
         addAndMakeVisible(mChooseBtn);
-
         mCloseBtn.setButtonText("Close");
         mCloseBtn.onClick = [this] { if (onClose) onClose(); };
         addAndMakeVisible(mCloseBtn);
 
         addAndMakeVisible(mZoneA);
         addAndMakeVisible(mZoneB);
-        auto selected = [this] { return mTree.getSelectedFile(0); };
+        auto selected = [this] { return mFiles.getSelectedFile(0); };
         mZoneA.getFile = selected;
         mZoneB.getFile = selected;
         mZoneA.onFile = [this](const juce::File &f) { if (onLoad) onLoad(f, 0); mZoneA.setIrName(f.getFileNameWithoutExtension()); };
@@ -139,26 +184,23 @@ public:
 
     ~IrBrowser() override
     {
-        mTree.removeListener(this);
+        mFiles.removeListener(this);
+        mFolders.removeListener(&mFolderSel);
         mThread.stopThread(2000);
     }
 
-    // Open over the rig that asked, syncing the drop zones with what's loaded.
-    void openFor(int rig, const juce::File &root,
-                 const juce::String &irA, const juce::String &irB)
+    void openFor(int rig, const juce::File &root, const juce::String &irA, const juce::String &irB)
     {
         mActiveRig = rig;
         mZoneA.setIrName(irA);
         mZoneB.setIrName(irB);
-        if (root.isDirectory())
+        mNoRoot = !root.isDirectory();
+        if (!mNoRoot)
         {
-            mList.setDirectory(root, true, true);
-            mNoRoot = false;
+            mFolderList.setDirectory(root, true, false);   // subfolders (left pane)
+            mFileContents.setDirectory(root, false, true); // root's IRs (right pane)
         }
-        else
-        {
-            mNoRoot = true;
-        }
+        mHaveSel = false;
         setVisible(true);
         toFront(true);
         repaint();
@@ -177,11 +219,19 @@ public:
         mCloseBtn.setBounds(top.removeFromRight(84).withSizeKeepingCentre(84, 26));
         top.removeFromRight(8);
         mChooseBtn.setBounds(top.removeFromRight(140).withSizeKeepingCentre(140, 26));
-        // title drawn left in paint
         r.removeFromTop(8);
 
         mSearch.setBounds(r.removeFromTop(30));
-        r.removeFromTop(10);
+        r.removeFromTop(8);
+
+        auto chips = r.removeFromTop(24);
+        for (auto *c : mTagChips)
+        {
+            const int w = 22 + c->getButtonText().length() * 7;
+            c->setBounds(chips.removeFromLeft(w));
+            chips.removeFromLeft(6);
+        }
+        r.removeFromTop(8);
 
         auto zones = r.removeFromTop(50);
         const int gap = 12;
@@ -189,10 +239,15 @@ public:
         zones.removeFromLeft(gap);
         mZoneB.setBounds(zones);
         r.removeFromTop(6);
-        mHintRect = r.removeFromTop(14); // "drag a file onto a cab" hint
+        mHintRect = r.removeFromTop(14);
         r.removeFromTop(4);
 
-        mTree.setBounds(r);
+        // Two panes: folders (left ~38%) | files (right).
+        mBodyRect = r;
+        auto left = r.removeFromLeft(juce::roundToInt((float)r.getWidth() * 0.38f));
+        r.removeFromLeft(12);
+        mFolders.setBounds(left);
+        mFiles.setBounds(r);
     }
 
     void paint(juce::Graphics &g) override
@@ -213,13 +268,20 @@ public:
             g.setColour(colors::captionDim);
             g.setFont(fonts::mono(12.0f));
             g.drawText("No IR folder set - click \"Change folder\" to pick your IR library",
-                       mTree.getBounds(), juce::Justification::centred);
+                       mBodyRect, juce::Justification::centred);
+        }
+        else if (mHaveSel)
+        {
+            g.setColour(colors::text2);
+            g.setFont(fonts::mono(10.0f, fonts::SemiBold));
+            g.drawText(mSelName + juce::String::fromUTF8("  \xE2\x80\x94  ") + mSelTag, mHintRect,
+                       juce::Justification::centredLeft, true);
         }
         else
         {
             g.setColour(colors::captionDim);
             g.setFont(fonts::mono(10.0f));
-            g.drawText("Drag a file onto Cab A or Cab B to load it",
+            g.drawText("Pick a folder on the left, then drag an IR onto Cab A or Cab B",
                        mHintRect, juce::Justification::centredLeft);
         }
     }
@@ -236,29 +298,67 @@ private:
                                   if (dir.isDirectory())
                                   {
                                       if (mSetRoot) mSetRoot(dir);
-                                      mList.setDirectory(dir, true, true);
+                                      mFolderList.setDirectory(dir, true, false);
+                                      mFileContents.setDirectory(dir, false, true);
                                       mNoRoot = false;
                                       repaint();
                                   }
                               });
     }
 
-    // FileBrowserListener
-    void selectionChanged() override {} // drag/double-click read the selection live
+    void folderSelected()
+    {
+        auto d = mFolders.getSelectedFile(0);
+        if (d.isDirectory())
+            mFileContents.setDirectory(d, false, true);
+    }
+
+    // FileBrowserListener (attached to the FILE list) — preview the selected IR.
+    void selectionChanged() override
+    {
+        auto f = mFiles.getSelectedFile(0);
+        std::array<float, nam_rig::ir::kResPts> resp{};
+        if (f.existsAsFile() && IrDropZone::looksLikeIr(f.getFullPathName())
+            && nam_rig::ir::analyzeFile(f, resp.data()))
+        {
+            mSelName = f.getFileNameWithoutExtension();
+            mSelTag = nam_rig::ir::classify(resp.data());
+            mHaveSel = true;
+        }
+        else { mHaveSel = false; mSelTag = {}; }
+        repaint();
+    }
     void fileClicked(const juce::File &, const juce::MouseEvent &) override {}
-    // Double-click does NOT load (folders still expand as normal) — loading is
-    // drag-only: drag a file onto the Cab A / Cab B zone.
-    void fileDoubleClicked(const juce::File &) override {}
+    void fileDoubleClicked(const juce::File &) override {} // load is drag-only
     void browserRootChanged(const juce::File &) override {}
 
+    // Adapter so the folder tree's selection drives the file pane.
+    struct FolderSel : juce::FileBrowserListener
+    {
+        std::function<void()> onSel;
+        void selectionChanged() override { if (onSel) onSel(); }
+        void fileClicked(const juce::File &, const juce::MouseEvent &) override {}
+        void fileDoubleClicked(const juce::File &) override {}
+        void browserRootChanged(const juce::File &) override {}
+    };
+
     juce::TimeSliceThread mThread;
+    DirOnlyFilter mFolderFilter;
+    juce::DirectoryContentsList mFolderList;
+    juce::FileTreeComponent mFolders;
     IrFileFilter mFilter;
-    juce::DirectoryContentsList mList;
-    juce::FileTreeComponent mTree;
+    juce::DirectoryContentsList mFileContents;
+    juce::FileTreeComponent mFiles;        // files-only (right pane)
+    FolderSel mFolderSel;
     juce::TextEditor mSearch;
+    IrTagCache mCache;
+    juce::OwnedArray<juce::ToggleButton> mTagChips;
+    juce::StringArray mTags;
     juce::TextButton mChooseBtn, mCloseBtn;
     IrDropZone mZoneA, mZoneB;
-    juce::Rectangle<int> mHintRect;
+    juce::Rectangle<int> mHintRect, mBodyRect;
+    juce::String mSelName, mSelTag;
+    bool mHaveSel = false;
     std::unique_ptr<juce::FileChooser> mChooser;
     std::function<juce::File()> mGetRoot;
     std::function<void(const juce::File &)> mSetRoot;

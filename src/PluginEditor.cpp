@@ -34,6 +34,10 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
     mModPanel.onSetSolo = [this](int slot, bool on) { mProc.setModSolo(slot, on); };
     mModPanel.getSolo = [this](int slot) { return mProc.getModSolo(slot); };
 
+    // Delay tap visualiser: read the sync-resolved effective times (per side).
+    mDelayPanel.setTimeProvider([this] { return mProc.delayTimeMs(); });
+    mDelayPanel.setTimeProviderR([this] { return mProc.delayTimeMsR(); });
+
     // --- Header ---
     mContent.addAndMakeVisible(mHeader); // behind the header widgets
     mContent.addAndMakeVisible(mPresetBar);

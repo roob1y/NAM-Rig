@@ -80,6 +80,27 @@ struct Biquad
         return q;
     }
 
+    // RBJ low-shelf (shelf slope S). gainDb < 0 cuts the lows (e.g. tape's
+    // one-time bass thinning at the output).
+    static Biquad lowshelf(double fs, double f0, double gainDb, double S = 0.7)
+    {
+        if (gainDb == 0.0)
+            return identity();
+        const double A = std::pow(10.0, gainDb / 40.0);
+        const double w = 2.0 * kPi * f0 / fs;
+        const double cosw = std::cos(w);
+        const double alpha = std::sin(w) / 2.0 * std::sqrt((A + 1.0 / A) * (1.0 / S - 1.0) + 2.0);
+        const double sa = 2.0 * std::sqrt(A) * alpha;
+        const double a0 = (A + 1.0) + (A - 1.0) * cosw + sa;
+        Biquad q;
+        q.b0 = (float)(A * ((A + 1.0) - (A - 1.0) * cosw + sa) / a0);
+        q.b1 = (float)(2.0 * A * ((A - 1.0) - (A + 1.0) * cosw) / a0);
+        q.b2 = (float)(A * ((A + 1.0) - (A - 1.0) * cosw - sa) / a0);
+        q.a1 = (float)(-2.0 * ((A - 1.0) + (A + 1.0) * cosw) / a0);
+        q.a2 = (float)(((A + 1.0) + (A - 1.0) * cosw - sa) / a0);
+        return q;
+    }
+
     static Biquad highpass(double fs, double f0, double Q = 0.70710678118654752)
     {
         const double w = 2.0 * kPi * f0 / fs;
@@ -107,6 +128,29 @@ struct Biquad
         q.b2 = (float)(((1.0 - cosw) / 2.0) / a0);
         q.a1 = (float)((-2.0 * cosw) / a0);
         q.a2 = (float)((1.0 - alpha) / a0);
+        return q;
+    }
+
+    // One-pole low-pass (6 dB/oct) as a biquad: y = k*x + (1-k)*y[-1]. Gentler than
+    // the 2-pole lowpass -> matches a tape echo's soft HF roll-off (multi-head unit).
+    static Biquad lowpass1(double fs, double f0)
+    {
+        const double k = 1.0 - std::exp(-2.0 * kPi * f0 / fs);
+        Biquad q;
+        q.b0 = (float)k; q.b1 = 0.0f; q.b2 = 0.0f;
+        q.a1 = (float)(-(1.0 - k)); q.a2 = 0.0f;
+        return q;
+    }
+
+    // One-pole high-pass (6 dB/oct) as a biquad: H = g(1 - z^-1)/(1 - g z^-1), g = e^{-2pi f0/fs}.
+    // Blocks DC; gentler than the 2-pole highpass -> matches a tape echo's soft low-end shed
+    // (the multi-head reference loses sub-bass slowly down the tail, ~-4 dB/pass at 40 Hz).
+    static Biquad highpass1(double fs, double f0)
+    {
+        const double g = std::exp(-2.0 * kPi * f0 / fs);
+        Biquad q;
+        q.b0 = (float)g; q.b1 = (float)(-g); q.b2 = 0.0f;
+        q.a1 = (float)(-g); q.a2 = 0.0f;
         return q;
     }
 

@@ -51,10 +51,31 @@ public:
             juce::String txt = mSlider.getTextFromValue(mSlider.getValue());
             if (!mRotationReadout && mUnit.isNotEmpty()) // pedal-style 0..10 knobs stay unitless
                 txt << ' ' << mUnit;
+            if (!mValueMenu.isEmpty()) // clickable value -> dropdown
+                txt << juce::String::fromUTF8(" \xE2\x96\xBE");
             g.setColour((mDragging ? acc : colors::text2).withMultipliedAlpha(ga));
             g.setFont(fonts::mono(11.0f, fonts::Medium));
             g.drawText(txt, mValueRect, juce::Justification::centred);
         }
+    }
+
+    // Make the value readout a clickable dropdown of discrete choices (the knob
+    // can still be turned to step). Used for the delay Sync division knobs.
+    void setValueMenu(juce::StringArray items) { mValueMenu = std::move(items); repaint(); }
+
+    void mouseDown(const juce::MouseEvent &e) override
+    {
+        if (mValueMenu.isEmpty() || !mShowValue || !isEnabled()
+            || !mValueRect.contains(e.getPosition()))
+            return;
+        juce::PopupMenu m;
+        const int cur = (int)std::lround(mSlider.getValue());
+        for (int i = 0; i < mValueMenu.size(); ++i)
+            m.addItem(i + 1, mValueMenu[i], true, i == cur);
+        m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this),
+                        [this](int r) {
+                            if (r > 0) mSlider.setValue(r - 1, juce::sendNotificationSync);
+                        });
     }
 
     void resized() override
@@ -66,6 +87,11 @@ public:
         const int d = juce::jmin(b.getWidth(), b.getHeight());
         mSlider.setBounds(b.withSizeKeepingCentre(d, d));
     }
+
+    // JUCE doesn't repaint on setEnabled(), so force it -> the caption, value readout
+    // and rotary all grey out together when disabled (e.g. the delay Time knob once a
+    // Sync division owns the time).
+    void enablementChanged() override { repaint(); }
 
     // Shrink the caption row so longer captions fit narrower mod-lane knobs.
     void setCaptionHeight(int h) { mCaptionH = h; resized(); repaint(); }
@@ -101,6 +127,19 @@ public:
     }
     void updateReadout() { mSlider.updateText(); repaint(); }
 
+    // Fully custom value readout: the function returns the COMPLETE string (incl.
+    // any unit), so the auto unit suffix is suppressed and kept suppressed across
+    // rebind(). Used by the delay Time knob to show the measured ms in both Free
+    // and tempo-synced modes.
+    void setReadoutFn(std::function<juce::String(double)> fn)
+    {
+        mReadoutFn = true;
+        mSlider.textFromValueFunction = std::move(fn);
+        mUnit.clear();
+        mSlider.updateText();
+        repaint();
+    }
+
     // Re-point this knob at a different parameter (drive pedals rebind per TYPE).
     void rebind(juce::AudioProcessorValueTreeState &apvts, const juce::String &paramId)
     {
@@ -111,7 +150,7 @@ public:
         {
             mSlider.setDoubleClickReturnValue(
                 true, param->convertFrom0to1(param->getDefaultValue()));
-            mUnit = param->getLabel();
+            if (!mReadoutFn) mUnit = param->getLabel(); // custom readout supplies its own unit
         }
         repaint();
     }
@@ -126,8 +165,9 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mAtt;
     juce::Rectangle<int> mCaptionRect, mValueRect;
     juce::String mUnit;
+    juce::StringArray mValueMenu; // when set, the value readout is a click-to-pick dropdown
     int mCaptionH = 15, mValueH = 16;
-    bool mShowValue = true, mDragging = false, mRotationReadout = false;
+    bool mShowValue = true, mDragging = false, mRotationReadout = false, mReadoutFn = false;
 };
 
 // Horizontal knob in a rounded bordered box: knob on the left, caption + value
@@ -1931,39 +1971,7 @@ public:
     // Auto tone descriptor (1-2 words) from the IR's per-zone energy, relative to
     // its own average. Pure function of the smoothed response — same data the
     // heat map shows, just named.
-    static juce::String classifyCharacter(const float *resp)
-    {
-        const double zfLo = nam_rig::CabBlock::kResFLo, zfHi = nam_rig::CabBlock::kResFHi;
-        const int P = nam_rig::CabBlock::kResPts;
-        const double lr = std::log(zfHi / zfLo);
-        auto zavg = [&](double a, double b) {
-            int i0 = juce::jlimit(0, P - 1, (int)std::round((double)(P - 1) * std::log(a / zfLo) / lr));
-            int i1 = juce::jlimit(0, P - 1, (int)std::round((double)(P - 1) * std::log(b / zfLo) / lr));
-            float s = 0.0f;
-            for (int i = i0; i <= i1; ++i) s += resp[i];
-            return s / (float)(i1 - i0 + 1);
-        };
-        const float lows = zavg(40, 120), body = zavg(120, 400), mids = zavg(400, 1500),
-                    pres = zavg(1500, 4000), fizz = zavg(4000, 8000);
-        const float tilt = 0.5f * (pres + fizz) - 0.5f * (lows + body);
-        const float scoop = 0.5f * (body + pres) - mids;
-
-        const char *t1 = (tilt > 3.0f) ? "Bright" : (tilt < -3.0f ? "Dark" : nullptr);
-        struct C { const char *w; float s; };
-        const C cs[] = {{"thick", body - 3.0f}, {"scooped", scoop - 4.0f}, {"present", pres - 3.0f},
-                        {"fizzy", fizz - 4.0f}, {"boomy", lows - 5.0f}, {"mid-forward", mids - 3.0f}};
-        const char *t2 = nullptr;
-        float best = 0.0f;
-        for (auto &c : cs) if (c.s > best) { best = c.s; t2 = c.w; }
-
-        auto cap = [](const char *w) { juce::String s(w); return s.substring(0, 1).toUpperCase() + s.substring(1); };
-        if (t1 == nullptr && t2 == nullptr) return "Balanced";
-        if (t2 != nullptr && (juce::String(t2) == "fizzy" || juce::String(t2) == "present"))
-            return cap(t2); // already implies bright; keep it to one word
-        if (t1 != nullptr && t2 != nullptr) return juce::String(t1) + ", " + t2;
-        if (t1 != nullptr) return juce::String(t1);
-        return cap(t2);
-    }
+    static juce::String classifyCharacter(const float *resp) { return nam_rig::ir::classify(resp); }
 
     void resized() override
     {
@@ -2422,24 +2430,18 @@ public:
         const juce::String p = mPrefix;
         const bool isFront = (soloSlot >= 0);
 
-        mNum.setText(label, juce::dontSendNotification);
-        mNum.setJustificationType(juce::Justification::centred);
-        mNum.setColour(juce::Label::textColourId, colors::textDim);
-        addAndMakeVisible(mNum);
-        addAndMakeVisible(mIcon);
-
+        mBadgeText = label;                       // drawn as a coloured badge in paint()
         const juce::Colour laneCol = colors::laneColour(soloSlot);
-        mIcon.setAccent(laneCol); // tint the glyph + box border per lane
-        mIcon.onClick = [this] {   // click the icon to toggle this slot on/off
-            if (auto *prm = mApvts.getParameter(mPrefix + "On"))
-            {
-                const bool now = prm->getValue() >= 0.5f;
-                prm->beginChangeGesture();
-                prm->setValueNotifyingHost(now ? 0.0f : 1.0f);
-                prm->endChangeGesture();
-            }
-            refresh();
-        };
+        mLaneCol = laneCol;
+
+        // Explicit ON pill (new design): replaces the old click-the-icon toggle.
+        mOn.setButtonText("ON");
+        mOn.setClickingTogglesState(true);
+        mOn.getProperties().set("pill", true);
+        addAndMakeVisible(mOn);
+        mOnAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            apvts, p + "On", mOn);
+        mOn.onClick = [this] { refresh(); }; // relayout dim state when toggled
 
         mScope = std::make_unique<LaneScope>(apvts, p, laneCol);
         addAndMakeVisible(*mScope); // live LFO/effect motion for this slot
@@ -2530,23 +2532,21 @@ public:
 
         mP2Ratio = std::make_unique<LabeledKnob>(apvts, p + "P2Ratio", "Swp 2");
         addChildComponent(*mP2Ratio); // bi-phase only (Sweep Gen 2 rate ratio)
-        mSeries.setButtonText(""); // checkbox only; caption sits beneath (saves width)
+        // Series + Extreme kept (per design note) but restyled as small accent
+        // pills in the lane's right control stack, matching ON / S.
+        mSeries.setButtonText("Series");
+        mSeries.setClickingTogglesState(true);
+        mSeries.getProperties().set("pill", true);
         addChildComponent(mSeries); // bi-phase only (series/parallel routing)
         mSeriesAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             apvts, p + "Series", mSeries);
-        mSeriesLabel.setText("Series", juce::dontSendNotification);
-        mSeriesLabel.setJustificationType(juce::Justification::centred);
-        mSeriesLabel.setColour(juce::Label::textColourId, colors::textDim);
-        addChildComponent(mSeriesLabel); // bi-phase only (font sized by row height, like knob captions)
 
-        mExtreme.setButtonText(""); // checkbox only; "Extreme" caption sits beneath
-        addChildComponent(mExtreme); // phaser/uni-vibe/bi-phase only (unlocks the wild ranges)
+        mExtreme.setButtonText("Extreme");
+        mExtreme.setClickingTogglesState(true);
+        mExtreme.getProperties().set("pill", true);
+        addChildComponent(mExtreme); // chorus/flanger/phaser/vibrato/uni-vibe/bi-phase (unlocks wild ranges)
         mExtremeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             apvts, p + "Extreme", mExtreme);
-        mExtremeLabel.setText("Extreme", juce::dontSendNotification);
-        mExtremeLabel.setJustificationType(juce::Justification::centred);
-        mExtremeLabel.setColour(juce::Label::textColourId, colors::textDim);
-        addChildComponent(mExtremeLabel);
 
         // Every knob in the lane reads 0..10 by rotation (pedal-style), so the
         // mixed underlying params (Speed in Hz, the rest 0..1, Sweep 2 a ratio)
@@ -2581,6 +2581,15 @@ public:
     // just re-applies the layout for the current params (no combo hand-sync).
     void refresh() { applyType(); }
 
+    // Section routing: in PARALLEL the per-lane Mix is overridden (the lane runs
+    // full-wet, Mod Mix owns dry/wet), so grey the knob. It stays live in SERIES.
+    void setSectionParallel(bool p)
+    {
+        if (mSectionParallel == p) return;
+        mSectionParallel = p;
+        if (mMix) mMix->setEnabled(!p && mMix->isVisible());
+    }
+
     // Show/relayout the controls for the current Type/Sync/On (reads the params;
     // never touches the combo, so it's safe to call from a fresh user selection).
     void applyType()
@@ -2589,8 +2598,6 @@ public:
         const int type = (int)mApvts.getRawParameterValue(p + "Type")->load();
         const int sync = (int)mApvts.getRawParameterValue(p + "Sync")->load();
         const bool on = mApvts.getRawParameterValue(p + "On")->load() >= 0.5f;
-        mIcon.setType(type);
-        mIcon.setActive(on);
         if (type == mLastType && sync == mLastSync && on == mLastOn)
             return;
         // Only a TYPE change alters which controls are shown / their bounds. Sync
@@ -2607,6 +2614,7 @@ public:
             mDepth->setVisible(type != 2);                 // phaser: no depth knob
             mFeedback->setVisible(type == 1 || type == 2 || type == 8); // flanger/phaser/bi-phase
             mMix->setVisible(nam_rig::ModVoice::mixExposed((nam_rig::ModVoice::Type)type)); // chorus + flanger
+            mMix->setEnabled(!mSectionParallel && mMix->isVisible()); // greyed in parallel (Mod Mix owns dry/wet)
             mWave.setVisible(type == 3);                   // tremolo shape
             mRate->setVisible(!rotary);                    // rotary: slow/fast toggle, not a rate
             if (!rotary) // knob ends exactly at this effect's rate ceiling (no dead travel past the internal cap)
@@ -2634,10 +2642,8 @@ public:
             mWidth->setCaption(flanger ? "Spread" : "Width");
             mP2Ratio->setVisible(type == 8);               // bi-phase: Sweep Gen 2 ratio
             mSeries.setVisible(type == 8);                  // bi-phase: series/parallel
-            mSeriesLabel.setVisible(type == 8);
             const bool extremeable = (type == 0 || type == 1 || type == 2 || type == 4 || type == 6 || type == 8); // chorus/flanger/phaser/vibrato/uni-vibe/bi-phase
             mExtreme.setVisible(extremeable);               // unlock the wild ranges
-            mExtremeLabel.setVisible(extremeable);
         }
         mRate->setEnabled(sync == 0 || type == 9); // rate greyed when synced; ring mod ignores sync so its Freq stays live
         repaint();
@@ -2647,61 +2653,85 @@ public:
 
     void paint(juce::Graphics &g) override
     {
+        const bool on = mLastOn;
         auto b = getLocalBounds().toFloat().reduced(0.5f);
-        g.setColour(colors::panel);
-        g.fillRoundedRectangle(b, 8.0f);
-        g.setColour(colors::outline);
-        g.drawRoundedRectangle(b, 8.0f, 1.0f);
+
+        // New-design lane chip: dark inset fill, per-lane coloured border, 10px
+        // radius. The whole chip dims when the slot is off (mirrors the mockup's
+        // opacity treatment).
+        juce::Graphics::ScopedSaveState ss(g);
+        if (!on)
+            g.setOpacity(0.55f);
+        g.setColour(juce::Colour(0xff191c21)); // lane chip surface
+        g.fillRoundedRectangle(b, 10.0f);
+        g.setColour(on ? mLaneCol.withAlpha(0.85f) : colors::outline);
+        g.drawRoundedRectangle(b, 10.0f, 1.0f);
+
+        // Coloured number/letter badge (lane colour fill, near-black digit).
+        if (!mBadge.isEmpty())
+        {
+            auto badge = mBadge.toFloat();
+            g.setColour(mLaneCol);
+            g.fillRoundedRectangle(badge, 7.0f);
+            g.setColour(colors::bg);
+            g.setFont(fonts::archivo(13.0f, fonts::ExtraBold));
+            g.drawText(mBadgeText, mBadge, juce::Justification::centred);
+        }
     }
 
     void resized() override
     {
-        auto area = getLocalBounds().reduced(9, 7);
-        auto numCol = area.removeFromLeft(16);
-        mNum.setBounds(numCol); // lane number (LED removed)
-        area.removeFromLeft(6);
+        auto area = getLocalBounds().reduced(13, 8);
 
-        auto iconCol = area.removeFromLeft(62);
-        mIcon.setBounds(iconCol.withSizeKeepingCentre(62, juce::jmin(iconCol.getHeight(), 46)));
-        area.removeFromLeft(10);
+        // Coloured number/letter badge (drawn in paint()).
+        mBadge = area.removeFromLeft(26).withSizeKeepingCentre(26, 26);
+        area.removeFromLeft(14);
 
-        auto meta = area.removeFromLeft(92).withSizeKeepingCentre(92, juce::jmin(area.getHeight(), 50));
-        mType.setBounds(meta.removeFromTop(24));
-        meta.removeFromTop(4);
-        auto bottomMeta = meta.removeFromTop(22);
-        mSync.setBounds(bottomMeta.withWidth(92));          // non-rotary
-        mRotFast.setBounds(bottomMeta.removeFromLeft(52));  // rotary: slow/fast
-        area.removeFromLeft(10);
+        // Type dropdown chip + (below it) the Sync / rotary slow-fast row.
+        auto meta = area.removeFromLeft(104).withSizeKeepingCentre(104, juce::jmin(area.getHeight(), 58));
+        mType.setBounds(meta.removeFromTop(28));
+        meta.removeFromTop(5);
+        auto row2 = meta.removeFromTop(24);
+        mSync.setBounds(row2.withWidth(104));               // non-rotary
+        mRotFast.setBounds(row2.removeFromLeft(56));        // rotary: slow/fast
+        area.removeFromLeft(14);
 
-        if (mSoloSlot >= 0) // front slots only
+        // Right control stack (mockup idiom): ON over S, as accent pills. Series /
+        // Extreme pills (kept per design note) sit just left of it when shown;
+        // Tremolo's wave-shape selector takes the same right slot on the post lane.
         {
-            mSolo.setBounds(area.removeFromRight(30).withSizeKeepingCentre(30, 22));
+            auto col = area.removeFromRight(46);
+            const int btnH = 23, gap = 5;
+            const bool front = (mSoloSlot >= 0);
+            const int groupH = front ? btnH * 2 + gap : btnH;
+            auto stack = col.withSizeKeepingCentre(42, juce::jmin(area.getHeight() - 4, groupH));
+            mOn.setBounds(stack.removeFromTop(btnH));
+            if (front)
+            {
+                stack.removeFromTop(gap);
+                mSolo.setBounds(stack.removeFromTop(btnH));
+            }
             area.removeFromRight(8);
-        }
-        if (mSeries.isVisible()) // "Series" caption above a small checkbox, centred as one unit
-        {
-            auto col = area.removeFromRight(44);
-            area.removeFromRight(6);
-            const int groupH = 14 + 3 + 13; // caption (knob-size) + gap + small box
-            auto stack = col.withSizeKeepingCentre(44, groupH);
-            mSeriesLabel.setBounds(stack.removeFromTop(14));
-            stack.removeFromTop(3);
-            mSeries.setBounds(stack.withSizeKeepingCentre(13, 13));
-        }
-        if (mExtreme.isVisible()) // "Extreme" caption above a small checkbox, same idiom as Series
-        {
-            auto col = area.removeFromRight(52);
-            area.removeFromRight(6);
-            const int groupH = 14 + 3 + 13;
-            auto stack = col.withSizeKeepingCentre(52, groupH);
-            mExtremeLabel.setBounds(stack.removeFromTop(14));
-            stack.removeFromTop(3);
-            mExtreme.setBounds(stack.withSizeKeepingCentre(13, 13));
         }
         if (mWave.isVisible())
         {
             mWave.setBounds(area.removeFromRight(84).withSizeKeepingCentre(84, 24));
             area.removeFromRight(8);
+        }
+        if (mSeries.isVisible() || mExtreme.isVisible())
+        {
+            auto col = area.removeFromRight(64);
+            area.removeFromRight(8);
+            const int btnH = 21, gap = 5;
+            const int n = (mExtreme.isVisible() ? 1 : 0) + (mSeries.isVisible() ? 1 : 0);
+            auto stack = col.withSizeKeepingCentre(62, n * btnH + (n - 1) * gap);
+            if (mExtreme.isVisible())
+            {
+                mExtreme.setBounds(stack.removeFromTop(btnH));
+                if (mSeries.isVisible()) stack.removeFromTop(gap);
+            }
+            if (mSeries.isVisible())
+                mSeries.setBounds(stack.removeFromTop(btnH));
         }
 
         // Knob order (left -> right), one consistent rule across every effect:
@@ -2747,16 +2777,19 @@ private:
     int mSoloSlot = -1; // 0-based front slot for solo; -1 = post lane (no solo)
     int mLastType = -1, mLastSync = -1;
     bool mLastOn = true;
-    juce::Label mNum;
-    ModFxIcon mIcon;
+    bool mSectionParallel = false; // SERIES = per-lane Mix live; PARALLEL = greyed
+    juce::Rectangle<int> mBadge;   // coloured number/letter badge (drawn in paint)
+    juce::String mBadgeText;       // "1".."3" or "P"
+    juce::Colour mLaneCol;         // per-lane accent (badge fill + chip border)
     std::unique_ptr<LaneScope> mScope;
     juce::ComboBox mType, mWave, mSync;
     std::unique_ptr<juce::ParameterAttachment> mTypeParamAtt; // robust binding for the filtered Type list
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mWaveAtt, mSyncAtt;
+    juce::ToggleButton mOn;   // explicit on/off pill (new design)
     juce::ToggleButton mSolo; // momentary dial-in (not APVTS-attached)
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mOnAtt;
     std::unique_ptr<LabeledKnob> mRate, mDepth, mFeedback, mMix, mWidth, mDrive, mManual, mP2Ratio, mHornDrum;
     juce::ToggleButton mRotFast, mSeries, mExtreme;
-    juce::Label mSeriesLabel, mExtremeLabel; // captions beneath the small checkboxes
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mRotFastAtt, mSeriesAtt, mExtremeAtt;
 };
 
@@ -2816,9 +2849,9 @@ public:
 
     void paint(juce::Graphics &g) override
     {
-        g.setColour(colors::textDim); // header (mirrors the rack's "SIGNAL FLOW")
-        g.setFont(RigLookAndFeel::withHeight(9.0f));
-        g.drawText("MOD MIX", getLocalBounds().removeFromTop(13), juce::Justification::centred);
+        g.setColour(colors::caption); // header (mirrors the rack's "CHAIN ORDER")
+        g.setFont(fonts::archivo(9.0f, fonts::SemiBold));
+        g.drawText("PARALLEL BLEND", getLocalBounds().removeFromTop(13), juce::Justification::centred);
         auto box = getLocalBounds().toFloat(); // bordered container (matches the rack)
         box.removeFromTop(15.0f);
         box = box.reduced(1.0f);
@@ -2863,28 +2896,25 @@ public:
                 g.drawLine(juce::Line<float>(pk, p), 1.0f);
             }
 
-        g.setFont(RigLookAndFeel::withHeight(10.0f));
+        g.setFont(fonts::archivo(9.5f, fonts::Bold));
         for (int i = 0; i < 3; ++i)
         {
             const auto p = scr(r, i);
-            const float rad = 3.0f + 4.0f * (mActive[i] ? w[i] : 0.0f);
-            g.setColour(mActive[i] ? colors::laneColour(i) : colors::outline);
+            const float rad = 3.5f + 4.0f * (mActive[i] ? w[i] : 0.0f);
+            const juce::Colour lc = colors::laneColour(i);
+            // Node is ALWAYS drawn in its lane colour (dim when the slot is off) so
+            // each corner has identity even before anything is blended in.
+            g.setColour(mActive[i] ? lc : lc.withAlpha(0.30f));
             g.fillEllipse(p.x - rad, p.y - rad, rad * 2.0f, rad * 2.0f);
-            const float ly = (i == 0) ? p.y - 13.0f - rad : p.y + 3.0f + rad; // clear the (weighted) node
-            if (mActive[i]) // blend weight as a percentage, in the lane colour
-            {
-                g.setColour(colors::laneColour(i));
-                // Anchor the corner labels inward so they never clip the box edge:
-                // bottom-left reads from the node rightward, bottom-right leftward.
-                const auto just = (i == 1) ? juce::Justification::centredLeft
-                                  : (i == 2) ? juce::Justification::centredRight
-                                             : juce::Justification::centred;
-                const int lx = (i == 1) ? (int)(p.x - 2.0f)
-                               : (i == 2) ? (int)(p.x - 38.0f)
-                                          : (int)(p.x - 20.0f);
-                g.drawText(juce::String(juce::roundToInt(w[i] * 100.0f)) + "%",
-                           lx, (int)ly, 40, 11, just);
-            }
+
+            // Persistent slot-number label ("1".."3" in the lane colour); the live
+            // blend weight is appended as a % once the slot is active.
+            juce::String lbl = juce::String(i + 1);
+            if (mActive[i])
+                lbl += "  " + juce::String(juce::roundToInt(w[i] * 100.0f)) + "%";
+            const float ly = (i == 0) ? p.y - 15.0f - rad : p.y + 5.0f + rad;
+            g.setColour(mActive[i] ? lc : lc.withAlpha(0.60f));
+            g.drawText(lbl, (int)(p.x - 26.0f), (int)ly, 52, 11, juce::Justification::centred);
         }
 
         // Puck takes the blended colour of the three lane accents by weight.
@@ -3020,9 +3050,9 @@ public:
     void paint(juce::Graphics &g) override
     {
         // Header + bordered container (matches the blend pad's framing).
-        g.setColour(colors::textDim);
-        g.setFont(RigLookAndFeel::withHeight(9.0f));
-        g.drawText("SIGNAL FLOW", getLocalBounds().removeFromTop(13),
+        g.setColour(colors::caption);
+        g.setFont(fonts::archivo(9.0f, fonts::SemiBold));
+        g.drawText("CHAIN ORDER", getLocalBounds().removeFromTop(13),
                    juce::Justification::centred);
         const auto box = boxRect();
         g.setColour(colors::scopeBg);
@@ -3271,11 +3301,10 @@ public:
         mPostLane = std::make_unique<ModSlotLane>(apvts, "post", "P", -1);
         addAndMakeVisible(*mPostLane);
 
-        mRouting.addItemList({"Series", "Parallel"}, 1);
-        addAndMakeVisible(mRouting);
-        mRoutingAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-            apvts, "modRouting", mRouting);
-        mRouting.onChange = [this] { refreshRouting(); };
+        mRouting = std::make_unique<SegmentedControl>(
+            apvts, "modRouting", juce::StringArray{"Series", "Parallel"});
+        addAndMakeVisible(*mRouting);
+        mRouting->onChange = [this](int) { refreshRouting(); };
 
         mPad = std::make_unique<BlendPad>(apvts);
         addChildComponent(*mPad); // parallel only
@@ -3347,10 +3376,12 @@ public:
     // Series -- the two faces of "how the slots combine".
     void refreshRouting()
     {
-        const bool par = (mRouting.getSelectedId() == 2);
+        const bool par = (mRouting && mRouting->index() == 1);
         mPad->setVisible(par);
         mModMix->setVisible(par);
         mRack->setVisible(!par);
+        for (auto &l : mLanes) // grey each lane's Mix knob in parallel (Mod Mix owns dry/wet)
+            if (l) l->setSectionParallel(par);
         if (par == mParallel)
             return; // visibility refreshed; layout already matches the mode
         mParallel = par;
@@ -3394,6 +3425,24 @@ public:
         g.setFont(RigLookAndFeel::withHeight(9.0f));
         g.drawText("IN", mSpine.getX() - 3, mSpine.getY() - 13, 26, 11, juce::Justification::centred);
         g.drawText("OUT", mSpine.getX() - 3, (int)mPostLaneY - 5, 26, 11, juce::Justification::centred);
+
+        // POST · SPEAKER STAGE divider sitting just above the post lane: a centred
+        // caption flanked by two thin rules (mockup idiom).
+        if (!mPostDivider.isEmpty())
+        {
+            auto d = mPostDivider.toFloat();
+            auto f = fonts::archivo(9.0f, fonts::SemiBold);
+            const juce::String label = juce::String::fromUTF8("POST \xC2\xB7 SPEAKER STAGE");
+            const float tw = juce::GlyphArrangement::getStringWidth(f, label) + 4.0f;
+            const float cy = d.getCentreY();
+            const float cx = d.getCentreX();
+            g.setColour(colors::divider);
+            g.fillRect(d.getX(), cy, cx - tw * 0.5f - d.getX() - 4.0f, 1.0f);
+            g.fillRect(cx + tw * 0.5f + 4.0f, cy, d.getRight() - (cx + tw * 0.5f + 4.0f), 1.0f);
+            g.setColour(colors::caption);
+            g.setFont(f);
+            g.drawText(label, d, juce::Justification::centred);
+        }
     }
 
     void resized() override
@@ -3401,7 +3450,8 @@ public:
         // Routing toggle (Series/Parallel) sits in the header's top-right corner,
         // vertically centred in the same band as the title.
         auto hdr = getLocalBounds().removeFromTop(contentArea().getY()).reduced(16, 0);
-        mRouting.setBounds(hdr.removeFromRight(86).withSizeKeepingCentre(86, 24));
+        const int rw = mRouting ? mRouting->idealWidth() : 120;
+        mRouting->setBounds(hdr.removeFromRight(rw).withSizeKeepingCentre(rw, 26));
 
         auto area = contentArea();
         const int n = nam_rig::ModBlock::kSlots, gap = 8;
@@ -3455,8 +3505,7 @@ private:
     std::vector<float> mArrowYs;
     std::array<float, (size_t)nam_rig::ModBlock::kSlots> mLaneCenters{}; // parallel spine taps
     float mPostLaneY = 0.0f;                                             // OUT label / line end
-    juce::ComboBox mRouting;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mRoutingAtt;
+    std::unique_ptr<SegmentedControl> mRouting;
     std::unique_ptr<BlendPad> mPad;
     std::unique_ptr<ChainRack> mRack;
     std::unique_ptr<HKnob> mModMix;
@@ -3465,72 +3514,820 @@ private:
 };
 
 //==============================================================================
+// Echo-taps visualiser (new design "ECHO TAPS" well): a left accent bar = the dry
+// hit, then feedback echoes marching right, each shorter by Feedback, spread up/
+// down by Width, alternating L/R when Ping-Pong is on. Tap spacing tracks Time.
+// Reads the live params; the panel repaints it from the editor timer.
+class DelayTaps : public juce::Component
+{
+public:
+    explicit DelayTaps(juce::AudioProcessorValueTreeState &apvts) : mApvts(apvts) {}
+
+    // Effective sync-resolved delay time in ms per side. When set, used instead of
+    // the raw Free-time param so synced spacing tracks the tempo division. The L/R
+    // pair lets the visualiser show the dual rhythm (dotted-1/8 + 1/4, etc.).
+    std::function<float()> getTimeMs, getTimeMsR;
+
+    void paint(juce::Graphics &g) override
+    {
+        auto r = getLocalBounds().toFloat();
+        juce::ColourGradient grad(colors::wellTop, r.getX(), r.getY(),
+                                  colors::wellBot, r.getX(), r.getBottom(), false);
+        g.setGradientFill(grad);
+        g.fillRoundedRectangle(r, 11.0f);
+        g.setColour(colors::cardBorder);
+        g.drawRoundedRectangle(r.reduced(0.5f), 11.0f, 1.0f);
+
+        auto in = r.reduced(13.0f, 11.0f);
+
+        // Space Tape: show the three heads and their time differences (a HEADS/TIME
+        // table + the heads drawn at their true relative spacing) instead of the
+        // generic single echo train. Inactive heads (per the Mode) are dimmed.
+        if ((int)mApvts.getRawParameterValue("delayCharacter")->load() == 2)
+        { paintSpaceTape(g, in); return; }
+
+        const float H = in.getHeight(), top = in.getY();
+        const float gutter = 16.0f;            // left margin reserved for the L / R labels
+        const float left = in.getX() + gutter; // dry bar + taps start just inside it
+        const float W = in.getRight() - left;
+        const float cy = top + H * 0.5f;
+
+        g.setColour(juce::Colour(0xff262c34)); // centre (L/R) axis
+        g.fillRect(in.getX(), cy - 0.5f, in.getWidth(), 1.0f);
+
+        const float rawTime = mApvts.getRawParameterValue("delayTime")->load();
+        const float timeL = getTimeMs  ? getTimeMs()  : rawTime;
+        const float timeR = getTimeMsR ? getTimeMsR() : timeL;
+        const float fb     = mApvts.getRawParameterValue("delayFeedback")->load();
+        const float width  = mApvts.getRawParameterValue("delayWidth")->load();
+
+        // Tap spacing is PROPORTIONAL to delay time (ref: a 500 ms tap ~ 0.13 of
+        // the width), so musical ratios read true -- a 1/2 lane lands exactly twice
+        // the spacing of a 1/4 lane. Clamped only at the extremes so a very long
+        // delay keeps its first echoes on-screen and a very short one stays legible.
+        auto spacingFor = [&](float t) {
+            // Floor low enough that every musical division stays proportional (1/16
+            // must read exactly half of 1/8); it only clamps sub-~45 ms Free times,
+            // where bars would otherwise overlap.
+            return juce::jlimit(0.012f, 0.55f, t * (0.13f / 500.0f));
+        };
+
+        // Dry reference bar at the far left.
+        g.setColour(colors::accent.withAlpha(0.5f));
+        g.fillRoundedRectangle(left, top, 3.0f, H, 1.5f);
+
+        // Mode: Dual (R unlinked) shows two independent trains; Ping-Pong shows ONE
+        // train alternating L/R; Single shows the linked pair. (DSP: Dual overrides ping.)
+        // Tape characters are mono: the DSP forces ping-pong/dual off, so the visualiser
+        // shows a single linked train for them regardless of the stored params.
+        const bool tapeChar = (int)mApvts.getRawParameterValue("delayCharacter")->load() != 0;
+        const bool dual = !tapeChar && mApvts.getRawParameterValue("delaySyncR")->load() > 0.5f;
+        const bool ping = !tapeChar && !dual && mApvts.getRawParameterValue("delayPingPong")->load() >= 0.5f;
+
+        // L lane sits above the centre axis, R below; their separation opens with
+        // Width (at Width 0 they collapse to the centre = mono, matching the DSP).
+        const float sep = (0.06f + 0.20f * width) * H;
+        auto drawTap = [&](float x, float laneCy, float h) {
+            const float halfH = (0.04f + h * 0.16f) * H; // decays with feedback (floored so far taps stay visible)
+            const float bx = left + x * W;
+            g.setColour(colors::accent.withAlpha(juce::jlimit(0.1f, 1.0f, 0.25f + h * 0.75f)));
+            g.fillRoundedRectangle(bx - 3.0f, laneCy - halfH, 6.0f, 2.0f * halfH, 3.0f);
+        };
+        // First echo sits ONE full delay-interval after the dry line (time zero) so the
+        // dry->echo1 gap matches the echo->echo gap; the train runs to the right edge
+        // (short/tight delays still fill the width), bars fading with feedback.
+        auto drawLane = [&](float t, float laneCy) {
+            const float sp = spacingFor(t);
+            float x = sp, h = 1.0f;
+            // cap high enough that even the minimum tap spacing fills the well to the
+            // right edge (short Free times were stopping ~57% across at the old 48 cap).
+            for (int i = 0; i < 96 && x < 0.97f; ++i) { drawTap(x, laneCy, h); h *= fb; x += sp; }
+        };
+
+        if (ping) // one train, hopping top<->bottom each repeat = the L/R bounce
+        {
+            const float sp = spacingFor(timeL);
+            float x = sp, h = 1.0f;
+            for (int i = 0; i < 96 && x < 0.97f; ++i)
+            {
+                drawTap(x, (i % 2 == 0) ? (cy - sep) : (cy + sep), h);
+                h *= fb;
+                x += sp;
+            }
+        }
+        else if (dual) // Dual = independent L/R times -> two distinct trains
+        {
+            drawLane(timeL, cy - sep);
+            drawLane(timeR, cy + sep);
+        }
+        else // Single (Clean) or Tape Echo = MONO -> a single centred train
+        {
+            drawLane(timeL, cy);
+        }
+
+        if (dual || ping) // only the stereo modes have L/R lanes -> only they get labels
+        {
+            g.setColour(colors::captionDim);
+            g.setFont(fonts::mono(9.0f, fonts::SemiBold));
+            g.drawText("L", (int)in.getX(), (int)top + 1, 14, 11, juce::Justification::centred);
+            g.drawText("R", (int)in.getX(), (int)in.getBottom() - 12, 14, 11, juce::Justification::centred);
+        }
+    }
+
+    // Space Tape head-time display. Left: a HEADS/TIME table (head index + its delay,
+    // shown as the musical division when synced or ms when free). Right: the three
+    // head taps at their TRUE relative spacing so the time differences read at a
+    // glance. Heads not active in the current Mode are dimmed (still shown as ghosts).
+    void paintSpaceTape(juce::Graphics &g, juce::Rectangle<float> in)
+    {
+        const int   syncIdx = (int)mApvts.getRawParameterValue("delaySync")->load();
+        const bool  sync    = syncIdx > 0;
+        const int   mode    = juce::jlimit(0, 11, (int)mApvts.getRawParameterValue("delayHeadMode")->load());
+        const int   mask    = kStHeadMaskUI[(size_t)mode];
+        const float base    = getTimeMs ? getTimeMs()
+                                        : mApvts.getRawParameterValue("delayTime")->load(); // head 1 ms
+        const float *ratio  = sync ? kHeadRatioSyncUI : kHeadRatioFreeUI;
+        const float headMs[3] = { base * ratio[0], base * ratio[1], base * ratio[2] };
+
+        // Keep the table + taps in a vertically-centred band so a tall well doesn't
+        // spread the content out with big empty margins top and bottom.
+        in = in.withSizeKeepingCentre(in.getWidth(), juce::jmin(in.getHeight(), 132.0f));
+        const float rowH = in.getHeight() / 3.0f;
+
+        // --- left: HEADS / TIME table (three rows) ---
+        const float tableW = juce::jmin(120.0f, in.getWidth() * 0.42f);
+        auto table = in.removeFromLeft(tableW);
+        for (int h = 0; h < 3; ++h)
+        {
+            const bool on = (mask & (1 << h)) != 0;
+            auto row = table.removeFromTop(rowH);
+            const juce::Colour col = on ? colors::accent : colors::captionDim;
+
+            auto chip = row.removeFromLeft(24.0f).reduced(2.0f, rowH * 0.24f);
+            g.setColour(col.withAlpha(on ? 0.22f : 0.10f));
+            g.fillRoundedRectangle(chip, 3.0f);
+            g.setColour(col.withAlpha(on ? 1.0f : 0.6f));
+            g.setFont(fonts::mono(11.0f, fonts::SemiBold));
+            g.drawText(juce::String(h + 1), chip.toNearestInt(), juce::Justification::centred);
+
+            const juce::String lab = sync ? headSyncLabel(h, syncIdx, headMs[h])
+                                          : juce::String(juce::roundToInt(headMs[h])) + " ms";
+            g.setColour(col.withAlpha(on ? 1.0f : 0.55f));
+            g.setFont(fonts::archivo(12.0f, fonts::SemiBold, 0.04f));
+            g.drawText(lab, row.reduced(8.0f, 0.0f).toNearestInt(), juce::Justification::centredLeft);
+        }
+
+        // --- right: head taps at true relative spacing (auto-fit so it always reads) ---
+        auto lane = in.reduced(6.0f, 6.0f);
+        const float cy = lane.getCentreY();
+        g.setColour(juce::Colour(0xff262c34));
+        g.fillRect(lane.getX(), cy - 0.5f, lane.getWidth(), 1.0f);
+        g.setColour(colors::accent.withAlpha(0.5f));
+        g.fillRoundedRectangle(lane.getX(), lane.getY(), 3.0f, lane.getHeight(), 1.5f); // dry hit
+
+        const float maxMs = juce::jmax(1.0f, headMs[2]); // head 3 is the longest
+        const float x0 = lane.getX() + 4.0f, W = lane.getWidth() - 8.0f;
+        const float scale = 0.72f / maxMs;
+        auto tapAt = [&](float ms, bool on, float alpha) {
+            const float x = x0 + ms * scale * W;
+            const float hh = (on ? 0.28f : 0.15f) * lane.getHeight();
+            g.setColour(colors::accent.withAlpha(alpha));
+            g.fillRoundedRectangle(x - 2.5f, cy - hh, 5.0f, 2.0f * hh, 2.5f);
+        };
+        // the heads (inactive = faint ghost so the spacing still reads), numbered
+        for (int h = 0; h < 3; ++h)
+        {
+            const bool on = (mask & (1 << h)) != 0;
+            tapAt(headMs[h], on, on ? 0.95f : 0.18f);
+            const float x = x0 + headMs[h] * scale * W;
+            g.setColour((on ? colors::accent : colors::captionDim).withAlpha(on ? 0.9f : 0.7f));
+            g.setFont(fonts::mono(8.0f, fonts::SemiBold));
+            g.drawText(juce::String(h + 1), (int)(x - 8.0f), (int)lane.getY() - 1, 16, 10,
+                       juce::Justification::centred);
+        }
+    }
+
+    // Musical label for a head when synced: head 1 = the selected division; heads 2/3 =
+    // that division x the sync head ratio, mapped to the nearest named value (ms fallback
+    // for the few odd products, e.g. the x8/3 of a triplet base).
+    juce::String headSyncLabel(int h, int syncIdx, float ms) const
+    {
+        if (h == 0) return juce::String(kSyncNamesUI[juce::jlimit(0, 13, syncIdx)]);
+        const double beats = kSyncBeatsUI[(size_t)juce::jlimit(0, 13, syncIdx)]
+                           * (double)kHeadRatioSyncUI[h];
+        for (const auto &nb : kNoteByBeats)
+            if (std::abs(beats - nb.beats) < 0.01)
+                return juce::String(nb.name);
+        return juce::String(juce::roundToInt(ms)) + " ms";
+    }
+
+private:
+    juce::AudioProcessorValueTreeState &mApvts;
+
+    // --- mirrored from DelayBlock for the display only (keep in sync with the engine) ---
+    static constexpr int   kStHeadMaskUI[12] =
+        {0b001, 0b010, 0b100, 0b110, 0b001, 0b010, 0b100, 0b011, 0b110, 0b101, 0b111, 0b000};
+    static constexpr float kHeadRatioFreeUI[3] = {1.0f, 1.95f, 2.79f};
+    static constexpr float kHeadRatioSyncUI[3] = {1.0f, 2.0f, 8.0f / 3.0f};
+    static constexpr double kSyncBeatsUI[14] =
+        {0.0, 4.0, 3.0, 2.0, 4.0 / 3.0, 1.5, 1.0, 2.0 / 3.0, 0.75, 0.5, 1.0 / 3.0, 0.375, 0.25, 1.0 / 6.0};
+    static constexpr const char *kSyncNamesUI[14] =
+        {"Free", "1/1", "1/2.", "1/2", "1/2T", "1/4.", "1/4", "1/4T", "1/8.", "1/8", "1/8T", "1/16.", "1/16", "1/16T"};
+    struct NoteBeats { double beats; const char *name; };
+    static constexpr NoteBeats kNoteByBeats[17] = {
+        {8.0, "2/1"}, {6.0, "1/1."}, {16.0 / 3.0, "2/1T"}, {4.0, "1/1"}, {3.0, "1/2."},
+        {8.0 / 3.0, "1/1T"}, {2.0, "1/2"}, {1.5, "1/4."}, {4.0 / 3.0, "1/2T"}, {1.0, "1/4"},
+        {0.75, "1/8."}, {2.0 / 3.0, "1/4T"}, {0.5, "1/8"}, {0.375, "1/16."}, {1.0 / 3.0, "1/8T"},
+        {0.25, "1/16"}, {1.0 / 6.0, "1/16T"}};
+};
+
+//==============================================================================
+// Vertical on/off switch: a pill track with a round handle that slides UP (on) /
+// DOWN (off), and an adjacent label that names the current state. Used for the
+// delay's Free/Sync switch beside the Time knob.
+class VToggle : public juce::Component
+{
+public:
+    std::function<void(bool)> onChange; // fired with the new state (true = up/"on")
+
+    VToggle(juce::String onLabel, juce::String offLabel)
+        : mOnLabel(std::move(onLabel)), mOffLabel(std::move(offLabel)) {}
+
+    void setState(bool on) { if (on != mState) { mState = on; repaint(); } }
+    bool state() const { return mState; }
+
+    void mouseUp(const juce::MouseEvent &) override
+    {
+        if (!isEnabled()) return;
+        mState = !mState;
+        repaint();
+        if (onChange) onChange(mState);
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        auto r = getLocalBounds().toFloat();
+        const float trackW = 20.0f, trackH = 38.0f;
+        // Track on the RIGHT; both labels sit to its left and stay visible. The handle
+        // position (not colour) shows the state — no accent highlight at all.
+        auto track = juce::Rectangle<float>(r.getRight() - trackW, r.getCentreY() - trackH * 0.5f,
+                                            trackW, trackH);
+        g.setColour(colors::tile);
+        g.fillRoundedRectangle(track, trackW * 0.5f);
+        g.setColour(colors::outline);
+        g.drawRoundedRectangle(track, trackW * 0.5f, 1.0f);
+
+        const float hd = trackW - 6.0f; // handle diameter
+        const float hx = track.getCentreX() - hd * 0.5f;
+        const float hy = mState ? track.getY() + 3.0f : track.getBottom() - 3.0f - hd;
+        g.setColour(colors::text2); // neutral handle, no accent
+        g.fillEllipse(hx, hy, hd, hd);
+
+        const float labW = track.getX() - r.getX() - 6.0f;
+        g.setFont(fonts::archivo(11.0f, fonts::SemiBold));
+        g.setColour(mState ? colors::textBright : colors::textDim); // top label = "on" (up)
+        g.drawText(mOnLabel, juce::Rectangle<float>(r.getX(), track.getY() - 3.0f, labW, 15.0f),
+                   juce::Justification::centredRight);
+        g.setColour(mState ? colors::textDim : colors::textBright); // bottom label = "off" (down)
+        g.drawText(mOffLabel, juce::Rectangle<float>(r.getX(), track.getBottom() - 12.0f, labW, 15.0f),
+                   juce::Justification::centredRight);
+    }
+
+private:
+    juce::String mOnLabel, mOffLabel;
+    bool mState = false;
+};
+
 class DelayPanel : public BlockPanel
 {
 public:
     explicit DelayPanel(juce::AudioProcessorValueTreeState &apvts)
         : BlockPanel("DELAY"), mApvts(apvts)
     {
-        mSyncLabel.setText("Sync", juce::dontSendNotification);
-        mSyncLabel.setColour(juce::Label::textColourId, colors::textDim);
-        addAndMakeVisible(mSyncLabel);
-        mSync.addItemList({"Free", "1/1", "1/2.", "1/2", "1/2T", "1/4.", "1/4",
-                           "1/4T", "1/8.", "1/8", "1/8T", "1/16.", "1/16", "1/16T"},
-                          1);
-        addAndMakeVisible(mSync);
-        mSyncAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-            apvts, "delaySync", mSync);
+        // Tempo divisions for the Time / Sync R dropdowns (index = choice value; 0 is
+        // Free/Link, never picked because the synced knobs clamp to 1..13).
+        const juce::StringArray divsL{"Free", "1/1", "1/2.", "1/2", "1/2T", "1/4.", "1/4",
+                                      "1/4T", "1/8.", "1/8", "1/8T", "1/16.", "1/16", "1/16T"};
+        mDivNames = divsL;
 
-        mPingPong.setButtonText("Ping-Pong");
-        mPingPong.getProperties().set("pill", true);
-        addAndMakeVisible(mPingPong);
-        mPpAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            apvts, "delayPingPong", mPingPong);
+        // SYNC as a vertical 2-way toggle (Free / Sync) sitting next to the Time knob.
+        // Sync -> the Time knob steps tempo divisions (driving delaySync) and shows the
+        // resolved ms; Free -> it sets free ms (delayTime). refresh() mirrors its state
+        // from delaySync; mLastDiv remembers the division across a Free trip.
+        mSyncToggle = std::make_unique<VToggle>("Sync", "Free"); // up = Sync, down = Free
+        addAndMakeVisible(*mSyncToggle);
+        mSyncToggle->onChange = [this](bool sync) {
+            if (sync) setParamIndex("delaySync", mLastDiv > 0 ? mLastDiv : 6); // -> last div (def 1/4)
+            else      setParamIndex("delaySync", 0);                           // -> Free
+            refresh();
+        };
 
+        // Sync R is the R side in Dual. Like the Time knob it does double duty: Free ->
+        // free R ms (delayTimeR); Sync -> R division (delaySyncR). It always shows the
+        // measured R ms; refresh() rebinds it with the Free/Sync toggle. (Created on the
+        // free param to match the initial Free state.)
+        mSyncRKnob = std::make_unique<LabeledKnob>(apvts, "delayTimeR", "Sync R");
+        mSyncRKnob->setReadoutFn([this](double v) {
+            const float ms = mTimeMsRProvider ? mTimeMsRProvider() : (float)v;
+            return juce::String(juce::roundToInt(ms)) + " ms";
+        });
+        mSyncRKnob->slider().onValueChange = [this] { refresh(); };
+        addAndMakeVisible(*mSyncRKnob);
+
+        // Space Tape MODE dial — the multi-head tape echo's 11 echo modes + Reverb-only. Stepped
+        // knob with click-to-pick menu (like Sync). Shown only for Space Tape
+        // (replaces Sync R). Modes 5-11/Reverb auto-engage the rig Spring.
+        const juce::StringArray headNames{"1 Head 1", "2 Head 2", "3 Head 3", "4 Heads 2+3",
+                                          "5 Head 1 +Rev", "6 Head 2 +Rev", "7 Head 3 +Rev",
+                                          "8 Heads 1+2 +Rev", "9 Heads 2+3 +Rev",
+                                          "10 Heads 1+3 +Rev", "11 All +Rev", "12 Reverb Only"};
+        mHeadKnob = std::make_unique<LabeledKnob>(apvts, "delayHeadMode", "Mode");
+        // Readout under the knob = just the mode number (12 = "Reverb"); the full
+        // descriptive names live in the click-to-pick menu (setValueMenu) below.
+        mHeadKnob->slider().textFromValueFunction =
+            [](double v) {
+                const int i = juce::jlimit(0, 11, (int)std::lround(v));
+                return i == 11 ? juce::String("Reverb") : juce::String(i + 1);
+            };
+        mHeadKnob->slider().updateText();
+        mHeadKnob->setValueMenu(headNames);
+        addChildComponent(*mHeadKnob); // visibility toggled in refresh()
+
+        // Stereo MODE selector as a dropdown (Single / Dual / Ping-Pong). Single =
+        // one linked time; Dual = independent L/R divisions (Sync R active);
+        // Ping-Pong = L/R bounce. It drives the underlying delaySyncR (Link) +
+        // delayPingPong states the DSP already routes from, so no new params.
+        mModeBox.addItemList({"Single", "Dual", "Ping-Pong"}, 1);
+        addAndMakeVisible(mModeBox);
+        mModeBox.onChange = [this] {
+            const int i = mModeBox.getSelectedItemIndex();
+            if (i == 1) // Dual: ping off; if R is Linked, match it to L (fallback 1/4 if L is Free)
+            {
+                setParamIndex("delayPingPong", 0);
+                if ((int)mApvts.getRawParameterValue("delaySyncR")->load() == 0)
+                {
+                    const int l = (int)mApvts.getRawParameterValue("delaySync")->load();
+                    setParamIndex("delaySyncR", l >= 1 ? l : 6);
+                }
+            }
+            else if (i == 2) // Ping-Pong: R Linked + bounce on
+            {
+                setParamIndex("delaySyncR", 0);
+                setParamIndex("delayPingPong", 1);
+            }
+            else // Single: R Linked, no bounce
+            {
+                setParamIndex("delaySyncR", 0);
+                setParamIndex("delayPingPong", 0);
+            }
+            refresh();
+        };
+
+        // Guitar delay presets: a quick menu that snapshots ONLY the delay params
+        // (the rest of the rig is untouched). Fast path to a usable sound.
+        mPresetBtn.setButtonText(juce::String::fromUTF8("Presets  \xE2\x96\xBE"));
+        addAndMakeVisible(mPresetBtn);
+        mPresetBtn.onClick = [this] {
+            juce::PopupMenu m;
+            const auto &ps = delayPresets();
+            for (int i = 0; i < (int)ps.size(); ++i)
+                m.addItem(i + 1, ps[(size_t)i].name);
+            m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&mPresetBtn),
+                            [this](int r) { if (r > 0) applyDelayPreset(r - 1); });
+        };
+
+        // Delay CHARACTER selector (Clean / Tape Echo) -> delayCharacter param.
+        // Tape engages the tape-echo voicing (saturation, bass/HF roll-off,
+        // wow/flutter + drift, tape glide); Clean is the transparent engine.
+        mCharacter = std::make_unique<SegmentedControl>(
+            apvts, "delayCharacter", juce::StringArray{"Clean", "Tape Echo", "Space Tape"});
+        addChildComponent(*mCharacter); // invisible param bridge; the left-column cards drive it
+        mCharacter->onChange = [this](int) { refresh(); resized(); repaint(); }; // relayout + card highlight
+
+        mTapsCaption.setText("ECHO TAPS", juce::dontSendNotification);
+        mTapsCaption.setColour(juce::Label::textColourId, colors::caption);
+        mTapsCaption.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.12f));
+        addAndMakeVisible(mTapsCaption);
+
+        mTaps = std::make_unique<DelayTaps>(apvts);
+        addAndMakeVisible(*mTaps);
+
+        // Wow/Flutter is tape character -> it belongs to the future tape delay, not
+        // the clean one. The DSP engine keeps it (mod amount stays 0 here).
         const std::pair<const char *, const char *> defs[] = {
             {"delayTime", "Time"},        {"delayFeedback", "Feedback"},
-            {"delayTone", "Tone"},        {"delayMod", "Wow/Flutter"},
+            {"delayLowCut", "Low Cut"},   {"delayTone", "High Cut"},
             {"delayWidth", "Width"},      {"delayMix", "Mix"}};
         for (const auto &[id, caption] : defs)
         {
             mKnobs.push_back(std::make_unique<LabeledKnob>(apvts, id, caption));
             addAndMakeVisible(*mKnobs.back());
         }
+        // Mix (last knob) reads pedal-style 0-10 off the knob ROTATION, so the skew
+        // stays invisible -- the dial just feels smooth; ears, not a percentage.
+        mKnobs.back()->setRotationReadout(10.0);
+
+        // Time knob (knob 0) always shows the MEASURED ms: the processor's
+        // sync-resolved time when synced, or the free ms otherwise. refresh() rebinds
+        // it between delayTime (Free) and delaySync (Sync, steps divisions).
+        mKnobs[0]->setReadoutFn([this](double v) {
+            const float ms = mTimeMsProvider ? mTimeMsProvider() : (float)v;
+            return juce::String(juce::roundToInt(ms)) + " ms";
+        });
+        mKnobs[0]->slider().onValueChange = [this] { refresh(); }; // sync change -> redraw taps + readout
+        refresh();
     }
 
-    void refresh() // time knob is owned by the sync division when sync != Free
+    // Wire the visualiser to the processor's sync-resolved delay times (per side)
+    // so synced tap spacing follows the tempo divisions, not just the Free knob. The
+    // L provider also feeds the Time knob's measured-ms readout.
+    void setTimeProvider(std::function<float()> f)
+    {
+        mTimeMsProvider = f;
+        if (mTaps) mTaps->getTimeMs = std::move(f);
+        if (!mKnobs.empty()) mKnobs[0]->updateReadout();
+    }
+    void setTimeProviderR(std::function<float()> f)
+    {
+        mTimeMsRProvider = f;
+        if (mTaps) mTaps->getTimeMsR = std::move(f);
+        if (mSyncRKnob) mSyncRKnob->updateReadout();
+    }
+
+    void refresh() // time knob is owned by the sync division when sync != Free; header shows time + FB
     {
         const int sync = (int)mApvts.getRawParameterValue("delaySync")->load();
-        mKnobs[0]->setEnabled(sync == 0);
+        const int chr = (int)mApvts.getRawParameterValue("delayCharacter")->load();
+        const bool space = chr == 2;   // Space Tape (multi-head)
+        const bool tape = chr != 0;    // any tape character = MONO
+        // Ping-pong + dual (independent L/R) are STEREO digital-delay tricks; the tape
+        // characters are authentically mono and the DSP forces them off for a tape
+        // character, so mirror that here -- treat Sync R / ping as Link/off for the
+        // header + mode badge, hide the stereo Mode selector + Sync R, and grey Width.
+        const int syncR = tape ? 0 : (int)mApvts.getRawParameterValue("delaySyncR")->load();
+        const bool ping = !tape && mApvts.getRawParameterValue("delayPingPong")->load() >= 0.5f;
+
+        // SYNC button reflects the free/sync state; remember a live division so the
+        // toggle can restore it. The Time knob does double duty: bound to delayTime in
+        // Free (sets ms), or to delaySync when synced (steps divisions, ms still shown).
+        const bool synced = sync > 0;
+        if (synced) mLastDiv = sync;
+        if (mSyncToggle) mSyncToggle->setState(synced);
+        if (synced != mWasSynced)
+        {
+            mWasSynced = synced;
+            if (synced)
+            {
+                mKnobs[0]->rebind(mApvts, "delaySync");
+                mKnobs[0]->slider().setRange(1.0, 13.0, 1.0); // exclude Free (0): the toggle owns that
+                mKnobs[0]->setValueMenu(mDivNames);           // click the readout -> pick a division
+                // Sync R follows: its own R division (can't reach Link -> stays Dual).
+                mSyncRKnob->rebind(mApvts, "delaySyncR");
+                mSyncRKnob->slider().setRange(1.0, 13.0, 1.0);
+                mSyncRKnob->setValueMenu(mDivNames);
+            }
+            else
+            {
+                mKnobs[0]->rebind(mApvts, "delayTime");
+                mKnobs[0]->setValueMenu({});                  // free ms: no division menu
+                mSyncRKnob->rebind(mApvts, "delayTimeR");     // free R ms
+                mSyncRKnob->setValueMenu({});
+            }
+            mKnobs[0]->updateReadout();
+            mSyncRKnob->updateReadout();
+        }
+
+        // No header time/FB readout on any character -- the knobs (and the Space Tape
+        // HEADS/TIME well) already show it; the duplicate summary was just clutter.
+        setHeaderRight(juce::String());
+
+        // Mode identifier: Dual if R unlinked, else Ping-Pong if bouncing, else Single
+        // (matches the DSP, where Dual overrides ping). Sync R is only live in Dual.
+        const bool dual = syncR > 0;
+        mModeBox.setSelectedItemIndex(dual ? 1 : (ping ? 2 : 0), juce::dontSendNotification);
+        if (mSyncRKnob) mSyncRKnob->setEnabled(dual);
+        // Width is an M/S spread on the wet -> only meaningful when there's stereo
+        // delay structure (Dual or Ping-Pong); in Single it does nothing, so grey it.
+        if (mKnobs.size() > 4) mKnobs[4]->setEnabled(dual || ping); // Width (now 5th knob)
+
+        // Tape characters are MONO: hide the stereo Mode selector + Sync R (Clean-only),
+        // grey Width. Space Tape additionally swaps in the multi-head Mode knob.
+        if (mHeadKnob) mHeadKnob->setVisible(space);
+        if (mSyncRKnob) mSyncRKnob->setVisible(!tape && dual); // only live in Dual
+        mModeBox.setVisible(!tape);
+        if (tape && mKnobs.size() > 4) mKnobs[4]->setEnabled(false); // Width n/a (mono tape)
+
+        // Space Tape repurposes the echo-taps well as the per-head time display.
+        mTapsCaption.setText(space ? "HEADS / TIME" : "ECHO TAPS", juce::dontSendNotification);
+
+        if (mTaps) mTaps->repaint();
+    }
+
+    // Set a choice/bool parameter to an integer value (UI -> param).
+    void setParamIndex(const char *id, int idx)
+    {
+        if (auto *p = mApvts.getParameter(id))
+        {
+            p->beginChangeGesture();
+            p->setValueNotifyingHost(p->convertTo0to1((float)idx));
+            p->endChangeGesture();
+        }
+    }
+
+    // Set any param to a real-world value (convertTo0to1 handles range/skew).
+    void setParamReal(const char *id, double val)
+    {
+        if (auto *p = mApvts.getParameter(id))
+        {
+            p->beginChangeGesture();
+            p->setValueNotifyingHost(p->convertTo0to1((float)val));
+            p->endChangeGesture();
+        }
+    }
+
+    // Guitar delay presets — full snapshots of the delay block only.
+    struct DPreset { const char *name; std::vector<std::pair<const char *, double>> kv; };
+    static const std::vector<DPreset> &delayPresets()
+    {
+        static const std::vector<DPreset> p = {
+            {"Slapback",       {{"delayOn",1},{"delaySync",0},{"delaySyncR",0},{"delayTime",100},{"delayFeedback",0.00},{"delayTone",8000},{"delayLowCut",200},{"delayWidth",1.00},{"delayMix",0.25},{"delayPingPong",0}}},
+            {"Quarter",        {{"delayOn",1},{"delaySync",6},{"delaySyncR",0},{"delayTime",500},{"delayFeedback",0.30},{"delayTone",8000},{"delayLowCut",200},{"delayWidth",1.00},{"delayMix",0.28},{"delayPingPong",0}}},
+            {"Dotted Lead",    {{"delayOn",1},{"delaySync",8},{"delaySyncR",0},{"delayTime",375},{"delayFeedback",0.40},{"delayTone",6000},{"delayLowCut",270},{"delayWidth",1.00},{"delayMix",0.40},{"delayPingPong",0}}},
+            {"Gallop",         {{"delayOn",1},{"delaySync",8},{"delaySyncR",6},{"delayTime",375},{"delayFeedback",0.30},{"delayTone",5000},{"delayLowCut",250},{"delayWidth",1.00},{"delayMix",0.38},{"delayPingPong",0}}},
+            {"Ambient Wash",   {{"delayOn",1},{"delaySync",6},{"delaySyncR",0},{"delayTime",500},{"delayFeedback",0.62},{"delayTone",5000},{"delayLowCut",220},{"delayWidth",1.00},{"delayMix",0.40},{"delayPingPong",0}}},
+            {"Dub Echo",       {{"delayOn",1},{"delaySync",6},{"delaySyncR",0},{"delayTime",500},{"delayFeedback",0.21},{"delayTone",1500},{"delayLowCut",250},{"delayWidth",1.00},{"delayMix",0.50},{"delayPingPong",1}}},
+        };
+        return p;
+    }
+    void applyDelayPreset(int idx)
+    {
+        const auto &ps = delayPresets();
+        if (idx < 0 || idx >= (int)ps.size()) return;
+        for (const auto &kv : ps[(size_t)idx].kv)
+            setParamReal(kv.first, kv.second);
+        refresh();
+    }
+
+    // Character display names (index = delayCharacter choice value).
+    static const char *kCharName(int i)
+    {
+        static const char *N[3] = {"Clean", "Tape Echo", "Space Tape"};
+        return N[juce::jlimit(0, 2, i)];
+    }
+
+    // A glyph that DESCRIBES each character:
+    //   0 Clean      -> 3 decaying echo spikes (precise digital repeats)
+    //   1 Tape Echo  -> a tape reel (rim + hub + spokes)
+    //   2 Space Tape -> a rocket ship (the "space" tape echo)
+    static void drawCharGlyph(juce::Graphics &g, int i, juce::Rectangle<float> gly,
+                              juce::Colour col)
+    {
+        g.setColour(col);
+        const auto c = gly.getCentre();
+        if (i == 0) // CLEAN: a clean train of 3 decaying echo spikes (narrow cluster)
+        {
+            const float span = gly.getWidth() * 0.55f; // tighter than the full box
+            const float x0 = c.x - span * 0.5f;
+            for (int b = 0; b < 3; ++b)
+            {
+                const float f = (float)b / 2.0f;
+                const float bx = x0 + f * span;
+                const float hh = gly.getHeight() * (0.5f - 0.36f * f);
+                g.fillRect(bx, c.y - hh, 1.8f, 2.0f * hh);
+            }
+            return;
+        }
+
+        if (i == 1) // TAPE ECHO: a tape reel
+        {
+            const float R = gly.getWidth() * 0.46f;
+            g.drawEllipse(c.x - R, c.y - R, 2.0f * R, 2.0f * R, 1.6f); // rim
+            const float rh = R * 0.30f;
+            g.fillEllipse(c.x - rh, c.y - rh, 2.0f * rh, 2.0f * rh);   // hub
+            for (int s = 0; s < 3; ++s)                                // spokes
+            {
+                const float a = (float)s * juce::MathConstants<float>::twoPi / 3.0f + 0.5f;
+                g.drawLine(c.x + rh * std::cos(a), c.y + rh * std::sin(a),
+                           c.x + (R - 1.5f) * std::cos(a), c.y + (R - 1.5f) * std::sin(a), 1.1f);
+            }
+            return;
+        }
+
+        // SPACE TAPE: a rocket ship.
+        const float bw = 3.4f;                       // body half-width
+        const float topY = gly.getY() + 1.0f;        // nose tip
+        const float bodyTop = gly.getY() + 6.0f;     // nose joins the body
+        const float botY = gly.getBottom() - 6.0f;   // body base (room for fins/flame)
+        juce::Path rocket;                            // nose + body outline
+        rocket.startNewSubPath(c.x, topY);
+        rocket.lineTo(c.x + bw, bodyTop);
+        rocket.lineTo(c.x + bw, botY);
+        rocket.lineTo(c.x - bw, botY);
+        rocket.lineTo(c.x - bw, bodyTop);
+        rocket.closeSubPath();
+        g.strokePath(rocket, juce::PathStrokeType(1.3f));
+        juce::Path fins;                              // two swept fins
+        fins.startNewSubPath(c.x - bw, botY - 4.0f);
+        fins.lineTo(c.x - bw - 3.0f, botY + 1.5f);
+        fins.lineTo(c.x - bw, botY);
+        fins.startNewSubPath(c.x + bw, botY - 4.0f);
+        fins.lineTo(c.x + bw + 3.0f, botY + 1.5f);
+        fins.lineTo(c.x + bw, botY);
+        g.strokePath(fins, juce::PathStrokeType(1.2f));
+        g.fillEllipse(c.x - 1.5f, bodyTop + 2.5f, 3.0f, 3.0f); // window
+        juce::Path flame;                             // exhaust
+        flame.startNewSubPath(c.x - 2.0f, botY + 1.0f);
+        flame.lineTo(c.x, botY + 5.0f);
+        flame.lineTo(c.x + 2.0f, botY + 1.0f);
+        g.strokePath(flame, juce::PathStrokeType(1.1f));
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        BlockPanel::paint(g);
+
+        // Left column: "CHARACTER" caption + selectable character cards, laid out
+        // exactly like the Reverb panel's character stack (glyph + name + highlight).
+        g.setColour(colors::caption);
+        g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.12f));
+        g.drawText("CHARACTER", mCharCap, juce::Justification::topLeft);
+
+        const int sel = juce::jlimit(0, 2, (int)mApvts.getRawParameterValue("delayCharacter")->load());
+        for (int i = 0; i < (int)mCardRects.size(); ++i)
+        {
+            auto r = mCardRects[(size_t)i].toFloat();
+            const bool on = (i == sel);
+            g.setColour(on ? colors::accent.withAlpha(0.12f) : juce::Colour(0xff181b21));
+            g.fillRoundedRectangle(r, 10.0f);
+            g.setColour(on ? colors::accent.withAlpha(0.55f) : colors::cardBorder);
+            g.drawRoundedRectangle(r, 10.0f, 1.0f);
+            // Per-character glyph that describes the sound (see drawCharGlyph).
+            auto gly = juce::Rectangle<float>(22.0f, 22.0f).withCentre(
+                {r.getX() + 26.0f, r.getCentreY()});
+            drawCharGlyph(g, i, gly, on ? colors::accent : colors::caption);
+            g.setColour(on ? colors::textBright : colors::text2);
+            g.setFont(fonts::archivo(14.0f, fonts::SemiBold));
+            // Left-aligned. The icon box sits 15px in from the card's left edge
+            // (centre +26, half-width 11 -> left 15, right 37), so start the label
+            // 15px past the icon's right edge to match that padding: 37 + 15 = 52.
+            g.drawText(kCharName(i), r.withTrimmedLeft(52), juce::Justification::centredLeft);
+        }
+
+        // Right column: big character name header (mirrors the Reverb name line).
+        g.setColour(colors::textBright);
+        g.setFont(fonts::archivo(18.0f, fonts::Bold));
+        g.drawText(kCharName(sel), mNameRect, juce::Justification::centredLeft);
+
+        // Faint grouped tile behind the sync module (its edge is the fence).
+        if (!mModuleTile.isEmpty())
+        {
+            auto t = mModuleTile.toFloat();
+            g.setColour(juce::Colour(0xff181b21));
+            g.fillRoundedRectangle(t, 12.0f);
+            g.setColour(colors::cardBorder);
+            g.drawRoundedRectangle(t, 12.0f, 1.0f);
+        }
+        if (!mSyncSep.isEmpty())
+        {
+            g.setColour(colors::divider);
+            g.fillRect(mSyncSep);
+        }
+
+        // Caption centred over the Stereo Mode dropdown (the Free/Sync toggle labels
+        // itself, so it needs no separate title).
+        if (mModeBox.isVisible())
+        {
+            g.setColour(colors::caption);
+            g.setFont(fonts::archivo(9.0f, fonts::SemiBold, 0.10f));
+            g.drawText("STEREO MODE", mModeCap, juce::Justification::centred);
+        }
+    }
+
+    void mouseUp(const juce::MouseEvent &e) override
+    {
+        for (int i = 0; i < (int)mCardRects.size(); ++i)
+            if (mCardRects[(size_t)i].contains(e.getPosition()))
+            {
+                if (mCharacter) mCharacter->setEnabledIndex(i); // drives delayCharacter + onChange
+                return;
+            }
     }
 
     void resized() override
     {
-        // Sync + Ping-Pong in the header-right.
-        auto hr = headerArea();
-        mPingPong.setBounds(hr.removeFromRight(96).withSizeKeepingCentre(96, 26));
-        hr.removeFromRight(10);
-        mSync.setBounds(hr.removeFromRight(110).withSizeKeepingCentre(110, 28));
-        hr.removeFromRight(8);
-        mSyncLabel.setBounds(hr.removeFromRight(42).withSizeKeepingCentre(42, 20));
-        mSyncLabel.setJustificationType(juce::Justification::centredRight);
+        const int chr = (int)mApvts.getRawParameterValue("delayCharacter")->load();
+        const bool space = chr == 2; // Space Tape (multi-head)
+        const bool tape = chr != 0;  // any tape character = mono (no Sync R / Mode)
 
-        auto area = bodyArea().reduced(24, 14)
-                        .withSizeKeepingCentre(bodyArea().getWidth() - 48,
-                                               juce::jmin(bodyArea().getHeight() - 28, 170));
-        const int w = area.getWidth() / (int)mKnobs.size();
+        // Header-right: delay-only Presets menu (where Reverb keeps Freeze).
+        auto hr = headerArea();
+        mPresetBtn.setBounds(hr.removeFromRight(118).withSizeKeepingCentre(118, 30));
+
+        auto body = bodyArea().reduced(24, 18);
+        auto left = body.removeFromLeft(166);
+        body.removeFromLeft(20);
+        auto right = body;
+        right.setBottom(bodyArea().getBottom() - 6); // reclaim the bottom padding for the knob band
+
+        // --- left column: CHARACTER caption + 3 character cards ---------------
+        mCharCap = left.removeFromTop(14);
+        left.removeFromTop(8);
+        const int n = 3, gap = 8;
+        // Card height is the SAME as a Reverb card: the left column is identical, so
+        // we divide it by the reverb character count (kNumShipped) instead of our 3.
+        // A Delay card == a Reverb card; with fewer characters the column's lower
+        // space is simply left empty rather than stretching the cards taller.
+        const int rvN = nam_rig::ReverbBlock::kNumShipped;
+        const int ch = juce::jmax(34, (left.getHeight() - gap * (rvN - 1)) / rvN);
+        mCardRects.clear();
+        for (int i = 0; i < n; ++i)
+        {
+            mCardRects.push_back(left.removeFromTop(ch));
+            if (i < n - 1) left.removeFromTop(gap);
+        }
+
+        // --- right column: name header --------------------------------------
+        mNameRect = right.removeFromTop(24);
+        right.removeFromTop(8);
+
+        // "ECHO TAPS" / "HEADS / TIME" caption above the visualiser.
+        auto capRow = right.removeFromTop(16);
+        mTapsCaption.setBounds(capRow.removeFromLeft(140).withSizeKeepingCentre(140, 16));
+        right.removeFromTop(4);
+
+        // --- bottom band: effect knobs | divider | sync module ----------------
+        // Every dial shares ONE baseline (anchored to the bottom of the band) so the
+        // whole row reads uniformly. The sync module on the right is only as wide as
+        // its content: the Sync toggle + Stereo Mode dropdown (equal width) sit above
+        // the Sync R knob, which lines up with the main dials.
+        auto bottom = right.removeFromBottom(162); // taller band -> uses the reclaimed bottom space
+        right.removeFromBottom(10);
+        mTaps->setBounds(right);
+
+        const int knobH = 92;                 // shared knob-cell height (caption+dial+value)
+        const int moduleW = 120;              // grouped sync tile
+
+        // Right sync module, inside a faint grouped tile (the tile edge is the fence,
+        // so there's no separate divider line).
+        auto moduleCol = bottom.removeFromRight(moduleW);
+        bottom.removeFromRight(16);           // gap between the knobs and the module
+        mModuleTile = moduleCol;
+        mSyncSep = {};                        // tile replaces the standalone divider
+
+        auto tileFull = moduleCol; // the whole tile, before carving out the dropdown
+
+        // Stereo Mode dropdown anchored at the TOP of the tile -> it stays put whether
+        // or not the Sync R knob is showing below.
+        moduleCol.removeFromTop(8);
+        mModeCap = moduleCol.removeFromTop(12);
+        moduleCol.removeFromTop(2);
+        auto ctlRow = moduleCol.removeFromTop(28);
+        mModeBox.setBounds(ctlRow.withSizeKeepingCentre(juce::jmin(96, moduleW), 28));
+
+        // Knob slot: Clean's Sync R centres in the space below the dropdown; Space
+        // Tape has no dropdown, so its Mode knob centres in the WHOLE tile.
+        auto knobArea = space ? tileFull : moduleCol;
+        auto srKnob = knobArea.withSizeKeepingCentre(juce::jmin(96, moduleW),
+                                                     juce::jmin(knobArea.getHeight(), knobH));
+        if (!tape && mSyncRKnob) mSyncRKnob->setBounds(srKnob);
+        if (space && mHeadKnob) mHeadKnob->setBounds(srKnob);
+
+        // Main row: a Free/Sync toggle leads (next to Time), then the six effect knobs.
+        // They fill the FULL band height so the left side isn't bottom-heavy under the
+        // tall sync tile on the right.
+        auto mainRow = bottom; // use the whole band, not just the bottom knob strip
+        auto togCell = mainRow.removeFromLeft(80);
+        if (mSyncToggle)
+        {
+            auto tb = togCell.withSizeKeepingCentre(66, 56);
+            tb.setX(togCell.getX());        // nudge the toggle to the left of its cell
+            mSyncToggle->setBounds(tb);
+        }
+        const int cellW = mainRow.getWidth() / (int)mKnobs.size();
         for (auto &k : mKnobs)
-            k->setBounds(area.removeFromLeft(w).reduced(6, 0));
+        {
+            auto cell = mainRow.removeFromLeft(cellW).reduced(0, 8); // fill the band vertically
+            k->setBounds(cell.withSizeKeepingCentre(juce::jmin(cellW - 12, 108), cell.getHeight()));
+        }
     }
 
 private:
     juce::AudioProcessorValueTreeState &mApvts;
-    juce::ComboBox mSync;
-    juce::Label mSyncLabel;
-    juce::ToggleButton mPingPong;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mSyncAtt;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mPpAtt;
+    juce::Label mTapsCaption;
+    juce::TextButton mPresetBtn;  // delay-only preset menu
+    std::unique_ptr<VToggle> mSyncToggle; // Free / Sync vertical switch (next to Time)
+    juce::ComboBox mModeBox;      // Single / Dual / Ping-Pong stereo dropdown
+    std::unique_ptr<LabeledKnob> mSyncRKnob, mHeadKnob;
+    std::unique_ptr<SegmentedControl> mCharacter; // Clean / Tape Echo / Space Tape (hidden bridge)
+    std::unique_ptr<DelayTaps> mTaps;
     std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
+    std::vector<juce::Rectangle<int>> mCardRects; // character card hit/paint rects
+    juce::Rectangle<int> mCharCap, mNameRect, mSyncSep; // caption + name header + divider
+    juce::Rectangle<int> mModeCap, mModuleTile;        // STEREO MODE caption + grouped sync tile
+    juce::StringArray mDivNames;  // tempo divisions for the Time knob's synced dropdown
+    int mLastDiv = 6;             // remembered division (1/4) for the Sync toggle
+    bool mWasSynced = false;      // tracks free/sync to rebind the Time knob only on change
+    std::function<float()> mTimeMsProvider, mTimeMsRProvider; // measured L / R delay ms
 };
 
 //==============================================================================
