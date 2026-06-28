@@ -79,10 +79,17 @@ public:
         0b011, 0b110, 0b101, 0b111,  // 8-11 +rev:     H1+2, H2+3, H1+3, all
         0b000};                      // 12 reverb only (no echo)
     static bool spaceTapeReverbOn(int mode) { return mode >= 4; } // modes 5-11 + reverb-only
-    // Multi-head tape echo head spacing, MEASURED from the reference (1:1.95:2.79; close to the
-    // documented ~1:1.9:2.76, not the reissue's idealised 1:2:3).
-    static constexpr std::array<float, 3> kHeadRatio = {1.0f, 1.95f, 2.79f};
-    // Authentic head-1 (Repeat Rate) span; the Time knob remaps onto this for Space Tape.
+    // Multi-head tape echo head spacing. FREE = the AUTHENTIC measured ratios
+    // (1:1.95:2.79; close to the documented ~1:1.9:2.76, the real fixed-head tape
+    // positions). SYNC = the authentic ratios SNAPPED to the nearest musical division
+    // (1.95->2.0, 2.79->8/3) so the heads land on 1/8 : 1/4 : 1/2T (a host division,
+    // the next division, and a half-note triplet) — every head on the grid, but the
+    // triplet tail keeps the organic gallop of the real off-integer head spacing
+    // rather than a mechanical 1:2:3.
+    static constexpr std::array<float, 3> kHeadRatio     = {1.0f, 1.95f, 2.79f};
+    static constexpr std::array<float, 3> kHeadRatioSync = {1.0f, 2.0f,  8.0f / 3.0f};
+    // (legacy free-mode Repeat-Rate span constants, no longer used — head 1 now = the
+    // displayed time directly; kept for reference.)
     static constexpr float kStHead1MinMs = 69.0f, kStHead1MaxMs = 177.0f;
 
     // What a character switches on in the feedback loop. All-zero = behaves like
@@ -555,13 +562,15 @@ private:
 
             const float dry = stereo ? 0.5f * (left[i] + right[i]) : left[i]; // mono sum in
 
-            // Sum active playback heads (head k reads at k x base; wow/flutter scales
-            // with head distance, so a further head wobbles k x as much).
+            // Sum active playback heads (head k reads at ratio[k] x base; wow/flutter
+            // scales with head distance, so a further head wobbles that much more).
+            // FREE = authentic 1:1.95:2.79; SYNC = integer 1:2:3 (all heads on grid).
+            const auto &ratios = (mSyncIdx > 0) ? kHeadRatioSync : kHeadRatio;
             float wet = 0.0f;
             for (int h = 0; h < 3; ++h)
                 if (mask & (1 << h))
                 {
-                    const double d = std::max(2.0, (double)kHeadRatio[(size_t)h] * (base + modMs) * fsK);
+                    const double d = std::max(2.0, (double)ratios[(size_t)h] * (base + modMs) * fsK);
                     wet += mLine[0].readFrac6(d - 1.0);
                 }
             wet *= tapGain;

@@ -485,7 +485,7 @@ int main()
             d.setFeedback(0.0f);
             d.prepare({SR, BLK});
             settle(d);
-            std::vector<float> l((size_t)(1.5 * SR), 0.0f), r = l;
+            std::vector<float> l((size_t)(2.0 * SR), 0.0f), r = l;
             l[0] = r[0] = 1.0f;
             run(d, l, r);
             return onsets(l);
@@ -512,8 +512,8 @@ int main()
                 const double h1 = t[0] / SR * 1000.0;
                 const double r2 = (double)t[1] / t[0], r3 = (double)t[2] / t[0];
                 CHECK(std::abs(h1 - 500.0) < 8.0, "T15 sync head1 %.1f ms on 1/4 div 500", h1);
-                CHECK(std::abs(r2 - 1.95) < 0.05, "T15 sync head2 ratio %.3f ~ 1.95", r2);
-                CHECK(std::abs(r3 - 2.79) < 0.05, "T15 sync head3 ratio %.3f ~ 2.79", r3);
+                CHECK(std::abs(r2 - 2.0) < 0.05, "T15 sync head2 ratio %.3f ~ 2.0 (1/4)", r2);
+                CHECK(std::abs(r3 - 2.6667) < 0.05, "T15 sync head3 ratio %.3f ~ 8/3 (1/2T)", r3);
             }
         }
     }
