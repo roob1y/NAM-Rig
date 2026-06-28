@@ -4011,6 +4011,73 @@ public:
         return N[juce::jlimit(0, 2, i)];
     }
 
+    // A glyph that DESCRIBES each character:
+    //   0 Clean      -> 3 decaying echo spikes (precise digital repeats)
+    //   1 Tape Echo  -> a tape reel (rim + hub + spokes)
+    //   2 Space Tape -> a rocket ship (the "space" tape echo)
+    static void drawCharGlyph(juce::Graphics &g, int i, juce::Rectangle<float> gly,
+                              juce::Colour col)
+    {
+        g.setColour(col);
+        const auto c = gly.getCentre();
+        if (i == 0) // CLEAN: a clean train of 3 decaying echo spikes (narrow cluster)
+        {
+            const float span = gly.getWidth() * 0.55f; // tighter than the full box
+            const float x0 = c.x - span * 0.5f;
+            for (int b = 0; b < 3; ++b)
+            {
+                const float f = (float)b / 2.0f;
+                const float bx = x0 + f * span;
+                const float hh = gly.getHeight() * (0.5f - 0.36f * f);
+                g.fillRect(bx, c.y - hh, 1.8f, 2.0f * hh);
+            }
+            return;
+        }
+
+        if (i == 1) // TAPE ECHO: a tape reel
+        {
+            const float R = gly.getWidth() * 0.46f;
+            g.drawEllipse(c.x - R, c.y - R, 2.0f * R, 2.0f * R, 1.6f); // rim
+            const float rh = R * 0.30f;
+            g.fillEllipse(c.x - rh, c.y - rh, 2.0f * rh, 2.0f * rh);   // hub
+            for (int s = 0; s < 3; ++s)                                // spokes
+            {
+                const float a = (float)s * juce::MathConstants<float>::twoPi / 3.0f + 0.5f;
+                g.drawLine(c.x + rh * std::cos(a), c.y + rh * std::sin(a),
+                           c.x + (R - 1.5f) * std::cos(a), c.y + (R - 1.5f) * std::sin(a), 1.1f);
+            }
+            return;
+        }
+
+        // SPACE TAPE: a rocket ship.
+        const float bw = 3.4f;                       // body half-width
+        const float topY = gly.getY() + 1.0f;        // nose tip
+        const float bodyTop = gly.getY() + 6.0f;     // nose joins the body
+        const float botY = gly.getBottom() - 6.0f;   // body base (room for fins/flame)
+        juce::Path rocket;                            // nose + body outline
+        rocket.startNewSubPath(c.x, topY);
+        rocket.lineTo(c.x + bw, bodyTop);
+        rocket.lineTo(c.x + bw, botY);
+        rocket.lineTo(c.x - bw, botY);
+        rocket.lineTo(c.x - bw, bodyTop);
+        rocket.closeSubPath();
+        g.strokePath(rocket, juce::PathStrokeType(1.3f));
+        juce::Path fins;                              // two swept fins
+        fins.startNewSubPath(c.x - bw, botY - 4.0f);
+        fins.lineTo(c.x - bw - 3.0f, botY + 1.5f);
+        fins.lineTo(c.x - bw, botY);
+        fins.startNewSubPath(c.x + bw, botY - 4.0f);
+        fins.lineTo(c.x + bw + 3.0f, botY + 1.5f);
+        fins.lineTo(c.x + bw, botY);
+        g.strokePath(fins, juce::PathStrokeType(1.2f));
+        g.fillEllipse(c.x - 1.5f, bodyTop + 2.5f, 3.0f, 3.0f); // window
+        juce::Path flame;                             // exhaust
+        flame.startNewSubPath(c.x - 2.0f, botY + 1.0f);
+        flame.lineTo(c.x, botY + 5.0f);
+        flame.lineTo(c.x + 2.0f, botY + 1.0f);
+        g.strokePath(flame, juce::PathStrokeType(1.1f));
+    }
+
     void paint(juce::Graphics &g) override
     {
         BlockPanel::paint(g);
@@ -4030,18 +4097,10 @@ public:
             g.fillRoundedRectangle(r, 10.0f);
             g.setColour(on ? colors::accent.withAlpha(0.55f) : colors::cardBorder);
             g.drawRoundedRectangle(r, 10.0f, 1.0f);
-            // Echo-train glyph: decaying vertical bars (the delay analogue of the
-            // reverb cards' concentric arcs).
+            // Per-character glyph that describes the sound (see drawCharGlyph).
             auto gly = juce::Rectangle<float>(22.0f, 22.0f).withCentre(
                 {r.getX() + 26.0f, r.getCentreY()});
-            g.setColour(on ? colors::accent : colors::caption);
-            for (int b = 0; b < 4; ++b)
-            {
-                const float f = (float)b / 3.0f;
-                const float bx = gly.getX() + f * gly.getWidth();
-                const float hh = gly.getHeight() * (0.5f - 0.34f * f);
-                g.fillRect(bx, gly.getCentreY() - hh, 2.0f, 2.0f * hh);
-            }
+            drawCharGlyph(g, i, gly, on ? colors::accent : colors::caption);
             g.setColour(on ? colors::textBright : colors::text2);
             g.setFont(fonts::archivo(14.0f, fonts::SemiBold));
             g.drawText(kCharName(i), r.withTrimmedLeft(46), juce::Justification::centredLeft);
