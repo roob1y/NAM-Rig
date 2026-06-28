@@ -148,8 +148,12 @@ stay byte-for-byte; there are regression tests asserting model 0 == legacy).
   `bModel`. Tests T30–T35; worked example in [`fuzz-face.md`](fuzz-face.md).
   **UNCOMMITTED** — offline build green (drive_test all pass, 0 failures), pending
   commit on Windows + play-test. Voiced germanium FF + all three behaviors (cleanup,
-  gate, ADAA) per Robbie's call. The `gate` (gThr 0.18, depth 0.6) and `dynDepth`
-  are ear-tunable taste params. The gate is now a **UI toggle** (default ON):
+  gate, ADAA) per Robbie's call. The gate is **RELATIVE to the note's peak**
+  (peak-hold instant-attack/~500ms-decay, gate on env/peak) so it's input-level
+  independent — the attack blooms clean at any level, only the decay tail chokes
+  (the first absolute-threshold version gated quiet rigs constantly; fixed +
+  T37 regression). `gate` depth 0.6, ratio knee 0.20..0.55, `dynDepth` 0.5 are
+  ear-tunable taste params. The gate is a **UI toggle** (default ON):
   per-slot `fGate` bool param → `DriveBlock::setGateOn()`; the Fuzz panel shows an
   Off/Gate `SegmentedControl` when `modelHasGate()` is true (Round Fuzz II only),
   placed in the glyph area. Test T36 covers the toggle. The Panels.h/processor

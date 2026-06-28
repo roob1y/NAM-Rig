@@ -653,6 +653,24 @@ int main()
               "T36 modelHasGate true only for Round Fuzz II");
     }
 
+    // ---- T37: gate is LEVEL-INDEPENDENT -- a QUIET strum's attack passes clean ----
+    // Regression for the absolute-threshold bug (gated quiet/uncalibrated rigs all the
+    // time). The relative (peak-hold) gate must let the onset bloom at any input level.
+    {
+        auto quietEarlyClean = [&](float peak) {
+            auto in = pluck(220.0, peak, 0.25, 38400);
+            const int N = (int)in.size();
+            auto on = realSlotM(Kind::Fuzz, 1, 0.6f, in);
+            DriveBlock d; d.setKind(0, (int)Kind::Fuzz); d.setModel(0, 1); d.setGateOn(0, false);
+            d.setDrive(0, 0.6f); d.setTone(0, 0.5f); d.prepare({SR, BLK});
+            auto off = in; for (size_t p = 0; p < in.size(); p += BLK) d.process(off.data() + p, (int)std::min<size_t>(BLK, in.size() - p));
+            return rmsWin(on, 0, N / 8) / rmsWin(off, 0, N / 8); // onset gate-on / gate-off
+        };
+        const double quiet = quietEarlyClean(0.05f), loud = quietEarlyClean(0.25f);
+        CHECK(quiet > 0.85 && loud > 0.85,
+              "T37 onset passes clean at any level: quiet %.2f, loud %.2f (gate only chokes the decay)", quiet, loud);
+    }
+
     std::printf("\n%s (%d failure%s)\n", gFails ? "RESULT: FAIL" : "RESULT: ALL PASS", gFails, gFails == 1 ? "" : "s");
     return gFails ? 1 : 0;
 }

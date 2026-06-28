@@ -68,13 +68,19 @@ threshold means a quieter signal clips less), so soft playing cleans up — meas
 4.3× quiet/loud harmonic spread.
 
 **Bias-starved gate** — a new `gate` field (0..1, zero-fill = every existing model
-unaffected). In the soft-poly path, an envelope-driven gate collapses the output as
-the note decays past a threshold (squared knee = the abrupt splat). Measured: a
-decaying pluck collapses to 0.38 of its early level vs 0.83 for the non-gated fuzz.
-It is **user-toggleable** (default ON): a per-slot `fGate` bool param drives
-`setGateOn()`, and `useGate = v.gate>0 && gateOn`. The Fuzz panel shows an Off/Gate
-toggle whenever `modelHasGate()` is true (i.e. only for Round Fuzz II), mirroring
-how the Range switch appears only for treble boosters.
+unaffected). In the soft-poly path, an envelope gate collapses the output as the
+note decays (squared knee = the abrupt splat). It is **RELATIVE to the note's own
+peak**, not an absolute level: a peak-hold follower (instant attack, ~500 ms decay)
+tracks the note's loudness and the gate acts on `env/peak`, so the attack blooms
+clean at ANY input level and only the decaying tail chokes. (The first version used
+an absolute envelope threshold — it gated quiet/uncalibrated rigs *all the time*,
+even on hard strums; the relative version fixes that, verified by T37: a quiet
+0.05-peak and a loud 0.25-peak strum both pass the onset clean, ratio 0.98.) A
+decaying pluck still collapses to ~0.38 of its early level vs 0.83 non-gated, and a
+sustained tone stays open (late/early ~1.0). It is **user-toggleable** (default ON):
+a per-slot `fGate` bool drives `setGateOn()`, `useGate = v.gate>0 && gateOn`. The
+Fuzz panel shows an Off/Gate toggle whenever `modelHasGate()` is true (Round Fuzz II
+only), mirroring how the Range switch appears only for treble boosters.
 
 ## The voicing row
 

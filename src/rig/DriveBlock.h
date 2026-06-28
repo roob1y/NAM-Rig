@@ -374,11 +374,12 @@ public:
             const float envAtk = 1.0f - (float)std::exp(-1.0 / (0.005 * sr)); // ~5 ms
             const float envRel = 1.0f - (float)std::exp(-1.0 / (0.120 * sr)); // ~120 ms
             const float invEnvRef = 1.0f / 0.25f; // picking-level reference
+            const float gpkDecay = (float)std::exp(-1.0 / (0.5 * sr)); // gate peak-hold release ~500 ms
 
             float hp = s.hp, lpz = s.lp, low = s.toneLp;
             float dcx = s.dcX1, dcy = s.dcY1;
             double x0 = s.x0, adx1 = s.adaaX1, adx2 = s.adaaX2;
-            float env = s.env;
+            float env = s.env, gpk = s.gpk;
 
             for (int i = 0; i < numSamples; ++i)
             {
@@ -410,12 +411,15 @@ public:
 
                     if (useGate)
                     {
-                        // bias-starved gate ("velcro"/splat): as a note decays below the
-                        // threshold the cold-biased stage can't sustain it, so the output
-                        // collapses FASTER than the input. Squared knee = the abrupt cut.
-                        const float gThr = 0.18f;                       // gate onset (normalised env)
-                        float gOpen = clamp01((envN - 0.5f * gThr) / gThr); // 0 below, 1 above
-                        gOpen *= gOpen;                                 // sharper knee
+                        // bias-starved gate ("velcro"/splat), RELATIVE to the note's own
+                        // peak so it works at ANY input level (a hard OR soft strum both
+                        // bloom, then choke as they decay past a fraction of their peak).
+                        // An absolute threshold gated quiet/uncalibrated rigs all the time.
+                        // gpk = peak-hold of the input env (instant attack, ~500 ms decay).
+                        gpk = (aenv > gpk) ? aenv : gpk * gpkDecay;
+                        const float ratio = env / (gpk + 1.0e-5f);      // ~1 at the attack, falls on decay
+                        float gOpen = clamp01((ratio - 0.20f) * (1.0f / 0.35f)); // choke <20% of peak, open >55%
+                        gOpen *= gOpen;                                 // sharper knee = the abrupt cut
                         c *= (1.0f - v.gate * (1.0f - gOpen));
                     }
                 }
@@ -470,7 +474,7 @@ public:
 
             s.hp = flush(hp); s.lp = flush(lpz); s.toneLp = flush(low);
             s.dcX1 = flush(dcx); s.dcY1 = flush(dcy); s.x0 = flushD(x0);
-            s.adaaX1 = flushD(adx1); s.adaaX2 = flushD(adx2); s.env = flush(env);
+            s.adaaX1 = flushD(adx1); s.adaaX2 = flushD(adx2); s.env = flush(env); s.gpk = flush(gpk);
         }
     }
 
@@ -492,13 +496,14 @@ private:
         double x0 = 0.0; // 1st-order ADAA history (double)
         double adaaX1 = 0.0, adaaX2 = 0.0; // 2nd-order ADAA history (cubic, double)
         float env = 0.0f; // envelope follower (touch dynamics)
+        float gpk = 0.0f; // gate peak-hold (relative bias-starved gate)
         int lastKind = -1;
         Biquad mid;     // pre/post-shaper peak (state preserved across blocks)
         Biquad emphPre, emphPost; // pre/de-emphasis pair (clip 3)
         void resetState()
         {
             hp = lp = toneLp = dcX1 = dcY1 = 0.0f; x0 = 0.0;
-            adaaX1 = adaaX2 = 0.0; env = 0.0f;
+            adaaX1 = adaaX2 = 0.0; env = 0.0f; gpk = 0.0f;
             lastKind = -1; mid.reset(); emphPre.reset(); emphPost.reset();
         }
     };
