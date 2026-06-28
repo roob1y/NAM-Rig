@@ -206,9 +206,16 @@ stay byte-for-byte; there are regression tests asserting model 0 == legacy).
   labels:** the Gold Horse panel shows **Gain / Treble / Output** (the Klon's own
   control names) while the TS-family OD models keep Drive/Tone/Level — captions only,
   params (oDrive/oTone/oLevel) unchanged (Panels.h `configure()` case 2, keyed on
-  `model == 3`). Possible future refinement: make the Klon **Treble** a true active
-  treble-shelf (it currently borrows the engine's symmetric tilt; matches well at
-  noon, but a real shelf keeps bass fixed as treble moves).
+  `model == 3`). **Treble = the real Klon active high-shelf** (DONE): new voicing
+  field `trebleShelfDb` (0 = legacy tilt → all other models byte-exact); when >0 the
+  Tone is a high-shelf at `pivotHz` with bass fixed and an asymmetric +18/−8 dB range
+  (cut = 0.44× boost), noon = flat. Gold Horse = `trebleShelfDb 18 @ pivot 408`. Test
+  T51. Tone audit of the other drives: GD II (TS) + Super Drive (SD-1) already use a
+  proper treble shelf (the cubic/asym-cubic `softPoly` path forces bass-fixed); Black
+  Rodent II = the RAT "Filter" LP (its real tone); Boost/Fuzz have no tone control;
+  the v1 legacy stand-ins (Green Drive 0, Black Rodent 0) keep the symmetric tilt by
+  design (byte-exact A/B refs). So tone is now circuit-modelled on every shipped "II"/
+  new model.
 
 Current model inventory: Boost (4: Range '65, EP Boost, Range '65 II, EP Boost II),
 Overdrive (**4**: Green Drive, Green Drive II, **Super Drive**, **Gold Horse**),

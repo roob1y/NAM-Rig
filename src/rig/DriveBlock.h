@@ -187,6 +187,11 @@ public:
         float gate;        // 0..1 bias-starved gate depth: as a note decays past a
                            //     threshold the cold-biased stage collapses the output
                            //     (the germanium "velcro"/splat); 0 = off
+        // --- Klon active treble shelf; 0 = use the legacy tilt/treble-shelf tone ---
+        float trebleShelfDb; // >0: Tone = an ACTIVE high-shelf at pivotHz (bass FIXED),
+                             //     asymmetric range +trebleShelfDb (full CW) down to
+                             //     -0.44*trebleShelfDb (full CCW) = the Klon's +18/-8 dB
+                             //     active treble control; noon (0.5) = flat. 0 = off
     };
 
     // A specific pedal MODEL inside a category (Type). A category can hold several
@@ -263,8 +268,10 @@ public:
             // gMin (genuinely clean min), moderate gMax (~the real 40 dB), lots of output
             // (outTrim -- it is also a boost). Tone = treble tilt ~450 Hz (the active
             // treble-shelf corner ~408 Hz, approximated by the engine tilt). Calibrated.
+            // tone = ACTIVE treble shelf (trebleShelfDb 18 @ pivot 408 Hz): the real
+            // Klon high-shelf (bass fixed, +18/-8 dB), noon = flat. NOT the engine tilt.
             {"Gold Horse", "Klon Centaur (transparent overdrive)",
-             { 1, 2.0f, 70.0f, 210.0f,  980.0f, 3.2f, 0.3f, 4700.0f, 0.00f,  450.0f, 0.95f, 1.0f, 0.0f,  0.0f, 700.0f, 0.50f, 0.30f, 0.0f, 1.0f}, false},
+             { 1, 2.0f, 70.0f, 210.0f,  980.0f, 3.2f, 0.3f, 4700.0f, 0.00f,  408.0f, 0.95f, 1.0f, 0.0f,  0.0f, 700.0f, 0.50f, 0.30f, 0.0f, 1.0f, 0.0f, 18.0f}, false},
         };
         static const Model dist[] = {
             // model 0: the original simple hard-clip stand-in (kept byte-for-byte for A/B).
@@ -403,8 +410,15 @@ public:
                 levelLin *= driveMakeup(k, model, s.drive.load()) * toneMakeup(k, model, s.tone.load());
 
             const float tilt = (s.tone.load() - 0.5f) * 2.0f;
-            const float trebleG = std::pow(10.0f, (tilt * kMaxTiltDb) * 0.05f);
-            const float bassG   = std::pow(10.0f, (-tilt * kMaxTiltDb) * 0.05f);
+            // Active treble shelf (Klon): bass FIXED, treble swings asymmetrically
+            // +trebleShelfDb (CW) .. -0.44*trebleShelfDb (CCW), noon = flat. Else the
+            // legacy symmetric tilt (+/-kMaxTiltDb see-saw). Non-shelf path is byte-exact.
+            const bool trebleShelf = (v.trebleShelfDb > 0.0f);
+            const float trebleDb = trebleShelf
+                ? (tilt >= 0.0f ? tilt * v.trebleShelfDb : tilt * v.trebleShelfDb * 0.44f)
+                : (tilt * kMaxTiltDb);
+            const float trebleG = std::pow(10.0f, trebleDb * 0.05f);
+            const float bassG   = trebleShelf ? 1.0f : std::pow(10.0f, (-tilt * kMaxTiltDb) * 0.05f);
             // RAT "Filter": one-pole LP whose corner sweeps from bright (tone 0, ~18 kHz
             // = effectively open) DOWN to v.toneFilterHz at full CW (tone 1) -> darker
             // clockwise, the opposite of the TS treble shelf. Else: the tilt pivot.

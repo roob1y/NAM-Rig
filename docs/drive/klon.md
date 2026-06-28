@@ -77,18 +77,23 @@ Super Drive).
   the Klon's famous *boost* comes from the per-slot **Level** knob, kept safe so the
   parallel clean sum doesn't overshoot the amp). Calibration-referenced; humbucker
   drives harder than single-coil (fixed clip threshold).
-- **Tone:** treble tilt at `pivotHz 450` (the engine tilt approximating the active
-  treble shelf corner ~408 Hz; bass mostly fixed near noon). A literal high-shelf
-  for the hard-clip path is a possible future refinement.
+- **Tone (Treble):** the **real Klon active treble shelf** — a high-shelf at
+  `pivotHz 408`, **bass below it fixed**, treble above it swinging asymmetrically
+  **+18 dB (full CW) to −8 dB (full CCW)** (`trebleShelfDb 18`, cut = 0.44×), flat at
+  noon. The circuit's Gvmax = (RV2+R23)/R21 = +18.24 dB, Gvmin = −8 dB. (New voicing
+  field `trebleShelfDb`; 0 = the legacy tilt, so every other model is byte-exact.
+  The panel labels this knob **Treble**.)
 
-Engine note: the hard-clip branch now does an optional clean blend
-(`cleanBlend>0 || dynDepth>0`); `kCleanScale` (the raw-input→clip-level gain) is the
-one new constant. Tunable taste knobs by ear: `cleanBlend`/`kCleanScale`
-(transparency), `gMax` (gain), `outTrim` (level), `lowCut`/`midDb` (body vs hump).
+Engine note: two small additions, both zero-fill/guarded so all other models stay
+byte-exact — (1) the hard-clip branch does an optional clean blend
+(`cleanBlend>0 || dynDepth>0`, raw input × `kCleanScale`), and (2) the
+`trebleShelfDb` active high-shelf tone. Tunable taste knobs by ear:
+`cleanBlend`/`kCleanScale` (transparency), `gMax` (gain), `outTrim` (level),
+`lowCut`/`midDb` (body vs hump), `trebleShelfDb`/`pivotHz` (treble shelf).
 
 ## 5. Voicing row (DriveBlock.h `od[]`, model 3)
 
 ```
-//  clip gMin gMax  lowCut midHz midDb midQ  lpHz   bias  pivot  outTrim shp post emphDb emphHz clean dyn  toneF adaa2
-{ 1, 2.0f, 70.0f, 210.0f, 980.0f, 3.2f, 0.3f, 4700.0f, 0.00f, 450.0f, 0.95f, 1.0f, 0.0f, 0.0f, 700.0f, 0.50f, 0.30f, 0.0f, 1.0f }
+//  clip gMin gMax  lowCut midHz midDb midQ  lpHz   bias  pivot  outTrim shp post emphDb emphHz clean dyn  toneF adaa2 gate trebleShelfDb
+{ 1, 2.0f, 70.0f, 210.0f, 980.0f, 3.2f, 0.3f, 4700.0f, 0.00f, 408.0f, 0.95f, 1.0f, 0.0f, 0.0f, 700.0f, 0.50f, 0.30f, 0.0f, 1.0f, 0.0f, 18.0f }
 ```
