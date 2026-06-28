@@ -1328,18 +1328,15 @@ private:
         m.addItem(1, "Off", true, mType.getSelectedItemIndex() == 0);
         for (int t = 1; t <= 4; ++t)
         {
+            // Every category nests under its own submenu -- even single-model ones
+            // (Distortion -> Black Rodent) -- so the menu reads uniformly.
             const auto cat = (DB::Kind)t;
             const int n = DB::modelCount(cat);
-            if (n > 1)
-            {
-                juce::PopupMenu sub;
-                for (int i = 0; i < n; ++i)
-                    sub.addItem(t * 100 + i + 10, DB::modelName(cat, i), true,
-                                mType.getSelectedItemIndex() == t && curModel() == i);
-                m.addSubMenu(names[t], sub);
-            }
-            else
-                m.addItem(t * 100 + 10, DB::modelName(cat, 0), true, mType.getSelectedItemIndex() == t);
+            juce::PopupMenu sub;
+            for (int i = 0; i < n; ++i)
+                sub.addItem(t * 100 + i + 10, DB::modelName(cat, i), true,
+                            mType.getSelectedItemIndex() == t && curModel() == i);
+            m.addSubMenu(names[t], sub);
         }
         m.showMenuAsync(juce::PopupMenu::Options()
                             .withTargetScreenArea(localAreaToGlobal(mPillRect))
