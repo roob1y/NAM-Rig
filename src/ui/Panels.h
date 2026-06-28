@@ -88,6 +88,11 @@ public:
         mSlider.setBounds(b.withSizeKeepingCentre(d, d));
     }
 
+    // JUCE doesn't repaint on setEnabled(), so force it -> the caption, value readout
+    // and rotary all grey out together when disabled (e.g. the delay Time knob once a
+    // Sync division owns the time).
+    void enablementChanged() override { repaint(); }
+
     // Shrink the caption row so longer captions fit narrower mod-lane knobs.
     void setCaptionHeight(int h) { mCaptionH = h; resized(); repaint(); }
 
@@ -122,6 +127,19 @@ public:
     }
     void updateReadout() { mSlider.updateText(); repaint(); }
 
+    // Fully custom value readout: the function returns the COMPLETE string (incl.
+    // any unit), so the auto unit suffix is suppressed and kept suppressed across
+    // rebind(). Used by the delay Time knob to show the measured ms in both Free
+    // and tempo-synced modes.
+    void setReadoutFn(std::function<juce::String(double)> fn)
+    {
+        mReadoutFn = true;
+        mSlider.textFromValueFunction = std::move(fn);
+        mUnit.clear();
+        mSlider.updateText();
+        repaint();
+    }
+
     // Re-point this knob at a different parameter (drive pedals rebind per TYPE).
     void rebind(juce::AudioProcessorValueTreeState &apvts, const juce::String &paramId)
     {
@@ -132,7 +150,7 @@ public:
         {
             mSlider.setDoubleClickReturnValue(
                 true, param->convertFrom0to1(param->getDefaultValue()));
-            mUnit = param->getLabel();
+            if (!mReadoutFn) mUnit = param->getLabel(); // custom readout supplies its own unit
         }
         repaint();
     }
@@ -149,7 +167,7 @@ private:
     juce::String mUnit;
     juce::StringArray mValueMenu; // when set, the value readout is a click-to-pick dropdown
     int mCaptionH = 15, mValueH = 16;
-    bool mShowValue = true, mDragging = false, mRotationReadout = false;
+    bool mShowValue = true, mDragging = false, mRotationReadout = false, mReadoutFn = false;
 };
 
 // Horizontal knob in a rounded bordered box: knob on the left, caption + value
@@ -3581,32 +3599,39 @@ public:
         auto drawLane = [&](float t, float laneCy) {
             const float sp = spacingFor(t);
             float x = sp, h = 1.0f;
-            for (int i = 0; i < 48 && x < 0.97f; ++i) { drawTap(x, laneCy, h); h *= fb; x += sp; }
+            // cap high enough that even the minimum tap spacing fills the well to the
+            // right edge (short Free times were stopping ~57% across at the old 48 cap).
+            for (int i = 0; i < 96 && x < 0.97f; ++i) { drawTap(x, laneCy, h); h *= fb; x += sp; }
         };
 
         if (ping) // one train, hopping top<->bottom each repeat = the L/R bounce
         {
             const float sp = spacingFor(timeL);
             float x = sp, h = 1.0f;
-            for (int i = 0; i < 48 && x < 0.97f; ++i)
+            for (int i = 0; i < 96 && x < 0.97f; ++i)
             {
                 drawTap(x, (i % 2 == 0) ? (cy - sep) : (cy + sep), h);
                 h *= fb;
                 x += sp;
             }
         }
-        else
+        else if (dual) // Dual = independent L/R times -> two distinct trains
         {
             drawLane(timeL, cy - sep);
             drawLane(timeR, cy + sep);
         }
+        else // Single (Clean) or Tape Echo = MONO -> a single centred train
+        {
+            drawLane(timeL, cy);
+        }
 
-        g.setColour(colors::captionDim);
-        g.setFont(fonts::mono(9.0f, fonts::SemiBold));
-        g.drawText("L", (int)in.getX(), (int)top + 1, 14, 11, juce::Justification::centred);
-        g.drawText("R", (int)in.getX(), (int)in.getBottom() - 12, 14, 11, juce::Justification::centred);
-        g.drawText(juce::String::fromUTF8("DRY \xE2\x86\x92 FEEDBACK ECHOES \xE2\x86\x92"),
-                   (int)in.getRight() - 200, (int)top + 1, 200, 11, juce::Justification::centredRight);
+        if (dual || ping) // only the stereo modes have L/R lanes -> only they get labels
+        {
+            g.setColour(colors::captionDim);
+            g.setFont(fonts::mono(9.0f, fonts::SemiBold));
+            g.drawText("L", (int)in.getX(), (int)top + 1, 14, 11, juce::Justification::centred);
+            g.drawText("R", (int)in.getX(), (int)in.getBottom() - 12, 14, 11, juce::Justification::centred);
+        }
     }
 
     // Space Tape head-time display. Left: a HEADS/TIME table (head index + its delay,
@@ -3619,11 +3644,14 @@ public:
         const bool  sync    = syncIdx > 0;
         const int   mode    = juce::jlimit(0, 11, (int)mApvts.getRawParameterValue("delayHeadMode")->load());
         const int   mask    = kStHeadMaskUI[(size_t)mode];
-        const float fb      = mApvts.getRawParameterValue("delayFeedback")->load();
         const float base    = getTimeMs ? getTimeMs()
                                         : mApvts.getRawParameterValue("delayTime")->load(); // head 1 ms
         const float *ratio  = sync ? kHeadRatioSyncUI : kHeadRatioFreeUI;
         const float headMs[3] = { base * ratio[0], base * ratio[1], base * ratio[2] };
+
+        // Keep the table + taps in a vertically-centred band so a tall well doesn't
+        // spread the content out with big empty margins top and bottom.
+        in = in.withSizeKeepingCentre(in.getWidth(), juce::jmin(in.getHeight(), 132.0f));
         const float rowH = in.getHeight() / 3.0f;
 
         // --- left: HEADS / TIME table (three rows) ---
@@ -3662,22 +3690,17 @@ public:
         const float scale = 0.72f / maxMs;
         auto tapAt = [&](float ms, bool on, float alpha) {
             const float x = x0 + ms * scale * W;
-            const float hh = (on ? 0.34f : 0.18f) * lane.getHeight();
+            const float hh = (on ? 0.28f : 0.15f) * lane.getHeight();
             g.setColour(colors::accent.withAlpha(alpha));
             g.fillRoundedRectangle(x - 2.5f, cy - hh, 5.0f, 2.0f * hh, 2.5f);
         };
-        // one faded feedback repeat of the cluster (a sense of the repeats)
-        if (fb > 0.02f)
-            for (int h = 0; h < 3; ++h)
-                if (mask & (1 << h))
-                    tapAt(headMs[h] + headMs[0], true, juce::jlimit(0.08f, 0.5f, fb * 0.5f));
         // the heads (inactive = faint ghost so the spacing still reads), numbered
         for (int h = 0; h < 3; ++h)
         {
             const bool on = (mask & (1 << h)) != 0;
             tapAt(headMs[h], on, on ? 0.95f : 0.18f);
             const float x = x0 + headMs[h] * scale * W;
-            g.setColour((on ? colors::accent : colors::captionDim).withAlpha(on ? 0.9f : 0.4f));
+            g.setColour((on ? colors::accent : colors::captionDim).withAlpha(on ? 0.9f : 0.7f));
             g.setFont(fonts::mono(8.0f, fonts::SemiBold));
             g.drawText(juce::String(h + 1), (int)(x - 8.0f), (int)lane.getY() - 1, 16, 10,
                        juce::Justification::centred);
@@ -3733,13 +3756,22 @@ public:
         juce::StringArray divsR = divsL;
         divsR.set(0, "Link"); // right knob: first step links to the left
 
-        mSyncKnob = std::make_unique<LabeledKnob>(apvts, "delaySync", "Sync");
-        mSyncKnob->slider().textFromValueFunction =
-            [](double v) { return juce::String(kSyncName(false, (int)std::lround(v))); };
-        mSyncKnob->slider().updateText();
-        mSyncKnob->setValueMenu(divsL);
-        mSyncKnob->slider().onValueChange = [this] { refresh(); };
-        addAndMakeVisible(*mSyncKnob);
+        mDivNames = divsL; // kept for the Time knob's tempo-division dropdown
+
+        // SYNC toggle (replaces the old stepped Sync knob): Free <-> tempo Sync. When
+        // on, the Time knob steps through musical divisions (driving delaySync) and
+        // shows the resolved ms; when off it sets free ms (delayTime). The button owns
+        // the free/sync flip; refresh() mirrors its state from delaySync.
+        mSyncBtn.setButtonText("Sync");
+        mSyncBtn.getProperties().set("pill", true);
+        mSyncBtn.setClickingTogglesState(false); // we drive delaySync ourselves
+        addAndMakeVisible(mSyncBtn);
+        mSyncBtn.onClick = [this] {
+            const int s = (int)mApvts.getRawParameterValue("delaySync")->load();
+            if (s > 0) { mLastDiv = s; setParamIndex("delaySync", 0); }            // -> Free
+            else       { setParamIndex("delaySync", mLastDiv > 0 ? mLastDiv : 6); } // -> last div (def 1/4)
+            refresh();
+        };
 
         mSyncRKnob = std::make_unique<LabeledKnob>(apvts, "delaySyncR", "Sync R");
         mSyncRKnob->slider().textFromValueFunction =
@@ -3757,8 +3789,13 @@ public:
                                           "8 Heads 1+2 +Rev", "9 Heads 2+3 +Rev",
                                           "10 Heads 1+3 +Rev", "11 All +Rev", "12 Reverb Only"};
         mHeadKnob = std::make_unique<LabeledKnob>(apvts, "delayHeadMode", "Mode");
+        // Readout under the knob = just the mode number (12 = "Reverb"); the full
+        // descriptive names live in the click-to-pick menu (setValueMenu) below.
         mHeadKnob->slider().textFromValueFunction =
-            [headNames](double v) { return headNames[juce::jlimit(0, 11, (int)std::lround(v))]; };
+            [](double v) {
+                const int i = juce::jlimit(0, 11, (int)std::lround(v));
+                return i == 11 ? juce::String("Reverb") : juce::String(i + 1);
+            };
         mHeadKnob->slider().updateText();
         mHeadKnob->setValueMenu(headNames);
         addChildComponent(*mHeadKnob); // visibility toggled in refresh()
@@ -3812,8 +3849,8 @@ public:
         // wow/flutter + drift, tape glide); Clean is the transparent engine.
         mCharacter = std::make_unique<SegmentedControl>(
             apvts, "delayCharacter", juce::StringArray{"Clean", "Tape Echo", "Space Tape"});
-        addAndMakeVisible(*mCharacter);
-        mCharacter->onChange = [this](int) { refresh(); resized(); }; // relayout: Tape Echo drops the Sync R slot
+        addChildComponent(*mCharacter); // invisible param bridge; the left-column cards drive it
+        mCharacter->onChange = [this](int) { refresh(); resized(); repaint(); }; // relayout + card highlight
 
         mTapsCaption.setText("ECHO TAPS", juce::dontSendNotification);
         mTapsCaption.setColour(juce::Label::textColourId, colors::caption);
@@ -3837,12 +3874,27 @@ public:
         // Mix (last knob) reads pedal-style 0-10 off the knob ROTATION, so the skew
         // stays invisible -- the dial just feels smooth; ears, not a percentage.
         mKnobs.back()->setRotationReadout(10.0);
+
+        // Time knob (knob 0) always shows the MEASURED ms: the processor's
+        // sync-resolved time when synced, or the free ms otherwise. refresh() rebinds
+        // it between delayTime (Free) and delaySync (Sync, steps divisions).
+        mKnobs[0]->setReadoutFn([this](double v) {
+            const float ms = mTimeMsProvider ? mTimeMsProvider() : (float)v;
+            return juce::String(juce::roundToInt(ms)) + " ms";
+        });
+        mKnobs[0]->slider().onValueChange = [this] { refresh(); }; // sync change -> redraw taps + readout
         refresh();
     }
 
     // Wire the visualiser to the processor's sync-resolved delay times (per side)
-    // so synced tap spacing follows the tempo divisions, not just the Free knob.
-    void setTimeProvider(std::function<float()> f) { if (mTaps) mTaps->getTimeMs = std::move(f); }
+    // so synced tap spacing follows the tempo divisions, not just the Free knob. The
+    // L provider also feeds the Time knob's measured-ms readout.
+    void setTimeProvider(std::function<float()> f)
+    {
+        mTimeMsProvider = f;
+        if (mTaps) mTaps->getTimeMs = std::move(f);
+        if (!mKnobs.empty()) mKnobs[0]->updateReadout();
+    }
     void setTimeProviderR(std::function<float()> f) { if (mTaps) mTaps->getTimeMsR = std::move(f); }
 
     void refresh() // time knob is owned by the sync division when sync != Free; header shows time + FB
@@ -3857,17 +3909,33 @@ public:
         // header + mode badge, hide the stereo Mode selector + Sync R, and grey Width.
         const int syncR = tape ? 0 : (int)mApvts.getRawParameterValue("delaySyncR")->load();
         const bool ping = !tape && mApvts.getRawParameterValue("delayPingPong")->load() >= 0.5f;
-        mKnobs[0]->setEnabled(sync == 0); // Time knob owned by the division when synced
 
-        static const char *kSyncNames[] = {"Free", "1/1", "1/2.", "1/2", "1/2T", "1/4.", "1/4",
-                                           "1/4T", "1/8.", "1/8", "1/8T", "1/16.", "1/16", "1/16T"};
-        const int fbPct = juce::roundToInt(mApvts.getRawParameterValue("delayFeedback")->load() * 100.0f);
-        juce::String t = (sync == 0)
-                             ? juce::String((int)mApvts.getRawParameterValue("delayTime")->load()) + " ms"
-                             : juce::String(kSyncNames[juce::jlimit(0, 13, sync)]);
-        if (syncR > 0) // dual: show the right-side division too (kSyncNames index matches)
-            t += juce::String::fromUTF8(" / ") + juce::String(kSyncNames[juce::jlimit(0, 13, syncR)]);
-        setHeaderRight(t + juce::String::fromUTF8("  \xC2\xB7  FB ") + juce::String(fbPct) + "%");
+        // SYNC button reflects the free/sync state; remember a live division so the
+        // toggle can restore it. The Time knob does double duty: bound to delayTime in
+        // Free (sets ms), or to delaySync when synced (steps divisions, ms still shown).
+        const bool synced = sync > 0;
+        if (synced) mLastDiv = sync;
+        mSyncBtn.setToggleState(synced, juce::dontSendNotification);
+        if (synced != mWasSynced)
+        {
+            mWasSynced = synced;
+            if (synced)
+            {
+                mKnobs[0]->rebind(mApvts, "delaySync");
+                mKnobs[0]->slider().setRange(1.0, 13.0, 1.0); // exclude Free (0): the button owns that
+                mKnobs[0]->setValueMenu(mDivNames);           // click the readout -> pick a division
+            }
+            else
+            {
+                mKnobs[0]->rebind(mApvts, "delayTime");
+                mKnobs[0]->setValueMenu({});                  // free ms: no division menu
+            }
+            mKnobs[0]->updateReadout();
+        }
+
+        // No header time/FB readout on any character -- the knobs (and the Space Tape
+        // HEADS/TIME well) already show it; the duplicate summary was just clutter.
+        setHeaderRight(juce::String());
 
         // Mode identifier: Dual if R unlinked, else Ping-Pong if bouncing, else Single
         // (matches the DSP, where Dual overrides ping). Sync R is only live in Dual.
@@ -3936,44 +4004,146 @@ public:
         refresh();
     }
 
+    // Character display names (index = delayCharacter choice value).
+    static const char *kCharName(int i)
+    {
+        static const char *N[3] = {"Clean", "Tape Echo", "Space Tape"};
+        return N[juce::jlimit(0, 2, i)];
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        BlockPanel::paint(g);
+
+        // Left column: "CHARACTER" caption + selectable character cards, laid out
+        // exactly like the Reverb panel's character stack (glyph + name + highlight).
+        g.setColour(colors::caption);
+        g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.12f));
+        g.drawText("CHARACTER", mCharCap, juce::Justification::topLeft);
+
+        const int sel = juce::jlimit(0, 2, (int)mApvts.getRawParameterValue("delayCharacter")->load());
+        for (int i = 0; i < (int)mCardRects.size(); ++i)
+        {
+            auto r = mCardRects[(size_t)i].toFloat();
+            const bool on = (i == sel);
+            g.setColour(on ? colors::accent.withAlpha(0.12f) : juce::Colour(0xff181b21));
+            g.fillRoundedRectangle(r, 10.0f);
+            g.setColour(on ? colors::accent.withAlpha(0.55f) : colors::cardBorder);
+            g.drawRoundedRectangle(r, 10.0f, 1.0f);
+            // Echo-train glyph: decaying vertical bars (the delay analogue of the
+            // reverb cards' concentric arcs).
+            auto gly = juce::Rectangle<float>(22.0f, 22.0f).withCentre(
+                {r.getX() + 26.0f, r.getCentreY()});
+            g.setColour(on ? colors::accent : colors::caption);
+            for (int b = 0; b < 4; ++b)
+            {
+                const float f = (float)b / 3.0f;
+                const float bx = gly.getX() + f * gly.getWidth();
+                const float hh = gly.getHeight() * (0.5f - 0.34f * f);
+                g.fillRect(bx, gly.getCentreY() - hh, 2.0f, 2.0f * hh);
+            }
+            g.setColour(on ? colors::textBright : colors::text2);
+            g.setFont(fonts::archivo(14.0f, fonts::SemiBold));
+            g.drawText(kCharName(i), r.withTrimmedLeft(46), juce::Justification::centredLeft);
+        }
+
+        // Right column: big character name header (mirrors the Reverb name line).
+        g.setColour(colors::textBright);
+        g.setFont(fonts::archivo(18.0f, fonts::Bold));
+        g.drawText(kCharName(sel), mNameRect, juce::Justification::centredLeft);
+
+        // Divider fencing the sync container off from the effect knobs.
+        if (!mSyncSep.isEmpty())
+        {
+            g.setColour(colors::divider);
+            g.fillRect(mSyncSep);
+        }
+    }
+
+    void mouseUp(const juce::MouseEvent &e) override
+    {
+        for (int i = 0; i < (int)mCardRects.size(); ++i)
+            if (mCardRects[(size_t)i].contains(e.getPosition()))
+            {
+                if (mCharacter) mCharacter->setEnabledIndex(i); // drives delayCharacter + onChange
+                return;
+            }
+    }
+
     void resized() override
     {
-        auto body = bodyArea();
+        const int chr = (int)mApvts.getRawParameterValue("delayCharacter")->load();
+        const bool space = chr == 2; // Space Tape (multi-head)
+        const bool tape = chr != 0;  // any tape character = mono (no Sync R / Mode)
 
-        // Top strip: Sync + Sync R stepped knobs (left); mode selector (right).
-        auto top = body.removeFromTop(96).reduced(24, 6);
-        mSyncKnob->setBounds(top.removeFromLeft(80).reduced(3, 0));
-        // Second slot holds Sync R (Clean) or the multi-head Mode knob (Space Tape).
-        // Tape Echo is mono with no dual, so it claims no slot -> no empty gap.
-        if ((int)mApvts.getRawParameterValue("delayCharacter")->load() != 1) // not Tape Echo
+        // Header-right: delay-only Presets menu (where Reverb keeps Freeze).
+        auto hr = headerArea();
+        mPresetBtn.setBounds(hr.removeFromRight(118).withSizeKeepingCentre(118, 30));
+
+        auto body = bodyArea().reduced(24, 18);
+        auto left = body.removeFromLeft(166);
+        body.removeFromLeft(20);
+        auto right = body;
+
+        // --- left column: CHARACTER caption + 3 character cards ---------------
+        mCharCap = left.removeFromTop(14);
+        left.removeFromTop(8);
+        const int n = 3, gap = 8;
+        // Card height is the SAME as a Reverb card: the left column is identical, so
+        // we divide it by the reverb character count (kNumShipped) instead of our 3.
+        // A Delay card == a Reverb card; with fewer characters the column's lower
+        // space is simply left empty rather than stretching the cards taller.
+        const int rvN = nam_rig::ReverbBlock::kNumShipped;
+        const int ch = juce::jmax(34, (left.getHeight() - gap * (rvN - 1)) / rvN);
+        mCardRects.clear();
+        for (int i = 0; i < n; ++i)
         {
-            mSyncRKnob->setBounds(top.removeFromLeft(80).reduced(3, 0));
-            if (mHeadKnob) mHeadKnob->setBounds(mSyncRKnob->getBounds()); // same slot (Space Tape)
+            mCardRects.push_back(left.removeFromTop(ch));
+            if (i < n - 1) left.removeFromTop(gap);
         }
-        const int mw = mMode ? mMode->idealWidth() : 240;
-        mMode->setBounds(top.removeFromRight(mw).withSizeKeepingCentre(mw, 28));
-        top.removeFromLeft(16);
-        mPresetBtn.setBounds(top.removeFromLeft(118).withSizeKeepingCentre(118, 28));
-        if (mCharacter)
+
+        // --- right column: name header --------------------------------------
+        mNameRect = right.removeFromTop(24);
+        right.removeFromTop(8);
+
+        // "ECHO TAPS" / "HEADS / TIME" caption above the visualiser.
+        auto capRow = right.removeFromTop(16);
+        mTapsCaption.setBounds(capRow.removeFromLeft(140).withSizeKeepingCentre(140, 16));
+        right.removeFromTop(4);
+
+        // --- bottom band: main knobs | separator | sync container ------------
+        // Everything lives along the bottom; the visualiser fills the tall space
+        // above it. The sync controls sit in their own container, fenced off from
+        // the effect knobs by a vertical divider.
+        auto bottom = right.removeFromBottom(150);
+        right.removeFromBottom(10);
+        mTaps->setBounds(right);
+
+        const int contW = 236;
+        auto cont = bottom.removeFromRight(contW);
+        mSyncSep = juce::Rectangle<int>(cont.getX() - 12, bottom.getY() + 10, 1,
+                                        bottom.getHeight() - 20); // the divider line
+        cont.removeFromLeft(16); // padding past the divider
+
+        auto r1 = cont.removeFromTop(28);
+        mSyncBtn.setBounds(r1.withSizeKeepingCentre(juce::jmin(124, r1.getWidth()), 28));
+        cont.removeFromTop(8);
+        auto r2 = cont.removeFromTop(28);
+        if (mMode)
         {
-            top.removeFromLeft(16);
-            const int cw = mCharacter->idealWidth();
-            mCharacter->setBounds(top.removeFromLeft(cw).withSizeKeepingCentre(cw, 28));
+            const int mw = juce::jmin(mMode->idealWidth(), r2.getWidth());
+            mMode->setBounds(r2.withSizeKeepingCentre(mw, 28));
         }
+        cont.removeFromTop(8);
+        // Second-slot knob: Sync R (Clean) or the multi-head Mode knob (Space Tape).
+        auto cKnob = cont.withSizeKeepingCentre(juce::jmin(96, cont.getWidth()),
+                                                juce::jmin(cont.getHeight(), 86));
+        if (!tape && mSyncRKnob) mSyncRKnob->setBounds(cKnob);
+        if (space && mHeadKnob) mHeadKnob->setBounds(cKnob);
 
-        // "ECHO TAPS" caption above the visualiser.
-        auto capRow = body.removeFromTop(20).reduced(24, 0);
-        mTapsCaption.setBounds(capRow.removeFromLeft(120).withSizeKeepingCentre(120, 16));
-
-        // Knob row at the bottom; the visualiser well fills the middle.
-        auto area = body.reduced(24, 0);
-        area.removeFromTop(2);
-        area.removeFromBottom(14);
-        auto knobRow = area.removeFromBottom(96);
-        area.removeFromBottom(12);
-        mTaps->setBounds(area);
-
-        const int kw = juce::jmin(108, knobRow.getWidth() / (int)mKnobs.size());
+        // Main effect knobs fill the rest of the bottom band, on the left.
+        auto knobRow = bottom;
+        const int kw = juce::jmin(104, knobRow.getWidth() / (int)mKnobs.size());
         auto row = knobRow.withSizeKeepingCentre(kw * (int)mKnobs.size(),
                                                  juce::jmin(knobRow.getHeight(), 92));
         for (auto &k : mKnobs)
@@ -3994,12 +4164,19 @@ private:
 
     juce::AudioProcessorValueTreeState &mApvts;
     juce::Label mTapsCaption;
-    juce::TextButton mPresetBtn; // delay-only preset menu
-    std::unique_ptr<LabeledKnob> mSyncKnob, mSyncRKnob, mHeadKnob;
+    juce::TextButton mPresetBtn;  // delay-only preset menu
+    juce::ToggleButton mSyncBtn;  // Free <-> tempo Sync (pill); drives delaySync
+    std::unique_ptr<LabeledKnob> mSyncRKnob, mHeadKnob;
     std::unique_ptr<SegmentedControl> mMode; // Single / Dual / Ping-Pong selector
-    std::unique_ptr<SegmentedControl> mCharacter; // Clean / Tape Echo selector
+    std::unique_ptr<SegmentedControl> mCharacter; // Clean / Tape Echo / Space Tape (hidden bridge)
     std::unique_ptr<DelayTaps> mTaps;
     std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
+    std::vector<juce::Rectangle<int>> mCardRects; // character card hit/paint rects
+    juce::Rectangle<int> mCharCap, mNameRect, mSyncSep; // caption + name header + divider
+    juce::StringArray mDivNames;  // tempo divisions for the Time knob's synced dropdown
+    int mLastDiv = 6;             // remembered division (1/4) for the Sync toggle
+    bool mWasSynced = false;      // tracks free/sync to rebind the Time knob only on change
+    std::function<float()> mTimeMsProvider; // processor's measured (resolved) delay ms
 };
 
 //==============================================================================
