@@ -196,9 +196,13 @@ public:
         float muffStages;    // >1: run an N-stage SOFT-clip CASCADE (the Big Muff's two
                              //     consecutive diode-in-feedback clip stages) instead of a
                              //     single shaper. Currently 2. 0/1 = the normal single clip.
-        float muffLpHz;      // the Miller-cap low-pass applied BEFORE EACH cubic clip stage
+        float muffLpHz;      // the input-booster Miller low-pass BEFORE clip stage 1
                              //     (the Muff's dark, smooth, no-fizz voice: clipping a
                              //     low-passed signal sounds smoother). Only used when muffStages>1.
+        float muffInterLpHz; // the clip-1 Miller low-pass BEFORE clip stage 2 (the real
+                             //     circuit's distinct, HIGHER corner ~1.78 kHz -> keeps the
+                             //     low-mid grind that a single shared corner over-darkens).
+                             //     0 -> fall back to muffLpHz. Only used when muffStages>1.
     };
 
     // A specific pedal MODEL inside a category (Type). A category can hold several
@@ -325,7 +329,7 @@ public:
             // controllable crunch at low Sustain, gMax 55 + the inter-stage gain = the
             // full saturated wall + max sustain at the top. Calibration-referenced.
             {"Violet Ram", "EHX Big Muff (Ram's Head, 2-stage)",
-             { 3, 3.0f, 55.0f,  80.0f,    0.0f, 0.0f, 0.7f, 1600.0f, 0.00f, 1000.0f, 2.00f, 0.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.0f,   0.0f, 0.0f, 0.0f, 0.0f, 2.0f, 1300.0f}, false},
+             { 3, 3.0f, 55.0f,  70.0f,    0.0f, 0.0f, 0.7f, 1170.0f, 0.00f, 1000.0f, 1.38f, 0.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.0f,   0.0f, 0.0f, 0.0f, 0.0f, 2.0f, 1200.0f, 1780.0f}, false},
         };
         switch (cat)
         {
@@ -427,7 +431,9 @@ public:
             const bool cubic = (v.clip == 3);
             const bool asymCubic = (v.clip == 4);         // asymmetric cubic fuzz (Round Fuzz II)
             const bool cascade = (v.muffStages > 1.0f);   // Big Muff 2-stage soft-clip cascade
-            const float millerCoef = (v.muffLpHz > 0.0f) ? coefForHz(v.muffLpHz, sr) : 0.0f; // pre-clip Miller LP
+            const float millerCoef = (v.muffLpHz > 0.0f) ? coefForHz(v.muffLpHz, sr) : 0.0f; // input-booster Miller LP (pre clip 1)
+            const float interMillerHz = (v.muffInterLpHz > 0.0f) ? v.muffInterLpHz : v.muffLpHz; // clip-1 Miller (pre clip 2): distinct higher corner
+            const float interMillerCoef = (interMillerHz > 0.0f) ? coefForHz(interMillerHz, sr) : 0.0f;
             const bool softPoly = (cubic || asymCubic) && !cascade; // single-shaper poly path (cascade has its own branch)
             const double kn = asymCubic ? (1.0 - (double)v.bias) : 1.0; // clip-4 negative knee (asymmetry)
             const bool adaa2 = (v.adaa2 > 0.5f);          // 2nd-order ADAA for this clip (hard clip)
@@ -482,20 +488,22 @@ public:
             // thin/bright, noon is scooped ~800 Hz, and the loudness gradient is gentle
             // (the old see-saw tilt actively boosted the lows +9 dB -> a huge, loud low
             // end CCW + a quiet CW; this fixes that). 2nd-order nodal solve (Rsrc 15k,
-            // Ct 2.2n, Rt 22k, Cb 22n, pot 100k, load 100k) bilinear-discretised,
-            // coeffs recomputed per block from the knob. Derivation: big_muff_response.py.
+            // Ct 10n, Rt 47k, Cb 6.8n, pot 100k, load 100k -- values fit so the FULL
+            // small-signal chain matches the real Muff: peak ~250 Hz, low-mid grind
+            // present, scoop ~1 kHz) bilinear-discretised, coeffs recomputed per block
+            // from the knob. Derivation: big_muff_response.py.
             float mtB0 = 1.0f, mtB1 = 0.0f, mtB2 = 0.0f, mtA1 = 0.0f, mtA2 = 0.0f;
             if (cascade)
             {
                 const double tn = (double)s.tone.load();
                 const double Rpt = (1.0 - tn) * 100000.0 + 1.0; // treble half of the 100k pot
                 const double Rpb = tn * 100000.0 + 1.0;         // bass half
-                const double b2 = 266200000.0 * Rpb;
-                const double b1 = 550000000000.0 * Rpb + 550000000000.0 * Rpt + 12100000000000000.0;
-                const double b0 = 250000000000000000000.0;
-                const double a2 = 4477.0 * Rpb * Rpt + 487630000.0 * Rpb + 447700000.0 * Rpt + 3993000000000.0;
-                const double a1 = 5500000.0 * Rpb * Rpt + 2667500000000.0 * Rpb + 753500000000.0 * Rpt + 217415000000000000.0;
-                const double a0 = 2500000000000000.0 * Rpb + 342500000000000000000.0;
+                const double b2 = 39950000.0 * Rpb;
+                const double b1 = 125000000000.0 * Rpb + 125000000000.0 * Rpt + 5875000000000000.0;
+                const double b0 = 12500000000000000000.0;
+                const double a2 = 527.0 * Rpb * Rpt + 58692500.0 * Rpb + 52700000.0 * Rpt + 599250000000.0;
+                const double a1 = 1250000.0 * Rpb * Rpt + 196450000000.0 * Rpb + 202500000000.0 * Rpt + 12026250000000000.0;
+                const double a0 = 125000000000000.0 * Rpb + 20250000000000000000.0;
                 const double K = 2.0 * sr;                  // bilinear s = K(1-z^-1)/(1+z^-1)
                 const double d0 = a2 * K * K + a1 * K + a0;  // normaliser
                 mtB0 = (float)((b2 * K * K + b1 * K + b0) / d0);
@@ -545,7 +553,7 @@ public:
 
                     float s2 = (float)y1 * kMuffStage2Gain;
                     if (hpCoef > 0.0f) { mHpInt += hpCoef * (s2 - mHpInt); s2 = s2 - mHpInt; } // inter-stage HP (tighten)
-                    if (millerCoef > 0.0f) { mLpInt += millerCoef * (s2 - mLpInt); s2 = mLpInt; } // clip-stage Miller LP
+                    if (interMillerCoef > 0.0f) { mLpInt += interMillerCoef * (s2 - mLpInt); s2 = mLpInt; } // clip-1 Miller LP (distinct ~1.78k corner)
                     const double xb2 = (double)s2;
                     const double y2 = clipCubicADAA2(xb2, adx1b, adx2b);
                     adx2b = adx1b; adx1b = xb2;
@@ -926,7 +934,7 @@ private:
         static const float D[6]  = {1.229f, 0.568f, 0.310f, 0.242f, 0.223f, 0.214f};
         static const float F[6]  = {0.543f, 0.367f, 0.302f, 0.280f, 0.273f, 0.271f};
         static const float F1[6] = {0.439f, 0.371f, 0.346f, 0.338f, 0.335f, 0.334f}; // Round Fuzz II (asym cubic, pink-noise ref)
-        static const float F2[6] = {0.591f, 0.395f, 0.314f, 0.284f, 0.273f, 0.269f}; // Violet Ram (Big Muff 2-stage cascade, pink-noise ref; compresses as both stages saturate)
+        static const float F2[6] = {0.587f, 0.396f, 0.316f, 0.286f, 0.275f, 0.272f}; // Violet Ram (Big Muff 2-stage cascade, pink-noise ref; compresses as both stages saturate)
         const float *t = (k == Kind::Boost) ? (model <= 0 ? B0 : model == 1 ? B1 : model == 2 ? B2 : B3)
                        : (k == Kind::Overdrive) ? (model >= 3 ? O3 : model == 2 ? O2 : O)
                        : (k == Kind::Distortion) ? D
@@ -942,7 +950,7 @@ private:
         static const float O[5]  = {0.472f, 0.757f, 1.000f, 0.851f, 0.548f};
         static const float D[5]  = {0.450f, 0.725f, 1.000f, 0.916f, 0.609f};
         static const float F[5]  = {0.533f, 0.833f, 1.000f, 0.773f, 0.485f};
-        static const float F2[5] = {0.671f, 0.836f, 1.000f, 1.154f, 1.277f}; // Violet Ram (Big Muff PASSIVE tone stack, pink-noise ref; gentle gradient)
+        static const float F2[5] = {0.858f, 0.952f, 1.000f, 0.994f, 0.929f}; // Violet Ram (Big Muff PASSIVE tone stack, pink-noise ref; very gentle gradient)
         // Round Fuzz models pin Tone to 0.5 (no tone) -> F centre is unity; the Muff
         // (model 2) is the only fuzz with a real Tone knob, so it gets its own table.
         const float *t = (k == Kind::Boost) ? (model <= 0 ? B0 : model == 1 ? B1 : B0)

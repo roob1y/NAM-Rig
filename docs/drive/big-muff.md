@@ -66,15 +66,21 @@ Per-sample cascade path (a new branch ahead of the single-shaper paths):
 
 ```
 u = xin * preGain                  // Sustain (Drive) maps gMin..gMax (log)
-u = highpass(u, lowCutHz=80)       // tighten lows pre-clip (shared pre-block)
-s1 = lowpass(u, muffLpHz=1300)     // input-booster Miller LP
+u = highpass(u, lowCutHz=70)       // tighten lows pre-clip (shared pre-block)
+s1 = lowpass(u, muffLpHz=1200)     // input-booster Miller LP
 y1 = cubicSoftClip_ADAA2(s1)       // STAGE 1 (soft, 2nd-order ADAA)
 s2 = y1 * kMuffStage2Gain          // fixed inter-stage gain
-s2 = highpass(s2, 80) ; s2 = lowpass(s2, 1300)   // inter-stage HP + Miller LP
+s2 = highpass(s2, 70) ; s2 = lowpass(s2, muffInterLpHz=1780)  // inter-stage HP + clip-1 Miller
 y2 = cubicSoftClip_ADAA2(s2)       // STAGE 2 (soft, 2nd-order ADAA)
 c  = y2
-// shared post: top LP (lpHz) -> DC block -> PASSIVE TONE-STACK biquad (§3) -> Level
+// shared post: top LP (lpHz=1170) -> DC block -> PASSIVE TONE-STACK biquad (§3) -> Level
 ```
+
+The **three Miller corners are distinct** (pre-clip-1 ~1200, inter ~1780, post ~1170),
+matching the real circuit's three caps — collapsing them to one shared corner
+over-darkened the low-mids and dropped the response peak to ~160 Hz (a PluginDoctor
+trace caught it); the real Muff peaks ~220 Hz with the low-mid grind present, which the
+distinct corners restore (measured peak ~250 Hz).
 
 The post tone shaping is the **real passive tone stack** (a per-block biquad driven by
 the Tone knob, §3), which replaces the engine's generic see-saw tilt **and** the old
@@ -100,23 +106,25 @@ Derived + fit in `big_muff_response.py`:
   static notch). The Big Muff tone control is a **passive network** — a treble
   high-pass and a bass low-pass blended by the Tone pot — so it can only *attenuate*
   (it has insertion loss), never boost. We derive its 2nd-order transfer function
-  `H(s, tone)` by nodal analysis (`Rsrc 15k, Ct 2.2n, Rt 22k, Cb 22n, pot 100k, load
-  100k` — values tuned so the idealised topology reproduces the measured Muff
-  behaviour), **bilinear-transform it to a biquad, and recompute the coefficients per
-  block from the knob**. Behaviour: **CCW** = bass low-pass (full, dark); **noon** =
-  scooped ~800 Hz (the famous mid dip emerges from the blend); **CW** = treble
-  high-pass (thinner, upper-mid forward). It is **passive** — measured peak ≤ −2.8 dB
-  at every position, so the loudness gradient is *gentle* (CCW only ~1.5× noon), the
+  `H(s, tone)` by nodal analysis (`Rsrc 15k, Ct 10n, Rt 47k, Cb 6.8n, pot 100k, load
+  100k` — values fit so the **full small-signal chain** reproduces the measured Muff:
+  peak ~250 Hz, low-mid grind present, ~1 kHz scoop), **bilinear-transform it to a
+  biquad, and recompute the coefficients per block from the knob**. Behaviour: **CCW**
+  = bass low-pass (full, dark); **noon** = scooped ~1 kHz; **CW** = treble high-pass
+  (thinner, upper-mid forward). It is **passive** — measured peak ≤ −4 dB at every
+  position, so the loudness gradient is *very gentle* (CCW only ~1.16× noon), the
   natural fuller-bass/thinner-treble of a real Muff, **not** the old engine see-saw
   tilt that actively boosted the lows +9 dB (that gave a huge CCW low end + a quiet
   CW — the bug this replaced). `midDb 0` (no separate notch — the tone stack owns the
   scoop).
-- **Band-limiting**: `lowCutHz 80` (the clip-stage HP 55/94 Hz), `muffLpHz 1300`
-  (the Miller LPs, applied pre each clip), `lpHz 1600` (the post-clip Miller roll —
-  mimics clip-2's feedback cap rolling its own output harmonics, so the top stays
-  smooth). Measured small-signal voice at noon (re 300 Hz): full lows (150 Hz +2 dB),
-  scooped mids (1 kHz −10 dB), dark top (3 kHz −25 dB) — the narrow, bassy, dark Muff
-  signature, now with the scoop coming from the real network.
+- **Band-limiting** — the three **distinct** Miller corners (the real circuit has three
+  caps, not one): `lowCutHz 70` (the clip-stage HP 55/94 Hz), `muffLpHz 1200`
+  (booster Miller, pre clip 1), `muffInterLpHz 1780` (clip-1 Miller, pre clip 2 — the
+  HIGHER corner that keeps the low-mid grind), `lpHz 1170` (clip-2 Miller, post). An
+  earlier single shared corner (1300) over-darkened the mids and dropped the peak to
+  ~160 Hz. Final small-signal voice at noon (abs dB): **peak ~250 Hz**, 130 Hz −1.4,
+  500 Hz −1.7, 1 kHz −7.8, 2 kHz −19 — the bassy, dark Muff with its low-mid grind
+  intact and the scoop a feature, not the rolloff.
 
 ---
 

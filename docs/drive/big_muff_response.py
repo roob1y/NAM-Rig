@@ -156,10 +156,13 @@ print("     bias=0 (symmetric back-to-back diode clipping); moderate gMin / high
 # ENGINE bilinear-transforms it to a biquad whose coeffs are recomputed per block
 # from the Tone knob (tone=1 -> treble/CW, tone=0 -> bass/CCW).
 #
-# Component values are tuned so the idealised topology reproduces the MEASURED Muff
-# behaviour (a ~800 Hz interior scoop at noon, dark LP at CCW, bright HP at CW,
-# passive insertion loss): Rsrc=15k, Ct=2.2nF, Rt=22k, Cb=22nF, pot=100k, load=100k.
-def tonestack_H(f, tone, Rsrc=15e3, Ct=2.2e-9, Rt=22e3, Cb=22e-9, Rpot=100e3, Rload=100e3):
+# Component values are fit so the FULL small-signal chain (band-limiting x tone stack)
+# reproduces the measured Muff: peak ~250 Hz, low-mid grind present, ~1 kHz scoop, dark
+# LP at CCW, bright HP at CW, passive. Rsrc=15k, Ct=10nF, Rt=47k, Cb=6.8nF, pot=100k,
+# load=100k. (An earlier Ct=2.2n/Rt=22k/Cb=22n forced a deeper ~800 Hz interior notch
+# but over-scooped the low-mids and dropped the chain peak to ~160 Hz -- a PluginDoctor
+# trace of the real rig caught it; the gentler values + distinct Miller corners fixed it.)
+def tonestack_H(f, tone, Rsrc=15e3, Ct=10e-9, Rt=47e3, Cb=6.8e-9, Rpot=100e3, Rload=100e3):
     jw = 1j * TwoPi * f
     Ysrc=1/Rsrc; Yct=jw*Ct; Yrt=1/Rt; Ycb=jw*Cb
     Ypt=1/max((1-tone)*Rpot,1.0); Ypb=1/max(tone*Rpot,1.0); Yld=1/Rload
@@ -178,3 +181,7 @@ for tone,lab in [(0.0,'CCW/bass'),(0.5,'noon'),(1.0,'CW/treble')]:
     print(f"  {lab:10}: peak={db.max():5.2f}dB (<=0 = PASSIVE)  notch@{nf:5.0f}Hz  120Hz={db[np.argmin(np.abs(fg-120))]:5.1f}  4k={db[np.argmin(np.abs(fg-4000))]:5.1f}")
 print("  Engine: bilinear biquad, Rpt=(1-tone)*100k, Rpb=tone*100k, coeffs from the nodal")
 print("  solve (see DriveBlock.h cascade tone section). midDb=0 (scoop now lives in the stack).")
+print("\nFINAL band-limiting (3 distinct Miller corners = the real circuit's 3 caps):")
+print("  lowCutHz=70 (HP x2), muffLpHz=1200 (pre clip1), muffInterLpHz=1780 (pre clip2),")
+print("  lpHz=1170 (post clip2). Full small-signal chain peaks ~250 Hz with the low-mid")
+print("  grind present (a single shared 1300 corner over-darkened it -> peak ~160 Hz).")

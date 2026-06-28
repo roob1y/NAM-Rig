@@ -982,7 +982,7 @@ int main()
     {
         auto gl = [&](float t) { auto in = sine(120.0, 0.1f, 16384); return goertzel(realSlotMT(Kind::Fuzz, 2, 0.5f, t, in), 120.0); };
         auto gh = [&](float t) { auto in = sine(3500.0, 0.1f, 16384); return goertzel(realSlotMT(Kind::Fuzz, 2, 0.5f, t, in), 3500.0); };
-        CHECK(gl(0.0f) > gl(1.0f) * 1.5, "T56 Tone morph: bass fuller CCW %.3f > %.3f CW", gl(0.0f), gl(1.0f));
+        CHECK(gl(0.0f) > gl(1.0f) * 1.2, "T56 Tone morph: bass fuller CCW %.3f > %.3f CW", gl(0.0f), gl(1.0f));
         CHECK(gh(1.0f) > gh(0.0f) * 1.5, "T56 Tone morph: treble fuller CW %.3f > %.3f CCW", gh(1.0f), gh(0.0f));
         const double rc = rms(realSlotMT(Kind::Fuzz, 2, 0.5f, 0.0f, sine(220.0, 0.15f, 16384)));
         const double rn = rms(realSlotMT(Kind::Fuzz, 2, 0.5f, 0.5f, sine(220.0, 0.15f, 16384)));
