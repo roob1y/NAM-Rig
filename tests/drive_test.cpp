@@ -548,6 +548,95 @@ int main()
         CHECK(worst < 1.5, "T29 EP Boost II no spikes across full-scale sweep: worst |out| %.2f", worst);
     }
 
+    // ====== Round Fuzz II (Fuzz model 1): germanium Fuzz Face (clip 4 asym cubic) ======
+
+    // helpers: a decaying pluck, and windowed RMS (for the gate test)
+    auto pluck = [&](double f, float a, double tau, int n) {
+        std::vector<float> v((size_t)n);
+        for (int i = 0; i < n; ++i) { const double t = i / SR; v[(size_t)i] = a * (float)(std::exp(-t / tau) * std::sin(2.0 * M_PI * f * t)); }
+        return v;
+    };
+    auto rmsWin = [](const std::vector<float> &x, int a, int b) {
+        double e = 0; for (int i = a; i < b; ++i) e += (double)x[i] * x[i]; return std::sqrt(e / (b - a));
+    };
+
+    // ---- T30: model 0 (Round Fuzz) preserved; Fuzz now has 2 models ----
+    {
+        auto in = sine(220.0, 0.2f, 8192);
+        auto m0 = realSlotM(Kind::Fuzz, 0, 0.7f, in);
+        auto def = realSlot(Kind::Fuzz, 0.7f, in); // default model == 0
+        bool same = true;
+        for (size_t i = 0; i < in.size(); ++i) same = same && (m0[i] == def[i]);
+        CHECK(same, "T30 Fuzz model 0 == legacy default (A/B preserves the original Round Fuzz)");
+        CHECK(DriveBlock::modelCount(Kind::Fuzz) == 2, "T30 Fuzz holds 2 models (Round Fuzz + Round Fuzz II)");
+    }
+
+    // ---- T31: Round Fuzz II is a heavy ASYMMETRIC fuzz, bright with a sub-bass trim ----
+    {
+        auto y = realSlotM(Kind::Fuzz, 1, 0.6f, sine(220.0, 0.2f, 24000));
+        const double thd = harmRatio(y, 220.0, 12);
+        const double h2h1 = goertzel(y, 440.0) / (goertzel(y, 220.0) + 1e-9);
+        CHECK(thd > 0.5 && h2h1 > 0.005,
+              "T31 Round Fuzz II heavy asym fuzz: THD %.2f, h2/h1 %.3f", thd, h2h1);
+        auto g = [&](double f) { auto in = sine(f, 0.005f, 16384); return goertzel(realSlotM(Kind::Fuzz, 1, 0.2f, in), f) / goertzel(in, f); };
+        const double brightDb = 20.0 * std::log10(g(3000.0) / g(60.0));
+        CHECK(brightDb > 1.0, "T31 bright + sub-bass trim: 3k vs 60Hz +%.1f dB", brightDb);
+    }
+
+    // ---- T32: soft-to-hard -- the clip gets harder as the input level rises (the FF touch) ----
+    {
+        const double soft = harmRatio(realSlotM(Kind::Fuzz, 1, 0.5f, sine(660.0, 0.02f, 24000)), 660.0, 12);
+        const double hard = harmRatio(realSlotM(Kind::Fuzz, 1, 0.5f, sine(660.0, 0.15f, 24000)), 660.0, 12);
+        CHECK(hard > soft * 1.5, "T32 soft->hard with level: THD small %.2f -> big %.2f", soft, hard);
+    }
+
+    // ---- T33: touch/volume cleanup (dynDepth) -- soft picking is cleaner than digging in ----
+    {
+        const double quiet = harmRatio(realSlotM(Kind::Fuzz, 1, 0.3f, sine(660.0, 0.03f, 24000)), 660.0, 10);
+        const double loud  = harmRatio(realSlotM(Kind::Fuzz, 1, 0.3f, sine(660.0, 0.40f, 24000)), 660.0, 10);
+        CHECK(loud > quiet * 2.0, "T33 touch cleanup: quiet THD %.2f << loud THD %.2f (%.1fx)", quiet, loud, loud / quiet);
+    }
+
+    // ---- T34: bias-starved GATE -- a decaying note collapses faster than the non-gated fuzz ----
+    {
+        auto in = pluck(220.0, 0.4f, 0.25, 38400);
+        const int N = (int)in.size();
+        auto g1 = realSlotM(Kind::Fuzz, 1, 0.6f, in); // gate on
+        auto g0 = realSlotM(Kind::Fuzz, 0, 0.6f, in); // no gate (the original sustains)
+        const double r1 = rmsWin(g1, 2 * N / 3, N) / rmsWin(g1, 0, N / 3);
+        const double r0 = rmsWin(g0, 2 * N / 3, N) / rmsWin(g0, 0, N / 3);
+        CHECK(r1 < r0 * 0.7, "T34 gate collapses the decay: RF II late/early %.3f << original %.3f", r1, r0);
+    }
+
+    // ---- T35: clip-4 2nd-order ADAA never spikes AND cuts alias vs a naive memoryless asym cubic ----
+    {
+        double worst = 0.0;
+        for (float dr = 0.0f; dr <= 1.001f; dr += 0.25f)
+            for (double f = 50.0; f <= 12000.0; f *= 1.2)
+            {
+                auto y = realSlotM(Kind::Fuzz, 1, dr, sine(f, 0.5f, 8192));
+                for (float v : y) worst = std::max(worst, (double)std::fabs(v));
+            }
+        CHECK(worst < 1.5, "T35 Round Fuzz II no spikes across full-scale sweep: worst |out| %.2f", worst);
+
+        // naive memoryless asym cubic sharing the voicing (preGain + low-cut + outTrim) -> alias baseline
+        const auto v = DriveBlock::voicingFor(Kind::Fuzz, 1);
+        const float pg = v.gMin * std::pow(v.gMax / v.gMin, 1.0f);
+        const double kn = 1.0 - (double)v.bias;
+        auto asymF = [&](double x) {
+            if (x >= 0.0) return x > 1.0 ? 2.0 / 3.0 : x - x * x * x / 3.0;
+            return x < -kn ? -(2.0 / 3.0) * kn : x - x * x * x / (3.0 * kn * kn);
+        };
+        const float hpC = 1.0f - (float)std::exp(-2.0 * M_PI * v.lowCutHz / SR);
+        auto in = sine(5000.0, 0.05f, 48000);
+        std::vector<float> naive(in.size());
+        float hp = 0;
+        for (size_t i = 0; i < in.size(); ++i) { float u = in[i] * pg; hp += hpC * (u - hp); u = u - hp; naive[i] = (float)asymF((double)u) * v.outTrim; }
+        auto adaa = realSlotM(Kind::Fuzz, 1, 1.0f, in);
+        const double a3 = goertzel(adaa, 3000.0), n3 = goertzel(naive, 3000.0);
+        CHECK(a3 < n3 * 0.7, "T35 clip-4 ADAA2 cuts alias@3k: %.2e < naive %.2e", a3, n3);
+    }
+
     std::printf("\n%s (%d failure%s)\n", gFails ? "RESULT: FAIL" : "RESULT: ALL PASS", gFails, gFails == 1 ? "" : "s");
     return gFails ? 1 : 0;
 }

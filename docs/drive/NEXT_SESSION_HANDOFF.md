@@ -133,11 +133,31 @@ stay byte-for-byte; there are regression tests asserting model 0 == legacy).
   pending commit on Windows + play-test. Voiced to the **Xotic** flavor by choice
   (Robbie's call); the pure-EP-3 flat alternative is noted in the doc if he wants it.
 
+- **Round Fuzz II** (Fuzz model 1, germanium Fuzz Face): the first rework that
+  needed new engine DSP. Voicing is just a bass trim (one-pole low-cut ~50 Hz,
+  bright, no top roll, fit `fuzz_face_response.py`). NEW **clip type 4 = asymmetric
+  cubic**: positive knee at 1 (rail +2/3), negative knee at `kn = 1−bias` (rail
+  −(2/3)kn) → asymmetry that PERSISTS at high gain (soft small-signal → tilted
+  square cranked); polynomial → exact F1/F2 → **2nd-order ADAA** (−44 dB alias vs
+  naive, peak-guarded, validated in isolation: kn=1 == the cubic exactly). NEW
+  **`gate` field** (0..1, zero-fill so every existing model is unaffected): envelope
+  gate that collapses the output on decay (the bias-starved splat). Touch/volume
+  **cleanup** via the cubic path's `dynDepth` (now serves clip 4). `gMin 8/gMax 200`,
+  `bias 0.45`, `dynDepth 0.50`, `gate 0.60`, `outTrim 0.65`. **Processor fix:** the
+  Fuzz case was hardcoded `setModel(s,0)` (the 2nd-model gotcha) → now reads
+  `bModel`. Tests T30–T35; worked example in [`fuzz-face.md`](fuzz-face.md).
+  **UNCOMMITTED** — offline build green (drive_test all pass, 0 failures), pending
+  commit on Windows + play-test. Voiced germanium FF + all three behaviors (cleanup,
+  gate, ADAA) per Robbie's call. The `gate` (gThr 0.18, depth 0.6) and `dynDepth`
+  are ear-tunable taste params.
+
 Current model inventory: Boost (4: Range '65, EP Boost, Range '65 II, EP Boost II),
 Overdrive (2: Green Drive, Green Drive II), Distortion (2: Black Rodent, Black
-Rodent II), Fuzz (1: Round Fuzz). **NB: `bModel` is now 0..3 = FULL for Boost** —
-adding a 5th Boost model needs the `bModel` param range widened (PluginProcessor.cpp
-`bModel` AudioParameterInt 0,3 → 0,4 + the UI menu IDs).
+Rodent II), Fuzz (2: Round Fuzz, Round Fuzz II). **NB: `bModel` is now 0..3 = FULL
+for Boost** — adding a 5th Boost model needs the `bModel` param range widened
+(PluginProcessor.cpp `bModel` AudioParameterInt 0,3 → 0,4 + the UI menu IDs). New
+engine bits available for reuse: **clip type 4 (asym cubic + 2nd-order ADAA)** and
+the **`gate`** field (any soft-poly clip).
 
 ---
 
@@ -148,12 +168,18 @@ Pick one and run the §1 playbook workflow on it.
 **Reworks** (existing simple stand-ins → give them the GD2/Black Rodent II
 treatment):
 
-| Model | Real circuit to fit | Notes |
-|-------|--------------------|-------|
-| **Round Fuzz** (Fuzz) | Fuzz Face / Tone Bender (germanium, bias-starved, asym) | model sag + input-impedance interaction; 2nd-order ADAA needs a polynomial recast of the tanh half |
+All four stand-in reworks are now **DONE**:
 
-Boost reworks both **DONE**: Range '65 → **Range '65 II** (model 2), EP Boost →
-**EP Boost II** (model 3). Boost's `bModel` slots (0..3) are now full.
+| Stand-in | Reworked as | Model |
+|----------|-------------|-------|
+| Range '65 (Boost) | **Range '65 II** (Dallas Rangemaster) | Boost model 2 |
+| EP Boost (Boost) | **EP Boost II** (Echoplex EP-3 / Xotic EP Booster) | Boost model 3 |
+| Black Rodent (Distortion) | **Black Rodent II** (ProCo RAT) | Distortion model 1 |
+| Round Fuzz (Fuzz) | **Round Fuzz II** (germanium Fuzz Face) | Fuzz model 1 |
+
+(Green Drive → Green Drive II was the original worked example.) Boost's `bModel`
+slots (0..3) are now full. Remaining drive work is **new models** (§ below), not
+reworks.
 
 **New models** to add alongside (add, don't replace):
 

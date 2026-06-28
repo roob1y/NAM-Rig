@@ -852,11 +852,11 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
             mChain.drive.setLevelDb(s, g("dLevel"));
             mChain.drive.setRange(s, 0); mChain.drive.setModel(s, (int)g("bModel"));
             break;
-        case 4: // Fuzz (no tone control)
+        case 4: // Fuzz (2 models: 0 Round Fuzz / 1 Round Fuzz II); no tone control
             mChain.drive.setDrive(s, g("fDrive"));
             mChain.drive.setTone(s, 0.5f);
             mChain.drive.setLevelDb(s, g("fLevel"));
-            mChain.drive.setRange(s, 0); mChain.drive.setModel(s, 0);
+            mChain.drive.setRange(s, 0); mChain.drive.setModel(s, (int)g("bModel"));
             break;
         default: break; // Off
         }

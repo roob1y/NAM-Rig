@@ -139,7 +139,7 @@ public:
     // Per-voicing character (single source of truth for process + tests).
     struct Voicing
     {
-        int   clip;        // 0 soft tanh, 1 hard sym, 2 hard ASYM rails, 3 cubic soft
+        int   clip;        // 0 soft tanh, 1 hard sym, 2 hard ASYM rails, 3 cubic soft, 4 ASYM cubic (fuzz)
         float gMin, gMax;  // pre-gain range (linear), log-mapped from Drive
         float lowCutHz;    // pre-shaper one-pole high-pass (tighten); 0 = off
         float midHz, midDb, midQ;  // pre-shaper peak (mid hump / treble peak); 0 dB = off
@@ -164,6 +164,10 @@ public:
                            //     (full-CW) corner; 0 = use the tilt/treble-shelf tone
         float adaa2;       // >0: run this clip type through 2nd-order ADAA (hard
                            //     clip gets the polynomial F2 path); 0 = 1st-order
+        // --- fuzz (clip 4) extra; 0 = no gate (every existing model zero-fills it) ---
+        float gate;        // 0..1 bias-starved gate depth: as a note decays past a
+                           //     threshold the cold-biased stage collapses the output
+                           //     (the germanium "velcro"/splat); 0 = off
     };
 
     // A specific pedal MODEL inside a category (Type). A category can hold several
@@ -229,13 +233,22 @@ public:
         static const Model fuzz[] = {
             {"Round Fuzz", "germanium fuzz",
              { 2, 6.0f,300.0f,  40.0f,    0.0f, 0.0f, 0.7f,    0.0f, 0.45f,  700.0f, 0.45f, 0.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.0f,   0.0f, 0.0f}, false},
+            // model 1: circuit-fit germanium Fuzz Face (AC128, the "round" one). Voicing is
+            // just a bass trim (one-pole low-cut ~50 Hz, fit fuzz_face_response.py), flat &
+            // bright above (NO top roll). The identity is the ASYMMETRIC cubic clip (type 4):
+            // persistent asymmetry at all gains (cold-biased Q1) -> soft for small signals,
+            // a tilted square when cranked; 2nd-order ADAA (polynomial, no dilog). dynDepth
+            // gives the touch/volume cleanup (soft picking -> cleaner); gate gives the
+            // bias-starved "velcro"/splat on decay. Hot, calibration-referenced gain range.
+            {"Round Fuzz II", "Fuzz Face (AC128 germanium, asym + gate)",
+             { 4, 8.0f,200.0f,  50.0f,    0.0f, 0.0f, 0.7f,    0.0f, 0.45f,  700.0f, 0.65f, 0.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.50f,  0.0f, 0.0f, 0.6f}, false},
         };
         switch (cat)
         {
         case Kind::Boost:      count = 4; return boost;
         case Kind::Overdrive:  count = 2; return od;
         case Kind::Distortion: count = 2; return dist;
-        case Kind::Fuzz:       count = 1; return fuzz;
+        case Kind::Fuzz:       count = 2; return fuzz;
         default:               count = 0; return nullptr;
         }
     }
@@ -326,10 +339,14 @@ public:
             const bool midPost = (v.midPost > 0.5f);
             const bool useLp = (v.lpHz > 0.0f);
             const bool cubic = (v.clip == 3);
+            const bool asymCubic = (v.clip == 4);         // asymmetric cubic fuzz (Round Fuzz II)
+            const bool softPoly = cubic || asymCubic;     // polynomial soft clips: clean blend + dynamics + gate path
+            const double kn = asymCubic ? (1.0 - (double)v.bias) : 1.0; // clip-4 negative knee (asymmetry)
             const bool adaa2 = (v.adaa2 > 0.5f);          // 2nd-order ADAA for this clip (hard clip)
             const bool ratTone = (v.toneFilterHz > 0.0f); // Tone = sweepable post-clip LP (RAT "Filter")
             const double asym = (v.clip == 2) ? (double)v.bias : 0.0;     // type-2 rail
-            const double inBias = (v.clip == 2) ? 0.0 : (double)v.bias;   // type 0/1/3 input bias
+            const double inBias = (v.clip == 2 || v.clip == 4) ? 0.0 : (double)v.bias; // type 0/1/3 input bias (4 = in-shaper asym)
+            const bool useGate = (v.gate > 0.0f);
             float levelLin = std::pow(10.0f, s.levelDb.load() * 0.05f) * v.outTrim;
             if (mAutoGain.load()) // OFF by default: Drive then naturally pushes the amp harder
                 levelLin *= driveMakeup(k, model, s.drive.load()) * toneMakeup(k, model, s.tone.load());
@@ -369,9 +386,10 @@ public:
                 if (useMid && !midPost) { const float m = s.mid.processSample(u); u += shapeAmt * (m - u); } // pre-clip peak (treble booster)
 
                 float c;
-                if (cubic)
+                if (softPoly)
                 {
-                    // ---- Green Drive II: pre-emphasis -> cubic 2nd-order ADAA -> de-emphasis -> clean blend ----
+                    // ---- polynomial soft clips (clip 3 cubic / clip 4 asym-cubic fuzz):
+                    //   pre-emphasis -> 2nd-order ADAA -> de-emphasis -> envelope clean blend (+ gate) ----
                     const float clean = u / preGain; // INPUT-level clean (TS-correct). Blending the
                     // gained u summed a huge signal that the envelope ripple modulated -> crackle.
                     float aenv = std::abs(xin);
@@ -381,10 +399,22 @@ public:
                     bEff = bEff < 0.0f ? 0.0f : (bEff > 0.9f ? 0.9f : bEff);
 
                     const double xb = (double)s.emphPre.processSample(u) + inBias;
-                    const double y = clipCubicADAA2(xb, adx1, adx2);
+                    const double y = asymCubic ? clipAsymCubicADAA2(xb, adx1, adx2, kn)
+                                               : clipCubicADAA2(xb, adx1, adx2);
                     adx2 = adx1; adx1 = xb;
                     float cc = s.emphPost.processSample((float)y);
                     c = (1.0f - bEff) * cc + bEff * clean;
+
+                    if (useGate)
+                    {
+                        // bias-starved gate ("velcro"/splat): as a note decays below the
+                        // threshold the cold-biased stage can't sustain it, so the output
+                        // collapses FASTER than the input. Squared knee = the abrupt cut.
+                        const float gThr = 0.18f;                       // gate onset (normalised env)
+                        float gOpen = clamp01((envN - 0.5f * gThr) / gThr); // 0 below, 1 above
+                        gOpen *= gOpen;                                 // sharper knee
+                        c *= (1.0f - v.gate * (1.0f - gOpen));
+                    }
                 }
                 else if (adaa2)
                 {
@@ -428,7 +458,7 @@ public:
                 else
                 {
                     const float high = c - low;
-                    const float bG = cubic ? 1.0f : bassG;
+                    const float bG = softPoly ? 1.0f : bassG;
                     toned = low * bG + high * trebleG;
                 }
                 const float outv = toned * levelLin;
@@ -551,6 +581,55 @@ private:
         return (2.0 / (x - x2)) * (cubD(x, x1) - cubD(x1, x2));
     }
 
+    // ---- asymmetric cubic soft-clip (type 4, Round Fuzz II) ----
+    // The germanium fuzz clips ASYMMETRICALLY at ALL gains (a cold-biased stage:
+    // one semicycle swings further than the other), so a symmetric shaper + DC bias
+    // won't do -- at high gain a biased odd shaper just squares up symmetrically.
+    // This shape has the POSITIVE knee at 1 (rail +2/3, the plain cubic) and the
+    // NEGATIVE knee at kn = 1 - bias (rail -(2/3)kn): the negative half saturates
+    // sooner, so the asymmetry PERSISTS into hard clipping (soft for small signals,
+    // a tilted square for big ones -- the Fuzz Face signature). Polynomial -> exact
+    // F1/F2 -> cheap 2nd-order ADAA (no dilogarithm). bias=0 (kn=1) == the cubic.
+    static double asymF(double x, double kn)
+    {
+        if (x >= 0.0) return x > 1.0 ? 2.0 / 3.0 : x - x * x * x / 3.0;
+        return x < -kn ? -(2.0 / 3.0) * kn : x - x * x * x / (3.0 * kn * kn);
+    }
+    static double asymF1(double x, double kn) // antiderivative (1st-order ADAA)
+    {
+        if (x >= 0.0) { if (x <= 1.0) return 0.5 * x * x - x * x * x * x / 12.0; return 5.0 / 12.0 + (2.0 / 3.0) * (x - 1.0); }
+        if (x >= -kn) return 0.5 * x * x - x * x * x * x / (12.0 * kn * kn);
+        const double Ln = (2.0 / 3.0) * kn; return (5.0 / 12.0) * kn * kn - Ln * (x + kn);
+    }
+    static double asymF2(double x, double kn) // 2nd antiderivative (2nd-order ADAA)
+    {
+        if (x >= 0.0) { if (x <= 1.0) return x * x * x / 6.0 - x * x * x * x * x / 60.0; const double t = x - 1.0; return 3.0 / 20.0 + (5.0 / 12.0) * t + (1.0 / 3.0) * t * t; }
+        if (x >= -kn) return x * x * x / 6.0 - x * x * x * x * x / (60.0 * kn * kn);
+        const double Ln = (2.0 / 3.0) * kn, t = x + kn; return -3.0 * kn * kn * kn / 20.0 + (5.0 / 12.0) * kn * kn * t - Ln * t * t / 2.0;
+    }
+    static double asymD(double a, double b, double kn) // (F2(a)-F2(b))/(a-b), L'Hopital -> F1(mid)
+    {
+        const double d = a - b;
+        if (std::abs(d) < 1.0e-5) return asymF1(0.5 * (a + b), kn);
+        return (asymF2(a, kn) - asymF2(b, kn)) / d;
+    }
+    // Same Parker/Bilbao 2nd-order kernel + the SAME peak guard as the cubic.
+    static double clipAsymCubicADAA2(double x, double x1, double x2, double kn)
+    {
+        const double TOL = 1.0e-5;
+        if (std::abs(x - x1) < TOL)
+        {
+            const double xBar = 0.5 * (x + x2);
+            const double delta = xBar - x1;
+            if (std::abs(delta) < TOL)
+                return asymF(0.5 * (xBar + x1), kn);
+            return (2.0 / delta) * (asymF1(xBar, kn) + (asymF2(x1, kn) - asymF2(xBar, kn)) / delta);
+        }
+        if (std::abs(x - x2) < TOL)
+            return (asymF1(x, kn) - asymF1(x1, kn)) / (x - x1); // peak guard: 1st-order over the step
+        return (2.0 / (x - x2)) * (asymD(x, x1, kn) - asymD(x1, x2, kn));
+    }
+
     // ---- hard clip (type 1) 2nd-order ADAA (Black Rodent II) ----
     // Hard clipping is the harshest shaper (square corners -> the most fold-back),
     // so it benefits most from 2nd-order. The clamp is piecewise-polynomial, so F1
@@ -617,9 +696,11 @@ private:
         static const float O[6]  = {0.666f, 0.435f, 0.296f, 0.212f, 0.161f, 0.129f};
         static const float D[6]  = {1.229f, 0.568f, 0.310f, 0.242f, 0.223f, 0.214f};
         static const float F[6]  = {0.543f, 0.367f, 0.302f, 0.280f, 0.273f, 0.271f};
+        static const float F1[6] = {0.439f, 0.371f, 0.346f, 0.338f, 0.335f, 0.334f}; // Round Fuzz II (asym cubic, pink-noise ref)
         const float *t = (k == Kind::Boost) ? (model <= 0 ? B0 : model == 1 ? B1 : model == 2 ? B2 : B3)
                        : (k == Kind::Overdrive) ? O
-                       : (k == Kind::Distortion) ? D : F;
+                       : (k == Kind::Distortion) ? D
+                       : (model <= 0 ? F : F1);
         return lerpTbl(t, 6, drive);
     }
     static float toneMakeup(Kind k, int model, float tone)
