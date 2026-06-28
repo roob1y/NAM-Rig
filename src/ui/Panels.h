@@ -289,6 +289,10 @@ public:
     // Stack the buttons vertically (equal size) instead of in a horizontal row.
     void setVertical(bool v) { if (mVertical != v) { mVertical = v; repaint(); } }
 
+    // Override the active-segment highlight colour (defaults to the global accent);
+    // drive pedals set this to the pedal's own colour so Range/Gate match the LED.
+    void setAccent(juce::Colour c) { if (mAccent != c) { mAccent = c; repaint(); } }
+
     void paint(juce::Graphics &g) override
     {
         auto f = fonts::archivo(12.0f, fonts::SemiBold);
@@ -311,9 +315,9 @@ public:
                 cell.addRoundedRectangle(r.getX(), r.getY(), r.getWidth(), r.getHeight(),
                                          rad, rad, top, top, bot, bot);
                 const bool on = i == active;
-                g.setColour(on ? (en ? colors::accent : colors::tileSel) : colors::tile);
+                g.setColour(on ? (en ? mAccent : colors::tileSel) : colors::tile);
                 g.fillPath(cell);
-                g.setColour((on && en) ? colors::accent : colors::outline);
+                g.setColour((on && en) ? mAccent : colors::outline);
                 g.strokePath(cell, juce::PathStrokeType(1.0f));
                 g.setColour(on ? (en ? colors::bg : colors::textDim) : (en ? colors::textDim : colors::captionDim));
                 g.drawText(mOptions[i], r, juce::Justification::centred);
@@ -327,9 +331,9 @@ public:
             const int w = (int)std::ceil(juce::GlyphArrangement::getStringWidth(f, mOptions[i])) + 26;
             auto r = juce::Rectangle<float>((float)x, 0.0f, (float)w, (float)getHeight());
             const bool on = i == active;
-            g.setColour(on ? (en ? colors::accent : colors::tileSel) : colors::tile);
+            g.setColour(on ? (en ? mAccent : colors::tileSel) : colors::tile);
             g.fillRoundedRectangle(r, 7.0f);
-            g.setColour((on && en) ? colors::accent : colors::outline);
+            g.setColour((on && en) ? mAccent : colors::outline);
             g.drawRoundedRectangle(r.reduced(0.5f), 7.0f, 1.0f);
             g.setColour(on ? (en ? colors::bg : colors::textDim) : (en ? colors::textDim : colors::captionDim));
             g.drawText(mOptions[i], r, juce::Justification::centred);
@@ -371,6 +375,7 @@ private:
     int mGap = 8;
     bool mVertical = false, mManual = false;
     int mManualIndex = -1;
+    juce::Colour mAccent { colors::accent };
 };
 
 // A small toggle "switch" (rounded track + sliding knob), bound to a bool param.
@@ -1431,8 +1436,14 @@ private:
         mKindStr = names[juce::jlimit(0, 4, type)];
         mSubStr = type == 0 ? juce::String("select a pedal")
                             : juce::String(nam_rig::DriveBlock::modelSub(cat, model));
+        // Range/Gate segmented controls take the pedal's own accent (the LED colour),
+        // so e.g. Round Fuzz's Off/Gate is red, not the global amber. They grey
+        // themselves via setEnabled(false) when the pedal is bypassed.
+        const juce::Colour segAcc = colors::driveModelAccent(type, model).led;
+        mRangeSeg->setAccent(segAcc);
         mRangeSeg->setVisible(nam_rig::DriveBlock::modelHasRange(cat, model));
         mRangeSeg->setEnabled(mActive); // drains its colour when the pedal is bypassed
+        mGateSeg->setAccent(segAcc);
         mGateSeg->setVisible(nam_rig::DriveBlock::modelHasGate(cat, model)); // Round Fuzz only
         mGateSeg->setEnabled(mActive);
         mOn.setAccent(colors::driveModelAccent(type, model).led); // footswitch glow tracks the LED (= accent, except Violet Ram = violet)
