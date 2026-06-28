@@ -159,13 +159,37 @@ stay byte-for-byte; there are regression tests asserting model 0 == legacy).
   placed in the glyph area. Test T36 covers the toggle. The Panels.h/processor
   param edits are UNTESTED in a build (JUCE can't compile offline) — Robbie builds.
 
+- **Super Drive** (Overdrive model 2, Boss SD-1) — the first *new* model (not a
+  rework). The SD-1 is OD-1/TS lineage, so the small-signal voicing fits ~the
+  TS808 (fit `sd1_response.py`, RMS 0.63 dB: same ~+5 dB hump @ 720–900 Hz,
+  slightly fuller bass / a hair brighter — the SD-1's "more open" reputation,
+  confirmed by the circuit, not guessed). The IDENTITY is **asymmetric clipping**
+  (3 diodes, 2+1 → a ~2:1 threshold ratio): built on **clip type 4 (asym cubic)**
+  so the even-harmonic crunch PERSISTS at gain (a symmetric clip + DC bias would
+  just square up symmetrically). Real ratio 2:1 = `bias 0.50`, softened to
+  **`bias 0.35` (kn 0.65)** for the diodes' soft feedback-loop knee — clearly
+  asymmetric (h2/h1 ~0.04–0.075 low/mid drive, still ~14× the symmetric GD2 even
+  cranked), milder than the fuzz. **Noticeably hotter** than GD2 (`gMin 6/gMax 120`)
+  + a touch more output (`outTrim 1.25`, noon RMS 1.07× GD2). Same feedback-clip
+  feel as GD2 (pre/de-emphasis `10@700`, clean blend 0.15, dynamics 0.40), static
+  voicing, mid post-clip. **Engine change:** the pre/de-emphasis pair is now enabled
+  for clip 3 **OR 4** when `emphDb > 0` — Round Fuzz II has `emphDb 0` so it is
+  unaffected (byte-exact); no other shipped model changes. Auto-gain `O2` table
+  measured (near-flat ~0.40, like the fuzz's `F1` — the asym clipper compresses).
+  Tests T38–T44 (incl. the maxabs no-spike sweep + alias cut). Worked example in
+  [`sd1.md`](sd1.md). **UNCOMMITTED** — offline build green (drive_test **68 CHECKs,
+  0 failures**), pending commit on Windows + play-test. UI just works (the Overdrive
+  case already reads `bModel`; menu is generic; `bModel` 0..3 covers model 2).
+
 Current model inventory: Boost (4: Range '65, EP Boost, Range '65 II, EP Boost II),
-Overdrive (2: Green Drive, Green Drive II), Distortion (2: Black Rodent, Black
-Rodent II), Fuzz (2: Round Fuzz, Round Fuzz II). **NB: `bModel` is now 0..3 = FULL
-for Boost** — adding a 5th Boost model needs the `bModel` param range widened
-(PluginProcessor.cpp `bModel` AudioParameterInt 0,3 → 0,4 + the UI menu IDs). New
-engine bits available for reuse: **clip type 4 (asym cubic + 2nd-order ADAA)** and
-the **`gate`** field (any soft-poly clip).
+Overdrive (**3**: Green Drive, Green Drive II, **Super Drive**), Distortion (2:
+Black Rodent, Black Rodent II), Fuzz (2: Round Fuzz, Round Fuzz II). **NB: `bModel`
+is now 0..3 = FULL for Boost**; Overdrive at 3 has room for **one more** (model 3)
+before widening; Distortion/Fuzz have room for 2 each. Adding a model beyond 0..3
+in any category needs the `bModel` param range widened (PluginProcessor.cpp `bModel`
+AudioParameterInt 0,3 → 0,4 + the UI menu IDs). New engine bits available for reuse:
+**clip type 4 (asym cubic + 2nd-order ADAA)** — now with optional pre/de-emphasis —
+and the **`gate`** field (any soft-poly clip).
 
 ---
 
@@ -193,10 +217,10 @@ reworks.
 
 | Pedal | Topology delta | Engine knobs |
 |-------|---------------|--------------|
-| **SD-1** | TS with **asymmetric** diodes | start from Green Drive II + `bias`; refit if EQ differs; +gain/+louder |
-| **Klon** | **hard** clip + heavy parallel **clean blend** | clip 1 + large `cleanBlend`, LP clean feed for low end; very transparent/dynamic |
-| **Blues Breaker** | softer, symmetric, open low end | cubic clip, gentler emphasis, less bass-cut |
-| **Big Muff** | cascaded clipping + scooped mids | needs a 2-stage path + negative `midDb` — bigger change |
+| ~~**SD-1**~~ | **DONE — Super Drive** (Overdrive model 2, [sd1.md](sd1.md)) | clip 4 asym cubic (bias 0.35), TS-fit EQ, gMin 6/gMax 120, outTrim 1.25; emphasis now enabled on clip 4 |
+| **Klon** | **hard** clip + heavy parallel **clean blend** | clip 1 + large `cleanBlend`, LP clean feed for low end; very transparent/dynamic. → Overdrive model 3 (the last 0..3 slot before widening) |
+| **Blues Breaker** | softer, symmetric, open low end | cubic clip, gentler emphasis, less bass-cut. → needs `bModel` widened (OD would be model 4) OR another category |
+| **Big Muff** | cascaded clipping + scooped mids | needs a 2-stage path + negative `midDb` — bigger change. → Distortion model 2 (room) |
 
 ---
 

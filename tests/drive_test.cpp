@@ -283,7 +283,7 @@ int main()
 
     // ====== Green Drive II (Overdrive model 1): reworked feedback-clip OD ======
 
-    // ---- T11: model 0 (tanh) byte-for-byte unchanged; category now has 2 models ----
+    // ---- T11: model 0 (tanh) byte-for-byte unchanged; category now has 3 models ----
     {
         auto in = sine(220.0, 0.2f, 8192);
         auto m0 = realSlotM(Kind::Overdrive, 0, 0.7f, in);
@@ -291,7 +291,7 @@ int main()
         bool same = true;
         for (size_t i = 0; i < in.size(); ++i) same = same && (m0[i] == def[i]);
         CHECK(same, "T11 OD model 0 == legacy default (A/B preserves the original)");
-        CHECK(DriveBlock::modelCount(Kind::Overdrive) == 2, "T11 Overdrive holds 2 models (v1 + v2)");
+        CHECK(DriveBlock::modelCount(Kind::Overdrive) == 3, "T11 Overdrive holds 3 models (v1 + v2 + Super Drive)");
     }
 
     // ---- T12: 2nd-order ADAA on the cubic crushes alias vs a naive cubic ----
@@ -669,6 +669,120 @@ int main()
         const double quiet = quietEarlyClean(0.05f), loud = quietEarlyClean(0.25f);
         CHECK(quiet > 0.85 && loud > 0.85,
               "T37 onset passes clean at any level: quiet %.2f, loud %.2f (gate only chokes the decay)", quiet, loud);
+    }
+
+    // ====== Super Drive (Overdrive model 2): circuit-fit Boss SD-1 (clip 4 asym cubic) ======
+
+    // ---- T38: models 0 & 1 preserved; OD now has 3 models; GD2 still renders ----
+    // The emphasis-pair condition was widened to clip 3 OR 4; GD2 (clip 3, emphDb 9)
+    // is unaffected (same biquads), so its behavioral tests (T11-T14) still hold.
+    {
+        auto in = sine(220.0, 0.2f, 8192);
+        auto m0 = realSlotM(Kind::Overdrive, 0, 0.7f, in);
+        auto def = realSlot(Kind::Overdrive, 0.7f, in);
+        bool same = true;
+        for (size_t i = 0; i < in.size(); ++i) same = same && (m0[i] == def[i]);
+        CHECK(same, "T38 OD model 0 still byte-exact after adding Super Drive");
+        auto m1 = realSlotM(Kind::Overdrive, 1, 0.7f, in);
+        bool finite = true; for (float v : m1) finite = finite && std::isfinite(v);
+        CHECK(finite, "T38 OD model 1 (Green Drive II) still renders cleanly");
+        CHECK(DriveBlock::modelCount(Kind::Overdrive) == 3, "T38 Overdrive holds 3 models (GD/GD II/Super Drive)");
+    }
+
+    // ---- T39: SD-1 small-signal voicing -- the TS-style ~720-900 Hz mid hump ----
+    // Same feedback-clip hump as the TS (sd1_response.py fit, RMS 0.63 dB): a real but
+    // modest bump, mid-forward of both the bass and the top. Small-signal probe stays
+    // linear so this reads the EQ, not the clip.
+    {
+        auto g = [&](double f, float dr) {
+            auto in = sine(f, 0.005f, 16384);
+            return goertzel(realSlotM(Kind::Overdrive, 2, dr, in), f) / goertzel(in, f);
+        };
+        const double midVs100 = 20.0 * std::log10(g(820.0, 0.0f) / g(100.0, 0.0f));
+        const double midVs5k  = 20.0 * std::log10(g(820.0, 0.0f) / g(5000.0, 0.0f));
+        CHECK(midVs100 > 3.0 && midVs5k > 3.0,
+              "T39 Super Drive mid-hump @drive0: 820Hz +%.1f vs 100Hz, +%.1f vs 5k", midVs100, midVs5k);
+        // emphasis engaged on clip 4: bass clips LEAST -> driven, the low end stays
+        // tighter than the mid (frequency-selective clipping, the TS/SD-1 feel).
+        const double bassDb = 20.0 * std::log10(g(100.0, 1.0f) / g(820.0, 1.0f));
+        CHECK(bassDb < -3.0, "T39 emphasis active (bass below the hump when driven): 100Hz %.1f dB vs 820Hz", bassDb);
+    }
+
+    // ---- T40: SD-1 is ASYMMETRIC -- clear even harmonics, unlike the symmetric GD2 ----
+    {
+        auto h2h1 = [&](int model, float dr) {
+            auto y = realSlotM(Kind::Overdrive, model, dr, sine(220.0, 0.10f, 24000));
+            return goertzel(y, 440.0) / (goertzel(y, 220.0) + 1e-9);
+        };
+        const double sd = h2h1(2, 0.5f), gd = h2h1(1, 0.5f);
+        CHECK(sd > 0.01 && sd > gd * 3.0,
+              "T40 Super Drive asymmetric vs symmetric GD2: h2/h1 %.3f > %.3f", sd, gd);
+    }
+
+    // ---- T41: the asymmetry PERSISTS at high gain (clip 4, not cubic+DC-bias) ----
+    // A symmetric shaper + input bias washes out to a symmetric square when cranked;
+    // the asym-cubic keeps a tilted shape, so even harmonics taper with Drive but stay
+    // FAR above the symmetric GD2 (~14x even at max) instead of vanishing. Probed at a
+    // cranked-but-not-maxed Drive where the SD-1 crunch is clearest.
+    {
+        auto h2h1 = [&](int model, float dr) {
+            auto y = realSlotM(Kind::Overdrive, model, dr, sine(220.0, 0.20f, 24000));
+            return goertzel(y, 440.0) / (goertzel(y, 220.0) + 1e-9);
+        };
+        const double sd = h2h1(2, 0.7f), gd = h2h1(1, 0.7f);
+        CHECK(sd > 0.008 && sd > gd * 5.0,
+              "T41 asymmetry persists cranked: Super Drive h2/h1 %.4f >> GD2 %.4f", sd, gd);
+    }
+
+    // ---- T42: noticeably hotter than GD2, and input-level dependent ----
+    {
+        auto thd = [&](int model, float dr, float amp) {
+            return harmRatio(realSlotM(Kind::Overdrive, model, dr, sine(220.0, amp, 24000)), 220.0, 12);
+        };
+        const double sd = thd(2, 0.7f, 0.10f), gd = thd(1, 0.7f, 0.10f);
+        CHECK(sd > gd * 1.2, "T42 Super Drive hotter than GD2: THD %.2f > %.2f", sd, gd);
+        const double single = thd(2, 0.2f, 0.08f), humbk = thd(2, 0.2f, 0.20f);
+        CHECK(humbk > single * 1.8,
+              "T42 input-dependent: humbucker THD %.2f > single-coil %.2f (drives harder)", humbk, single);
+    }
+
+    // ---- T43: clip-4 ADAA2 cuts alias AND never spikes (maxabs sweep) -- safety ----
+    {
+        double worst = 0.0;
+        for (float dr = 0.0f; dr <= 1.001f; dr += 0.25f)
+            for (double f = 50.0; f <= 12000.0; f *= 1.2)
+            {
+                auto y = realSlotM(Kind::Overdrive, 2, dr, sine(f, 0.5f, 8192));
+                for (float v : y) worst = std::max(worst, (double)std::fabs(v));
+            }
+        CHECK(worst < 1.5, "T43 Super Drive no spikes across full-scale sweep: worst |out| %.2f", worst);
+
+        // naive memoryless asym cubic sharing the voicing pre-gain + low-cut -> alias baseline
+        const auto v = DriveBlock::voicingFor(Kind::Overdrive, 2);
+        const float pg = v.gMin * std::pow(v.gMax / v.gMin, 1.0f);
+        const double kn = 1.0 - (double)v.bias;
+        auto asymF = [&](double x) {
+            if (x >= 0.0) return x > 1.0 ? 2.0 / 3.0 : x - x * x * x / 3.0;
+            return x < -kn ? -(2.0 / 3.0) * kn : x - x * x * x / (3.0 * kn * kn);
+        };
+        const float hpC = 1.0f - (float)std::exp(-2.0 * M_PI * v.lowCutHz / SR);
+        auto in = sine(5000.0, 0.05f, 48000);
+        std::vector<float> naive(in.size());
+        float hp = 0;
+        for (size_t i = 0; i < in.size(); ++i) { float u = in[i] * pg; hp += hpC * (u - hp); u = u - hp; naive[i] = (float)asymF((double)u) * v.outTrim; }
+        auto adaa = realSlotM(Kind::Overdrive, 2, 1.0f, in);
+        const double a3 = goertzel(adaa, 3000.0), n3 = goertzel(naive, 3000.0);
+        CHECK(a3 < n3 * 0.7, "T43 clip-4 ADAA2 cuts alias@3k: %.2e < naive %.2e", a3, n3);
+    }
+
+    // ---- T44: A/B level-match -- "a touch more output" than GD2, not wildly louder ----
+    {
+        auto noonRms = [&](int model) {
+            return rms(realSlotM(Kind::Overdrive, model, 0.5f, sine(220.0, 0.10f, 24000)));
+        };
+        const double ratio = noonRms(2) / std::max(noonRms(1), 1e-9);
+        CHECK(ratio > 0.9 && ratio < 1.8,
+              "T44 Super Drive a touch hotter, A/B-fair: noon RMS %.2fx GD2", ratio);
     }
 
     std::printf("\n%s (%d failure%s)\n", gFails ? "RESULT: FAIL" : "RESULT: ALL PASS", gFails, gFails == 1 ? "" : "s");

@@ -28,10 +28,20 @@
 //                  full Volume (gMax 80, vs the stand-in's 20). Soft germanium clip
 //                  (tanh) with an off-centre bias -> asymmetric even-harmonic warmth
 //                  + soft compression when strummed hard.
-//   Green Drive  : a green-box mid-hump overdrive (TS-style). TWO models:
+//   Green Drive  : a green-box mid-hump overdrive (TS-style). THREE models:
 //                  model 0 "Green Drive" = the original memoryless tanh voicing;
 //                  model 1 "Green Drive II" = the reworked feedback-clip model
-//                  (see below). Both share the ~720 Hz mid hump.
+//                  (see below); model 2 "Super Drive" = the Boss SD-1 (see below).
+//                  All three share the ~720 Hz mid hump.
+//   Super Drive  : the Boss SD-1 Super Overdrive (OD-1 lineage). Small-signal
+//                  voicing ~= the TS808 (fit to the schematic, RMS 0.63 dB), but
+//                  the identity is ASYMMETRIC clipping: 3 diodes (2+1) = a ~2:1
+//                  threshold ratio -> persistent even harmonics (a 2nd-harmonic
+//                  "crunch"). Built on clip type 4 (asym cubic) so the asymmetry
+//                  survives at high gain; bias 0.35 (kn 0.65) = the soft feedback
+//                  knee softened from the literal 2:1. Noticeably hotter than GD2
+//                  (gMin 6/gMax 120) + a touch more output. Same feedback-clip
+//                  pre/de-emphasis feel as GD2. See docs/drive/sd1.md.
 //   Black Rodent : a hard-clip distortion (ProCo RAT). TWO models:
 //                  model 0 "Black Rodent" = the original simple hard-clip stand-in;
 //                  model 1 "Black Rodent II" = the circuit-fit RAT (see below). Both
@@ -217,6 +227,21 @@ public:
              { 0, 1.5f, 30.0f, 560.0f,  780.0f, 6.0f, 0.7f, 1300.0f, 0.05f,  720.0f, 1.10f, 1.0f, 1.0f,  0.0f, 700.0f, 0.00f, 0.0f,  0.0f, 0.0f}, false},
             {"Green Drive II", "feedback-clip overdrive (v2)",
              { 3, 5.0f, 80.0f, 220.0f,  820.0f, 3.6f, 0.7f, 1900.0f, 0.00f, 1200.0f, 1.15f, 0.0f, 1.0f,  9.0f, 700.0f, 0.20f, 0.40f, 0.0f, 0.0f}, false},
+            // model 2: circuit-fit Boss SD-1 Super Overdrive (OD-1 lineage, uPC4558
+            // feedback-clip). Small-signal voicing is ~the TS808 (fit sd1_response.py,
+            // RMS 0.63 dB: same ~+5 dB hump @ 720-900 Hz, slightly fuller bass / a hair
+            // brighter -- the SD-1's "more open" reputation, confirmed by the circuit).
+            // The IDENTITY is ASYMMETRIC clipping (3 diodes, 2+1 -> a ~2:1 threshold
+            // ratio): clip type 4 (asym cubic) so the even-harmonic crunch PERSISTS at
+            // gain (a symmetric clip + DC bias would just square up symmetrically). Real
+            // ratio 2:1 = bias 0.50, softened to bias 0.35 (kn 0.65) for the diodes'
+            // soft FEEDBACK-loop knee -- clearly asymmetric (h2/h1 ~0.04-0.075), milder
+            // than the fuzz. Noticeably hotter than GD2 (gMin 6/gMax 120, the 1M drive
+            // pot + 0.9V 1S2473 diodes) + a touch more output (outTrim 1.25). Same
+            // feedback-clip feel as GD2: pre/de-emphasis (bass clips least), small clean
+            // blend + touch dynamics. Static (shapeTrack 0), mid post-clip, calibrated.
+            {"Super Drive", "Boss SD-1 (asymmetric overdrive)",
+             { 4, 6.0f,120.0f, 160.0f,  900.0f, 5.0f, 0.5f, 2000.0f, 0.35f, 1200.0f, 1.25f, 0.0f, 1.0f, 10.0f, 700.0f, 0.15f, 0.40f, 0.0f, 0.0f}, false},
         };
         static const Model dist[] = {
             // model 0: the original simple hard-clip stand-in (kept byte-for-byte for A/B).
@@ -247,7 +272,7 @@ public:
         switch (cat)
         {
         case Kind::Boost:      count = 4; return boost;
-        case Kind::Overdrive:  count = 2; return od;
+        case Kind::Overdrive:  count = 3; return od;
         case Kind::Distortion: count = 2; return dist;
         case Kind::Fuzz:       count = 2; return fuzz;
         default:               count = 0; return nullptr;
@@ -324,7 +349,7 @@ public:
                 s.lastKind = cfg;
                 s.mid = (v.midDb != 0.0f) ? Biquad::peaking(sr, v.midHz, v.midQ, v.midDb)
                                           : Biquad::identity();
-                if (v.clip == 3 && v.emphDb > 0.0f) // pre/de-emphasis pair (frequency-selective clip)
+                if ((v.clip == 3 || v.clip == 4) && v.emphDb > 0.0f) // pre/de-emphasis pair (frequency-selective clip; clip 4 = SD-1)
                 {
                     s.emphPre  = Biquad::highshelf(sr, v.emphHz,  v.emphDb);
                     s.emphPost = Biquad::highshelf(sr, v.emphHz, -v.emphDb);
@@ -703,11 +728,12 @@ private:
         static const float B2[6] = {1.556f, 0.916f, 0.557f, 0.378f, 0.295f, 0.260f}; // Range '65 II (Rangemaster, pink-noise ref)
         static const float B3[6] = {1.073f, 0.801f, 0.601f, 0.456f, 0.352f, 0.279f}; // EP Boost II (clean boost, pink-noise ref)
         static const float O[6]  = {0.666f, 0.435f, 0.296f, 0.212f, 0.161f, 0.129f};
+        static const float O2[6] = {0.438f, 0.410f, 0.401f, 0.398f, 0.396f, 0.396f}; // Super Drive (SD-1, asym cubic, pink-noise ref; near-flat = the clipper compresses)
         static const float D[6]  = {1.229f, 0.568f, 0.310f, 0.242f, 0.223f, 0.214f};
         static const float F[6]  = {0.543f, 0.367f, 0.302f, 0.280f, 0.273f, 0.271f};
         static const float F1[6] = {0.439f, 0.371f, 0.346f, 0.338f, 0.335f, 0.334f}; // Round Fuzz II (asym cubic, pink-noise ref)
         const float *t = (k == Kind::Boost) ? (model <= 0 ? B0 : model == 1 ? B1 : model == 2 ? B2 : B3)
-                       : (k == Kind::Overdrive) ? O
+                       : (k == Kind::Overdrive) ? (model >= 2 ? O2 : O)
                        : (k == Kind::Distortion) ? D
                        : (model <= 0 ? F : F1);
         return lerpTbl(t, 6, drive);
