@@ -223,10 +223,10 @@ stay byte-for-byte; there are regression tests asserting model 0 == legacy).
 
 Current model inventory: Boost (4: Range '65, EP Boost, Range '65 II, EP Boost II),
 Overdrive (**4**: Green Drive, Green Drive II, **Super Drive**, **Gold Horse**),
-Distortion (**3**: Black Rodent, Black Rodent II, **Violet Ram**), Fuzz (2: Round
-Fuzz, Round Fuzz II).
+Distortion (2: Black Rodent, Black Rodent II), Fuzz (**3**: Round Fuzz, Round Fuzz II,
+**Violet Ram**).
 **NB: `bModel` 0..3 is now FULL for BOTH Boost AND Overdrive.** Distortion has room
-for 1 more (3/4); Fuzz has room for 2. Adding a 5th model to Boost or Overdrive (or any beyond 0..3)
+for 2 more (2/4); Fuzz has room for 1 (3/4). Adding a 5th model to Boost or Overdrive (or any beyond 0..3)
 needs the `bModel` param range widened (PluginProcessor.cpp `bModel` AudioParameterInt
 0,3 → 0,4 + the UI menu IDs). New engine bits available for reuse: **clip type 4
 (asym cubic + 2nd-order ADAA)** — with optional pre/de-emphasis — the **`gate`**
@@ -262,7 +262,7 @@ reworks.
 | ~~**SD-1**~~ | **DONE — Super Drive** (Overdrive model 2, [sd1.md](sd1.md)) | clip 4 asym cubic (bias 0.35), TS-fit EQ, gMin 6/gMax 120, outTrim 1.25; emphasis now enabled on clip 4 |
 | ~~**Klon**~~ | **DONE — Gold Horse** (Overdrive model 3, [klon.md](klon.md)) | clip 1 hard + 2nd-order ADAA + heavy raw-input clean blend (new hard-clip blend path, `kCleanScale`), ~1 kHz band-pass, shapeTrack bloom; fills bModel 0..3 |
 | **Blues Breaker** | softer, symmetric, open low end | cubic clip, gentler emphasis, less bass-cut. → **needs `bModel` widened** (Overdrive is now FULL at 0..3) OR put it in another category |
-| ~~**Big Muff**~~ | **DONE — Violet Ram** (Distortion model 2, [big-muff.md](big-muff.md)) | new 2-stage soft-clip CASCADE (`muffStages` + `muffLpHz` + `kMuffStage2Gain`), cubic ×2, circuit-fit −6.5 dB scoop, moderate-default/hot-ceiling range, see-saw Tone. Distortion now 3/4 |
+| ~~**Big Muff**~~ | **DONE — Violet Ram** (**Fuzz** model 2, [big-muff.md](big-muff.md)) | new 2-stage soft-clip CASCADE (`muffStages` + `muffLpHz` + `kMuffStage2Gain`), cubic ×2, circuit-fit −6.5 dB scoop, moderate-default/hot-ceiling range, see-saw Tone. Filed under FUZZ (Robbie's call) → needed a new `fTone` param + the Fuzz panel shows Sustain/Tone/Volume only for the Muff. Fuzz now 3/4 |
 
 ---
 
@@ -314,13 +314,16 @@ reworks.
 
 ## 8. Big Muff — ✅ DONE (Violet Ram, 2026-06-28)
 
-**Built** as **Distortion model 2 "Violet Ram"** (Ram's Head '73): a real 2-stage
-soft-clip CASCADE (new `muffStages`/`muffLpHz` fields + `kMuffStage2Gain`, both
-zero-fill → 324-config regression byte-exact vs HEAD), circuit-fit −6.5 dB scoop
-(ElectroSmash measured), see-saw Tone, moderate-default/hot-ceiling Sustain range.
-drive_test 96 CHECKs, 0 failures (T52–T57). Worked example: [big-muff.md](big-muff.md).
-**UNCOMMITTED** — offline build green, pending commit on Windows + play-test. The
-prep notes below are retained for reference / the era variants.
+**Built** as **Fuzz model 2 "Violet Ram"** (Ram's Head '73): a real 2-stage soft-clip
+CASCADE (new `muffStages`/`muffLpHz` fields + `kMuffStage2Gain`, all zero-fill →
+324-config regression byte-exact vs HEAD), circuit-fit −6.5 dB scoop (ElectroSmash
+measured), see-saw Tone, moderate-default/hot-ceiling Sustain range. **Filed under
+FUZZ** (Robbie's call — the Muff is a diode distortion but perceived as a fuzz); since
+the Fuzz category had no Tone knob, added a new **`fTone`** param + a Panels.h case-4
+branch (`model == 2`) so only the Muff shows Sustain/Tone/Volume. drive_test 96 CHECKs,
+0 failures (T52–T57). Worked example: [big-muff.md](big-muff.md). **UNCOMMITTED** —
+offline build green, pending commit on Windows + play-test. The prep notes below are
+retained for reference / the era variants.
 
 **Original goal:** add a Big Muff as **Distortion model 2** (Distortion has room: 2/4, so
 `bModel` 0..3 fits — no param widening). Disguised name TBD (scheme: pick something

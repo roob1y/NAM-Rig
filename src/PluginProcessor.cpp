@@ -154,10 +154,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
             juce::ParameterID(pid + "dLevel", 1), lbl + "Dist Volume",
             juce::NormalisableRange<float>(-12.0f, 12.0f, 0.1f), 0.0f,
             juce::AudioParameterFloatAttributes().withLabel("dB")));
-        // Fuzz: Fuzz / Volume (no tone control).
+        // Fuzz: Fuzz / Volume (+ Tone, used only by the Big Muff model 2).
         params.push_back(std::make_unique<juce::AudioParameterFloat>(
             juce::ParameterID(pid + "fDrive", 1), lbl + "Fuzz",
             juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID(pid + "fTone", 1), lbl + "Fuzz Tone",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f)); // Muff Tone scoop (Round Fuzz models ignore it)
         params.push_back(std::make_unique<juce::AudioParameterFloat>(
             juce::ParameterID(pid + "fLevel", 1), lbl + "Fuzz Volume",
             juce::NormalisableRange<float>(-12.0f, 12.0f, 0.1f), 0.0f,
@@ -848,15 +851,17 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
             mChain.drive.setLevelDb(s, g("oLevel"));
             mChain.drive.setRange(s, 0); mChain.drive.setModel(s, (int)g("bModel"));
             break;
-        case 3: // Distortion (3 models: 0 Black Rodent / 1 Black Rodent II / 2 Violet Ram)
+        case 3: // Distortion (2 models: 0 Black Rodent / 1 Black Rodent II)
             mChain.drive.setDrive(s, g("dDrive"));
             mChain.drive.setTone(s, g("dTone"));
             mChain.drive.setLevelDb(s, g("dLevel"));
             mChain.drive.setRange(s, 0); mChain.drive.setModel(s, (int)g("bModel"));
             break;
-        case 4: // Fuzz (2 models: 0 Round Fuzz / 1 Round Fuzz II); no tone control
+        case 4: // Fuzz (3 models: 0 Round Fuzz / 1 Round Fuzz II / 2 Violet Ram)
             mChain.drive.setDrive(s, g("fDrive"));
-            mChain.drive.setTone(s, 0.5f);
+            // Round Fuzz models have no tone (pinned 0.5); the Big Muff (model 2)
+            // exposes the Muff Tone scoop via fTone.
+            mChain.drive.setTone(s, (int)g("bModel") == 2 ? g("fTone") : 0.5f);
             mChain.drive.setLevelDb(s, g("fLevel"));
             mChain.drive.setRange(s, 0); mChain.drive.setModel(s, (int)g("bModel"));
             mChain.drive.setGateOn(s, g("fGate") > 0.5f); // bias-starved gate (Round Fuzz II)

@@ -292,24 +292,6 @@ public:
             // low-pass (darker CW). Hot, calibration-referenced range (LM308 Gv up to ~2300).
             {"Black Rodent II", "ProCo RAT (LM308, diodes-to-ground)",
              { 1, 4.0f,150.0f,  62.0f,  935.0f,17.0f, 0.5f, 4800.0f, 0.00f, 1500.0f, 0.47f, 1.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.0f, 475.0f, 1.0f}, false},
-            // model 2: circuit-fit EHX Big Muff Pi (Ram's Head '73). The Muff is NOT a
-            // single shaper -- it is TWO consecutive SOFT-clip stages (silicon 1N914
-            // back-to-back diodes in each transistor's collector->base FEEDBACK loop,
-            // ~+/-0.6 V), so we run a real 2-stage cubic CASCADE (muffStages 2): each
-            // stage has the Miller-cap low-pass (muffLpHz 1300) BEFORE it -> the dark,
-            // smooth, no-fizz voice (clipping a low-passed signal sounds smoother) and
-            // the dense, compressed double-clip "wall" a single clip can't make. A fixed
-            // inter-stage gain (kMuffStage2Gain) drives stage 1's output into stage 2's
-            // knee. Pre-clip low-cut 80 Hz tightens the lows (clip stages HP 55/94 Hz);
-            // gentle post LP 1600 keeps it dark. The famous passive tone-stack mid SCOOP
-            // is a static post-clip notch FIT to ElectroSmash's MEASURED tone-noon
-            // response (midHz 1000, Q 0.80, -6.5 dB = the 1 kHz notch 6.5 dB below the
-            // shelves; big_muff_response.py). Tone = the engine see-saw tilt @ 1 kHz (the
-            // real Muff bass/treble blend across the scoop). bias 0 (symmetric clipping).
-            // MODERATE default / HIGH-gain ceiling: gMin 3 = controllable crunch at low
-            // Sustain, gMax 120 = the full saturated wall at max. Calibration-referenced.
-            {"Violet Ram", "EHX Big Muff (Ram's Head, 2-stage)",
-             { 3, 3.0f, 55.0f,  80.0f, 1000.0f,-6.5f, 0.80f,1600.0f, 0.00f, 1000.0f, 0.80f, 0.0f, 1.0f,  0.0f, 700.0f, 0.0f, 0.0f,   0.0f, 0.0f, 0.0f, 0.0f, 2.0f, 1300.0f}, false},
         };
         static const Model fuzz[] = {
             {"Round Fuzz", "germanium fuzz",
@@ -323,13 +305,34 @@ public:
             // bias-starved "velcro"/splat on decay. Hot, calibration-referenced gain range.
             {"Round Fuzz II", "Fuzz Face (AC128 germanium, asym + gate)",
              { 4, 8.0f,200.0f,  50.0f,    0.0f, 0.0f, 0.7f,    0.0f, 0.45f,  700.0f, 0.65f, 0.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.50f,  0.0f, 0.0f, 0.6f}, false},
+            // model 2: circuit-fit EHX Big Muff Pi (Ram's Head '73). Filed under FUZZ
+            // (it is marketed/perceived as a fuzz, though technically a diode distortion).
+            // The Muff is NOT a single shaper -- it is TWO consecutive SOFT-clip stages
+            // (silicon 1N914 back-to-back diodes in each transistor's collector->base
+            // FEEDBACK loop, ~+/-0.6 V), so we run a real 2-stage cubic CASCADE
+            // (muffStages 2): each stage has the Miller-cap low-pass (muffLpHz 1300)
+            // BEFORE it -> the dark, smooth, no-fizz voice (clipping a low-passed signal
+            // sounds smoother) and the dense, compressed double-clip "wall" a single clip
+            // can't make. A fixed inter-stage gain (kMuffStage2Gain) drives stage 1's
+            // output into stage 2's knee. Pre-clip low-cut 80 Hz tightens the lows (clip
+            // stages HP 55/94 Hz); gentle post LP 1600 keeps it dark. The famous passive
+            // tone-stack mid SCOOP is a static post-clip notch FIT to ElectroSmash's
+            // MEASURED tone-noon response (midHz 1000, Q 0.80, -6.5 dB = the 1 kHz notch
+            // 6.5 dB below the shelves; big_muff_response.py). Tone = the engine see-saw
+            // tilt @ 1 kHz (the real Muff bass/treble blend) -- UNLIKE the other fuzzes,
+            // the Muff exposes a Tone knob (the Fuzz panel shows it only for this model).
+            // bias 0 (symmetric clipping). MODERATE default / HIGH-gain ceiling: gMin 3 =
+            // controllable crunch at low Sustain, gMax 55 + the inter-stage gain = the
+            // full saturated wall + max sustain at the top. Calibration-referenced.
+            {"Violet Ram", "EHX Big Muff (Ram's Head, 2-stage)",
+             { 3, 3.0f, 55.0f,  80.0f, 1000.0f,-6.5f, 0.80f,1600.0f, 0.00f, 1000.0f, 0.80f, 0.0f, 1.0f,  0.0f, 700.0f, 0.0f, 0.0f,   0.0f, 0.0f, 0.0f, 0.0f, 2.0f, 1300.0f}, false},
         };
         switch (cat)
         {
         case Kind::Boost:      count = 4; return boost;
         case Kind::Overdrive:  count = 4; return od;
-        case Kind::Distortion: count = 3; return dist;
-        case Kind::Fuzz:       count = 2; return fuzz;
+        case Kind::Distortion: count = 2; return dist;
+        case Kind::Fuzz:       count = 3; return fuzz;
         default:               count = 0; return nullptr;
         }
     }
@@ -881,13 +884,13 @@ private:
         static const float O2[6] = {0.438f, 0.410f, 0.401f, 0.398f, 0.396f, 0.396f}; // Super Drive (SD-1, asym cubic, pink-noise ref; near-flat = the clipper compresses)
         static const float O3[6] = {0.427f, 0.322f, 0.240f, 0.206f, 0.199f, 0.201f}; // Gold Horse (Klon, hard clip + heavy clean blend, pink-noise ref)
         static const float D[6]  = {1.229f, 0.568f, 0.310f, 0.242f, 0.223f, 0.214f};
-        static const float D2[6] = {0.599f, 0.399f, 0.315f, 0.284f, 0.273f, 0.269f}; // Violet Ram (Big Muff 2-stage cascade, pink-noise ref; compresses as both stages saturate)
         static const float F[6]  = {0.543f, 0.367f, 0.302f, 0.280f, 0.273f, 0.271f};
         static const float F1[6] = {0.439f, 0.371f, 0.346f, 0.338f, 0.335f, 0.334f}; // Round Fuzz II (asym cubic, pink-noise ref)
+        static const float F2[6] = {0.599f, 0.399f, 0.315f, 0.284f, 0.273f, 0.269f}; // Violet Ram (Big Muff 2-stage cascade, pink-noise ref; compresses as both stages saturate)
         const float *t = (k == Kind::Boost) ? (model <= 0 ? B0 : model == 1 ? B1 : model == 2 ? B2 : B3)
                        : (k == Kind::Overdrive) ? (model >= 3 ? O3 : model == 2 ? O2 : O)
-                       : (k == Kind::Distortion) ? (model >= 2 ? D2 : D)
-                       : (model <= 0 ? F : F1);
+                       : (k == Kind::Distortion) ? D
+                       : (model <= 0 ? F : model == 1 ? F1 : F2);
         return lerpTbl(t, 6, drive);
     }
     static float toneMakeup(Kind k, int model, float tone)
@@ -899,9 +902,13 @@ private:
         static const float O[5]  = {0.472f, 0.757f, 1.000f, 0.851f, 0.548f};
         static const float D[5]  = {0.450f, 0.725f, 1.000f, 0.916f, 0.609f};
         static const float F[5]  = {0.533f, 0.833f, 1.000f, 0.773f, 0.485f};
+        static const float F2[5] = {0.371f, 0.619f, 1.000f, 1.350f, 1.171f}; // Violet Ram (Big Muff see-saw Tone, pink-noise ref)
+        // Round Fuzz models pin Tone to 0.5 (no tone) -> F centre is unity; the Muff
+        // (model 2) is the only fuzz with a real Tone knob, so it gets its own table.
         const float *t = (k == Kind::Boost) ? (model <= 0 ? B0 : model == 1 ? B1 : B0)
                        : (k == Kind::Overdrive) ? O
-                       : (k == Kind::Distortion) ? D : F;
+                       : (k == Kind::Distortion) ? D
+                       : (model == 2 ? F2 : F);
         return lerpTbl(t, 5, tone);
     }
 

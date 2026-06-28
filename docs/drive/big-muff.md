@@ -1,9 +1,10 @@
 # Violet Ram — EHX Big Muff Pi (Ram's Head '73)
 
 Worked example of the [building-drives playbook](building-drives-playbook.md) for the
-**first cascaded-clipping** drive in the rack. Added as **Distortion model 2**
-(`Violet Ram`), alongside Black Rodent (RAT) models 0/1. Companion derivation
-script: [`big_muff_response.py`](big_muff_response.py).
+**first cascaded-clipping** drive in the rack. Added as **Fuzz model 2**
+(`Violet Ram`), alongside Round Fuzz models 0/1. (The Muff is technically a diode
+*distortion*, but it is marketed/perceived as a fuzz — Robbie's call to file it under
+Fuzz.) Companion derivation script: [`big_muff_response.py`](big_muff_response.py).
 
 > Era / character chosen by Robbie: **Ram's Head '73** (the violet-era, Gilmour
 > Muff — smooth, bassy, scooped), **faithful 2-stage cascade**, **circuit-derived
@@ -136,20 +137,26 @@ Auto-gain table `D2` measured (pink noise): compresses as both stages saturate.
 
 ## 5. UI
 
-Distortion's `bModel` is 0..3 (no widening — Distortion was 2/4). The processor
-already reads `bModel` for Distortion, and the Type menu / model dropdown are
-generic, so the Violet Ram appears automatically. Per-model control captions
-(Panels.h `configure()` case 3, keyed on `model == 2`): the Muff shows **Sustain /
-Tone / Volume** (its own control names) while the RAT models keep Dist / Filter /
-Volume — captions only; the params (`dDrive/dTone/dLevel`) are unchanged, so
-presets/automation are intact.
+Fuzz's `bModel` is 0..3 (no widening — Fuzz was 2/4). The processor already reads
+`bModel` for Fuzz, and the Type menu / model dropdown are generic, so the Violet Ram
+appears automatically. The catch: the **Fuzz category had no Tone knob** (the Round
+Fuzz models pin Tone to noon), but the Muff's Tone (the mid-scoop see-saw) is a
+signature control. So:
+
+- A new **`fTone`** param was added to the Fuzz block (Round Fuzz models ignore it —
+  the processor pins their tone to 0.5; only the Muff, `bModel == 2`, reads `fTone`).
+- Panels.h `configure()` case 4 (keyed on `model == 2`): the Muff shows **Sustain /
+  Tone / Volume** with the Tone knob visible; the Round Fuzz models stay Fuzz / Volume
+  (Tone hidden).
+
+The `fTone` param is new (unreleased dev branch, so no preset drift).
 
 ---
 
 ## 6. Tests (drive_test.cpp T52–T57) + build
 
-- **T52** existing Distortion models byte-exact; category holds 3; scoop is a notch
-  (midDb < 0); cascade enabled (muffStages 2).
+- **T52** existing Fuzz models byte-exact; Fuzz holds 3 / Distortion back to 2; scoop
+  is a notch (midDb < 0); cascade enabled (muffStages 2).
 - **T53** the Muff voice: full lows, ~10 dB mid scoop, ~22 dB-dark top.
 - **T54** the cascade **compresses**: input ×8 → output ×1.14.
 - **T55** dual-ADAA cascade **never spikes**: worst |out| 0.56, all finite.
@@ -157,10 +164,11 @@ presets/automation are intact.
 - **T57** input-level dependent (humbucker drives harder).
 
 Offline build **green: 96 CHECKs, 0 failures**, and a full **324-config regression
-byte-exact vs HEAD** (every shipped Boost/OD/Dist/Fuzz model). UI/processor edits
-are JUCE (reviewed by hand — captions/comments + a model-keyed branch identical in
-shape to the Klon's). **Pending commit on Windows + play-test.**
+byte-exact vs HEAD** (every shipped Boost/OD/Dist/Fuzz model — the new fields zero-fill
+and the Muff just moved categories). UI/processor edits are JUCE (reviewed by hand —
+captions/comments + the new `fTone` param + a model-keyed branch identical in shape to
+the Klon's). **Pending commit on Windows + play-test.**
 
-Model inventory now: Boost 4, Overdrive 4, **Distortion 3** (Black Rodent / II /
-Violet Ram), Fuzz 2. New reusable engine bits: the **N-stage soft-clip cascade**
-(`muffStages` + `muffLpHz` + `kMuffStage2Gain`) for any multi-stage clipper.
+Model inventory now: Boost 4, Overdrive 4, Distortion 2 (Black Rodent / II), **Fuzz 3**
+(Round Fuzz / II / **Violet Ram**). New reusable engine bits: the **N-stage soft-clip
+cascade** (`muffStages` + `muffLpHz` + `kMuffStage2Gain`) for any multi-stage clipper.

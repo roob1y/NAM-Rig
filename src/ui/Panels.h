@@ -1330,23 +1330,23 @@ private:
             break;
         }
         case 3:
-        {
-            // Violet Ram (Big Muff, model 2) shows the Muff's own control names
-            // (Sustain / Tone / Volume); the RAT models (Black Rodent / II) keep
-            // Dist / Filter / Volume. Captions only -- the params (dDrive/dTone/
-            // dLevel) are unchanged, so presets/automation are intact.
-            const bool muff = (model == 2);
-            mDrive->rebind(mApvts, p + "dDrive"); mDrive->setCaption(muff ? "Sustain" : "Dist");
-            mTone->rebind(mApvts, p + "dTone");   mTone->setCaption(muff ? "Tone" : "Filter");
+            mDrive->rebind(mApvts, p + "dDrive"); mDrive->setCaption("Dist");
+            mTone->rebind(mApvts, p + "dTone");   mTone->setCaption("Filter");
             mLevel->rebind(mApvts, p + "dLevel"); mLevel->setCaption("Volume");
             mDrive->setVisible(true); mTone->setVisible(true); mLevel->setVisible(true);
             break;
-        }
         case 4:
-            mDrive->rebind(mApvts, p + "fDrive"); mDrive->setCaption("Fuzz");
+        {
+            // Round Fuzz models = Fuzz / Volume (no tone). The Big Muff (Violet Ram,
+            // model 2) is filed under Fuzz but exposes its own Sustain / Tone / Volume
+            // (the only fuzz with a Tone knob -- bound to fTone, shown only here).
+            const bool muff = (model == 2);
+            mDrive->rebind(mApvts, p + "fDrive"); mDrive->setCaption(muff ? "Sustain" : "Fuzz");
+            mTone->rebind(mApvts, p + "fTone");   mTone->setCaption("Tone");
             mLevel->rebind(mApvts, p + "fLevel"); mLevel->setCaption("Volume");
-            mDrive->setVisible(true); mTone->setVisible(false); mLevel->setVisible(true);
+            mDrive->setVisible(true); mTone->setVisible(muff); mLevel->setVisible(true);
             break;
+        }
         default:
             mDrive->setVisible(false); mTone->setVisible(false); mLevel->setVisible(false);
             break;

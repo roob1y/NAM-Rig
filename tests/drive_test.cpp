@@ -347,7 +347,7 @@ int main()
         bool same = true;
         for (size_t i = 0; i < in.size(); ++i) same = same && (m0[i] == def[i]);
         CHECK(same, "T15 Dist model 0 == legacy default (A/B preserves the original Black Rodent)");
-        CHECK(DriveBlock::modelCount(Kind::Distortion) == 3, "T15 Distortion holds 3 models (Black Rodent + II + Violet Ram)");
+        CHECK(DriveBlock::modelCount(Kind::Distortion) == 2, "T15 Distortion holds 2 models (Black Rodent + II)");
     }
 
     // ---- T16: 2nd-order ADAA on the HARD clip crushes alias vs a naive hard clip ----
@@ -568,7 +568,7 @@ int main()
         bool same = true;
         for (size_t i = 0; i < in.size(); ++i) same = same && (m0[i] == def[i]);
         CHECK(same, "T30 Fuzz model 0 == legacy default (A/B preserves the original Round Fuzz)");
-        CHECK(DriveBlock::modelCount(Kind::Fuzz) == 2, "T30 Fuzz holds 2 models (Round Fuzz + Round Fuzz II)");
+        CHECK(DriveBlock::modelCount(Kind::Fuzz) == 3, "T30 Fuzz holds 3 models (Round Fuzz + II + Violet Ram)");
     }
 
     // ---- T31: Round Fuzz II is a heavy ASYMMETRIC fuzz, bright with a sub-bass trim ----
@@ -913,17 +913,20 @@ int main()
 
     // ====== Violet Ram (Distortion model 2): circuit-fit EHX Big Muff (Ram's Head) ======
 
-    // ---- T52: existing Distortion models stay byte-exact; the category now holds 3 ----
-    // The new 2-stage CASCADE + scoop fields zero-fill, so models 0/1 are untouched.
+    // ---- T52: the Muff is filed under FUZZ; existing Fuzz models stay byte-exact ----
+    // Big Muff = a diode distortion but marketed/perceived as a fuzz, so it lives in the
+    // Fuzz category (model 2). The new 2-stage CASCADE + scoop fields zero-fill, so the
+    // Round Fuzz models 0/1 are untouched.
     {
         auto in = sine(220.0, 0.2f, 8192);
-        auto m0 = realSlotM(Kind::Distortion, 0, 0.7f, in);
-        auto def = realSlot(Kind::Distortion, 0.7f, in);
+        auto m0 = realSlotM(Kind::Fuzz, 0, 0.7f, in);
+        auto def = realSlot(Kind::Fuzz, 0.7f, in);
         bool same = true;
         for (size_t i = 0; i < in.size(); ++i) same = same && (m0[i] == def[i]);
-        CHECK(same, "T52 Distortion model 0 still byte-exact after adding Violet Ram");
-        CHECK(DriveBlock::modelCount(Kind::Distortion) == 3, "T52 Distortion holds 3 models (bModel 0..3)");
-        const auto v = DriveBlock::voicingFor(Kind::Distortion, 2);
+        CHECK(same, "T52 Fuzz model 0 still byte-exact after adding Violet Ram");
+        CHECK(DriveBlock::modelCount(Kind::Fuzz) == 3, "T52 Fuzz holds 3 models (bModel 0..3)");
+        CHECK(DriveBlock::modelCount(Kind::Distortion) == 2, "T52 Distortion back to 2 (Muff left)");
+        const auto v = DriveBlock::voicingFor(Kind::Fuzz, 2);
         CHECK(v.muffStages > 1.0f, "T52 Violet Ram runs the 2-stage cascade (muffStages %.0f)", v.muffStages);
         CHECK(v.midDb < 0.0f, "T52 Violet Ram tone-stack scoop is a NOTCH (midDb %.1f < 0)", v.midDb);
     }
@@ -935,7 +938,7 @@ int main()
     {
         auto g = [&](double f) {
             auto in = sine(f, 0.004f, 16384);
-            return goertzel(realSlotM(Kind::Distortion, 2, 0.0f, in), f) / goertzel(in, f);
+            return goertzel(realSlotM(Kind::Fuzz, 2, 0.0f, in), f) / goertzel(in, f);
         };
         const double g300 = g(300.0);
         const double bass   = 20.0 * std::log10(g(150.0) / g300);  // ~full lows
@@ -950,8 +953,8 @@ int main()
     // Both stages clip, so an 8x louder input barely raises the output -- the dense,
     // squashed Big Muff dynamic. A single shaper would compress far less.
     {
-        const double lo = rms(realSlotM(Kind::Distortion, 2, 0.5f, sine(220.0, 0.05f, 16384)));
-        const double hi = rms(realSlotM(Kind::Distortion, 2, 0.5f, sine(220.0, 0.40f, 16384)));
+        const double lo = rms(realSlotM(Kind::Fuzz, 2, 0.5f, sine(220.0, 0.05f, 16384)));
+        const double hi = rms(realSlotM(Kind::Fuzz, 2, 0.5f, sine(220.0, 0.40f, 16384)));
         CHECK(hi / lo < 2.0, "T54 Violet Ram cascade compresses: input x8 -> output x%.2f", hi / lo);
     }
 
@@ -964,7 +967,7 @@ int main()
         for (float dr = 0.0f; dr <= 1.001f; dr += 0.25f)
             for (double f = 50.0; f <= 16000.0; f *= 1.2)
             {
-                auto y = realSlotM(Kind::Distortion, 2, dr, sine(f, 0.5f, 8192));
+                auto y = realSlotM(Kind::Fuzz, 2, dr, sine(f, 0.5f, 8192));
                 for (float v : y) { worst = std::max(worst, (double)std::fabs(v)); finite = finite && std::isfinite(v); }
             }
         CHECK(finite, "T55 Violet Ram emits only finite samples across the sweep");
@@ -973,8 +976,8 @@ int main()
 
     // ---- T56: Tone is the real Muff see-saw (bass up CCW, treble up CW) ----
     {
-        auto gl = [&](float t) { auto in = sine(120.0, 0.1f, 16384); return goertzel(realSlotMT(Kind::Distortion, 2, 0.5f, t, in), 120.0); };
-        auto gh = [&](float t) { auto in = sine(3500.0, 0.1f, 16384); return goertzel(realSlotMT(Kind::Distortion, 2, 0.5f, t, in), 3500.0); };
+        auto gl = [&](float t) { auto in = sine(120.0, 0.1f, 16384); return goertzel(realSlotMT(Kind::Fuzz, 2, 0.5f, t, in), 120.0); };
+        auto gh = [&](float t) { auto in = sine(3500.0, 0.1f, 16384); return goertzel(realSlotMT(Kind::Fuzz, 2, 0.5f, t, in), 3500.0); };
         CHECK(gl(0.0f) > gl(1.0f) * 2.0, "T56 Violet Ram Tone CCW = bass: low %.3f (CCW) > %.3f (CW)", gl(0.0f), gl(1.0f));
         CHECK(gh(1.0f) > gh(0.0f) * 1.5, "T56 Violet Ram Tone CW = treble: high %.3f (CW) > %.3f (CCW)", gh(1.0f), gh(0.0f));
     }
@@ -983,8 +986,8 @@ int main()
     // The clip threshold is fixed (calibration-referenced), so a hotter pickup clips
     // more for the same knob -- like the real pedal.
     {
-        const double sc = harmRatio(realSlotM(Kind::Distortion, 2, 0.3f, sine(660.0, 0.08f, 24000)), 660.0, 12);
-        const double hb = harmRatio(realSlotM(Kind::Distortion, 2, 0.3f, sine(660.0, 0.20f, 24000)), 660.0, 12);
+        const double sc = harmRatio(realSlotM(Kind::Fuzz, 2, 0.3f, sine(660.0, 0.08f, 24000)), 660.0, 12);
+        const double hb = harmRatio(realSlotM(Kind::Fuzz, 2, 0.3f, sine(660.0, 0.20f, 24000)), 660.0, 12);
         CHECK(hb > sc + 0.05, "T57 Violet Ram humbucker drives harder: THD %.3f (HB) > %.3f (SC)", hb, sc);
     }
 
