@@ -149,7 +149,11 @@ stay byte-for-byte; there are regression tests asserting model 0 == legacy).
   **UNCOMMITTED** — offline build green (drive_test all pass, 0 failures), pending
   commit on Windows + play-test. Voiced germanium FF + all three behaviors (cleanup,
   gate, ADAA) per Robbie's call. The `gate` (gThr 0.18, depth 0.6) and `dynDepth`
-  are ear-tunable taste params.
+  are ear-tunable taste params. The gate is now a **UI toggle** (default ON):
+  per-slot `fGate` bool param → `DriveBlock::setGateOn()`; the Fuzz panel shows an
+  Off/Gate `SegmentedControl` when `modelHasGate()` is true (Round Fuzz II only),
+  placed in the glyph area. Test T36 covers the toggle. The Panels.h/processor
+  param edits are UNTESTED in a build (JUCE can't compile offline) — Robbie builds.
 
 Current model inventory: Boost (4: Range '65, EP Boost, Range '65 II, EP Boost II),
 Overdrive (2: Green Drive, Green Drive II), Distortion (2: Black Rodent, Black

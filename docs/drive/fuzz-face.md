@@ -71,6 +71,10 @@ threshold means a quieter signal clips less), so soft playing cleans up — meas
 unaffected). In the soft-poly path, an envelope-driven gate collapses the output as
 the note decays past a threshold (squared knee = the abrupt splat). Measured: a
 decaying pluck collapses to 0.38 of its early level vs 0.83 for the non-gated fuzz.
+It is **user-toggleable** (default ON): a per-slot `fGate` bool param drives
+`setGateOn()`, and `useGate = v.gate>0 && gateOn`. The Fuzz panel shows an Off/Gate
+toggle whenever `modelHasGate()` is true (i.e. only for Round Fuzz II), mirroring
+how the Range switch appears only for treble boosters.
 
 ## The voicing row
 

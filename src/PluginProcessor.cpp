@@ -162,6 +162,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
             juce::ParameterID(pid + "fLevel", 1), lbl + "Fuzz Volume",
             juce::NormalisableRange<float>(-12.0f, 12.0f, 0.1f), 0.0f,
             juce::AudioParameterFloatAttributes().withLabel("dB")));
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID(pid + "fGate", 1), lbl + "Fuzz Gate", true)); // bias-starved splat (Round Fuzz II)
     }
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID("driveAutoGain", 1), "Drive Auto Gain", false));
@@ -857,6 +859,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
             mChain.drive.setTone(s, 0.5f);
             mChain.drive.setLevelDb(s, g("fLevel"));
             mChain.drive.setRange(s, 0); mChain.drive.setModel(s, (int)g("bModel"));
+            mChain.drive.setGateOn(s, g("fGate") > 0.5f); // bias-starved gate (Round Fuzz II)
             break;
         default: break; // Off
         }

@@ -127,6 +127,7 @@ public:
     void setRange(int slot, int r) { at(slot).range.store(r); } // treble-boost cap switch: 0 Treble/1 Mid/2 Full
     void setOn(int slot, bool on) { at(slot).on.store(on); }            // footswitch (default on)
     void setModel(int slot, int m) { at(slot).model.store(m); }         // model within the category
+    void setGateOn(int slot, bool on) { at(slot).gateOn.store(on); }    // fuzz bias-starved gate enable (default on)
 
     bool anyActive() const
     {
@@ -260,6 +261,8 @@ public:
     { int n = 0; const Model *a = modelsFor(c, n); return (a && n > 0) ? a[juce::jlimit(0, n - 1, m)].sub : ""; }
     static bool modelHasRange(Kind c, int m)
     { int n = 0; const Model *a = modelsFor(c, n); return a && n > 0 && a[juce::jlimit(0, n - 1, m)].hasRange; }
+    static bool modelHasGate(Kind c, int m) // exposes the bias-starved gate toggle (fuzz)
+    { return voicingFor(c, m).gate > 0.0f; }
 
     static Voicing voicingFor(Kind c, int m)
     {
@@ -346,7 +349,7 @@ public:
             const bool ratTone = (v.toneFilterHz > 0.0f); // Tone = sweepable post-clip LP (RAT "Filter")
             const double asym = (v.clip == 2) ? (double)v.bias : 0.0;     // type-2 rail
             const double inBias = (v.clip == 2 || v.clip == 4) ? 0.0 : (double)v.bias; // type 0/1/3 input bias (4 = in-shaper asym)
-            const bool useGate = (v.gate > 0.0f);
+            const bool useGate = (v.gate > 0.0f) && s.gateOn.load(); // model has a gate AND it's switched on
             float levelLin = std::pow(10.0f, s.levelDb.load() * 0.05f) * v.outTrim;
             if (mAutoGain.load()) // OFF by default: Drive then naturally pushes the amp harder
                 levelLin *= driveMakeup(k, model, s.drive.load()) * toneMakeup(k, model, s.tone.load());
@@ -484,6 +487,7 @@ private:
         std::atomic<int> range{0};
         std::atomic<int> model{0};
         std::atomic<bool> on{true};
+        std::atomic<bool> gateOn{true}; // fuzz bias-starved gate enable (control, not DSP state)
         float hp = 0.0f, lp = 0.0f, toneLp = 0.0f, dcX1 = 0.0f, dcY1 = 0.0f;
         double x0 = 0.0; // 1st-order ADAA history (double)
         double adaaX1 = 0.0, adaaX2 = 0.0; // 2nd-order ADAA history (cubic, double)

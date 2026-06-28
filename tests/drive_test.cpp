@@ -637,6 +637,22 @@ int main()
         CHECK(a3 < n3 * 0.7, "T35 clip-4 ADAA2 cuts alias@3k: %.2e < naive %.2e", a3, n3);
     }
 
+    // ---- T36: the gate is runtime-toggleable -- OFF leaves the fuzz sustaining ----
+    {
+        auto in = pluck(220.0, 0.4f, 0.25, 38400);
+        const int N = (int)in.size();
+        DriveBlock don, doff;
+        for (auto *d : {&don, &doff}) { d->setKind(0, (int)Kind::Fuzz); d->setModel(0, 1); d->setDrive(0, 0.6f); d->setTone(0, 0.5f); d->prepare({SR, BLK}); }
+        don.setGateOn(0, true); doff.setGateOn(0, false);
+        auto yon = in, yoff = in;
+        for (size_t p = 0; p < in.size(); p += BLK) { don.process(yon.data() + p, (int)std::min<size_t>(BLK, in.size() - p)); doff.process(yoff.data() + p, (int)std::min<size_t>(BLK, in.size() - p)); }
+        const double ron = rmsWin(yon, 2 * N / 3, N) / rmsWin(yon, 0, N / 3);
+        const double roff = rmsWin(yoff, 2 * N / 3, N) / rmsWin(yoff, 0, N / 3);
+        CHECK(roff > ron * 1.5, "T36 gate toggle: OFF sustains (late/early %.3f) vs ON collapses (%.3f)", roff, ron);
+        CHECK(DriveBlock::modelHasGate(Kind::Fuzz, 1) && !DriveBlock::modelHasGate(Kind::Fuzz, 0),
+              "T36 modelHasGate true only for Round Fuzz II");
+    }
+
     std::printf("\n%s (%d failure%s)\n", gFails ? "RESULT: FAIL" : "RESULT: ALL PASS", gFails, gFails == 1 ? "" : "s");
     return gFails ? 1 : 0;
 }

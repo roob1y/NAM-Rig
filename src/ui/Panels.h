@@ -1075,6 +1075,11 @@ public:
                                                        juce::StringArray{"Treble", "Mid", "Full"});
         addChildComponent(*mRangeSeg);
 
+        // Fuzz-only bias-starved Gate (Off/Gate), shown when the model has a gate.
+        mGateSeg = std::make_unique<SegmentedControl>(apvts, p + "fGate",
+                                                      juce::StringArray{"Off", "Gate"});
+        addChildComponent(*mGateSeg);
+
         mOnAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             apvts, p + "On", mOn);
         mOn.onClick = [this] { refresh(); };
@@ -1143,8 +1148,8 @@ public:
         g.setColour(mActive ? pair.accent : juce::Colour(0xff2a2f37));
         g.fillEllipse(jewel);
 
-        // Silkscreen art glyph.
-        if (mLastType != 0)
+        // Silkscreen art glyph (hidden when the Fuzz Gate toggle occupies this area).
+        if (mLastType != 0 && !(mGateSeg && mGateSeg->isVisible()))
             paintDriveGlyph(g, mLastType, mGlyphRect.toFloat(),
                             mActive ? pair.accent.withAlpha(0.85f) : juce::Colour(0xff5a616b));
 
@@ -1225,6 +1230,16 @@ public:
             const int sw = juce::jlimit(36, mRangeSeg->idealCellWidth(), avail);
             const int sh = 58;
             mRangeSeg->setBounds(kb.getRight() + 10, dialCy - sh / 2, sw, sh);
+        }
+
+        // Fuzz Gate (Off/Gate): a horizontal toggle centred in the decorative glyph
+        // area (the glyph is hidden while it's shown), so it never collides with the
+        // two Fuzz knobs or the footswitch.
+        if (mGateSeg->isVisible())
+        {
+            mGateSeg->setVertical(false);
+            const int gw = juce::jmin(mGateSeg->idealWidth(), getWidth() - 40);
+            mGateSeg->setBounds(juce::Rectangle<int>(juce::jmax(72, gw), 30).withCentre(mGlyphRect.getCentre()));
         }
     }
 
@@ -1335,6 +1350,8 @@ private:
                             : juce::String(nam_rig::DriveBlock::modelSub(cat, model));
         mRangeSeg->setVisible(nam_rig::DriveBlock::modelHasRange(cat, model));
         mRangeSeg->setEnabled(mActive); // drains its colour when the pedal is bypassed
+        mGateSeg->setVisible(nam_rig::DriveBlock::modelHasGate(cat, model)); // Round Fuzz II only
+        mGateSeg->setEnabled(mActive);
         mOn.setAccent(colors::driveAccent(accentIndex()).accent);
         mOn.setLit(mActive);
     }
@@ -1343,6 +1360,7 @@ private:
     int mSlot;
     juce::ComboBox mType, mModel;
     std::unique_ptr<SegmentedControl> mRangeSeg;
+    std::unique_ptr<SegmentedControl> mGateSeg; // fuzz bias-starved gate (Off/Gate)
     Footswitch mOn;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mOnAtt;
