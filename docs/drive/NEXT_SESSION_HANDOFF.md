@@ -304,3 +304,62 @@ reworks.
 5. Add it as a new model in `modelsFor()`, wire `bModel` if it's a category's 2nd
    model, write measurement tests (maxabs + the suite), build offline, all green,
    then commit small by filename on Windows.
+
+---
+
+## 8. Big Muff — next session prep (the planned next model)
+
+**Goal:** add a Big Muff as **Distortion model 2** (Distortion has room: 2/4, so
+`bModel` 0..3 fits — no param widening). Disguised name TBD (scheme: pick something
+evocative-but-not-the-brand, e.g. "Green Mountain" / "Civil War" / "Triangle Fuzz").
+Ask Robbie up front (he likes to choose): **clip character, how scooped the mids,
+gain/output, and which Big Muff era** (Triangle / Ram's Head / Green Russian / NYC —
+they differ mostly in the tone-scoop depth and the clipping diodes).
+
+**Why it's the "bigger change":** the Muff is **two cascaded clipping stages**
+(each a transistor gain stage with **symmetric soft clipping**, diodes in feedback),
+then the famous **passive mid-SCOOP tone stack**, then a recovery stage. Our engine
+is a **single shaper per slot** — so the Muff needs either:
+  - (a) a real **2-stage cascade** in the process loop (new path: clip → inter-stage
+    EQ → clip), the faithful route; or
+  - (b) a **single hotter soft-clip** approximation (clip 3 cubic, high gain, lots of
+    sustain) + the scoop. Cheaper, less authentic. **Ask Robbie which.**
+The **mid scoop** is a **negative `midDb`** (the RBJ peak does notches fine) — the
+Muff Tone knob sweeps a blend of a low-pass and a high-pass with a midrange notch;
+model the notch with negative `midDb` and the Tone as a tilt/shelf, or fit the real
+passive network (ElectroSmash has the exact tone-stack response).
+
+**Reusable bits now available** (all guarded/zero-fill → byte-exact for shipped
+models): clip 1 hard + 2nd-order ADAA, clip 3 cubic, clip 4 asym-cubic; the
+**hard-clip clean blend** (raw-input × `kCleanScale`); the **`trebleShelfDb`** active
+shelf; the **`gate`** field; pre/de-emphasis on clip 3/4. The Muff likely wants
+**cubic soft clip ×2** (smooth/saturated) + **negative midDb scoop** + a low-ish
+`lpHz` (Muffs are dark) + high gain/sustain.
+
+**Research:** ElectroSmash "Big Muff Pi Analysis" (full schematic + the tone-stack
+math + the two clipping stages); Coda Effects "Big Muff mods and tweaks"; Kit Rae's
+Big Muff history (the era/version differences). Derive the tone-stack response and
+the clipping-stage EQ, fit as usual (`*_response.py`).
+
+### Hard-won mechanics from the SD-1/Klon session (read these — they save hours)
+
+- **The sandbox bash mount TRUNCATES file reads** (DriveBlock.h/drive_test.cpp come
+  back cut off near the tail). **Build offline from `git show HEAD:<path>`** (reads
+  the object store, full) **into `/tmp`**, re-apply the session's edits there with a
+  small Python `str.replace` script (assert each replace hits exactly once), then
+  `g++ -std=c++17 -O2 -I/tmp/... `. JUCE stub: a 1-line `juce::jlimit` header. The
+  **Read/Write/Edit file tools are the source of truth** (NOT truncated) — edit the
+  real repo files with those; only bash reads are truncated.
+- **Sandbox git is unreliable here:** the truncated mount makes `git diff`/`status`
+  show **phantom modifications** (e.g. `ep3_response.py`, `sd1_response.py` appear
+  "modified" = a chopped last line) and the index can get a stuck `index.lock`
+  ("Operation not permitted") + spurious staged deletions of `reverb_test.cpp`/
+  `rig_chain_process.cpp`. **Commit on Windows**, add files **by explicit name**,
+  ignore the phantoms, and `del .git\index.lock` if it complains.
+- **Set test thresholds to MEASURED reality**, not a priori guesses — probe the new
+  model in a tiny C++ harness first, read the numbers, then write the CHECK bounds
+  (with a little cross-compiler margin; Robbie builds on MSVC).
+- **Auto-gain tables (`O`/`O2`/`O3`/...) are measured** with a pink-noise probe
+  (`rms_in/rms_out` per drive point); hard clippers come out near-flat.
+- **Per-model control labels** live in `Panels.h` `configure()` (keyed on `model`);
+  **per-model voicing** is just a new zero-filled `Voicing` field + a guarded branch.
