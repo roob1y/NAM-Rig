@@ -1318,14 +1318,16 @@ private:
             break;
         case 2:
         {
-            // Gold Horse (Klon, model 3) shows the Klon's own control names; the
-            // TS-family OD models (Green Drive / GD II / Super Drive) keep
-            // Drive/Tone/Level. Only the captions differ -- the params
-            // (oDrive/oTone/oLevel) are unchanged, so presets/automation are intact.
+            // Per-model control names match each real pedal: Gold Horse (Klon,
+            // model 3) = Gain/Treble/Output; Breaker Drive (Bluesbreaker, model 4)
+            // = Gain/Tone/Volume; the TS-family OD models (Green Drive / GD II /
+            // Super Drive) keep Drive/Tone/Level. Only the captions differ -- the
+            // params (oDrive/oTone/oLevel) are unchanged, so presets/automation are intact.
             const bool klon = (model == 3);
-            mDrive->rebind(mApvts, p + "oDrive"); mDrive->setCaption(klon ? "Gain" : "Drive");
+            const bool bb   = (model == 4); // Breaker Drive (Marshall Bluesbreaker)
+            mDrive->rebind(mApvts, p + "oDrive"); mDrive->setCaption((klon || bb) ? "Gain" : "Drive");
             mTone->rebind(mApvts, p + "oTone");   mTone->setCaption(klon ? "Treble" : "Tone");
-            mLevel->rebind(mApvts, p + "oLevel"); mLevel->setCaption(klon ? "Output" : "Level");
+            mLevel->rebind(mApvts, p + "oLevel"); mLevel->setCaption(klon ? "Output" : (bb ? "Volume" : "Level"));
             mDrive->setVisible(true); mTone->setVisible(true); mLevel->setVisible(true);
             break;
         }
