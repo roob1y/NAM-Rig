@@ -3521,6 +3521,13 @@ public:
         g.drawRoundedRectangle(r.reduced(0.5f), 11.0f, 1.0f);
 
         auto in = r.reduced(13.0f, 11.0f);
+
+        // Space Tape: show the three heads and their time differences (a HEADS/TIME
+        // table + the heads drawn at their true relative spacing) instead of the
+        // generic single echo train. Inactive heads (per the Mode) are dimmed.
+        if ((int)mApvts.getRawParameterValue("delayCharacter")->load() == 2)
+        { paintSpaceTape(g, in); return; }
+
         const float H = in.getHeight(), top = in.getY();
         const float gutter = 16.0f;            // left margin reserved for the L / R labels
         const float left = in.getX() + gutter; // dry bar + taps start just inside it
@@ -3602,8 +3609,113 @@ public:
                    (int)in.getRight() - 200, (int)top + 1, 200, 11, juce::Justification::centredRight);
     }
 
+    // Space Tape head-time display. Left: a HEADS/TIME table (head index + its delay,
+    // shown as the musical division when synced or ms when free). Right: the three
+    // head taps at their TRUE relative spacing so the time differences read at a
+    // glance. Heads not active in the current Mode are dimmed (still shown as ghosts).
+    void paintSpaceTape(juce::Graphics &g, juce::Rectangle<float> in)
+    {
+        const int   syncIdx = (int)mApvts.getRawParameterValue("delaySync")->load();
+        const bool  sync    = syncIdx > 0;
+        const int   mode    = juce::jlimit(0, 11, (int)mApvts.getRawParameterValue("delayHeadMode")->load());
+        const int   mask    = kStHeadMaskUI[(size_t)mode];
+        const float fb      = mApvts.getRawParameterValue("delayFeedback")->load();
+        const float base    = getTimeMs ? getTimeMs()
+                                        : mApvts.getRawParameterValue("delayTime")->load(); // head 1 ms
+        const float *ratio  = sync ? kHeadRatioSyncUI : kHeadRatioFreeUI;
+        const float headMs[3] = { base * ratio[0], base * ratio[1], base * ratio[2] };
+        const float rowH = in.getHeight() / 3.0f;
+
+        // --- left: HEADS / TIME table (three rows) ---
+        const float tableW = juce::jmin(120.0f, in.getWidth() * 0.42f);
+        auto table = in.removeFromLeft(tableW);
+        for (int h = 0; h < 3; ++h)
+        {
+            const bool on = (mask & (1 << h)) != 0;
+            auto row = table.removeFromTop(rowH);
+            const juce::Colour col = on ? colors::accent : colors::captionDim;
+
+            auto chip = row.removeFromLeft(24.0f).reduced(2.0f, rowH * 0.24f);
+            g.setColour(col.withAlpha(on ? 0.22f : 0.10f));
+            g.fillRoundedRectangle(chip, 3.0f);
+            g.setColour(col.withAlpha(on ? 1.0f : 0.6f));
+            g.setFont(fonts::mono(11.0f, fonts::SemiBold));
+            g.drawText(juce::String(h + 1), chip.toNearestInt(), juce::Justification::centred);
+
+            const juce::String lab = sync ? headSyncLabel(h, syncIdx, headMs[h])
+                                          : juce::String(juce::roundToInt(headMs[h])) + " ms";
+            g.setColour(col.withAlpha(on ? 1.0f : 0.55f));
+            g.setFont(fonts::archivo(12.0f, fonts::SemiBold, 0.04f));
+            g.drawText(lab, row.reduced(8.0f, 0.0f).toNearestInt(), juce::Justification::centredLeft);
+        }
+
+        // --- right: head taps at true relative spacing (auto-fit so it always reads) ---
+        auto lane = in.reduced(6.0f, 6.0f);
+        const float cy = lane.getCentreY();
+        g.setColour(juce::Colour(0xff262c34));
+        g.fillRect(lane.getX(), cy - 0.5f, lane.getWidth(), 1.0f);
+        g.setColour(colors::accent.withAlpha(0.5f));
+        g.fillRoundedRectangle(lane.getX(), lane.getY(), 3.0f, lane.getHeight(), 1.5f); // dry hit
+
+        const float maxMs = juce::jmax(1.0f, headMs[2]); // head 3 is the longest
+        const float x0 = lane.getX() + 4.0f, W = lane.getWidth() - 8.0f;
+        const float scale = 0.72f / maxMs;
+        auto tapAt = [&](float ms, bool on, float alpha) {
+            const float x = x0 + ms * scale * W;
+            const float hh = (on ? 0.34f : 0.18f) * lane.getHeight();
+            g.setColour(colors::accent.withAlpha(alpha));
+            g.fillRoundedRectangle(x - 2.5f, cy - hh, 5.0f, 2.0f * hh, 2.5f);
+        };
+        // one faded feedback repeat of the cluster (a sense of the repeats)
+        if (fb > 0.02f)
+            for (int h = 0; h < 3; ++h)
+                if (mask & (1 << h))
+                    tapAt(headMs[h] + headMs[0], true, juce::jlimit(0.08f, 0.5f, fb * 0.5f));
+        // the heads (inactive = faint ghost so the spacing still reads), numbered
+        for (int h = 0; h < 3; ++h)
+        {
+            const bool on = (mask & (1 << h)) != 0;
+            tapAt(headMs[h], on, on ? 0.95f : 0.18f);
+            const float x = x0 + headMs[h] * scale * W;
+            g.setColour((on ? colors::accent : colors::captionDim).withAlpha(on ? 0.9f : 0.4f));
+            g.setFont(fonts::mono(8.0f, fonts::SemiBold));
+            g.drawText(juce::String(h + 1), (int)(x - 8.0f), (int)lane.getY() - 1, 16, 10,
+                       juce::Justification::centred);
+        }
+    }
+
+    // Musical label for a head when synced: head 1 = the selected division; heads 2/3 =
+    // that division x the sync head ratio, mapped to the nearest named value (ms fallback
+    // for the few odd products, e.g. the x8/3 of a triplet base).
+    juce::String headSyncLabel(int h, int syncIdx, float ms) const
+    {
+        if (h == 0) return juce::String(kSyncNamesUI[juce::jlimit(0, 13, syncIdx)]);
+        const double beats = kSyncBeatsUI[(size_t)juce::jlimit(0, 13, syncIdx)]
+                           * (double)kHeadRatioSyncUI[h];
+        for (const auto &nb : kNoteByBeats)
+            if (std::abs(beats - nb.beats) < 0.01)
+                return juce::String(nb.name);
+        return juce::String(juce::roundToInt(ms)) + " ms";
+    }
+
 private:
     juce::AudioProcessorValueTreeState &mApvts;
+
+    // --- mirrored from DelayBlock for the display only (keep in sync with the engine) ---
+    static constexpr int   kStHeadMaskUI[12] =
+        {0b001, 0b010, 0b100, 0b110, 0b001, 0b010, 0b100, 0b011, 0b110, 0b101, 0b111, 0b000};
+    static constexpr float kHeadRatioFreeUI[3] = {1.0f, 1.95f, 2.79f};
+    static constexpr float kHeadRatioSyncUI[3] = {1.0f, 2.0f, 8.0f / 3.0f};
+    static constexpr double kSyncBeatsUI[14] =
+        {0.0, 4.0, 3.0, 2.0, 4.0 / 3.0, 1.5, 1.0, 2.0 / 3.0, 0.75, 0.5, 1.0 / 3.0, 0.375, 0.25, 1.0 / 6.0};
+    static constexpr const char *kSyncNamesUI[14] =
+        {"Free", "1/1", "1/2.", "1/2", "1/2T", "1/4.", "1/4", "1/4T", "1/8.", "1/8", "1/8T", "1/16.", "1/16", "1/16T"};
+    struct NoteBeats { double beats; const char *name; };
+    static constexpr NoteBeats kNoteByBeats[17] = {
+        {8.0, "2/1"}, {6.0, "1/1."}, {16.0 / 3.0, "2/1T"}, {4.0, "1/1"}, {3.0, "1/2."},
+        {8.0 / 3.0, "1/1T"}, {2.0, "1/2"}, {1.5, "1/4."}, {4.0 / 3.0, "1/2T"}, {1.0, "1/4"},
+        {0.75, "1/8."}, {2.0 / 3.0, "1/4T"}, {0.5, "1/8"}, {0.375, "1/16."}, {1.0 / 3.0, "1/8T"},
+        {0.25, "1/16"}, {1.0 / 6.0, "1/16T"}};
 };
 
 //==============================================================================
@@ -3772,6 +3884,9 @@ public:
         if (mSyncRKnob) mSyncRKnob->setVisible(!tape);
         if (mMode) mMode->setVisible(!tape);
         if (tape && mKnobs.size() > 4) mKnobs[4]->setEnabled(false); // Width n/a (mono tape)
+
+        // Space Tape repurposes the echo-taps well as the per-head time display.
+        mTapsCaption.setText(space ? "HEADS / TIME" : "ECHO TAPS", juce::dontSendNotification);
 
         if (mTaps) mTaps->repaint();
     }
