@@ -270,6 +270,25 @@ int main()
         CHECK(std::llabs((long long)atR - (long long)expR) <= 2, "T8 R echo at %zu (expect %zu)", atR, expR);
     }
 
+    // ---- T8b: FREE + dual -> R follows its own free ms (not a division); the
+    //          synced case still uses the division; Link still mirrors L. ----
+    {
+        DelayBlock d;
+        d.setBpm(120.0);
+        d.prepare({SR, BLK});
+        d.setSyncIndex(0);   // main FREE
+        d.setTimeMs(300.0f);
+        d.setSyncIndexR(9);  // unlinked -> dual
+        d.setTimeMsR(450.0f);
+        CHECK(std::abs(d.currentTimeMs() - 300.0) < 0.01, "T8b free L = %.2f (want 300)", d.currentTimeMs());
+        CHECK(std::abs(d.currentTimeMsR() - 450.0) < 0.01, "T8b free dual R = %.2f (want 450 free ms)", d.currentTimeMsR());
+        CHECK(d.dualTime(), "T8b free dual -> dualTime() true");
+        d.setSyncIndex(6);   // main SYNCED (1/4) -> R now its 1/8 division = 250
+        CHECK(std::abs(d.currentTimeMsR() - 250.0) < 0.01, "T8b sync dual R = %.2f (want 250 div)", d.currentTimeMsR());
+        d.setSyncIndex(0); d.setSyncIndexR(0); // Link in free -> mirror L
+        CHECK(std::abs(d.currentTimeMsR() - 300.0) < 0.01, "T8b free link R = %.2f (mirror L 300)", d.currentTimeMsR());
+    }
+
     // ---- T9: feedback low-cut thins bass build-up in the repeats ----
     {
         auto tailEnergy = [&](float lowCutHz) {

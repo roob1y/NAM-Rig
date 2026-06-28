@@ -341,6 +341,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::NormalisableRange<float>(nam_rig::DelayBlock::kMinTimeMs,
                                        nam_rig::DelayBlock::kMaxTimeMs, 1.0f, 0.4f),
         350.0f, juce::AudioParameterFloatAttributes().withLabel("ms")));
+    // Right-side FREE time: the independent R delay when DUAL is on and the main
+    // delay is unsynced (the synced case uses delaySyncR instead).
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("delayTimeR", 1), "Delay Time R",
+        juce::NormalisableRange<float>(nam_rig::DelayBlock::kMinTimeMs,
+                                       nam_rig::DelayBlock::kMaxTimeMs, 1.0f, 0.4f),
+        350.0f, juce::AudioParameterFloatAttributes().withLabel("ms")));
     // Feedback runs to 1.1 so the TAPE character can self-oscillate: its authentic
     // band-pass loop is lossy, so the mid-band only takes off above ~unity, and the
     // in-loop saturation bounds the runaway. The clean delay is internally clamped
@@ -992,6 +999,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.delay.setSyncIndex((int)apvts.getRawParameterValue("delaySync")->load());
     mChain.delay.setSyncIndexR(delayTape ? 0 : (int)apvts.getRawParameterValue("delaySyncR")->load());
     mChain.delay.setTimeMs(apvts.getRawParameterValue("delayTime")->load());
+    mChain.delay.setTimeMsR(apvts.getRawParameterValue("delayTimeR")->load());
     mChain.delay.setFeedback(apvts.getRawParameterValue("delayFeedback")->load());
     mChain.delay.setToneHz(apvts.getRawParameterValue("delayTone")->load());
     mChain.delay.setLowCutHz(apvts.getRawParameterValue("delayLowCut")->load());

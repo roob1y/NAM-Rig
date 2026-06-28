@@ -262,6 +262,8 @@ public:
 
     // ---- parameters (audio thread) ----
     void setTimeMs(float ms) { mTimeMs = std::clamp(ms, kMinTimeMs, kMaxTimeMs); }
+    // Right-side FREE time (used in DUAL when the main delay is unsynced).
+    void setTimeMsR(float ms) { mTimeMsR = std::clamp(ms, kMinTimeMs, kMaxTimeMs); }
     void setSyncIndex(int idx) { mSyncIdx = std::clamp(idx, 0, (int)kSyncBeats.size() - 1); }
     // Right-side division: index 0 = Link (R mirrors L); 1..13 select the same
     // musical divisions as kSyncBeats[1..13]. Unlinking puts the delay in DUAL
@@ -345,14 +347,17 @@ public:
         return mTimeMs;
     }
 
-    // Effective RIGHT time: Link (idx 0) mirrors the left; otherwise its own
-    // synced division. Used by the dual routing and the tap visualiser.
+    // Effective RIGHT time. Link (idx 0) mirrors the left. Otherwise (DUAL): when the
+    // main delay is SYNCED the R follows its own division; when the main delay is FREE
+    // the R follows its own free ms (mTimeMsR). Used by dual routing + the visualiser.
     float currentTimeMsR() const
     {
         if (mSyncIdxR <= 0)
-            return currentTimeMs();
-        return std::clamp((float)(kSyncBeats[(size_t)mSyncIdxR] * 60000.0 / mBpm),
-                          kMinTimeMs, kMaxTimeMs);
+            return currentTimeMs();             // Link -> mirror L
+        if (mSyncIdx > 0)                        // synced -> R's own division
+            return std::clamp((float)(kSyncBeats[(size_t)mSyncIdxR] * 60000.0 / mBpm),
+                              kMinTimeMs, kMaxTimeMs);
+        return mTimeMsR;                         // free -> R's own free ms
     }
     bool dualTime() const { return mSyncIdxR > 0; } // R unlinked -> independent sides
 
@@ -830,7 +835,7 @@ private:
     std::array<Biquad, 2> mOutBass, mPreamp;  // tape: OUTPUT-once bass thin + HF lift
     Lfo mWow, mFlutter, mDrift;               // mDrift = slow random transport wander (tape)
 
-    float mTimeMs = 350.0f, mFeedback = 0.35f, mToneHz = 8000.0f;
+    float mTimeMs = 350.0f, mTimeMsR = 350.0f, mFeedback = 0.35f, mToneHz = 8000.0f;
     float mLowCutHz = 20.0f; // feedback high-pass (Low Cut); <= kMinLowCutHz = off
     float mWidth = 1.0f, mModAmt = 0.0f, mMix = 0.25f;
     int mSyncIdx = 0, mSyncIdxR = 0; // mSyncIdxR: 0 = Link (mirror L)
