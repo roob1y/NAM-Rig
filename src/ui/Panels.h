@@ -1317,11 +1317,18 @@ private:
             mDrive->setVisible(true); mTone->setVisible(false); mLevel->setVisible(false);
             break;
         case 2:
-            mDrive->rebind(mApvts, p + "oDrive"); mDrive->setCaption("Drive");
-            mTone->rebind(mApvts, p + "oTone");   mTone->setCaption("Tone");
-            mLevel->rebind(mApvts, p + "oLevel"); mLevel->setCaption("Level");
+        {
+            // Gold Horse (Klon, model 3) shows the Klon's own control names; the
+            // TS-family OD models (Green Drive / GD II / Super Drive) keep
+            // Drive/Tone/Level. Only the captions differ -- the params
+            // (oDrive/oTone/oLevel) are unchanged, so presets/automation are intact.
+            const bool klon = (model == 3);
+            mDrive->rebind(mApvts, p + "oDrive"); mDrive->setCaption(klon ? "Gain" : "Drive");
+            mTone->rebind(mApvts, p + "oTone");   mTone->setCaption(klon ? "Treble" : "Tone");
+            mLevel->rebind(mApvts, p + "oLevel"); mLevel->setCaption(klon ? "Output" : "Level");
             mDrive->setVisible(true); mTone->setVisible(true); mLevel->setVisible(true);
             break;
+        }
         case 3:
             mDrive->rebind(mApvts, p + "dDrive"); mDrive->setCaption("Dist");
             mTone->rebind(mApvts, p + "dTone");   mTone->setCaption("Filter");

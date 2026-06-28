@@ -200,6 +200,15 @@ stay byte-for-byte; there are regression tests asserting model 0 == legacy).
   **UNCOMMITTED** — offline build green (drive_test **79 CHECKs, 0 failures**),
   pending commit on Windows + play-test. UI just works (Overdrive reads `bModel`;
   menu generic; model 3 fills the last `bModel` 0..3 slot — no param widening).
+  **PluginDoctor-verified** vs the Nembrini "NA Clon Minotaur": ours matches the
+  real Klon's broad ~1 kHz band-pass more closely than the commercial clone (which
+  is darker/narrower up top) — Robbie's A/B, gain+treble at noon. **Per-model control
+  labels:** the Gold Horse panel shows **Gain / Treble / Output** (the Klon's own
+  control names) while the TS-family OD models keep Drive/Tone/Level — captions only,
+  params (oDrive/oTone/oLevel) unchanged (Panels.h `configure()` case 2, keyed on
+  `model == 3`). Possible future refinement: make the Klon **Treble** a true active
+  treble-shelf (it currently borrows the engine's symmetric tilt; matches well at
+  noon, but a real shelf keeps bass fixed as treble moves).
 
 Current model inventory: Boost (4: Range '65, EP Boost, Range '65 II, EP Boost II),
 Overdrive (**4**: Green Drive, Green Drive II, **Super Drive**, **Gold Horse**),
