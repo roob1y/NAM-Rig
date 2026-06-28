@@ -181,15 +181,36 @@ stay byte-for-byte; there are regression tests asserting model 0 == legacy).
   0 failures**), pending commit on Windows + play-test. UI just works (the Overdrive
   case already reads `bModel`; menu is generic; `bModel` 0..3 covers model 2).
 
+- **Gold Horse** (Overdrive model 3, Klon Centaur) — the first model whose identity
+  is the **parallel clean sum**, not the clipper. NOT a TS: the op-amp gain stage is
+  a ~1 kHz **band-pass** (fit `klon_response.py`, RMS 0.14 dB) clipped by a
+  **symmetric** germanium hard clip (clip 1 + 2nd-order ADAA, like Black Rodent II),
+  then summed with a big parallel **clean** path = the "transparent overdrive".
+  **Engine change:** the clean-blend path (previously soft-poly only) was added to
+  the **hard-clip branch**, guarded so Black Rodent II (`cleanBlend 0`) stays
+  byte-exact (regression T46). The clean is the **RAW input** (full-range, restores
+  the lows the mid-focused clip drops), at input level (no crackle), scaled by the
+  new constant **`kCleanScale 3.5`** to the clip's ±1 level so `cleanBlend 0.50` is
+  genuinely heavy (without it the ×preGain clipped path swamps the clean). `dynDepth
+  0.30` (touch). **`shapeTrack 1`** = the hump blooms with Drive → near-clean boost
+  at low Drive (THD ~0.001), dirties up cranked (the Klon reputation). `gMin 2/gMax
+  70`, bright/open `lpHz 4700`, `outTrim 0.95` (≈ GD2 at noon; the boost lives on the
+  Level knob, kept safe so the clean sum doesn't overshoot — worst |out| 1.39 < 1.5).
+  Auto-gain `O3` measured. Tests T45–T50. Worked example in [`klon.md`](klon.md).
+  **UNCOMMITTED** — offline build green (drive_test **79 CHECKs, 0 failures**),
+  pending commit on Windows + play-test. UI just works (Overdrive reads `bModel`;
+  menu generic; model 3 fills the last `bModel` 0..3 slot — no param widening).
+
 Current model inventory: Boost (4: Range '65, EP Boost, Range '65 II, EP Boost II),
-Overdrive (**3**: Green Drive, Green Drive II, **Super Drive**), Distortion (2:
-Black Rodent, Black Rodent II), Fuzz (2: Round Fuzz, Round Fuzz II). **NB: `bModel`
-is now 0..3 = FULL for Boost**; Overdrive at 3 has room for **one more** (model 3)
-before widening; Distortion/Fuzz have room for 2 each. Adding a model beyond 0..3
-in any category needs the `bModel` param range widened (PluginProcessor.cpp `bModel`
-AudioParameterInt 0,3 → 0,4 + the UI menu IDs). New engine bits available for reuse:
-**clip type 4 (asym cubic + 2nd-order ADAA)** — now with optional pre/de-emphasis —
-and the **`gate`** field (any soft-poly clip).
+Overdrive (**4**: Green Drive, Green Drive II, **Super Drive**, **Gold Horse**),
+Distortion (2: Black Rodent, Black Rodent II), Fuzz (2: Round Fuzz, Round Fuzz II).
+**NB: `bModel` 0..3 is now FULL for BOTH Boost AND Overdrive.** Distortion/Fuzz
+have room for 2 each. Adding a 5th model to Boost or Overdrive (or any beyond 0..3)
+needs the `bModel` param range widened (PluginProcessor.cpp `bModel` AudioParameterInt
+0,3 → 0,4 + the UI menu IDs). New engine bits available for reuse: **clip type 4
+(asym cubic + 2nd-order ADAA)** — with optional pre/de-emphasis — the **`gate`**
+field, and now a **hard-clip clean blend** (raw-input, `kCleanScale`) for parallel
+clean/dirty sums.
 
 ---
 
@@ -218,9 +239,9 @@ reworks.
 | Pedal | Topology delta | Engine knobs |
 |-------|---------------|--------------|
 | ~~**SD-1**~~ | **DONE — Super Drive** (Overdrive model 2, [sd1.md](sd1.md)) | clip 4 asym cubic (bias 0.35), TS-fit EQ, gMin 6/gMax 120, outTrim 1.25; emphasis now enabled on clip 4 |
-| **Klon** | **hard** clip + heavy parallel **clean blend** | clip 1 + large `cleanBlend`, LP clean feed for low end; very transparent/dynamic. → Overdrive model 3 (the last 0..3 slot before widening) |
-| **Blues Breaker** | softer, symmetric, open low end | cubic clip, gentler emphasis, less bass-cut. → needs `bModel` widened (OD would be model 4) OR another category |
-| **Big Muff** | cascaded clipping + scooped mids | needs a 2-stage path + negative `midDb` — bigger change. → Distortion model 2 (room) |
+| ~~**Klon**~~ | **DONE — Gold Horse** (Overdrive model 3, [klon.md](klon.md)) | clip 1 hard + 2nd-order ADAA + heavy raw-input clean blend (new hard-clip blend path, `kCleanScale`), ~1 kHz band-pass, shapeTrack bloom; fills bModel 0..3 |
+| **Blues Breaker** | softer, symmetric, open low end | cubic clip, gentler emphasis, less bass-cut. → **needs `bModel` widened** (Overdrive is now FULL at 0..3) OR put it in another category |
+| **Big Muff** | cascaded clipping + scooped mids | needs a 2-stage path + negative `midDb` — bigger change. → Distortion model 2 (room: Distortion has 2/4) |
 
 ---
 

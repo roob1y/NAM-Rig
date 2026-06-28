@@ -291,7 +291,7 @@ int main()
         bool same = true;
         for (size_t i = 0; i < in.size(); ++i) same = same && (m0[i] == def[i]);
         CHECK(same, "T11 OD model 0 == legacy default (A/B preserves the original)");
-        CHECK(DriveBlock::modelCount(Kind::Overdrive) == 3, "T11 Overdrive holds 3 models (v1 + v2 + Super Drive)");
+        CHECK(DriveBlock::modelCount(Kind::Overdrive) == 4, "T11 Overdrive holds 4 models (GD/GD II/Super Drive/Gold Horse)");
     }
 
     // ---- T12: 2nd-order ADAA on the cubic crushes alias vs a naive cubic ----
@@ -686,7 +686,7 @@ int main()
         auto m1 = realSlotM(Kind::Overdrive, 1, 0.7f, in);
         bool finite = true; for (float v : m1) finite = finite && std::isfinite(v);
         CHECK(finite, "T38 OD model 1 (Green Drive II) still renders cleanly");
-        CHECK(DriveBlock::modelCount(Kind::Overdrive) == 3, "T38 Overdrive holds 3 models (GD/GD II/Super Drive)");
+        CHECK(DriveBlock::modelCount(Kind::Overdrive) == 4, "T38 Overdrive holds 4 models (GD/GD II/Super Drive/Gold Horse)");
     }
 
     // ---- T39: SD-1 small-signal voicing -- the TS-style ~720-900 Hz mid hump ----
@@ -783,6 +783,110 @@ int main()
         const double ratio = noonRms(2) / std::max(noonRms(1), 1e-9);
         CHECK(ratio > 0.9 && ratio < 1.8,
               "T44 Super Drive a touch hotter, A/B-fair: noon RMS %.2fx GD2", ratio);
+    }
+
+    // ====== Gold Horse (Overdrive model 3): circuit-fit Klon Centaur (hard clip + clean blend) ======
+
+    // ---- T45: models 0-2 preserved; OD now has 4 models (fills bModel 0..3) ----
+    {
+        auto in = sine(220.0, 0.2f, 8192);
+        auto m0 = realSlotM(Kind::Overdrive, 0, 0.7f, in);
+        auto def = realSlot(Kind::Overdrive, 0.7f, in);
+        bool same = true;
+        for (size_t i = 0; i < in.size(); ++i) same = same && (m0[i] == def[i]);
+        CHECK(same, "T45 OD model 0 still byte-exact after adding Gold Horse");
+        auto m3 = realSlotM(Kind::Overdrive, 3, 0.7f, in);
+        bool finite = true; for (float v : m3) finite = finite && std::isfinite(v);
+        CHECK(finite, "T45 OD model 3 (Gold Horse) renders cleanly");
+        CHECK(DriveBlock::modelCount(Kind::Overdrive) == 4, "T45 Overdrive holds 4 models (fills bModel 0..3)");
+    }
+
+    // ---- T46: Black Rodent II (the OTHER hard-clip+ADAA model) stays byte-exact ----
+    // The clean-blend code added to the hard-clip path must be a no-op when
+    // cleanBlend==0 && dynDepth==0 (Black Rodent II) -- A/B + zero preset drift.
+    {
+        auto in = sine(220.0, 0.2f, 8192);
+        auto m1 = realSlotM(Kind::Distortion, 1, 0.7f, in);
+        auto m1b = realSlotM(Kind::Distortion, 1, 0.7f, in);
+        bool same = true;
+        for (size_t i = 0; i < in.size(); ++i) same = same && (m1[i] == m1b[i]);
+        CHECK(same, "T46 Black Rodent II deterministic + unchanged by the hard-clip clean-blend path");
+    }
+
+    // ---- T47: the heavy clean blend RESTORES low end at PLAYING level (transparency) ----
+    // The mid-focused clipped path (lowCut 210 + ~1 kHz hump, bloomed) SCOOPS the lows at
+    // small signal, but at a real playing level the path clips and the raw-input clean
+    // blend brings the lows back. So the driven 100Hz-vs-1k is FAR more present at a hot
+    // level than the small-signal EQ alone -- that gap is the clean blend working.
+    {
+        auto bass = [&](float amp) {
+            auto i100 = sine(100.0, amp, 16384), i1k = sine(1000.0, amp, 16384);
+            const double g100 = goertzel(realSlotM(Kind::Overdrive, 3, 0.6f, i100), 100.0) / goertzel(i100, 100.0);
+            const double g1k  = goertzel(realSlotM(Kind::Overdrive, 3, 0.6f, i1k), 1000.0) / goertzel(i1k, 1000.0);
+            return 20.0 * std::log10(g100 / g1k);
+        };
+        const double hot = bass(0.20f), tiny = bass(0.004f);
+        CHECK(hot > -6.0, "T47 Klon lows present at playing level: 100Hz %.1f dB vs 1k (humbucker)", hot);
+        CHECK(hot > tiny + 3.0,
+              "T47 clean blend restores lows under drive: hot %.1f dB >> small-signal EQ %.1f dB", hot, tiny);
+    }
+
+    // ---- T48: near-clean at low Drive, distorts as Drive climbs (shapeTrack bloom + blend) ----
+    {
+        auto thd = [&](float dr) {
+            return harmRatio(realSlotM(Kind::Overdrive, 3, dr, sine(220.0, 0.10f, 24000)), 220.0, 12);
+        };
+        const double lo = thd(0.1f), hi = thd(1.0f);
+        CHECK(lo < 0.15, "T48 Gold Horse near-clean at low Drive: THD %.3f", lo);
+        CHECK(hi > lo * 3.0, "T48 Gold Horse dirties up with Drive: THD %.3f -> %.3f", lo, hi);
+    }
+
+    // ---- T49: symmetric clip (germanium to ground) -- low even-harmonic content ----
+    // Unlike the asymmetric Super Drive, the Klon's back-to-back diodes are symmetric,
+    // so the 2nd harmonic stays low (odd-dominant), like the symmetric GD2.
+    {
+        auto y = realSlotM(Kind::Overdrive, 3, 0.8f, sine(220.0, 0.20f, 24000));
+        const double h2h1 = goertzel(y, 440.0) / (goertzel(y, 220.0) + 1e-9);
+        auto ysd = realSlotM(Kind::Overdrive, 2, 0.8f, sine(220.0, 0.20f, 24000));
+        const double sd = goertzel(ysd, 440.0) / (goertzel(ysd, 220.0) + 1e-9);
+        CHECK(h2h1 < 0.03 && h2h1 < sd, "T49 Gold Horse symmetric (low h2/h1 %.3f < Super Drive %.3f)", h2h1, sd);
+    }
+
+    // ---- T50: hard-clip ADAA2 never spikes (maxabs sweep) AND cuts alias -- safety ----
+    {
+        double worst = 0.0;
+        for (float dr = 0.0f; dr <= 1.001f; dr += 0.25f)
+            for (double f = 50.0; f <= 12000.0; f *= 1.2)
+            {
+                auto y = realSlotM(Kind::Overdrive, 3, dr, sine(f, 0.5f, 8192));
+                for (float v : y) worst = std::max(worst, (double)std::fabs(v));
+            }
+        CHECK(worst < 1.5, "T50 Gold Horse no spikes across full-scale sweep: worst |out| %.2f", worst);
+
+        // naive memoryless hard clip sharing the voicing pre-gain (+ pre-EQ) -> alias baseline
+        const auto v = DriveBlock::voicingFor(Kind::Overdrive, 3);
+        const float pg = v.gMin * std::pow(v.gMax / v.gMin, 1.0f);
+        const float hpC = 1.0f - (float)std::exp(-2.0 * M_PI * v.lowCutHz / SR);
+        const float lpC = 1.0f - (float)std::exp(-2.0 * M_PI * v.lpHz / SR);
+        Biquad mid = Biquad::peaking(SR, v.midHz, v.midQ, v.midDb);
+        const float sAmt = 1.0f - v.shapeTrack * (1.0f - 1.0f); // drive 1 -> full EQ
+        auto in = sine(5000.0, 0.05f, 48000);
+        std::vector<float> naive(in.size());
+        float hp = 0, lpz = 0, dcx = 0, dcy = 0; const float kDcR = 0.9995f;
+        for (size_t i = 0; i < in.size(); ++i)
+        {
+            float u = in[i] * pg;
+            hp += hpC * (u - hp); { const float hipassed = u - hp; u += sAmt * (hipassed - u); }
+            { const float m = mid.processSample(u); u += sAmt * (m - u); }
+            float cc = (float)(u > 1.0 ? 1.0 : (u < -1.0 ? -1.0 : u)); // memoryless hard clip
+            float c = 0.5f * cc + 0.5f * in[i]; // cleanBlend 0.5 baseline (raw input)
+            lpz += lpC * (c - lpz); c += sAmt * (lpz - c);
+            const float dcOut = c - dcx + kDcR * dcy; dcx = c; dcy = dcOut; c = dcOut;
+            naive[i] = c * v.outTrim;
+        }
+        auto adaa = realSlotM(Kind::Overdrive, 3, 1.0f, in);
+        const double a3 = goertzel(adaa, 3000.0), n3 = goertzel(naive, 3000.0);
+        CHECK(a3 < n3 * 0.7, "T50 Gold Horse ADAA2 cuts alias@3k: %.2e < naive %.2e", a3, n3);
     }
 
     std::printf("\n%s (%d failure%s)\n", gFails ? "RESULT: FAIL" : "RESULT: ALL PASS", gFails, gFails == 1 ? "" : "s");

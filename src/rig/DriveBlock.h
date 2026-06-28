@@ -28,11 +28,12 @@
 //                  full Volume (gMax 80, vs the stand-in's 20). Soft germanium clip
 //                  (tanh) with an off-centre bias -> asymmetric even-harmonic warmth
 //                  + soft compression when strummed hard.
-//   Green Drive  : a green-box mid-hump overdrive (TS-style). THREE models:
+//   Green Drive  : a green-box mid-hump overdrive (TS-style). FOUR models:
 //                  model 0 "Green Drive" = the original memoryless tanh voicing;
 //                  model 1 "Green Drive II" = the reworked feedback-clip model
-//                  (see below); model 2 "Super Drive" = the Boss SD-1 (see below).
-//                  All three share the ~720 Hz mid hump.
+//                  (see below); model 2 "Super Drive" = the Boss SD-1 (see below);
+//                  model 3 "Gold Horse" = the Klon Centaur (see below). 0-2 share
+//                  the ~720 Hz mid hump; the Klon's is a broader ~1 kHz band-pass.
 //   Super Drive  : the Boss SD-1 Super Overdrive (OD-1 lineage). Small-signal
 //                  voicing ~= the TS808 (fit to the schematic, RMS 0.63 dB), but
 //                  the identity is ASYMMETRIC clipping: 3 diodes (2+1) = a ~2:1
@@ -42,6 +43,13 @@
 //                  knee softened from the literal 2:1. Noticeably hotter than GD2
 //                  (gMin 6/gMax 120) + a touch more output. Same feedback-clip
 //                  pre/de-emphasis feel as GD2. See docs/drive/sd1.md.
+//   Gold Horse   : the Klon Centaur (TL072 + germanium diodes-to-ground). NOT a TS:
+//                  a ~1 kHz BAND-PASS op-amp gain stage, SYMMETRIC germanium HARD clip
+//                  (clip 1 + 2nd-order ADAA), SUMMED with a big parallel CLEAN path =
+//                  the "transparent overdrive". Modelled as a heavy clean blend taken
+//                  from the RAW input (restores the lows the mid-focused clip drops) +
+//                  shapeTrack bloom (near-clean boost at low Drive). Bright/open top,
+//                  lots of output (also a boost). See docs/drive/klon.md.
 //   Black Rodent : a hard-clip distortion (ProCo RAT). TWO models:
 //                  model 0 "Black Rodent" = the original simple hard-clip stand-in;
 //                  model 1 "Black Rodent II" = the circuit-fit RAT (see below). Both
@@ -242,6 +250,21 @@ public:
             // blend + touch dynamics. Static (shapeTrack 0), mid post-clip, calibrated.
             {"Super Drive", "Boss SD-1 (asymmetric overdrive)",
              { 4, 6.0f,120.0f, 160.0f,  900.0f, 5.0f, 0.5f, 2000.0f, 0.35f, 1200.0f, 1.25f, 0.0f, 1.0f, 10.0f, 700.0f, 0.15f, 0.40f, 0.0f, 0.0f}, false},
+            // model 3: circuit-fit Klon Centaur (TL072 + germanium diodes-to-ground).
+            // NOT a TS: the op-amp gain stage is a ~1 kHz BAND-PASS (fit klon_response.py,
+            // RMS 0.14 dB) clipped by SYMMETRIC germanium (hard, clip 1 + 2nd-order ADAA),
+            // then SUMMED with a big parallel CLEAN feedforward -> the "transparent
+            // overdrive". We model the clean sum as a HEAVY clean blend taken from the RAW
+            // input (cleanBlend 0.50 + dynDepth 0.30): the mid-focused clipped path drops
+            // the lows (lowCut 210, hump 980) and the full-range clean restores them ->
+            // big open low end + dynamics. shapeTrack 1 = the hump BLOOMS with Drive, so
+            // at low Drive it is a near-clean boost (the Klon reputation), distorting more
+            // as Drive climbs. Bright/open top (lpHz 4700, the 27V headroom feel). Modest
+            // gMin (genuinely clean min), moderate gMax (~the real 40 dB), lots of output
+            // (outTrim -- it is also a boost). Tone = treble tilt ~450 Hz (the active
+            // treble-shelf corner ~408 Hz, approximated by the engine tilt). Calibrated.
+            {"Gold Horse", "Klon Centaur (transparent overdrive)",
+             { 1, 2.0f, 70.0f, 210.0f,  980.0f, 3.2f, 0.3f, 4700.0f, 0.00f,  450.0f, 0.95f, 1.0f, 0.0f,  0.0f, 700.0f, 0.50f, 0.30f, 0.0f, 1.0f}, false},
         };
         static const Model dist[] = {
             // model 0: the original simple hard-clip stand-in (kept byte-for-byte for A/B).
@@ -272,7 +295,7 @@ public:
         switch (cat)
         {
         case Kind::Boost:      count = 4; return boost;
-        case Kind::Overdrive:  count = 3; return od;
+        case Kind::Overdrive:  count = 4; return od;
         case Kind::Distortion: count = 2; return dist;
         case Kind::Fuzz:       count = 2; return fuzz;
         default:               count = 0; return nullptr;
@@ -450,13 +473,36 @@ public:
                 }
                 else if (adaa2)
                 {
-                    // ---- Black Rodent II: hard clip on 2nd-order ADAA (peak-guarded) ----
-                    // The pre-clip EQ (low-cut + ~935 Hz hump) is already in u, so mids
-                    // hit the diodes hardest and bass clips least (the RAT gain stage).
+                    // ---- hard clip on 2nd-order ADAA (peak-guarded): Black Rodent II
+                    // (RAT) and Gold Horse (Klon). The pre-clip EQ (low-cut + mid hump) is
+                    // already in u, so mids hit the diodes hardest and bass clips least. ----
                     const double xb = (double)u + inBias;
                     const double y = clipHardADAA2(xb, adx1, adx2);
                     adx2 = adx1; adx1 = xb;
-                    c = (float)y;
+                    const float cc = (float)y;
+                    // HEAVY parallel clean blend (the Klon "transparent" sum): mix the RAW
+                    // full-range input back in -> restores the low end + dynamics that the
+                    // mid-focused clipped path drops. Clean is at INPUT level (xin, NOT the
+                    // gained signal -> no crackle). The envelope nudges it (touch: soft
+                    // picking cleans up). With cleanBlend 0 AND dynDepth 0 this is a no-op,
+                    // so Black Rodent II stays byte-exact.
+                    if (v.cleanBlend > 0.0f || v.dynDepth > 0.0f)
+                    {
+                        const float aenv = std::abs(xin);
+                        env += (aenv > env ? envAtk : envRel) * (aenv - env);
+                        const float envN = clamp01(env * invEnvRef);
+                        float bEff = v.cleanBlend + v.dynDepth * (0.5f - envN);
+                        bEff = bEff < 0.0f ? 0.0f : (bEff > 0.9f ? 0.9f : bEff);
+                        // The clipped path is bounded ~+/-1, so the RAW input clean (xin)
+                        // must be scaled up to a comparable level or the "heavy" blend is
+                        // inaudible. kCleanScale brings a nominal pick level (~0.2) up to
+                        // the clip threshold so cleanBlend is meaningful = the Klon's clean
+                        // sum. Fixed (NOT preGain) + bounded by the input -> no crackle.
+                        const float clean = xin * kCleanScale;
+                        c = (1.0f - bEff) * cc + bEff * clean;
+                    }
+                    else
+                        c = cc;
                 }
                 else
                 {
@@ -506,6 +552,7 @@ public:
 private:
     static constexpr float kMaxTiltDb = 9.0f;
     static constexpr float kDcR = 0.9995f; // DC blocker pole (~4 Hz corner @ 48k)
+    static constexpr float kCleanScale = 3.5f; // raw-input clean -> clip-level gain (hard-clip clean blend, Klon)
 
     struct Slot
     {
@@ -729,11 +776,12 @@ private:
         static const float B3[6] = {1.073f, 0.801f, 0.601f, 0.456f, 0.352f, 0.279f}; // EP Boost II (clean boost, pink-noise ref)
         static const float O[6]  = {0.666f, 0.435f, 0.296f, 0.212f, 0.161f, 0.129f};
         static const float O2[6] = {0.438f, 0.410f, 0.401f, 0.398f, 0.396f, 0.396f}; // Super Drive (SD-1, asym cubic, pink-noise ref; near-flat = the clipper compresses)
+        static const float O3[6] = {0.427f, 0.322f, 0.240f, 0.206f, 0.199f, 0.201f}; // Gold Horse (Klon, hard clip + heavy clean blend, pink-noise ref)
         static const float D[6]  = {1.229f, 0.568f, 0.310f, 0.242f, 0.223f, 0.214f};
         static const float F[6]  = {0.543f, 0.367f, 0.302f, 0.280f, 0.273f, 0.271f};
         static const float F1[6] = {0.439f, 0.371f, 0.346f, 0.338f, 0.335f, 0.334f}; // Round Fuzz II (asym cubic, pink-noise ref)
         const float *t = (k == Kind::Boost) ? (model <= 0 ? B0 : model == 1 ? B1 : model == 2 ? B2 : B3)
-                       : (k == Kind::Overdrive) ? (model >= 2 ? O2 : O)
+                       : (k == Kind::Overdrive) ? (model >= 3 ? O3 : model == 2 ? O2 : O)
                        : (k == Kind::Distortion) ? D
                        : (model <= 0 ? F : F1);
         return lerpTbl(t, 6, drive);
