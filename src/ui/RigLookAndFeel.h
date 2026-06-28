@@ -117,7 +117,7 @@ namespace colors
         case 4: // Fuzz
             return (model == 1)
                        ? AccentPair{C(0xffd7dde2), C(0xff5a626b), C(0xffb06bd8)} // Violet Ram (Big Muff): chrome body, VIOLET LED
-                       : AccentPair{C(0xffcaa6f0), C(0xff8a5cc6)};               // Round Fuzz (lavender)
+                       : AccentPair{C(0xffff5a4d), C(0xffa83229)};               // Round Fuzz (Fuzz Face red)
         default: return {accent, accentDim};
         }
     }
