@@ -130,8 +130,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
             juce::ParameterID(pid + "bRange", 1), lbl + "Boost Range",
             juce::StringArray{"Treble", "Mid", "Full"}, 0)); // treble-boost cap switch
+        // Shared per-slot model index across ALL drive categories. Range 0..4 so the
+        // largest category (Overdrive: 5 models incl. Breaker Drive) is reachable; the
+        // model menu clamps to each category's modelCount, so smaller categories ignore
+        // the extra index. Default 0.
         params.push_back(std::make_unique<juce::AudioParameterInt>(
-            juce::ParameterID(pid + "bModel", 1), lbl + "Boost Model", 0, 3, 0));
+            juce::ParameterID(pid + "bModel", 1), lbl + "Boost Model", 0, 4, 0));
         // Overdrive: Drive / Tone / Level.
         params.push_back(std::make_unique<juce::AudioParameterFloat>(
             juce::ParameterID(pid + "oDrive", 1), lbl + "OD Drive",

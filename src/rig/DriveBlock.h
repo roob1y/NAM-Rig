@@ -283,6 +283,29 @@ public:
             // Klon high-shelf (bass fixed, +18/-8 dB), noon = flat. NOT the engine tilt.
             {"Gold Horse", "Klon Centaur (transparent overdrive)",
              { 1, 2.0f, 70.0f, 210.0f,  980.0f, 3.2f, 0.3f, 4700.0f, 0.00f,  408.0f, 0.95f, 1.0f, 0.0f,  0.0f, 700.0f, 0.50f, 0.30f, 0.0f, 1.0f, 0.0f, 18.0f}, false},
+            // model 4: circuit-fit Marshall Bluesbreaker (the early-'90s pedal, the
+            // King of Tone / Timmy / Morning Glory ancestor). A TL072 non-inverting
+            // boost+filter (IC1A) into an INVERTING soft-clip stage (IC1B, 4x 1N914 in
+            // the feedback loop: high 1.2V threshold + a 6k8 series R -> SOFT, warm),
+            // then a passive treble-rolloff tone. Derived + fit in bluesbreaker_response.py
+            // (RMS 0.35 dB, 40-6k). The small-signal voice is the OPPOSITE of a TS:
+            // WIDE-OPEN low end (input HPF C1 10n / R1 1M = ~16 Hz, NOT a 220 Hz bass cut)
+            // + a GENTLE bright presence shelf (~+4.7 dB toward 4-7 kHz) from the IC1A gain
+            // stage, sitting PRE-clip (midPost 0) so it both colours the tone AND clips the
+            // highs a touch = the BB's mild grain when pushed. STATIC (shapeTrack 0): the
+            // circuit's emphasis saturates fast (it is ~flat only at the very bottom of the
+            // Drive pot and essentially FULL from noon up), so a fixed shelf matches the
+            // usable range far better than a linear bloom -- and the "clean till you push
+            // it" feel comes from the low gMin + soft clip, not the EQ. SYMMETRIC cubic soft
+            // clip (bias 0) -- gentler than GD2/SD-1: softer knee, MILDER pre/de-emphasis
+            // (emphDb, frequency-selective clip; cancels in the linear path so it doesn't
+            // touch the small-signal fit) + a touch more clean blend (0.22) + touch (0.45)
+            // since the BB famously keeps guitar timbre/dynamics. LOWER, softer gain range
+            // than GD2 (gMin/gMax) -- clean till pushed, "fairly low output, breaks up late"
+            // (the real pedal). Treble-shelf tone (bass fixed, soft-poly path), pivot 1200.
+            // Calibration-referenced. See docs/drive/bluesbreaker.md.
+            {"Breaker Drive", "Marshall Bluesbreaker (soft symmetric OD)",
+             { 3, 3.0f, 48.0f,  20.0f, 4000.0f, 4.7f, 0.68f,13000.0f, 0.00f, 1200.0f, 1.15f, 0.0f, 0.0f,  5.0f, 700.0f, 0.22f, 0.45f, 0.0f, 0.0f}, false},
         };
         static const Model dist[] = {
             // model 0: the original simple hard-clip stand-in (kept byte-for-byte for A/B).
@@ -334,7 +357,7 @@ public:
         switch (cat)
         {
         case Kind::Boost:      count = 4; return boost;
-        case Kind::Overdrive:  count = 4; return od;
+        case Kind::Overdrive:  count = 5; return od;
         case Kind::Distortion: count = 2; return dist;
         case Kind::Fuzz:       count = 3; return fuzz;
         default:               count = 0; return nullptr;

@@ -295,7 +295,7 @@ treatment — circuit-fit voicing, real shaper, ADAA, calibrated feel):
 |-------|---------------|--------------|
 | **SD-1** | TS with **asymmetric** diodes | start from Green Drive II, add `bias` (asym), refit if EQ differs; +gain/+louder |
 | **Klon** | **hard** clip + heavy parallel **clean blend** | clip 1 (hard) + large `cleanBlend`, LP clean feed for low end; very transparent/dynamic |
-| **Blues Breaker** | softer, **symmetric**, open low end | cubic clip, gentler emphasis, less bass-cut |
+| ~~**Blues Breaker**~~ | **DONE — Breaker Drive** (Overdrive model 4, [bluesbreaker.md](bluesbreaker.md)) | symmetric cubic, open lows (lowCut 20), gentle presence shelf (static), mild emphasis, soft range; widened `bModel` 0..4 |
 | **Big Muff** | cascaded clipping stages, scooped mids | needs a 2-stage path + a mid *scoop* (negative midDb) — bigger change |
 
 For each (new or rework): research → derive curve → fit → pick clip shape +

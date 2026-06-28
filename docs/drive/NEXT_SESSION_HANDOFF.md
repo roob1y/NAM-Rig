@@ -222,16 +222,19 @@ stay byte-for-byte; there are regression tests asserting model 0 == legacy).
   new model.
 
 Current model inventory: Boost (4: Range '65, EP Boost, Range '65 II, EP Boost II),
-Overdrive (**4**: Green Drive, Green Drive II, **Super Drive**, **Gold Horse**),
-Distortion (2: Black Rodent, Black Rodent II), Fuzz (**3**: Round Fuzz, Round Fuzz II,
-**Violet Ram**).
-**NB: `bModel` 0..3 is now FULL for BOTH Boost AND Overdrive.** Distortion has room
-for 2 more (2/4); Fuzz has room for 1 (3/4). Adding a 5th model to Boost or Overdrive (or any beyond 0..3)
-needs the `bModel` param range widened (PluginProcessor.cpp `bModel` AudioParameterInt
-0,3 → 0,4 + the UI menu IDs). New engine bits available for reuse: **clip type 4
-(asym cubic + 2nd-order ADAA)** — with optional pre/de-emphasis — the **`gate`**
-field, and now a **hard-clip clean blend** (raw-input, `kCleanScale`) for parallel
-clean/dirty sums.
+Overdrive (**5**: Green Drive, Green Drive II, **Super Drive**, **Gold Horse**,
+**Breaker Drive**), Distortion (2: Black Rodent, Black Rodent II), Fuzz (**3**: Round
+Fuzz, Round Fuzz II, **Violet Ram**).
+**NB: `bModel` was widened `0,3` → `0,4` for Breaker Drive** (the shared per-slot model
+index across all drive categories; the menu clamps to each category's `modelCount`). So
+Overdrive now holds 5 (0..4), Boost is full at 0..3 (room for 1 more at index 4 now the
+param allows it), Distortion has room (2/5), Fuzz has room (3/5) — no further param
+widening needed for the next several models. The widening was a **one-line**
+PluginProcessor.cpp change; the Panels.h model menu is fully generic (built from
+`modelCount`/`modelName`), so no menu IDs needed editing. New engine bits available for
+reuse: **clip type 4 (asym cubic + 2nd-order ADAA)** — with optional pre/de-emphasis —
+the **`gate`** field, and a **hard-clip clean blend** (raw-input, `kCleanScale`) for
+parallel clean/dirty sums.
 
 ---
 
@@ -261,7 +264,7 @@ reworks.
 |-------|---------------|--------------|
 | ~~**SD-1**~~ | **DONE — Super Drive** (Overdrive model 2, [sd1.md](sd1.md)) | clip 4 asym cubic (bias 0.35), TS-fit EQ, gMin 6/gMax 120, outTrim 1.25; emphasis now enabled on clip 4 |
 | ~~**Klon**~~ | **DONE — Gold Horse** (Overdrive model 3, [klon.md](klon.md)) | clip 1 hard + 2nd-order ADAA + heavy raw-input clean blend (new hard-clip blend path, `kCleanScale`), ~1 kHz band-pass, shapeTrack bloom; fills bModel 0..3 |
-| **Blues Breaker** | softer, symmetric, open low end | cubic clip, gentler emphasis, less bass-cut. → **needs `bModel` widened** (Overdrive is now FULL at 0..3) OR put it in another category |
+| ~~**Blues Breaker**~~ | **DONE — Breaker Drive** (Overdrive model 4, [bluesbreaker.md](bluesbreaker.md)) | symmetric cubic soft clip (bias 0), OPEN lows (lowCut 20, ~16 Hz input HPF — not a TS bass cut), gentle bright presence shelf (midHz 4000/+4.7, static shapeTrack 0), mild emphasis (emphDb 5), soft range gMin 3/gMax 48 (the gentlest OD), outTrim 1.15. Fit RMS 0.71 dB end-to-end. **Widened `bModel` 0,3→0,4** (one-liner; menu is generic) |
 | ~~**Big Muff**~~ | **DONE — Violet Ram** (**Fuzz** model 2, [big-muff.md](big-muff.md)) | new 2-stage soft-clip CASCADE (`muffStages` + `muffLpHz` + `kMuffStage2Gain`), cubic ×2, circuit-fit −6.5 dB scoop, moderate-default/hot-ceiling range, see-saw Tone. Filed under FUZZ (Robbie's call) → needed a new `fTone` param + the Fuzz panel shows Sustain/Tone/Volume only for the Muff. Fuzz now 3/4 |
 
 ---
@@ -327,9 +330,14 @@ PASSIVE Big Muff tone stack** — a treble-HP/bass-LP 2nd-order network, derived
 by nodal solve, **bilinear-transformed to a per-block biquad** (coeffs from the knob,
 keyed on `muffStages > 1`, slot state `mtX1/X2/Y1/Y2`; static notch removed, `midDb 0`).
 Passive = only attenuates → gentle gradient (CCW ~1.5× noon, not the +9 dB boost).
-drive_test **98 CHECKs, 0 failures** (T56 asserts the passive gradient). Worked example:
-[big-muff.md](big-muff.md). **UNCOMMITTED** — offline build green, pending commit on
-Windows + play-test. The prep notes below are retained for reference / the era variants.
+drive_test **98 CHECKs, 0 failures** (T56 asserts the passive gradient). A later **voicing
+refit** (after a PluginDoctor trace showed the peak too low at ~160 Hz / over-scooped
+low-mids) gave it the real circuit's **three distinct Miller corners** (`muffLpHz 1200`
+pre clip 1, new `muffInterLpHz 1780` pre clip 2, `lpHz 1170` post) + gentler tone-stack
+values (Ct 10n/Rt 47k/Cb 6.8n) -> peak ~250 Hz with the low-mid grind restored. Worked
+example: [big-muff.md](big-muff.md). **COMMITTED on Windows (2026-06-28), build passed;
+kept the dark Ram's Head voicing by choice** (brightness belongs on the amp + Tone knob).
+The prep notes below are retained for reference / the era variants.
 
 **Original goal:** add a Big Muff as **Distortion model 2** (Distortion has room: 2/4, so
 `bModel` 0..3 fits — no param widening). Disguised name TBD (scheme: pick something

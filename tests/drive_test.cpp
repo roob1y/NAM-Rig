@@ -291,7 +291,7 @@ int main()
         bool same = true;
         for (size_t i = 0; i < in.size(); ++i) same = same && (m0[i] == def[i]);
         CHECK(same, "T11 OD model 0 == legacy default (A/B preserves the original)");
-        CHECK(DriveBlock::modelCount(Kind::Overdrive) == 4, "T11 Overdrive holds 4 models (GD/GD II/Super Drive/Gold Horse)");
+        CHECK(DriveBlock::modelCount(Kind::Overdrive) == 5, "T11 Overdrive holds 5 models (GD/GD II/Super Drive/Gold Horse/Breaker Drive)");
     }
 
     // ---- T12: 2nd-order ADAA on the cubic crushes alias vs a naive cubic ----
@@ -686,7 +686,7 @@ int main()
         auto m1 = realSlotM(Kind::Overdrive, 1, 0.7f, in);
         bool finite = true; for (float v : m1) finite = finite && std::isfinite(v);
         CHECK(finite, "T38 OD model 1 (Green Drive II) still renders cleanly");
-        CHECK(DriveBlock::modelCount(Kind::Overdrive) == 4, "T38 Overdrive holds 4 models (GD/GD II/Super Drive/Gold Horse)");
+        CHECK(DriveBlock::modelCount(Kind::Overdrive) == 5, "T38 Overdrive holds 5 models (GD/GD II/Super Drive/Gold Horse/Breaker Drive)");
     }
 
     // ---- T39: SD-1 small-signal voicing -- the TS-style ~720-900 Hz mid hump ----
@@ -798,7 +798,7 @@ int main()
         auto m3 = realSlotM(Kind::Overdrive, 3, 0.7f, in);
         bool finite = true; for (float v : m3) finite = finite && std::isfinite(v);
         CHECK(finite, "T45 OD model 3 (Gold Horse) renders cleanly");
-        CHECK(DriveBlock::modelCount(Kind::Overdrive) == 4, "T45 Overdrive holds 4 models (fills bModel 0..3)");
+        CHECK(DriveBlock::modelCount(Kind::Overdrive) == 5, "T45 Overdrive holds 5 models (Gold Horse + Breaker Drive)");
     }
 
     // ---- T46: Black Rodent II (the OTHER hard-clip+ADAA model) stays byte-exact ----
@@ -996,6 +996,134 @@ int main()
         const double sc = harmRatio(realSlotM(Kind::Fuzz, 2, 0.3f, sine(660.0, 0.08f, 24000)), 660.0, 12);
         const double hb = harmRatio(realSlotM(Kind::Fuzz, 2, 0.3f, sine(660.0, 0.20f, 24000)), 660.0, 12);
         CHECK(hb > sc + 0.05, "T57 Violet Ram humbucker drives harder: THD %.3f (HB) > %.3f (SC)", hb, sc);
+    }
+
+    // ====== Breaker Drive (Overdrive model 4): circuit-fit Marshall Bluesbreaker ======
+
+    // ---- T58: model 4 added; OD models 0-3 byte-exact; Breaker renders cleanly ----
+    // Purely additive (a new od[] row + the Overdrive count 4->5 + the bModel param
+    // widened 0..3 -> 0..4), so every shipped model is untouched.
+    {
+        auto in = sine(220.0, 0.2f, 8192);
+        auto m0 = realSlotM(Kind::Overdrive, 0, 0.7f, in);
+        auto def = realSlot(Kind::Overdrive, 0.7f, in);
+        bool same = true;
+        for (size_t i = 0; i < in.size(); ++i) same = same && (m0[i] == def[i]);
+        CHECK(same, "T58 OD model 0 still byte-exact after adding Breaker Drive");
+        auto m4 = realSlotM(Kind::Overdrive, 4, 0.7f, in);
+        bool finite = true; for (float v : m4) finite = finite && std::isfinite(v);
+        CHECK(finite, "T58 OD model 4 (Breaker Drive) renders only finite samples");
+        const auto v = DriveBlock::voicingFor(Kind::Overdrive, 4);
+        CHECK(v.clip == 3 && v.bias == 0.0f, "T58 Breaker = symmetric cubic soft clip (clip %d, bias %.2f)", v.clip, v.bias);
+    }
+
+    // ---- T59: the Bluesbreaker VOICE -- WIDE-OPEN lows (NOT a TS bass cut) + a gentle
+    // bright presence shelf, and a TS-style treble-shelf Tone (bass fixed). ----
+    // Small-signal probe (amp tiny -> the soft clip stays ~linear). The defining
+    // contrast with the TS-family GD2 is the LOW END: the BB barely touches it
+    // (input HPF ~16 Hz) where the TS cuts ~8 dB; and a mild upper-treble lift.
+    {
+        auto g = [&](int model, double f, float dr, float tone) {
+            auto in = sine(f, 0.005f, 16384);
+            return goertzel(realSlotMT(Kind::Overdrive, model, dr, tone, in), f) / goertzel(in, f);
+        };
+        const double openLows = 20.0 * std::log10(g(4, 50.0, 0.0f, 0.5f) / g(4, 200.0, 0.0f, 0.5f));
+        const double tsLows   = 20.0 * std::log10(g(1, 50.0, 0.0f, 0.5f) / g(1, 200.0, 0.0f, 0.5f)); // GD2 (TS) bass cut
+        CHECK(openLows > -3.0, "T59 Breaker open low end: 50Hz %.1f dB re 200 (barely cut)", openLows);
+        CHECK(openLows > tsLows + 4.0,
+              "T59 Breaker far more open than the TS: lows %.1f dB vs GD2 %.1f dB", openLows, tsLows);
+        const double presence = 20.0 * std::log10(g(4, 3000.0, 0.0f, 0.5f) / g(4, 200.0, 0.0f, 0.5f));
+        CHECK(presence > 2.0, "T59 Breaker gentle presence shelf: 3kHz +%.1f dB re 200", presence);
+        // static voicing (shapeTrack 0): the small-signal shape is drive-independent.
+        const double pres0 = 20.0 * std::log10(g(4, 3000.0, 0.0f, 0.5f) / g(4, 200.0, 0.0f, 0.5f));
+        const double pres1 = 20.0 * std::log10(g(4, 3000.0, 0.5f, 0.5f) / g(4, 200.0, 0.5f, 0.5f));
+        CHECK(std::fabs(pres0 - pres1) < 1.0,
+              "T59 Breaker voicing is static (shapeTrack 0): presence %.1f ~ %.1f across Drive", pres0, pres1);
+        // Tone = treble shelf, bass FIXED (the BB passive treble rolloff, soft-poly path).
+        const double trebMoves = 20.0 * std::log10(g(4, 3000.0, 0.5f, 1.0f) / g(4, 3000.0, 0.5f, 0.0f));
+        const double bassFixed = 20.0 * std::log10(g(4, 100.0, 0.5f, 1.0f) / g(4, 100.0, 0.5f, 0.0f));
+        CHECK(trebMoves > 6.0 && std::fabs(bassFixed) < 1.0,
+              "T59 Breaker Tone = treble shelf: 3k moves %.1f dB, 100Hz fixed %.1f dB", trebMoves, bassFixed);
+    }
+
+    // ---- T60: SYMMETRIC clipping -- low even harmonics, unlike the asymmetric SD-1 ----
+    // The BB's back-to-back diodes (4x 1N914) clip symmetrically (bias 0), so h2/h1 is
+    // near zero -- in sharp contrast to the Super Drive's 2:1 asymmetric crunch.
+    {
+        auto h2h1 = [&](int model, float dr) {
+            auto y = realSlotM(Kind::Overdrive, model, dr, sine(220.0, 0.20f, 24000));
+            return goertzel(y, 440.0) / (goertzel(y, 220.0) + 1e-9);
+        };
+        const double bb = h2h1(4, 0.6f), sd = h2h1(2, 0.6f);
+        CHECK(bb < 0.02, "T60 Breaker is symmetric: h2/h1 %.4f ~ 0", bb);
+        CHECK(sd > bb * 5.0, "T60 vs the asymmetric SD-1: Breaker %.4f << Super Drive %.4f", bb, sd);
+    }
+
+    // ---- T61: SOFTER / gentler than a TS -- less THD than GD2, far less than SD-1 ----
+    // The BB is the mildest overdrive in the rack: a high diode threshold (1.2 V) + the
+    // 6k8 series R = a soft knee, and a lower gain range. At noon (and matched input) it
+    // is cleaner than Green Drive II, which is itself cleaner than the hot SD-1.
+    {
+        auto thd = [&](int model) {
+            return harmRatio(realSlotM(Kind::Overdrive, model, 0.5f, sine(220.0, 0.20f, 24000)), 220.0, 12);
+        };
+        const double bb = thd(4), gd = thd(1), sd = thd(2);
+        CHECK(bb < gd && gd < sd,
+              "T61 Breaker is the gentlest OD: noon THD %.3f (BB) < %.3f (GD2) < %.3f (SD-1)", bb, gd, sd);
+    }
+
+    // ---- T62: never spikes -- maxabs sweep. Suite convention (T17/T43) = Tone NOON. ----
+    // The bright BB voicing runs hotter at Tone fully-CW (the +9 dB treble shelf on a
+    // hot, bright signal = legitimate gain, NOT a crackle spike), so we assert the
+    // standard tone-noon bound AND that even the full tone x drive sweep stays finite
+    // and bounded (no divide-by-zero ADAA spike).
+    {
+        double wn = 0.0, wAny = 0.0; bool finite = true;
+        for (float dr = 0.0f; dr <= 1.001f; dr += 0.25f)
+            for (double f = 50.0; f <= 12000.0; f *= 1.2)
+            {
+                auto yn = realSlotMT(Kind::Overdrive, 4, dr, 0.5f, sine(f, 0.5f, 8192)); // tone noon
+                for (float v : yn) { wn = std::max(wn, (double)std::fabs(v)); finite = finite && std::isfinite(v); }
+                for (float tn = 0.0f; tn <= 1.001f; tn += 0.5f)
+                {
+                    auto yc = realSlotMT(Kind::Overdrive, 4, dr, tn, sine(f, 0.5f, 8192));
+                    for (float v : yc) { wAny = std::max(wAny, (double)std::fabs(v)); finite = finite && std::isfinite(v); }
+                }
+            }
+        CHECK(wn < 1.5, "T62 Breaker no spikes at Tone noon (full-scale sweep): worst |out| %.2f", wn);
+        CHECK(finite && wAny < 1.8, "T62 Breaker bounded+finite even at Tone CW (bright): worst |out| %.2f", wAny);
+    }
+
+    // ---- T63: input-dependent + breaks up LATE (clean till pushed) ----
+    // The clip threshold is fixed (calibration-referenced): a humbucker drives harder
+    // than a single-coil at the same knob; and at low Drive the BB stays nearly clean
+    // (the real pedal: "not much overdrive before 3 o'clock"), dirtying up the dial.
+    {
+        const double sc = harmRatio(realSlotM(Kind::Overdrive, 4, 0.2f, sine(220.0, 0.08f, 24000)), 220.0, 10);
+        const double hb = harmRatio(realSlotM(Kind::Overdrive, 4, 0.2f, sine(220.0, 0.20f, 24000)), 220.0, 10);
+        CHECK(hb > sc * 1.8, "T63 Breaker input-dependent: humbucker THD %.3f > single-coil %.3f", hb, sc);
+        const double lowDr  = harmRatio(realSlotM(Kind::Overdrive, 4, 0.2f, sine(220.0, 0.08f, 24000)), 220.0, 10);
+        const double highDr = harmRatio(realSlotM(Kind::Overdrive, 4, 0.9f, sine(220.0, 0.08f, 24000)), 220.0, 10);
+        CHECK(lowDr < 0.05 && highDr > lowDr * 5.0,
+              "T63 Breaker breaks up late: clean at low Drive %.3f -> dirties to %.3f", lowDr, highDr);
+    }
+
+    // ---- T64: the cubic soft clip runs 2nd-order ADAA -- alias far below a naive cubic ----
+    {
+        auto in = sine(5000.0, 0.05f, 48000); // odd harmonics fold to 3 k / 13 k
+        auto adaa = realSlotM(Kind::Overdrive, 4, 1.0f, in);
+        // naive memoryless cubic sharing Breaker's pre-gain + pre-clip low-cut -> baseline
+        const auto v = DriveBlock::voicingFor(Kind::Overdrive, 4);
+        const float pg = v.gMin * std::pow(v.gMax / v.gMin, 1.0f);
+        const float hpC = 1.0f - (float)std::exp(-2.0 * M_PI * v.lowCutHz / SR);
+        auto cub = [](double x) { if (x > 1.0) return 2.0 / 3.0; if (x < -1.0) return -2.0 / 3.0; return x - x * x * x / 3.0; };
+        std::vector<float> naive(in.size());
+        float hp = 0;
+        for (size_t i = 0; i < in.size(); ++i) { float u = in[i] * pg; hp += hpC * (u - hp); u = u - hp; naive[i] = (float)cub((double)u) * v.outTrim; }
+        const double a3 = goertzel(adaa, 3000.0), n3 = goertzel(naive, 3000.0);
+        CHECK(a3 < n3 * 0.5, "T64 Breaker ADAA2 cuts alias@3k: %.2e < naive %.2e", a3, n3);
+        const double redDb = 20.0 * std::log10(n3 / std::max(a3, 1e-12));
+        CHECK(redDb > 12.0, "T64 Breaker alias@3k reduced by %.1f dB (2nd-order cubic)", redDb);
     }
 
     std::printf("\n%s (%d failure%s)\n", gFails ? "RESULT: FAIL" : "RESULT: ALL PASS", gFails, gFails == 1 ? "" : "s");
