@@ -6,12 +6,12 @@
 // model (from published circuit analyses + measured frequency responses):
 //   Off          : out of the path — bit-exact passthrough.
 //   Boost        : germanium treble booster ("Range '65") / FET clean boost
-//                  ("EP Boost"). Range '65 = a one-pole input-cap high-pass
+//                  ("Plex Boost"). Range '65 = a one-pole input-cap high-pass
 //                  (the 3-way switch moves the corner) + soft germanium clip.
 //                  TWO models: 0 "Range '65" = the circuit-fit Dallas Rangemaster,
-//                  1 "EP Boost" = the circuit-fit Echoplex EP-3 / Xotic EP Booster
+//                  1 "Plex Boost" = the circuit-fit Echoplex EP-3 / Xotic EP Booster
 //                  (see below). The v1 stand-ins have been removed from the catalog.
-//   EP Boost     : the Maestro Echoplex EP-3 preamp (single JFET common-source) as the
+//   Plex Boost   : the Maestro Echoplex EP-3 preamp (single JFET common-source) as the
 //                  Xotic EP Booster. The pure EP-3 stage is ~FLAT across audio (fit
 //                  ep3_response.py) -- the character is clean headroom + very high
 //                  input Z + JFET 2nd-harmonic, FULL-RANGE (opposite of the
@@ -230,13 +230,13 @@ public:
             // Cin/Rgate HPF sits ~3 Hz, the source is unbypassed, the 220 pF roll is
             // >70 kHz) -- its magic is clean headroom + very high input Z + subtle JFET
             // 2nd-harmonic, NOT an EQ. It is FULL-RANGE (the opposite of the Rangemaster's
-            // treble-only high-pass). "EP Boost" as a pedal = the Xotic EP Booster, which
+            // treble-only high-pass). "Plex Boost" as a pedal = the Xotic EP Booster, which
             // adds gentle TONE-SHAPING: a broad presence high-shelf + full low end. We fit
             // our low-Q pre-shaper peak (midHz 5000, Q 0.35, +4 dB) to that gentle shelf
             // (docs/drive/ep3_response.py, RMS 0.35 dB), low-cut at ~15 Hz (full bass).
             // High-headroom CLEAN soft (tanh) clip with a small off-centre bias for the
             // JFET even-harmonic warmth -> mostly clean, a little hair only when cranked.
-            {"EP Boost", "Clean Full-Range Boost",
+            {"Plex Boost", "Clean Full-Range Boost",
              { 0, 1.3f,  6.0f,  15.0f, 5000.0f, 4.0f, 0.35f,   0.0f, 0.10f, 1200.0f, 0.74f, 0.0f, 1.0f,  0.0f, 700.0f, 0.0f, 0.0f,   0.0f, 0.0f}, false},
         };
         static const Model od[] = {
@@ -935,14 +935,14 @@ private:
     static float driveMakeup(Kind k, int model, float drive)
     {
         static const float B2[6] = {1.556f, 0.916f, 0.557f, 0.378f, 0.295f, 0.260f}; // Range '65 (Rangemaster, pink-noise ref)
-        static const float B3[6] = {1.073f, 0.801f, 0.601f, 0.456f, 0.352f, 0.279f}; // EP Boost (clean boost, pink-noise ref)
+        static const float B3[6] = {1.073f, 0.801f, 0.601f, 0.456f, 0.352f, 0.279f}; // Plex Boost (clean boost, pink-noise ref)
         static const float O[6]  = {0.666f, 0.435f, 0.296f, 0.212f, 0.161f, 0.129f};  // Green Drive (mid-hump OD)
         static const float O2[6] = {0.438f, 0.410f, 0.401f, 0.398f, 0.396f, 0.396f}; // Super Drive (SD-1, asym cubic, pink-noise ref; near-flat = the clipper compresses)
         static const float O3[6] = {0.427f, 0.322f, 0.240f, 0.206f, 0.199f, 0.201f}; // Gold Horse / Breaker Drive (hard/soft clip + clean blend, pink-noise ref)
         static const float D[6]  = {1.229f, 0.568f, 0.310f, 0.242f, 0.223f, 0.214f};  // Black Rodent (ProCo RAT)
         static const float F1[6] = {0.439f, 0.371f, 0.346f, 0.338f, 0.335f, 0.334f}; // Round Fuzz (asym cubic, pink-noise ref)
         static const float F2[6] = {0.587f, 0.396f, 0.316f, 0.286f, 0.275f, 0.272f}; // Violet Ram (Big Muff 2-stage cascade, pink-noise ref; compresses as both stages saturate)
-        // model indices are now compact (v1 stand-ins removed): Boost 0 Range '65 / 1 EP Boost;
+        // model indices are now compact (v1 stand-ins removed): Boost 0 Range '65 / 1 Plex Boost;
         // OD 0 Green Drive / 1 Super Drive / 2 Gold Horse / 3 Breaker Drive; Fuzz 0 Round Fuzz / 1 Violet Ram.
         const float *t = (k == Kind::Boost) ? (model <= 0 ? B2 : B3)
                        : (k == Kind::Overdrive) ? (model >= 2 ? O3 : model == 1 ? O2 : O)
