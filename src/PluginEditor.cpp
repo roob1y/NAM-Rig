@@ -27,6 +27,11 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
               &mModPanel, &mDelayPanel, &mReverbPanel}
 {
     setLookAndFeel(&mLnf);
+    // Manually-shown PopupMenus (drive/delay pickers, presets, etc.) don't inherit
+    // a component's LookAndFeel the way ComboBox dropdowns do -- they fall back to
+    // the default. Point the default at our LookAndFeel so every menu in the plugin
+    // gets the one styled dropdown look.
+    juce::LookAndFeel::setDefaultLookAndFeel(&mLnf);
     addAndMakeVisible(mContent);
     mContent.setSize(kBaseW, kBaseH);
 
@@ -86,6 +91,8 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
 
 NamRigEditor::~NamRigEditor()
 {
+    if (&juce::LookAndFeel::getDefaultLookAndFeel() == &mLnf)
+        juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
     setLookAndFeel(nullptr);
 }
 

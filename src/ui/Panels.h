@@ -11,6 +11,33 @@
 namespace nam_rig::ui
 {
 
+// Compact, non-selectable menu section header ("CHOOSE DRIVE" etc). JUCE's
+// addSectionHeader reserves a tall row with the label bottom-aligned, which left
+// a big dead gap at the top of the menu; this custom item is short and draws the
+// caption with minimal padding.
+class MenuSectionHeader : public juce::PopupMenu::CustomComponent
+{
+public:
+    explicit MenuSectionHeader(juce::String text)
+        : juce::PopupMenu::CustomComponent(false), mText(std::move(text).toUpperCase()) {}
+
+    void getIdealSize(int &w, int &h) override
+    {
+        const auto f = fonts::archivo(10.0f, fonts::SemiBold, 0.14f);
+        w = (int)std::ceil(juce::GlyphArrangement::getStringWidth(f, mText)) + 34;
+        h = 22;
+    }
+    void paint(juce::Graphics &g) override
+    {
+        g.setColour(colors::caption);
+        g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.14f));
+        g.drawText(mText, getLocalBounds().reduced(14, 0), juce::Justification::centredLeft, true);
+    }
+
+private:
+    juce::String mText;
+};
+
 // Rotary knob with a caption above and a mono value readout below, attached to
 // one APVTS parameter. Caption + value are drawn by the component (the rotary
 // itself comes from the LookAndFeel); the readout turns accent while dragging.
@@ -60,8 +87,14 @@ public:
     }
 
     // Make the value readout a clickable dropdown of discrete choices (the knob
-    // can still be turned to step). Used for the delay Sync division knobs.
-    void setValueMenu(juce::StringArray items) { mValueMenu = std::move(items); repaint(); }
+    // can still be turned to step). Used for the delay Sync division knobs. An
+    // optional header titles the styled menu ("Sync", "Mode", ...).
+    void setValueMenu(juce::StringArray items, juce::String header = {})
+    {
+        mValueMenu = std::move(items);
+        mValueMenuHeader = std::move(header);
+        repaint();
+    }
 
     void mouseDown(const juce::MouseEvent &e) override
     {
@@ -69,9 +102,12 @@ public:
             || !mValueRect.contains(e.getPosition()))
             return;
         juce::PopupMenu m;
+        if (mValueMenuHeader.isNotEmpty())
+            m.addCustomItem(-1, std::make_unique<MenuSectionHeader>(mValueMenuHeader), nullptr, {});
         const int cur = (int)std::lround(mSlider.getValue());
         for (int i = 0; i < mValueMenu.size(); ++i)
             m.addItem(i + 1, mValueMenu[i], true, i == cur);
+        m.setLookAndFeel(&getLookAndFeel());
         m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this),
                         [this](int r) {
                             if (r > 0) mSlider.setValue(r - 1, juce::sendNotificationSync);
@@ -166,6 +202,7 @@ private:
     juce::Rectangle<int> mCaptionRect, mValueRect;
     juce::String mUnit;
     juce::StringArray mValueMenu; // when set, the value readout is a click-to-pick dropdown
+    juce::String mValueMenuHeader; // optional title for the click-to-pick menu
     int mCaptionH = 15, mValueH = 16;
     bool mShowValue = true, mDragging = false, mRotationReadout = false, mReadoutFn = false;
 };
@@ -1052,16 +1089,36 @@ inline void paintDriveGlyph(juce::Graphics &g, int type, int model,
         g.fillPath(dots, xf);
         return;
     }
-    if (motif == Sd1) // Super Drive -> hero shield with a lightning bolt (stroked shield, filled bolt)
+    if (motif == Sd1) // Super Drive -> Robbie's vector design (Super-Drive Design 2.svg): outline shield + FILLED bolt
     {
-        juce::Path shield;
-        shield.startNewSubPath(15, 9); shield.lineTo(49, 9); shield.lineTo(49, 25);
-        shield.cubicTo(49, 35, 41, 42, 32, 46); shield.cubicTo(23, 42, 15, 35, 15, 25); shield.closeSubPath();
-        g.strokePath(shield, juce::PathStrokeType(2.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded), xf);
-        juce::Path bolt; // slim, centred on the shield axis
-        bolt.startNewSubPath(35.0f, 14.0f); bolt.lineTo(27.0f, 27.0f); bolt.lineTo(30.5f, 27.0f);
-        bolt.lineTo(28.0f, 40.0f); bolt.lineTo(37.0f, 24.5f); bolt.lineTo(33.0f, 24.5f);
-        bolt.lineTo(35.5f, 14.0f); bolt.closeSubPath();
+        juce::Path shield; // path2 "Shield" -- stroked outline
+        shield.startNewSubPath(31.69f, 3.36f);
+        shield.cubicTo(33.22f, 3.27f, 45.80f, 7.37f, 45.80f, 7.37f);
+        shield.cubicTo(46.69f, 7.63f, 49.80f, 8.38f, 50.09f, 9.13f);
+        shield.cubicTo(50.44f, 9.78f, 49.62f, 17.81f, 49.62f, 17.81f);
+        shield.cubicTo(49.15f, 22.96f, 47.54f, 30.48f, 44.75f, 34.83f);
+        shield.cubicTo(43.27f, 37.13f, 41.01f, 39.34f, 38.85f, 41.01f);
+        shield.cubicTo(37.72f, 41.89f, 33.65f, 44.60f, 32.36f, 44.77f);
+        shield.cubicTo(31.44f, 44.89f, 25.76f, 41.48f, 23.85f, 39.74f);
+        shield.cubicTo(22.15f, 38.20f, 20.77f, 36.77f, 19.52f, 34.83f);
+        shield.cubicTo(16.39f, 29.96f, 15.29f, 23.24f, 14.60f, 17.58f);
+        shield.cubicTo(14.60f, 17.58f, 13.81f, 9.81f, 14.18f, 9.13f);
+        shield.cubicTo(14.49f, 8.33f, 17.56f, 7.62f, 18.47f, 7.34f);
+        shield.cubicTo(18.47f, 7.34f, 31.69f, 3.36f, 31.69f, 3.36f);
+        shield.closeSubPath();
+        g.strokePath(shield, juce::PathStrokeType(2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded), xf);
+
+        juce::Path bolt; // path1 "Bolt" -- filled solid with the accent
+        bolt.startNewSubPath(34.60f, 8.62f);
+        bolt.lineTo(34.15f, 12.21f);
+        bolt.lineTo(32.81f, 19.38f);
+        bolt.lineTo(38.63f, 20.05f);
+        bolt.lineTo(32.90f, 30.35f);
+        bolt.lineTo(29.45f, 35.95f);
+        bolt.lineTo(31.69f, 23.86f);
+        bolt.lineTo(25.41f, 23.18f);
+        bolt.lineTo(28.46f, 18.26f);
+        bolt.closeSubPath();
         g.fillPath(bolt, xf);
         return;
     }
@@ -1122,6 +1179,291 @@ inline void paintDriveGlyph(juce::Graphics &g, int type, int model,
                                              juce::PathStrokeType::rounded));
 }
 
+// Fully custom drive picker -- a real Component (NOT juce::PopupMenu), so it has no
+// OS window and therefore none of PopupMenu's window-level headaches (opaque/white
+// clear, drop-shadow box, corner ring, 1x scale). It's added to the SCALED content
+// canvas so it scales with the plugin automatically, draws its own rounded panels,
+// and shows a two-pane cascade: categories on the left, the hovered category's
+// models (two-line: bold name + mono descriptor) on the right.
+class DrivePickerOverlay : public juce::Component
+{
+public:
+    struct Model { juce::String name, sub; juce::Colour led; };
+    struct Cat   { juce::String name; std::vector<Model> models; };
+
+    std::function<void(int /*type 0..4*/, int /*model*/)> onPick;
+    std::function<void()> onDismiss;
+
+    DrivePickerOverlay(std::vector<Cat> cats, int curType, int curModel)
+        : mCats(std::move(cats)), mCurType(curType), mCurModel(curModel)
+    {
+        setWantsKeyboardFocus(true);
+        // Open the current category's models by default (so the selection is visible).
+        mOpenCat = (curType >= 1 && curType <= (int)mCats.size()) ? curType - 1 : -1;
+    }
+
+    // Pill rect expressed in THIS overlay's coordinate space; anchors the menu.
+    void setAnchor(juce::Rectangle<int> a) { mAnchor = a; layout(); repaint(); }
+
+    void resized() override { layout(); }
+    void mouseMove(const juce::MouseEvent &e) override { updateHover(e.getPosition()); }
+    void mouseDrag(const juce::MouseEvent &e) override { updateHover(e.getPosition()); }
+
+    void mouseDown(const juce::MouseEvent &e) override
+    {
+        const auto p = e.getPosition();
+        if (mOpenCat >= 0 && mModelPanel.contains(p))
+        {
+            const int idx = modelIndexAt(p);
+            if (idx >= 0) pick(mOpenCat + 1, idx);
+            return; // click on panel padding: keep open
+        }
+        if (mCatPanel.contains(p))
+        {
+            const int row = catRowAt(p);
+            if (row == kOffRow) { pick(0, 0); return; }
+            if (row >= 0)
+            {
+                if ((int)mCats[(size_t)row].models.size() <= 1) pick(row + 1, 0);
+                else { mOpenCat = row; mHoverModel = -1; layout(); repaint(); }
+            }
+            return;
+        }
+        dismiss(); // click anywhere outside the panels closes the picker
+    }
+
+    bool keyPressed(const juce::KeyPress &k) override
+    {
+        if (k == juce::KeyPress::escapeKey) { dismiss(); return true; }
+        return false;
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        paintPanel(g, mCatPanel);
+        g.setColour(colors::caption);
+        g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.14f));
+        g.drawText("CHOOSE DRIVE",
+                   juce::Rectangle<int>(mCatPanel.getX() + 14, mCatPanel.getY() + kPad,
+                                        mCatPanel.getWidth() - 28, kHeaderH),
+                   juce::Justification::centredLeft);
+
+        for (int i = 0; i < (int)mCats.size(); ++i)
+            paintCatRow(g, i);
+
+        auto sep = juce::Rectangle<int>(mCatPanel.getX() + 12, offRowY() - kSep / 2 - 1,
+                                        mCatPanel.getWidth() - 24, 1);
+        g.setColour(colors::divider);
+        g.fillRect(sep);
+        paintRow(g, offRowRect(), "Off", mCurType == 0, juce::Colour(), false,
+                 mHoverCatRow == kOffRow);
+
+        if (mOpenCat >= 0)
+        {
+            paintPanel(g, mModelPanel);
+            const auto &ms = mCats[(size_t)mOpenCat].models;
+            for (int i = 0; i < (int)ms.size(); ++i)
+                paintModelRow(g, i);
+        }
+    }
+
+private:
+    static constexpr int kHeaderH = 22, kRowH = 38, kModelH = 46, kSep = 13, kPad = 6;
+    static constexpr int kCatW = 200;
+    static constexpr int kOffRow = -2;
+
+    void layout()
+    {
+        const int n = (int)mCats.size();
+        const int h = kPad + kHeaderH + n * kRowH + kSep + kRowH + kPad;
+        int x = mAnchor.getX();
+        int y = mAnchor.getY();
+        if (auto *par = getParentComponent())
+        {
+            x = juce::jlimit(4, juce::jmax(4, par->getWidth() - kCatW - 4), x);
+            y = juce::jlimit(4, juce::jmax(4, par->getHeight() - h - 4), y);
+        }
+        mCatPanel = {x, y, kCatW, h};
+
+        if (mOpenCat >= 0 && mOpenCat < (int)mCats.size())
+        {
+            const auto &ms = mCats[(size_t)mOpenCat].models;
+            int mw = 160;
+            for (auto &m : ms)
+            {
+                mw = juce::jmax(mw, (int)std::ceil(juce::GlyphArrangement::getStringWidth(
+                                        fonts::archivo(15.0f, fonts::Bold), m.name)) + 44);
+                mw = juce::jmax(mw, (int)std::ceil(juce::GlyphArrangement::getStringWidth(
+                                        fonts::mono(11.0f), m.sub)) + 44);
+            }
+            const int mh = kPad * 2 + (int)ms.size() * kModelH;
+            int mx = mCatPanel.getRight() + 6;
+            int my = catRowY(mOpenCat) - kPad;
+            if (auto *par = getParentComponent())
+            {
+                if (mx + mw + 4 > par->getWidth()) mx = mCatPanel.getX() - mw - 6; // flip to the left
+                my = juce::jlimit(4, juce::jmax(4, par->getHeight() - mh - 4), my);
+            }
+            mModelPanel = {mx, my, mw, mh};
+        }
+        else
+            mModelPanel = {};
+    }
+
+    int catRowY(int i) const { return mCatPanel.getY() + kPad + kHeaderH + i * kRowH; }
+    juce::Rectangle<int> catRowRect(int i) const
+    {
+        return {mCatPanel.getX() + 4, catRowY(i), mCatPanel.getWidth() - 8, kRowH};
+    }
+    int offRowY() const
+    {
+        return mCatPanel.getY() + kPad + kHeaderH + (int)mCats.size() * kRowH + kSep;
+    }
+    juce::Rectangle<int> offRowRect() const
+    {
+        return {mCatPanel.getX() + 4, offRowY(), mCatPanel.getWidth() - 8, kRowH};
+    }
+    juce::Rectangle<int> modelRowRect(int i) const
+    {
+        return {mModelPanel.getX() + 4, mModelPanel.getY() + kPad + i * kModelH,
+                mModelPanel.getWidth() - 8, kModelH};
+    }
+    int catRowAt(juce::Point<int> p) const
+    {
+        for (int i = 0; i < (int)mCats.size(); ++i)
+            if (catRowRect(i).contains(p)) return i;
+        if (offRowRect().contains(p)) return kOffRow;
+        return -1;
+    }
+    int modelIndexAt(juce::Point<int> p) const
+    {
+        if (mOpenCat < 0) return -1;
+        const auto &ms = mCats[(size_t)mOpenCat].models;
+        for (int i = 0; i < (int)ms.size(); ++i)
+            if (modelRowRect(i).contains(p)) return i;
+        return -1;
+    }
+
+    void updateHover(juce::Point<int> p)
+    {
+        const int row = mCatPanel.contains(p) ? catRowAt(p) : -1;
+        if (row >= 0 && row != mOpenCat && !mCats[(size_t)row].models.empty())
+        {
+            mOpenCat = row;
+            layout();
+        }
+        mHoverCatRow = row;
+        mHoverModel = (mOpenCat >= 0 && mModelPanel.contains(p)) ? modelIndexAt(p) : -1;
+        repaint();
+    }
+
+    void pick(int type, int model)
+    {
+        if (onPick) onPick(type, model);
+        dismiss();
+    }
+    void dismiss()
+    {
+        if (mDismissing) return;
+        mDismissing = true;
+        juce::Component::SafePointer<DrivePickerOverlay> self(this);
+        juce::MessageManager::callAsync([self]() mutable {
+            if (self == nullptr) return;
+            auto cb = self->onDismiss; // local copy: invoking it deletes the overlay
+            if (cb) cb();              // (and thus the member std::function) -- safe via the copy
+        });
+    }
+
+    void paintPanel(juce::Graphics &g, juce::Rectangle<int> r)
+    {
+        auto b = r.toFloat();
+        const float rad = 9.0f;
+        g.setColour(juce::Colour(0xff1c2027)); // opaque base
+        g.fillRoundedRectangle(b, rad);
+        juce::ColourGradient grad(juce::Colour(0xff232830), b.getTopLeft(),
+                                  juce::Colour(0xff171a21), b.getBottomLeft(), false);
+        dither::fillRoundedRectangle(g, grad, b, rad);
+        g.setColour(juce::Colours::black.withAlpha(0.25f));
+        g.drawRoundedRectangle(b.reduced(0.5f), rad, 1.0f);
+    }
+
+    void drawChevron(juce::Graphics &g, juce::Rectangle<int> row)
+    {
+        const float x = (float)row.getRight() - 14.0f, cy = (float)row.getCentreY(), s = 4.0f;
+        juce::Path p;
+        p.startNewSubPath(x - s * 0.5f, cy - s);
+        p.lineTo(x + s * 0.5f, cy);
+        p.lineTo(x - s * 0.5f, cy + s);
+        g.setColour(colors::caption);
+        g.strokePath(p, juce::PathStrokeType(1.6f, juce::PathStrokeType::curved,
+                                             juce::PathStrokeType::rounded));
+    }
+
+    // Single-line row (categories + Off). dot = accent dot when selected.
+    void paintRow(juce::Graphics &g, juce::Rectangle<int> r, const juce::String &name,
+                  bool selected, juce::Colour, bool hasChevron, bool hovered)
+    {
+        if (hovered)
+        {
+            g.setColour(colors::tileSel);
+            g.fillRoundedRectangle(r.toFloat().reduced(1.0f), 7.0f);
+        }
+        auto tx = r.reduced(14, 0);
+        if (selected)
+        {
+            auto dot = juce::Rectangle<float>(6.0f, 6.0f)
+                           .withCentre({(float)r.getX() + 11.0f, (float)r.getCentreY()});
+            g.setColour(colors::accent);
+            g.fillEllipse(dot);
+            tx = tx.withTrimmedLeft(10);
+        }
+        g.setColour(colors::textBright);
+        g.setFont(fonts::archivo(14.0f, fonts::SemiBold));
+        g.drawText(name, tx, juce::Justification::centredLeft);
+        if (hasChevron) drawChevron(g, r);
+    }
+
+    void paintCatRow(juce::Graphics &g, int i)
+    {
+        paintRow(g, catRowRect(i), mCats[(size_t)i].name, mCurType == i + 1, juce::Colour(),
+                 true, mHoverCatRow == i || mOpenCat == i);
+    }
+
+    void paintModelRow(juce::Graphics &g, int i)
+    {
+        const auto &m = mCats[(size_t)mOpenCat].models[(size_t)i];
+        auto r = modelRowRect(i);
+        if (mHoverModel == i)
+        {
+            g.setColour(colors::tileSel);
+            g.fillRoundedRectangle(r.toFloat().reduced(1.0f), 7.0f);
+        }
+        auto tx = r.reduced(14, 0);
+        const bool sel = (mCurType == mOpenCat + 1 && mCurModel == i);
+        if (sel)
+        {
+            auto dot = juce::Rectangle<float>(6.0f, 6.0f)
+                           .withCentre({(float)r.getX() + 11.0f, (float)r.getCentreY()});
+            g.setColour(m.led);
+            g.fillEllipse(dot);
+            tx = tx.withTrimmedLeft(10);
+        }
+        auto top = tx.removeFromTop(tx.getHeight() / 2 + 3);
+        g.setColour(colors::textBright);
+        g.setFont(fonts::archivo(15.0f, fonts::Bold));
+        g.drawText(m.name, top, juce::Justification::bottomLeft);
+        g.setColour(colors::caption);
+        g.setFont(fonts::mono(11.0f));
+        g.drawText(m.sub, tx.withTrimmedTop(1), juce::Justification::topLeft);
+    }
+
+    std::vector<Cat> mCats;
+    int mCurType, mCurModel;
+    int mOpenCat = -1, mHoverCatRow = -1, mHoverModel = -1;
+    bool mDismissing = false;
+    juce::Rectangle<int> mAnchor, mCatPanel, mModelPanel;
+};
+
 // One drive "stomp" in the pedalboard. Top-to-bottom: Type (category), a model
 // selector (when the category has several models), the model's descriptive
 // subtitle, the authentic knobs, the model's mode switch (treble-boost Range),
@@ -1175,8 +1517,13 @@ public:
 
     void refresh()
     {
-        const int type = mType.getSelectedItemIndex();
         const juce::String pid = "drv" + juce::String(mSlot + 1);
+        // Type is read from the param (authoritative), not the hidden bridge combo,
+        // so a fresh selection always takes effect immediately. Keep the combo in
+        // sync for the APVTS attachment, without re-triggering onChange.
+        const int type = curTypeIndex();
+        if (mType.getSelectedItemIndex() != type)
+            mType.setSelectedItemIndex(type, juce::dontSendNotification);
         const bool on = mApvts.getRawParameterValue(pid + "On")->load() >= 0.5f;
         if (type != mLastType)
             populateModels(type);
@@ -1332,38 +1679,78 @@ public:
     }
 
 private:
-    int curModel() const { return juce::jmax(0, mModel.getSelectedItemIndex()); }
+    int curModel() const
+    {
+        return juce::jmax(0,
+            (int)mApvts.getRawParameterValue("drv" + juce::String(mSlot + 1) + "bModel")->load());
+    }
 
     void showMenu()
     {
         using DB = nam_rig::DriveBlock;
-        static const char *names[] = {"Off", "Boost", "Overdrive", "Distortion", "Fuzz"};
-        juce::PopupMenu m;
-        m.addItem(1, "Off", true, mType.getSelectedItemIndex() == 0);
+        if (mPicker != nullptr) { mPicker.reset(); return; } // click pill again = close
+
+        // Build the category/model tree for the custom picker.
+        std::vector<DrivePickerOverlay::Cat> cats;
         for (int t = 1; t <= 4; ++t)
         {
-            // Every category nests under its own submenu -- even single-model ones
-            // (Distortion -> Black Rodent) -- so the menu reads uniformly.
+            static const char *names[] = {"Off", "Boost", "Overdrive", "Distortion", "Fuzz"};
             const auto cat = (DB::Kind)t;
+            DrivePickerOverlay::Cat c;
+            c.name = names[t];
             const int n = DB::modelCount(cat);
-            juce::PopupMenu sub;
             for (int i = 0; i < n; ++i)
-                sub.addItem(t * 100 + i + 10, DB::modelName(cat, i), true,
-                            mType.getSelectedItemIndex() == t && curModel() == i);
-            m.addSubMenu(names[t], sub);
+                c.models.push_back({DB::modelName(cat, i), DB::modelSub(cat, i),
+                                    colors::driveModelAccent(t, i).led});
+            cats.push_back(std::move(c));
         }
-        m.showMenuAsync(juce::PopupMenu::Options()
-                            .withTargetScreenArea(localAreaToGlobal(mPillRect))
-                            .withMinimumWidth(180),
-                        [this](int r)
-                        {
-                            if (r <= 0) return;
-                            if (r == 1) { mType.setSelectedItemIndex(0); return; }
-                            const int t = (r - 10) / 100, i = (r - 10) % 100;
-                            mType.setSelectedItemIndex(t);
-                            if (nam_rig::DriveBlock::modelCount((nam_rig::DriveBlock::Kind)t) > 1)
-                                mModel.setSelectedItemIndex(i);
-                        });
+
+        // Host the overlay on the SCALED content canvas (the direct child of the
+        // top-level editor that contains us) so it scales with the plugin and can
+        // position anywhere without clipping.
+        auto *top = getTopLevelComponent();
+        juce::Component *host = this;
+        while (host->getParentComponent() != nullptr && host->getParentComponent() != top)
+            host = host->getParentComponent();
+        if (host == this || host->getParentComponent() == nullptr) return; // safety
+
+        auto overlay = std::make_unique<DrivePickerOverlay>(std::move(cats), curTypeIndex(), curModel());
+        auto *ov = overlay.get();
+        ov->onPick = [this](int t, int m) { setTypeModel(t, m); };
+        ov->onDismiss = [this] { mPicker.reset(); };
+        mPicker = std::move(overlay);
+
+        host->addAndMakeVisible(*ov);
+        ov->setBounds(host->getLocalBounds());
+        ov->setAnchor(host->getLocalArea(this, mPillRect)); // pill rect in host coords
+        ov->grabKeyboardFocus();
+    }
+
+    // Selection is param-authoritative (mirrors the modulation panel's
+    // ParameterAttachment fix): write the APVTS params directly with a full change
+    // gesture and let refresh() read them back, so a re-pick can never get "stuck"
+    // on a hidden ComboBox that didn't fire its change.
+    void setTypeModel(int type, int model)
+    {
+        const juce::String p = "drv" + juce::String(mSlot + 1);
+        setChoiceParam(p + "Type", type);
+        if (nam_rig::DriveBlock::modelCount((nam_rig::DriveBlock::Kind)type) > 1)
+            setChoiceParam(p + "bModel", model);
+        refresh();
+    }
+    void setChoiceParam(const juce::String &id, int idx)
+    {
+        if (auto *prm = mApvts.getParameter(id))
+        {
+            prm->beginChangeGesture();
+            prm->setValueNotifyingHost(prm->convertTo0to1((float)juce::jmax(0, idx)));
+            prm->endChangeGesture();
+        }
+    }
+    int curTypeIndex() const
+    {
+        return juce::jlimit(0, 4,
+            (int)mApvts.getRawParameterValue("drv" + juce::String(mSlot + 1) + "Type")->load());
     }
 
     void populateModels(int type)
@@ -1472,6 +1859,7 @@ private:
     juce::Rectangle<int> mHeaderRect, mGlyphRect, mPillRect, mSubRect;
     int mLastType = -1, mLastModel = -1;
     bool mLastOn = true, mActive = false;
+    std::unique_ptr<DrivePickerOverlay> mPicker; // custom drive picker (in-canvas, not a PopupMenu)
 };
 
 //==============================================================================
@@ -3971,7 +4359,7 @@ public:
                 return i == 11 ? juce::String("Reverb") : juce::String(i + 1);
             };
         mHeadKnob->slider().updateText();
-        mHeadKnob->setValueMenu(headNames);
+        mHeadKnob->setValueMenu(headNames, "Echo Mode");
         addChildComponent(*mHeadKnob); // visibility toggled in refresh()
 
         // Stereo MODE selector as a dropdown (Single / Dual / Ping-Pong). Single =
@@ -4010,9 +4398,11 @@ public:
         addAndMakeVisible(mPresetBtn);
         mPresetBtn.onClick = [this] {
             juce::PopupMenu m;
+            m.addCustomItem(-1, std::make_unique<MenuSectionHeader>("Delay Presets"), nullptr, {});
             const auto &ps = delayPresets();
             for (int i = 0; i < (int)ps.size(); ++i)
                 m.addItem(i + 1, ps[(size_t)i].name);
+            m.setLookAndFeel(&getLookAndFeel());
             m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&mPresetBtn),
                             [this](int r) { if (r > 0) applyDelayPreset(r - 1); });
         };
@@ -4101,11 +4491,11 @@ public:
             {
                 mKnobs[0]->rebind(mApvts, "delaySync");
                 mKnobs[0]->slider().setRange(1.0, 13.0, 1.0); // exclude Free (0): the toggle owns that
-                mKnobs[0]->setValueMenu(mDivNames);           // click the readout -> pick a division
+                mKnobs[0]->setValueMenu(mDivNames, "Sync Division"); // click the readout -> pick a division
                 // Sync R follows: its own R division (can't reach Link -> stays Dual).
                 mSyncRKnob->rebind(mApvts, "delaySyncR");
                 mSyncRKnob->slider().setRange(1.0, 13.0, 1.0);
-                mSyncRKnob->setValueMenu(mDivNames);
+                mSyncRKnob->setValueMenu(mDivNames, "Sync R Division");
             }
             else
             {
