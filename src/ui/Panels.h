@@ -1052,6 +1052,19 @@ inline void paintDriveGlyph(juce::Graphics &g, int type, int model,
         g.fillPath(dots, xf);
         return;
     }
+    if (motif == Sd1) // Super Drive -> hero shield with a lightning bolt (stroked shield, filled bolt)
+    {
+        juce::Path shield;
+        shield.startNewSubPath(15, 9); shield.lineTo(49, 9); shield.lineTo(49, 25);
+        shield.cubicTo(49, 35, 41, 42, 32, 46); shield.cubicTo(23, 42, 15, 35, 15, 25); shield.closeSubPath();
+        g.strokePath(shield, juce::PathStrokeType(2.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded), xf);
+        juce::Path bolt; // slim, centred on the shield axis
+        bolt.startNewSubPath(35.0f, 14.0f); bolt.lineTo(27.0f, 27.0f); bolt.lineTo(30.5f, 27.0f);
+        bolt.lineTo(28.0f, 40.0f); bolt.lineTo(37.0f, 24.5f); bolt.lineTo(33.0f, 24.5f);
+        bolt.lineTo(35.5f, 14.0f); bolt.closeSubPath();
+        g.fillPath(bolt, xf);
+        return;
+    }
 
     // ---- single-path motifs: pre-transform the path (keeps the existing glyphs
     //      pixel-for-pixel) then fill or stroke ----
@@ -1087,10 +1100,6 @@ inline void paintDriveGlyph(juce::Graphics &g, int type, int model,
         p.startNewSubPath(27, 27); p.lineTo(25, 39);                                          // leg
         p.startNewSubPath(32, 27); p.lineTo(32, 39);                                          // leg
         p.startNewSubPath(37, 27); p.lineTo(39, 39);                                          // leg
-        break;
-    case Sd1: // Super Drive -> asymmetric soft-clip wave
-        p.startNewSubPath(4, 24); p.cubicTo(7, 12, 13, 11, 19, 11); p.cubicTo(25, 11, 26, 24, 32, 24);
-        p.cubicTo(38, 24, 39, 32, 45, 32); p.cubicTo(51, 32, 57, 32, 60, 24);
         break;
     case Klon: // Gold Horse -> simple bow & arrow (archer motif, minimal line art)
         p.startNewSubPath(40, 9); p.quadraticTo(14, 16, 14, 24); p.quadraticTo(14, 32, 40, 39); // bow limb
