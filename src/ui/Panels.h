@@ -2444,11 +2444,8 @@ public:
     CabPanel(NamRigProcessor &proc, int rig)
         : mProc(proc), mRig(rig)
     {
-        // Post-cab cuts live with their cab (per rig).
-        mHpf = std::make_unique<LabeledKnob>(mProc.apvts, rig == 0 ? "cabHpf" : "rigBcabHpf", "Low Cut");
-        mLpf = std::make_unique<LabeledKnob>(mProc.apvts, rig == 0 ? "cabLpf" : "rigBcabLpf", "High Cut");
-        addAndMakeVisible(*mHpf);
-        addAndMakeVisible(*mLpf);
+        // The post-cab Low/High cuts now live in the Mix panel (per-rig output
+        // shaping); this lane is just the IR display + per-cab on/off.
 
         // Per-cab on/off so each cab can be bypassed independently from the panel
         // (the strip's CAB tile toggles both at once). Stays live when dimmed.
@@ -2495,20 +2492,13 @@ public:
 
     void resized() override
     {
-        // Vertical lane: rig label + IR name on top, response well in the middle,
-        // Low/High cut knobs at the bottom.
+        // Vertical lane: rig label + IR name on top, response well filling the rest
+        // (the Low/High cuts moved to the Mix panel).
         auto area = getLocalBounds().reduced(14, 10);
         auto top = area.removeFromTop(24);
         mOn.setBounds(top.removeFromRight(46).withSizeKeepingCentre(46, 20));
         top.removeFromRight(8);
         mNameRect = top;
-
-        auto knobs = area.removeFromBottom(88);
-        const int kw = 104, gap = 16;
-        auto krow = knobs.withSizeKeepingCentre(kw * 2 + gap, knobs.getHeight());
-        mHpf->setBounds(krow.removeFromLeft(kw));
-        krow.removeFromLeft(gap);
-        mLpf->setBounds(krow.removeFromLeft(kw));
 
         area.removeFromTop(6);
         mRespRect = area.withTrimmedBottom(4);
@@ -2518,12 +2508,13 @@ public:
     {
         paintNameRow(g);
         paintResponse(g);
-        if (mDim) // IR bypassed / rig out: dim the graph, but the cuts stay live
+        // Cab bypassed / rig out: dim the whole lane. (When BOTH cabs are out the
+        // CombinedCabPanel draws the full "BYPASSED" veil over everything instead.)
+        // The On pill is a child, so it stays drawn + clickable above this scrim.
+        if (mDim)
         {
             g.setColour(colors::panel.withAlpha(0.62f));
-            auto s = getLocalBounds();
-            s.setBottom(mRespRect.getBottom() + 4);
-            g.fillRect(s);
+            g.fillRect(getLocalBounds());
         }
     }
 
@@ -2739,7 +2730,6 @@ private:
     int mRig = 0;
     juce::String mIrName{juce::String::fromUTF8("No IR \xC2\xB7 amp runs direct")};
     juce::String mCharacter; // auto tone descriptor (e.g. "Dark, thick")
-    std::unique_ptr<LabeledKnob> mHpf, mLpf; // post-cab Low/High cut
     juce::ToggleButton mOn;                  // per-cab bypass (cabOn / cabOnB)
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mOnAtt;
     juce::Rectangle<int> mNameRect, mRespRect;
@@ -5467,7 +5457,15 @@ public:
         mLevelB = std::make_unique<LabeledKnob>(mProc.apvts, "rigLevelB", "Level");
         mPanB = std::make_unique<LabeledKnob>(mProc.apvts, "rigPanB", "Pan");
         mAlign = std::make_unique<LabeledKnob>(mProc.apvts, "rigAlign", "Align");
-        for (auto *k : {mLevelA.get(), mPanA.get(), mLevelB.get(), mPanB.get(), mAlign.get()})
+        // Per-rig Low/High cut: always-on output filters that live with the rig's
+        // other output shaping (level/pan). Params are shared with the cab block
+        // (cabHpf/cabLpf / rigBcabHpf/rigBcabLpf) — moved here UI-only, DSP unchanged.
+        mLowCutA = std::make_unique<LabeledKnob>(mProc.apvts, "cabHpf", "Low Cut");
+        mHighCutA = std::make_unique<LabeledKnob>(mProc.apvts, "cabLpf", "High Cut");
+        mLowCutB = std::make_unique<LabeledKnob>(mProc.apvts, "rigBcabHpf", "Low Cut");
+        mHighCutB = std::make_unique<LabeledKnob>(mProc.apvts, "rigBcabLpf", "High Cut");
+        for (auto *k : {mLevelA.get(), mPanA.get(), mLowCutA.get(), mHighCutA.get(),
+                        mLevelB.get(), mPanB.get(), mLowCutB.get(), mHighCutB.get(), mAlign.get()})
             addAndMakeVisible(*k);
 
         mPolA.setAccent(colors::laneColour(0));
@@ -5542,6 +5540,12 @@ public:
         mModes->setActive(mode); // A=0, B=1, Dual=2
         mLevelA->setEnabled(aOn);
         mLevelB->setEnabled(bOn);
+        // Cuts are always-on output filters; grey them only when the rig isn't
+        // playing (soloed away or amp bypassed), matching the Level knob.
+        mLowCutA->setEnabled(aOn);
+        mHighCutA->setEnabled(aOn);
+        mLowCutB->setEnabled(bOn);
+        mHighCutB->setEnabled(bOn);
         // Pan only matters in Dual (Solo plays centered) and on a live row.
         mPanA->setEnabled(dual && aOn);
         mPanB->setEnabled(dual && bOn);
@@ -5593,27 +5597,33 @@ public:
         const int cardH = 112, gap = 12;
 
         auto layoutRow = [&](juce::Rectangle<int> card, juce::Rectangle<int> &tagOut,
-                             LabeledKnob &lvl, LabeledKnob &pan, InvertSwitch &pol, OutMeter &meter)
+                             LabeledKnob &lvl, LabeledKnob &pan, LabeledKnob &lowCut,
+                             LabeledKnob &highCut, InvertSwitch &pol, OutMeter &meter)
         {
             auto r = card.reduced(20, 10);
+            const int kGap = 18;
             // Label stack (drawn in paint): centre it vertically within the row.
             auto tag = r.removeFromLeft(58);
             tagOut = tag.withSizeKeepingCentre(58, 36);
-            r.removeFromLeft(22);
-            lvl.setBounds(r.removeFromLeft(88));
-            r.removeFromLeft(22);
-            pan.setBounds(r.removeFromLeft(88));
-            r.removeFromLeft(22);
+            r.removeFromLeft(kGap);
+            lvl.setBounds(r.removeFromLeft(84));
+            r.removeFromLeft(kGap);
+            pan.setBounds(r.removeFromLeft(84));
+            r.removeFromLeft(kGap);
+            lowCut.setBounds(r.removeFromLeft(84));
+            r.removeFromLeft(kGap);
+            highCut.setBounds(r.removeFromLeft(84));
+            r.removeFromLeft(kGap + 4);
             pol.setBounds(r.removeFromLeft(130).withSizeKeepingCentre(130, 24));
             // Meter pinned to the card's right edge.
             meter.setBounds(r.removeFromRight(60).withSizeKeepingCentre(60, 56));
         };
 
         mCardA = body.removeFromTop(cardH);
-        layoutRow(mCardA, mTagA, *mLevelA, *mPanA, mPolA, mMeterA);
+        layoutRow(mCardA, mTagA, *mLevelA, *mPanA, *mLowCutA, *mHighCutA, mPolA, mMeterA);
         body.removeFromTop(gap);
         mCardB = body.removeFromTop(cardH);
-        layoutRow(mCardB, mTagB, *mLevelB, *mPanB, mPolB, mMeterB);
+        layoutRow(mCardB, mTagB, *mLevelB, *mPanB, *mLowCutB, *mHighCutB, mPolB, mMeterB);
 
         body.removeFromTop(gap + 4);
         auto alignRow = body.removeFromTop(96);
@@ -5628,6 +5638,7 @@ private:
     NamRigProcessor &mProc;
     std::unique_ptr<SegmentedControl> mModes;
     std::unique_ptr<LabeledKnob> mLevelA, mPanA, mLevelB, mPanB, mAlign;
+    std::unique_ptr<LabeledKnob> mLowCutA, mHighCutA, mLowCutB, mHighCutB;
     InvertSwitch mPolA, mPolB;
     OutMeter mMeterA, mMeterB;
     juce::TextButton mAutoBtn{"Auto-align"}, mMatchBtn{"Match Levels"};

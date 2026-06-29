@@ -185,9 +185,15 @@ void NamRigEditor::timerCallback()
     mAmpPanelA.setBypassed(aOut || off("ampOnA"));
     mAmpPanelB.setBypassed(bOut || off("ampOnB"));
     mEqPanelA.setBypassed(aOut || off("eqOn"));
-    mCabPanel.cabA().setBypassed(aOut || off("cabOn"));
     mEqPanelB.setBypassed(bOut || off("eqOnB"));
-    mCabPanel.cabB().setBypassed(bOut || off("cabOnB"));
+    // Cab: each side dims independently (keeps its Low/High cuts live), but when
+    // BOTH cabs are out the whole CAB panel gets the full "BYPASSED" veil like the
+    // other blocks. In Solo, the un-soloed rig's cab counts as out.
+    const bool cabAOff = aOut || off("cabOn");
+    const bool cabBOff = bOut || off("cabOnB");
+    mCabPanel.cabA().setBypassed(cabAOff);
+    mCabPanel.cabB().setBypassed(cabBOff);
+    mCabPanel.setBypassed(cabAOff && cabBOff);
     mModPanel.setBypassed(off("modOn"));
     mDelayPanel.setBypassed(off("delayOn"));
     mReverbPanel.setBypassed(off("reverbOn"));
