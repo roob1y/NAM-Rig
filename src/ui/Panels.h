@@ -2730,7 +2730,7 @@ private:
         {
             g.setColour(colors::captionDim);
             g.setFont(fonts::mono(11.0f));
-            g.drawText("No IR loaded \xC2\xB7 amp runs direct", in.toNearestInt(),
+            g.drawText(juce::String::fromUTF8("No IR loaded \xC2\xB7 amp runs direct"), in.toNearestInt(),
                        juce::Justification::centred);
         }
     }
