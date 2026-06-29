@@ -611,6 +611,20 @@ public:
     }
     juce::Font getPopupMenuFont() override { return fonts::archivo(14.0f, fonts::SemiBold); }
 
+    // ComboBox popups drop BELOW the box instead of overlaying the selected item on
+    // top of it, so the box (button) stays visible. Omitting withItemThatMustBeVisible
+    // is what stops JUCE from aligning the chosen item over the target.
+    juce::PopupMenu::Options getOptionsForComboBoxPopupMenu(juce::ComboBox &box,
+                                                            juce::Label &label) override
+    {
+        return juce::PopupMenu::Options()
+            .withTargetComponent(&box)
+            .withInitiallySelectedItem(box.getSelectedId())
+            .withMinimumWidth(box.getWidth())
+            .withMaximumNumColumns(1)
+            .withStandardItemHeight(label.getHeight());
+    }
+
     // ---- Styled dropdown menus (matches the drive picker design) -------------
     // Every PopupMenu + ComboBox dropdown in the editor uses this LookAndFeel, so
     // styling it here gives the whole plugin the one rounded dark menu look.

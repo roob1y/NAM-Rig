@@ -338,7 +338,7 @@ public:
             // bias 0 (symmetric clipping). MODERATE default / HIGH-gain ceiling: gMin 3 =
             // controllable crunch at low Sustain, gMax 55 + the inter-stage gain = the
             // full saturated wall + max sustain at the top. Calibration-referenced.
-            {"Violet Ram", "Big-Muff Sustain Fuzz",
+            {"Violet Ram", "Thick Sustain Fuzz",
              { 3, 3.0f, 55.0f,  70.0f,    0.0f, 0.0f, 0.7f, 1170.0f, 0.00f, 1000.0f, 1.38f, 0.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.0f,   0.0f, 0.0f, 0.0f, 0.0f, 2.0f, 1200.0f, 1780.0f}, false},
         };
         switch (cat)

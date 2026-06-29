@@ -886,11 +886,13 @@ public:
         };
         mCurve.setSustain((float)mKnobs[0]->slider().getValue());
 
-        // Voicing selector (Clean / OTA / Opto / FET) -> compMode param.
-        mModes = std::make_unique<SegmentedControl>(apvts, "compMode",
-                                                    juce::StringArray{"Clean", "OTA", "Opto", "FET"});
-        mModes->onChange = [this](int) { updateCurveShape(); };
-        addAndMakeVisible(*mModes);
+        // Voicing selector (Clean / OTA / Opto / FET) -> compMode param. A dropdown
+        // (the box stays visible; the menu opens below it via the global combo options).
+        mModeBox.addItemList({"Clean", "OTA", "Opto", "FET"}, 1);
+        mModeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, "compMode", mModeBox);
+        mModeBox.onChange = [this] { updateCurveShape(); };
+        addAndMakeVisible(mModeBox);
         updateCurveShape();
 
         mDetail.setButtonText("DETAIL");
@@ -930,8 +932,8 @@ public:
         auto hr = headerArea();
         mDetail.setBounds(hr.removeFromRight(62).withSizeKeepingCentre(62, 26));
         hr.removeFromRight(10);
-        const int mw = juce::jmin(mModes->idealWidth(), hr.getWidth());
-        mModes->setBounds(hr.removeFromRight(mw).withSizeKeepingCentre(mw, 24));
+        const int mw = juce::jmin(120, hr.getWidth());
+        mModeBox.setBounds(hr.removeFromRight(mw).withSizeKeepingCentre(mw, 26));
 
         auto area = bodyArea().reduced(24, 14);
 
@@ -971,7 +973,7 @@ private:
 
     void updateCurveShape()
     {
-        const int idx = mModes ? mModes->index() : 0;
+        const int idx = juce::jmax(0, mModeBox.getSelectedItemIndex());
         const auto v = nam_rig::CompBlock::voicingFor((nam_rig::CompBlock::Mode)idx);
         mCurve.setShape(v.ratio, v.kneeDb);
     }
@@ -981,7 +983,8 @@ private:
     PeakMeter mIn, mOut;
     juce::Rectangle<int> mInLabelCol, mOutLabelCol;
     CompCurve mCurve;
-    std::unique_ptr<SegmentedControl> mModes;
+    juce::ComboBox mModeBox;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mModeAtt;
     juce::TextButton mDetail;
 };
 
@@ -1248,15 +1251,15 @@ public:
                                         mCatPanel.getWidth() - 28, kHeaderH),
                    juce::Justification::centredLeft);
 
-        for (int i = 0; i < (int)mCats.size(); ++i)
-            paintCatRow(g, i);
-
-        auto sep = juce::Rectangle<int>(mCatPanel.getX() + 12, offRowY() - kSep / 2 - 1,
+        paintRow(g, offRowRect(), "Off", mCurType == 0, juce::Colour(), false,
+                 mHoverCatRow == kOffRow);
+        auto sep = juce::Rectangle<int>(mCatPanel.getX() + 12, catRowY(0) - kSep / 2 - 1,
                                         mCatPanel.getWidth() - 24, 1);
         g.setColour(colors::divider);
         g.fillRect(sep);
-        paintRow(g, offRowRect(), "Off", mCurType == 0, juce::Colour(), false,
-                 mHoverCatRow == kOffRow);
+
+        for (int i = 0; i < (int)mCats.size(); ++i)
+            paintCatRow(g, i);
 
         if (mOpenCat >= 0)
         {
@@ -1277,9 +1280,10 @@ private:
         const int n = (int)mCats.size();
         const int h = kPad + kHeaderH + n * kRowH + kSep + kRowH + kPad;
         int x = mAnchor.getX();
-        int y = mAnchor.getY();
+        int y = mAnchor.getY() - h - 4; // float ABOVE the pill so the button stays visible
         if (auto *par = getParentComponent())
         {
+            if (y < 4) y = mAnchor.getBottom() + 4; // no room above -> drop below
             x = juce::jlimit(4, juce::jmax(4, par->getWidth() - kCatW - 4), x);
             y = juce::jlimit(4, juce::jmax(4, par->getHeight() - h - 4), y);
         }
@@ -1297,11 +1301,11 @@ private:
                                         fonts::mono(11.0f), m.sub)) + 44);
             }
             const int mh = kPad * 2 + (int)ms.size() * kModelH;
-            int mx = mCatPanel.getRight() + 6;
+            int mx = mCatPanel.getRight(); // flush against the category panel (no gap)
             int my = catRowY(mOpenCat) - kPad;
             if (auto *par = getParentComponent())
             {
-                if (mx + mw + 4 > par->getWidth()) mx = mCatPanel.getX() - mw - 6; // flip to the left
+                if (mx + mw + 4 > par->getWidth()) mx = mCatPanel.getX() - mw; // flip to the left, still flush
                 my = juce::jlimit(4, juce::jmax(4, par->getHeight() - mh - 4), my);
             }
             mModelPanel = {mx, my, mw, mh};
@@ -1310,14 +1314,15 @@ private:
             mModelPanel = {};
     }
 
-    int catRowY(int i) const { return mCatPanel.getY() + kPad + kHeaderH + i * kRowH; }
+    // Order top-to-bottom: header, Off, divider, then the category rows.
+    int offRowY() const { return mCatPanel.getY() + kPad + kHeaderH; }
+    int catRowY(int i) const
+    {
+        return mCatPanel.getY() + kPad + kHeaderH + kRowH + kSep + i * kRowH;
+    }
     juce::Rectangle<int> catRowRect(int i) const
     {
         return {mCatPanel.getX() + 4, catRowY(i), mCatPanel.getWidth() - 8, kRowH};
-    }
-    int offRowY() const
-    {
-        return mCatPanel.getY() + kPad + kHeaderH + (int)mCats.size() * kRowH + kSep;
     }
     juce::Rectangle<int> offRowRect() const
     {
@@ -1705,14 +1710,20 @@ private:
             cats.push_back(std::move(c));
         }
 
-        // Host the overlay on the SCALED content canvas (the direct child of the
-        // top-level editor that contains us) so it scales with the plugin and can
-        // position anywhere without clipping.
-        auto *top = getTopLevelComponent();
-        juce::Component *host = this;
-        while (host->getParentComponent() != nullptr && host->getParentComponent() != top)
-            host = host->getParentComponent();
-        if (host == this || host->getParentComponent() == nullptr) return; // safety
+        // Host the overlay on the SCALED content canvas so it scales with the plugin
+        // and can position anywhere without clipping. The editor scales mContent via an
+        // AffineTransform, so the canvas is the nearest ancestor with a non-identity
+        // transform. At 1:1 zoom that transform is identity, so fall back to our
+        // grandparent (DrivePedal -> DrivePanel -> mContent), which is the same canvas.
+        juce::Component *host = nullptr;
+        for (auto *c = getParentComponent(); c != nullptr; c = c->getParentComponent())
+            if (!c->getTransform().isIdentity()) { host = c; break; }
+        if (host == nullptr)
+        {
+            host = getParentComponent();                       // DrivePanel
+            if (host != nullptr) host = host->getParentComponent(); // mContent
+        }
+        if (host == nullptr) return; // safety
 
         auto overlay = std::make_unique<DrivePickerOverlay>(std::move(cats), curTypeIndex(), curModel());
         auto *ov = overlay.get();
