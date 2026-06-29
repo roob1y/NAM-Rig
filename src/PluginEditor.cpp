@@ -84,9 +84,85 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
     // Uniform scaling: fixed aspect, remember the last size for this instance.
     setResizable(true, true);
     getConstrainer()->setFixedAspectRatio((double)kBaseW / kBaseH);
-    setResizeLimits(kBaseW * 6 / 10, kBaseH * 6 / 10, kBaseW * 3 / 2, kBaseH * 3 / 2);
-    const int w = mProc.uiWidth > 0 ? mProc.uiWidth : kBaseW;
-    setSize(w, w * kBaseH / kBaseW);
+    const int minW = kBaseW * 6 / 10; // 708
+    const int maxW = kBaseW * 5 / 2;  // 2950 — headroom so 4K / high-DPI can scale up
+    setResizeLimits(minW, kBaseH * 6 / 10, maxW, kBaseH * 5 / 2);
+
+    // Provisional size now (state may not be loaded yet, display info is flaky in
+    // the constructor). The authoritative pass runs on the first timer tick, when
+    // the saved state is loaded and the display is reliable. mPersistSize stays
+    // false until then so our own setSize calls don't clobber the restored uiWidth.
+    applyRememberedOrFitSize();
+}
+
+// The work area of the display the window is on. Display info is flaky in the
+// editor constructor (no peer yet), so prefer the on-screen bounds when we have
+// them, falling back to the mouse's display, then the primary.
+juce::Rectangle<int> NamRigEditor::screenWorkArea() const
+{
+    auto &displays = juce::Desktop::getInstance().getDisplays();
+    if (!getScreenBounds().isEmpty())
+        if (auto *disp = displays.getDisplayForRect(getScreenBounds()))
+            return disp->userArea;
+    if (auto *disp = displays.getDisplayForPoint(juce::Desktop::getMousePosition()))
+        return disp->userArea;
+    if (auto *disp = displays.getPrimaryDisplay())
+        return disp->userArea;
+    return {};
+}
+
+// Choose a default size for the current screen. JUCE reports the work area in
+// LOGICAL pixels — the same space setSize uses — so Windows display scaling is
+// handled for free (at 150% a 4K screen reads ~2560x1440, and the host applies
+// the content scale to the window). Target ~85% of the work-area height (≈ the
+// 1180x808 design on a 1080p screen), don't spill past ~94% of either dimension,
+// clamp to the resize limits. Implausible/empty work areas (the constructor's
+// flaky query) fall back to the design width — never to the minimum.
+void NamRigEditor::resizeToFitScreen()
+{
+    const double aspect = (double)kBaseW / kBaseH;
+    const int minW = kBaseW * 6 / 10, maxW = kBaseW * 5 / 2;
+    const auto work = screenWorkArea();
+
+    int w = kBaseW; // safe fallback when the screen size is unknown/bogus
+    if (work.getWidth() >= 1000 && work.getHeight() >= 700)
+        w = juce::jmin(juce::roundToInt(work.getHeight() * 0.85 * aspect),
+                       juce::roundToInt(work.getWidth() * 0.94));
+    w = juce::jlimit(minW, maxW, w);
+    setSize(w, juce::roundToInt((double)w / aspect));
+}
+
+// Use the saved window size if it's a real one, otherwise fit to the screen. A
+// cached width at/below the minimum is a stale collapse from an earlier build
+// (nobody picks the 60%-scale minimum on purpose), so it's treated as "no size".
+void NamRigEditor::applyRememberedOrFitSize()
+{
+    const int minW = kBaseW * 6 / 10;
+    if (mProc.uiWidth > minW + 4)
+    {
+        setSize(mProc.uiWidth, juce::roundToInt((double)mProc.uiWidth * kBaseH / kBaseW));
+        clampSizeToScreen(); // shrink if that remembered size doesn't fit this screen
+    }
+    else
+    {
+        resizeToFitScreen();
+    }
+}
+
+// Keep a *remembered* size as-is, but if it's larger than the current screen (a
+// project saved on a big display, reopened on a small one) shrink it to fit so the
+// title bar can't end up off-screen. Only ever shrinks — never enlarges the user's
+// chosen size.
+void NamRigEditor::clampSizeToScreen()
+{
+    const auto work = screenWorkArea();
+    if (work.getWidth() < 1000 || work.getHeight() < 700)
+        return; // screen size unknown -> leave the remembered size alone
+    const double aspect = (double)kBaseW / kBaseH;
+    const int fitW = juce::jmin(juce::roundToInt(work.getWidth() * 0.96),
+                                juce::roundToInt(work.getHeight() * 0.96 * aspect));
+    if (getWidth() > fitW)
+        setSize(fitW, juce::roundToInt((double)fitW / aspect));
 }
 
 NamRigEditor::~NamRigEditor()
@@ -149,6 +225,23 @@ void NamRigEditor::showSettingsMenu()
 
 void NamRigEditor::timerCallback()
 {
+    // Re-fit the default to the actual screen once display info is trustworthy.
+    // It's unreliable in the editor constructor (no peer) AND can stay bogus for a
+    // while after the window appears in some hosts, so we KEEP RETRYING each tick
+    // until we get a plausible work area (or give up after ~3s and accept the
+    // fallback). Only when we own the size — a remembered size is left untouched.
+    if (!mSizedToScreen)
+    {
+        const auto work = screenWorkArea();
+        const bool valid = work.getWidth() >= 1000 && work.getHeight() >= 700;
+        if (valid || ++mFitTries > 90)
+        {
+            mSizedToScreen = true;
+            applyRememberedOrFitSize(); // saved state is loaded now -> authoritative
+            mPersistSize = true;        // from here, user resizes are remembered
+        }
+    }
+
     const double now = juce::Time::getMillisecondCounterHiRes();
     const float dt = (float)juce::jlimit(0.0, 0.5, (now - mLastTimerMs) * 0.001);
     mLastTimerMs = now;
@@ -227,7 +320,10 @@ void NamRigEditor::resized()
     const float scale = (float)getWidth() / (float)kBaseW;
     mContent.setTransform(juce::AffineTransform::scale(scale));
     mContent.setTopLeftPosition(0, 0);
-    mProc.uiWidth = getWidth();
+    // Only remember the size once initial sizing is done, so our own provisional
+    // setSize calls don't overwrite a just-restored uiWidth before we've used it.
+    if (mPersistSize)
+        mProc.uiWidth = getWidth();
 
     auto full = juce::Rectangle<int>(0, 0, kBaseW, kBaseH);
 

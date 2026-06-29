@@ -1136,6 +1136,7 @@ void NamRigProcessor::getStateInformation(juce::MemoryBlock &destData)
     state.setProperty("irPath", mIrPath[0], nullptr);
     state.setProperty("modelPathB", mModelPath[1], nullptr);
     state.setProperty("irPathB", mIrPath[1], nullptr);
+    state.setProperty("uiWidth", uiWidth, nullptr); // remember the editor window size
     std::unique_ptr<juce::XmlElement> xml(state.createXml());
     copyXmlToBinary(*xml, destData);
 }
@@ -1150,6 +1151,10 @@ void NamRigProcessor::setStateInformation(const void *data, int sizeInBytes)
     beginStateLoad(); // don't let the type-change reset wipe the restored knobs
     apvts.replaceState(state);
     endStateLoadDeferred();
+
+    // Restore the editor window size (0 if this state predates the feature, which
+    // leaves the editor to size-to-screen on first open).
+    uiWidth = (int)state.getProperty("uiWidth", 0);
 
     const juce::String modelPath = state.getProperty("modelPath", "");
     if (modelPath.isNotEmpty())

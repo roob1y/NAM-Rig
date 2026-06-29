@@ -30,6 +30,17 @@ private:
     void showPanel(int selectableIndex);
     void showSettingsMenu();
 
+    // Default-size-to-screen. Display info is unreliable at editor construction
+    // inside a host, so we pick a best-effort size in the constructor and then
+    // re-fit once on the first timer tick (when the window is really on screen).
+    void resizeToFitScreen();
+    void clampSizeToScreen();       // shrink a remembered size that's too big for this screen
+    void applyRememberedOrFitSize(); // use the saved size if real, else fit to screen
+    juce::Rectangle<int> screenWorkArea() const;
+    bool mSizedToScreen = false;    // the reliable post-show sizing pass has run
+    bool mPersistSize = false;      // gate: only write uiWidth back after initial sizing
+    int mFitTries = 0;              // ticks spent waiting for valid display info
+
     NamRigProcessor &mProc;
     nam_rig::ui::RigLookAndFeel mLnf;
 
