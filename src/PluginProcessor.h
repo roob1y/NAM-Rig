@@ -132,6 +132,9 @@ public:
     // the UI tap visualiser tracks tempo-synced spacing, not just the Free knob.
     float delayTimeMs() const { return mChain.delay.currentTimeMs(); }
     float delayTimeMsR() const { return mChain.delay.currentTimeMsR(); } // right side (Link mirrors L)
+    // Per-rig OUT L·R output peak (dBFS) for the Mix panel meters. rig 0 = A, 1 = B.
+    float rigOutLDb(int rig) const { return mChain.rigOutLDb(rig); }
+    float rigOutRDb(int rig) const { return mChain.rigOutRDb(rig); }
 
     // --- Parameters ---
     juce::AudioProcessorValueTreeState apvts;

@@ -327,6 +327,10 @@ public:
         mNanLast.store(nullptr, std::memory_order_relaxed);
     }
 
+    // Per-rig output peak for the editor's OUT L·R meters, in dBFS (floor -100).
+    float rigOutLDb(int rig) const { return mRigPeakL[rig & 1].load(std::memory_order_relaxed); }
+    float rigOutRDb(int rig) const { return mRigPeakR[rig & 1].load(std::memory_order_relaxed); }
+
     // ---- the blocks ----
     GateBlock gate; // shared pre
     CompBlock comp;
@@ -349,6 +353,24 @@ private:
     {
         for (int i = 0; i < n; ++i)
             v[i] *= g;
+    }
+
+    // Absolute peak of a buffer (linear). Used for the Mix panel meters only.
+    static float bufPeak(const float *x, int n)
+    {
+        float p = 0.0f;
+        for (int i = 0; i < n; ++i)
+            p = juce::jmax(p, std::abs(x[i]));
+        return p;
+    }
+    // Convert a linear L/R peak pair to dBFS and publish for the editor meters.
+    void storeRigPeak(int rig, float linL, float linR) const
+    {
+        auto toDb = [](float lin) {
+            return lin > 1.0e-5f ? 20.0f * std::log10(lin) : -100.0f;
+        };
+        mRigPeakL[rig & 1].store(toDb(linL), std::memory_order_relaxed);
+        mRigPeakR[rig & 1].store(toDb(linR), std::memory_order_relaxed);
     }
 
     // ---- NaN/Inf self-heal --------------------------------------------------
@@ -412,6 +434,11 @@ private:
     void mix(float *outL, float *outR, const float *vA, const float *vB,
              int n, int numChannels) const
     {
+        // Per-rig output telemetry for the Mix panel's OUT L·R meters. Each rig's
+        // mono voice peak scales linearly through level + pan, so we take the raw
+        // voice peak once and apply the same gains the mix below uses.
+        const float pkA = bufPeak(vA, n), pkB = bufPeak(vB, n);
+
         if (numChannels == 1)
         {
             // Mono fold: sum the active rigs at their levels (pan is moot).
@@ -423,6 +450,8 @@ private:
                 if (b) s += vB[i] * mLevelB;
                 outL[i] = s;
             }
+            storeRigPeak(0, a ? pkA * mLevelA : 0.0f, a ? pkA * mLevelA : 0.0f);
+            storeRigPeak(1, b ? pkB * mLevelB : 0.0f, b ? pkB * mLevelB : 0.0f);
             return;
         }
 
@@ -436,6 +465,9 @@ private:
                 outL[i] = s;
                 outR[i] = s;
             }
+            const float pk = (mMode == SoloA) ? pkA * mLevelA : pkB * mLevelB;
+            storeRigPeak(0, mMode == SoloA ? pk : 0.0f, mMode == SoloA ? pk : 0.0f);
+            storeRigPeak(1, mMode == SoloB ? pk : 0.0f, mMode == SoloB ? pk : 0.0f);
         }
         else // Dual
         {
@@ -449,6 +481,8 @@ private:
                 outL[i] = a * gLA + b * gLB;
                 outR[i] = a * gRA + b * gRB;
             }
+            storeRigPeak(0, pkA * mLevelA * gLA, pkA * mLevelA * gRA);
+            storeRigPeak(1, pkB * mLevelB * gLB, pkB * mLevelB * gRB);
         }
     }
 
@@ -558,6 +592,11 @@ private:
 
     std::atomic<std::uint32_t> mNanCount{0};      // self-heal trip counter
     std::atomic<const char *> mNanLast{nullptr};  // name() of last offender
+
+    // Per-rig OUT L·R peak telemetry (dBFS), written by mix() on the audio thread,
+    // read by the editor timer. mutable: mix() is const but still publishes meters.
+    mutable std::atomic<float> mRigPeakL[2]{{-100.0f}, {-100.0f}};
+    mutable std::atomic<float> mRigPeakR[2]{{-100.0f}, {-100.0f}};
 };
 
 } // namespace nam_rig

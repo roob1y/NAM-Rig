@@ -4235,10 +4235,22 @@ public:
         if (h == 0) return juce::String(kSyncNamesUI[juce::jlimit(0, 13, syncIdx)]);
         const double beats = kSyncBeatsUI[(size_t)juce::jlimit(0, 13, syncIdx)]
                            * (double)kHeadRatioSyncUI[h];
+        // Snap the LABEL to the nearest musical division. Head 3's 8/3 ratio
+        // gallops off-grid for the triplet bases, but they land close enough to
+        // name; the tap lane on the right still renders the true spacing.
+        const char *best = kNoteByBeats[0].name;
+        double bestErr = 1.0e9;
         for (const auto &nb : kNoteByBeats)
-            if (std::abs(beats - nb.beats) < 0.01)
-                return juce::String(nb.name);
-        return juce::String(juce::roundToInt(ms)) + " ms";
+        {
+            const double e = std::abs(beats - nb.beats);
+            if (e < bestErr) { bestErr = e; best = nb.name; }
+        }
+        // The 1/1 base pushes head 3 (×8/3 ≈ 10.7 beats) well past the longest
+        // named division — there's no clean note, and "2/1" would read a third
+        // short — so show ms for that one case rather than a misleading division.
+        if (syncIdx == 1 && bestErr > 0.01)
+            return juce::String(juce::roundToInt(ms)) + " ms";
+        return juce::String(best);
     }
 
 private:
@@ -5334,6 +5346,105 @@ private:
 };
 
 //==============================================================================
+// Slide-switch + "Invert ø" label used per rig in the Mix panel. Decoupled from
+// the parameter (no attachment): the host writes the param on click and mirrors
+// the saved value back via setStateQuiet(), so Solo can show "not inverted"
+// while the Dual value is retained. The whole strip (track + label) is clickable.
+class InvertSwitch : public juce::Component
+{
+public:
+    std::function<void(bool)> onToggle;
+
+    void setAccent(juce::Colour c) { if (mAccent != c) { mAccent = c; repaint(); } }
+    void setStateQuiet(bool on) { if (on != mOn) { mOn = on; repaint(); } }
+    bool state() const { return mOn; }
+
+    void enablementChanged() override { repaint(); }
+
+    void mouseUp(const juce::MouseEvent &e) override
+    {
+        if (!isEnabled() || !getLocalBounds().contains(e.getPosition())) return;
+        mOn = !mOn;
+        repaint();
+        if (onToggle) onToggle(mOn);
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        const bool en = isEnabled();
+        const float th = 23.0f, tw = 40.0f;
+        juce::Rectangle<float> track(0.0f, (getHeight() - th) * 0.5f, tw, th);
+        g.setColour(en && mOn ? mAccent.withAlpha(0.92f) : colors::tile);
+        g.fillRoundedRectangle(track, th * 0.5f);
+        g.setColour(en && mOn ? mAccent : colors::outline);
+        g.drawRoundedRectangle(track.reduced(0.5f), th * 0.5f, 1.0f);
+        const float d = 17.0f;
+        const float kx = mOn ? track.getRight() - d - 2.0f : track.getX() + 2.0f;
+        g.setColour(en ? (mOn ? colors::bg : colors::text2) : colors::captionDim);
+        g.fillEllipse(kx, track.getY() + (th - d) * 0.5f, d, d);
+
+        g.setColour(en ? colors::text2 : colors::captionDim);
+        g.setFont(fonts::archivo(12.0f, fonts::Medium));
+        g.drawText(juce::String::fromUTF8("Invert \xC3\xB8"),
+                   juce::Rectangle<int>((int)tw + 9, 0, getWidth() - (int)tw - 9, getHeight()),
+                   juce::Justification::centredLeft);
+    }
+
+private:
+    bool mOn = false;
+    juce::Colour mAccent{colors::accent};
+};
+
+// Per-rig OUT L·R meter: two thin vertical bars (tag-coloured fill over a dark
+// track) with an "OUT L·R" caption beneath. Fed dBFS from the editor timer with
+// a peak-hold fall-back so brief peaks stay readable.
+class OutMeter : public juce::Component
+{
+public:
+    static constexpr float kMinDb = -60.0f, kFallDbPerSec = 36.0f;
+
+    void setAccent(juce::Colour c) { mAccent = c; }
+
+    void push(float lDb, float rDb, float dt)
+    {
+        mL = juce::jlimit(kMinDb, 6.0f, juce::jmax(lDb, mL - kFallDbPerSec * dt));
+        mR = juce::jlimit(kMinDb, 6.0f, juce::jmax(rDb, mR - kFallDbPerSec * dt));
+        repaint();
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        const float barW = 7.0f, barGap = 4.0f, barH = 40.0f;
+        const float totalW = barW * 2 + barGap;
+        const float x0 = (getWidth() - totalW) * 0.5f;
+        const bool en = isEnabled();
+        auto bar = [&](float x, float db)
+        {
+            juce::Rectangle<float> b(x, 0.0f, barW, barH);
+            g.setColour(colors::track);
+            g.fillRoundedRectangle(b, 3.0f);
+            const float norm = juce::jlimit(0.0f, 1.0f, (db - kMinDb) / (0.0f - kMinDb));
+            if (norm > 0.001f)
+            {
+                g.setColour(en ? mAccent : colors::captionDim);
+                g.fillRoundedRectangle(b.withTrimmedTop(barH * (1.0f - norm)), 3.0f);
+            }
+        };
+        bar(x0, mL);
+        bar(x0 + barW + barGap, mR);
+
+        g.setColour(colors::caption);
+        g.setFont(fonts::mono(8.5f, fonts::SemiBold, 0.1f));
+        g.drawText(juce::String::fromUTF8("OUT L\xC2\xB7R"),
+                   juce::Rectangle<int>(0, (int)barH + 4, getWidth(), 12),
+                   juce::Justification::centred);
+    }
+
+private:
+    float mL = kMinDb, mR = kMinDb;
+    juce::Colour mAccent{colors::accent};
+};
+
 // MIX — dual-rig routing: mode (Solo A / Solo B / Dual), per-rig level + pan +
 // polarity, the phase-align nudge, and the Auto-align button (probes both
 // voices). The two rigs merge here into the shared stereo section.
@@ -5351,17 +5462,6 @@ public:
         };
         addAndMakeVisible(*mModes);
 
-        auto rigTag = [this](juce::Label &l, const char *txt, juce::Colour c)
-        {
-            l.setText(txt, juce::dontSendNotification);
-            l.setJustificationType(juce::Justification::centredLeft);
-            l.setColour(juce::Label::textColourId, c);
-            l.setFont(fonts::archivo(12.0f, fonts::Bold, 0.08f));
-            addAndMakeVisible(l);
-        };
-        rigTag(mALabel, "RIG A", colors::titleAccent);
-        rigTag(mBLabel, "RIG B", colors::laneColour(1));
-
         mLevelA = std::make_unique<LabeledKnob>(mProc.apvts, "rigLevelA", "Level");
         mPanA = std::make_unique<LabeledKnob>(mProc.apvts, "rigPanA", "Pan");
         mLevelB = std::make_unique<LabeledKnob>(mProc.apvts, "rigLevelB", "Level");
@@ -5370,26 +5470,27 @@ public:
         for (auto *k : {mLevelA.get(), mPanA.get(), mLevelB.get(), mPanB.get(), mAlign.get()})
             addAndMakeVisible(*k);
 
-        mPolA.setButtonText(juce::String::fromUTF8("\xC3\xB8 Invert"));
-        mPolB.setButtonText(juce::String::fromUTF8("\xC3\xB8 Invert"));
-        mPolA.getProperties().set("pill", true);
-        mPolB.getProperties().set("pill", true);
+        mPolA.setAccent(colors::laneColour(0));
+        mPolB.setAccent(colors::laneColour(1));
         addAndMakeVisible(mPolA);
         addAndMakeVisible(mPolB);
-        // No plain attachment: the displayed toggle is decoupled from the saved
+        // No attachment: the displayed switch is decoupled from the saved
         // parameter so Solo can read "not inverted" while the value is retained
         // for Dual. Clicks (only possible in Dual) write the parameter; refresh()
-        // mirrors it back into the button.
-        mPolA.setClickingTogglesState(true);
-        mPolB.setClickingTogglesState(true);
-        mPolA.onClick = [this] {
+        // mirrors it back into the switch.
+        mPolA.onToggle = [this](bool on) {
             if (auto *p = mProc.apvts.getParameter("rigPolA"))
-                p->setValueNotifyingHost(mPolA.getToggleState() ? 1.0f : 0.0f);
+                p->setValueNotifyingHost(on ? 1.0f : 0.0f);
         };
-        mPolB.onClick = [this] {
+        mPolB.onToggle = [this](bool on) {
             if (auto *p = mProc.apvts.getParameter("rigPolB"))
-                p->setValueNotifyingHost(mPolB.getToggleState() ? 1.0f : 0.0f);
+                p->setValueNotifyingHost(on ? 1.0f : 0.0f);
         };
+
+        mMeterA.setAccent(colors::laneColour(0));
+        mMeterB.setAccent(colors::laneColour(1));
+        addAndMakeVisible(mMeterA);
+        addAndMakeVisible(mMeterB);
 
         mAutoBtn.onClick = [this] { mProc.autoAlign(); };
         addAndMakeVisible(mAutoBtn);
@@ -5397,8 +5498,38 @@ public:
         addAndMakeVisible(mMatchBtn);
     }
 
-    // Called from the editor timer.
-    void refresh()
+    void paint(juce::Graphics &g) override
+    {
+        BlockPanel::paint(g);
+
+        // Two rounded row "cards" behind each rig's controls.
+        for (int rig = 0; rig < 2; ++rig)
+        {
+            auto card = (rig == 0 ? mCardA : mCardB).toFloat();
+            if (card.isEmpty()) continue;
+            g.setColour(rig == 0 ? juce::Colour(0xff1b1f26) : juce::Colour(0xff191e23));
+            g.fillRoundedRectangle(card, 10.0f);
+            g.setColour(juce::Colour(0xff2a2f37));
+            g.drawRoundedRectangle(card.reduced(0.5f), 10.0f, 1.0f);
+
+            // Letter + amp-name label stack at the card's left.
+            auto stack = (rig == 0 ? mTagA : mTagB);
+            const bool live = (rig == 0 ? mLiveA : mLiveB);
+            const juce::Colour tag = rig == 0 ? colors::laneColour(0) : colors::laneColour(1);
+            g.setColour(live ? tag : colors::captionDim);
+            g.setFont(fonts::archivo(16.0f, fonts::ExtraBold));
+            g.drawText(rig == 0 ? "A" : "B",
+                       stack.removeFromTop(20), juce::Justification::centred);
+            stack.removeFromTop(2);
+            g.setColour(colors::caption);
+            g.setFont(fonts::mono(9.5f, fonts::Medium));
+            g.drawText(rig == 0 ? mNameA : mNameB, stack.removeFromTop(14),
+                       juce::Justification::centred);
+        }
+    }
+
+    // Called from the editor timer (dt = seconds since last tick).
+    void refresh(float dt)
     {
         const int mode = (int)mProc.apvts.getRawParameterValue("rigMode")->load();
         const bool dual = (mode == 2);
@@ -5411,20 +5542,18 @@ public:
         mModes->setActive(mode); // A=0, B=1, Dual=2
         mLevelA->setEnabled(aOn);
         mLevelB->setEnabled(bOn);
-        mALabel.setColour(juce::Label::textColourId, aOn ? colors::titleAccent : colors::captionDim);
-        mBLabel.setColour(juce::Label::textColourId, bOn ? colors::laneColour(1) : colors::captionDim);
         // Pan only matters in Dual (Solo plays centered) and on a live row.
         mPanA->setEnabled(dual && aOn);
         mPanB->setEnabled(dual && bOn);
         // Polarity is a SAVED state but only shown/active in Dual. In Solo the
-        // button reads "not inverted" without clearing the stored value, so it
+        // switch reads "not inverted" without clearing the stored value, so it
         // pops back to inverted when Dual is re-selected.
         const bool polA = mProc.apvts.getRawParameterValue("rigPolA")->load() >= 0.5f;
         const bool polB = mProc.apvts.getRawParameterValue("rigPolB")->load() >= 0.5f;
         mPolA.setEnabled(dual && aOn);
         mPolB.setEnabled(dual && bOn);
-        mPolA.setToggleState(dual && aOn && polA, juce::dontSendNotification);
-        mPolB.setToggleState(dual && bOn && polB, juce::dontSendNotification);
+        mPolA.setStateQuiet(dual && aOn && polA);
+        mPolB.setStateQuiet(dual && bOn && polB);
         // Alignment only applies when BOTH rigs are actually playing (Dual with
         // both amps engaged) — greyed in Single and when the amps are bypassed.
         const bool bothLoaded = mProc.isModelLoaded(0) && mProc.isModelLoaded(1);
@@ -5432,6 +5561,25 @@ public:
         mAlign->setEnabled(aligning);
         mAutoBtn.setEnabled(aligning && bothLoaded);
         mMatchBtn.setEnabled(aligning && bothLoaded);
+
+        // OUT L·R meters.
+        mMeterA.setEnabled(aOn);
+        mMeterB.setEnabled(bOn);
+        mMeterA.push(mProc.rigOutLDb(0), mProc.rigOutRDb(0), dt);
+        mMeterB.push(mProc.rigOutLDb(1), mProc.rigOutRDb(1), dt);
+
+        // Amp-name captions + live state; repaint the labels when anything changed.
+        auto nameFor = [this](int rig) {
+            return mProc.isModelLoaded(rig)
+                       ? mProc.getModelName(rig).upToFirstOccurrenceOf(".", false, false).toUpperCase()
+                       : juce::String::fromUTF8("\xE2\x80\x94"); // em dash
+        };
+        const juce::String nA = nameFor(0), nB = nameFor(1);
+        if (nA != mNameA || nB != mNameB || aOn != mLiveA || bOn != mLiveB)
+        {
+            mNameA = nA; mNameB = nB; mLiveA = aOn; mLiveB = bOn;
+            repaint();
+        }
     }
 
     void resized() override
@@ -5441,38 +5589,53 @@ public:
         const int mw = juce::jmin(mModes->idealWidth(), hr.getWidth());
         mModes->setBounds(hr.removeFromRight(mw).withSizeKeepingCentre(mw, 24));
 
-        auto area = bodyArea().reduced(24, 16);
+        auto body = bodyArea().reduced(26, 18);
+        const int cardH = 112, gap = 12;
 
-        auto rigRow = [&](juce::Label &tag, LabeledKnob &lvl, LabeledKnob &pan,
-                          juce::ToggleButton &pol)
+        auto layoutRow = [&](juce::Rectangle<int> card, juce::Rectangle<int> &tagOut,
+                             LabeledKnob &lvl, LabeledKnob &pan, InvertSwitch &pol, OutMeter &meter)
         {
-            auto r = area.removeFromTop(104);
-            tag.setBounds(r.removeFromLeft(66).withSizeKeepingCentre(56, 20));
-            lvl.setBounds(r.removeFromLeft(100).reduced(6, 0));
-            pan.setBounds(r.removeFromLeft(100).reduced(6, 0));
-            pol.setBounds(r.removeFromLeft(104).withSizeKeepingCentre(96, 26));
-            area.removeFromTop(6);
+            auto r = card.reduced(20, 10);
+            // Label stack (drawn in paint): centre it vertically within the row.
+            auto tag = r.removeFromLeft(58);
+            tagOut = tag.withSizeKeepingCentre(58, 36);
+            r.removeFromLeft(22);
+            lvl.setBounds(r.removeFromLeft(88));
+            r.removeFromLeft(22);
+            pan.setBounds(r.removeFromLeft(88));
+            r.removeFromLeft(22);
+            pol.setBounds(r.removeFromLeft(130).withSizeKeepingCentre(130, 24));
+            // Meter pinned to the card's right edge.
+            meter.setBounds(r.removeFromRight(60).withSizeKeepingCentre(60, 56));
         };
-        rigRow(mALabel, *mLevelA, *mPanA, mPolA);
-        rigRow(mBLabel, *mLevelB, *mPanB, mPolB);
-        area.removeFromTop(6);
 
-        auto alignRow = area.removeFromTop(104);
-        alignRow.removeFromLeft(66);
-        mAlign->setBounds(alignRow.removeFromLeft(100).reduced(6, 0));
-        alignRow.removeFromLeft(12);
-        mAutoBtn.setBounds(alignRow.removeFromLeft(130).withSizeKeepingCentre(130, 30));
-        alignRow.removeFromLeft(8);
-        mMatchBtn.setBounds(alignRow.removeFromLeft(130).withSizeKeepingCentre(130, 30));
+        mCardA = body.removeFromTop(cardH);
+        layoutRow(mCardA, mTagA, *mLevelA, *mPanA, mPolA, mMeterA);
+        body.removeFromTop(gap);
+        mCardB = body.removeFromTop(cardH);
+        layoutRow(mCardB, mTagB, *mLevelB, *mPanB, mPolB, mMeterB);
+
+        body.removeFromTop(gap + 4);
+        auto alignRow = body.removeFromTop(96);
+        mAlign->setBounds(alignRow.removeFromLeft(88));
+        alignRow.removeFromLeft(20);
+        mAutoBtn.setBounds(alignRow.removeFromLeft(122).withSizeKeepingCentre(122, 34));
+        alignRow.removeFromLeft(10);
+        mMatchBtn.setBounds(alignRow.removeFromLeft(132).withSizeKeepingCentre(132, 34));
     }
 
 private:
     NamRigProcessor &mProc;
     std::unique_ptr<SegmentedControl> mModes;
-    juce::Label mALabel, mBLabel;
     std::unique_ptr<LabeledKnob> mLevelA, mPanA, mLevelB, mPanB, mAlign;
-    juce::ToggleButton mPolA, mPolB;
+    InvertSwitch mPolA, mPolB;
+    OutMeter mMeterA, mMeterB;
     juce::TextButton mAutoBtn{"Auto-align"}, mMatchBtn{"Match Levels"};
+
+    // Layout rects (set in resized, drawn in paint).
+    juce::Rectangle<int> mCardA, mCardB, mTagA, mTagB;
+    juce::String mNameA, mNameB;
+    bool mLiveA = false, mLiveB = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MixPanel)
 };
