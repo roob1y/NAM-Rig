@@ -1560,8 +1560,6 @@ public:
         juce::ColourGradient base(encTop, 0.0f, b.getY(),
                                   encBot, 0.0f, b.getBottom(), false);
         dither::fillRoundedRectangle(g, base, b, 16.0f);
-        g.setColour(juce::Colours::white.withAlpha(0.05f));
-        g.drawRoundedRectangle(b.reduced(0.5f).withTrimmedBottom(b.getHeight() - 2.0f), 16.0f, 1.0f);
         g.setColour(tint.withAlpha(mActive ? 0.55f : 0.34f));
         g.drawRoundedRectangle(b, 16.0f, 1.5f);
 
