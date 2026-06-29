@@ -11,6 +11,33 @@
 namespace nam_rig::ui
 {
 
+// Compact, non-selectable menu section header ("CHOOSE DRIVE" etc). JUCE's
+// addSectionHeader reserves a tall row with the label bottom-aligned, which left
+// a big dead gap at the top of the menu; this custom item is short and draws the
+// caption with minimal padding.
+class MenuSectionHeader : public juce::PopupMenu::CustomComponent
+{
+public:
+    explicit MenuSectionHeader(juce::String text)
+        : juce::PopupMenu::CustomComponent(false), mText(std::move(text).toUpperCase()) {}
+
+    void getIdealSize(int &w, int &h) override
+    {
+        const auto f = fonts::archivo(10.0f, fonts::SemiBold, 0.14f);
+        w = (int)std::ceil(juce::GlyphArrangement::getStringWidth(f, mText)) + 34;
+        h = 22;
+    }
+    void paint(juce::Graphics &g) override
+    {
+        g.setColour(colors::caption);
+        g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.14f));
+        g.drawText(mText, getLocalBounds().reduced(14, 0), juce::Justification::centredLeft, true);
+    }
+
+private:
+    juce::String mText;
+};
+
 // Rotary knob with a caption above and a mono value readout below, attached to
 // one APVTS parameter. Caption + value are drawn by the component (the rotary
 // itself comes from the LookAndFeel); the readout turns accent while dragging.
@@ -60,8 +87,14 @@ public:
     }
 
     // Make the value readout a clickable dropdown of discrete choices (the knob
-    // can still be turned to step). Used for the delay Sync division knobs.
-    void setValueMenu(juce::StringArray items) { mValueMenu = std::move(items); repaint(); }
+    // can still be turned to step). Used for the delay Sync division knobs. An
+    // optional header titles the styled menu ("Sync", "Mode", ...).
+    void setValueMenu(juce::StringArray items, juce::String header = {})
+    {
+        mValueMenu = std::move(items);
+        mValueMenuHeader = std::move(header);
+        repaint();
+    }
 
     void mouseDown(const juce::MouseEvent &e) override
     {
@@ -69,9 +102,12 @@ public:
             || !mValueRect.contains(e.getPosition()))
             return;
         juce::PopupMenu m;
+        if (mValueMenuHeader.isNotEmpty())
+            m.addCustomItem(-1, std::make_unique<MenuSectionHeader>(mValueMenuHeader), nullptr, {});
         const int cur = (int)std::lround(mSlider.getValue());
         for (int i = 0; i < mValueMenu.size(); ++i)
             m.addItem(i + 1, mValueMenu[i], true, i == cur);
+        m.setLookAndFeel(&getLookAndFeel());
         m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this),
                         [this](int r) {
                             if (r > 0) mSlider.setValue(r - 1, juce::sendNotificationSync);
@@ -166,6 +202,7 @@ private:
     juce::Rectangle<int> mCaptionRect, mValueRect;
     juce::String mUnit;
     juce::StringArray mValueMenu; // when set, the value readout is a click-to-pick dropdown
+    juce::String mValueMenuHeader; // optional title for the click-to-pick menu
     int mCaptionH = 15, mValueH = 16;
     bool mShowValue = true, mDragging = false, mRotationReadout = false, mReadoutFn = false;
 };
@@ -289,6 +326,10 @@ public:
     // Stack the buttons vertically (equal size) instead of in a horizontal row.
     void setVertical(bool v) { if (mVertical != v) { mVertical = v; repaint(); } }
 
+    // Override the active-segment highlight colour (defaults to the global accent);
+    // drive pedals set this to the pedal's own colour so Range/Gate match the LED.
+    void setAccent(juce::Colour c) { if (mAccent != c) { mAccent = c; repaint(); } }
+
     void paint(juce::Graphics &g) override
     {
         auto f = fonts::archivo(12.0f, fonts::SemiBold);
@@ -311,9 +352,9 @@ public:
                 cell.addRoundedRectangle(r.getX(), r.getY(), r.getWidth(), r.getHeight(),
                                          rad, rad, top, top, bot, bot);
                 const bool on = i == active;
-                g.setColour(on ? (en ? colors::accent : colors::tileSel) : colors::tile);
+                g.setColour(on ? (en ? mAccent : colors::tileSel) : colors::tile);
                 g.fillPath(cell);
-                g.setColour((on && en) ? colors::accent : colors::outline);
+                g.setColour((on && en) ? mAccent : colors::outline);
                 g.strokePath(cell, juce::PathStrokeType(1.0f));
                 g.setColour(on ? (en ? colors::bg : colors::textDim) : (en ? colors::textDim : colors::captionDim));
                 g.drawText(mOptions[i], r, juce::Justification::centred);
@@ -327,9 +368,9 @@ public:
             const int w = (int)std::ceil(juce::GlyphArrangement::getStringWidth(f, mOptions[i])) + 26;
             auto r = juce::Rectangle<float>((float)x, 0.0f, (float)w, (float)getHeight());
             const bool on = i == active;
-            g.setColour(on ? (en ? colors::accent : colors::tileSel) : colors::tile);
+            g.setColour(on ? (en ? mAccent : colors::tileSel) : colors::tile);
             g.fillRoundedRectangle(r, 7.0f);
-            g.setColour((on && en) ? colors::accent : colors::outline);
+            g.setColour((on && en) ? mAccent : colors::outline);
             g.drawRoundedRectangle(r.reduced(0.5f), 7.0f, 1.0f);
             g.setColour(on ? (en ? colors::bg : colors::textDim) : (en ? colors::textDim : colors::captionDim));
             g.drawText(mOptions[i], r, juce::Justification::centred);
@@ -371,6 +412,7 @@ private:
     int mGap = 8;
     bool mVertical = false, mManual = false;
     int mManualIndex = -1;
+    juce::Colour mAccent { colors::accent };
 };
 
 // A small toggle "switch" (rounded track + sliding knob), bound to a bool param.
@@ -844,11 +886,13 @@ public:
         };
         mCurve.setSustain((float)mKnobs[0]->slider().getValue());
 
-        // Voicing selector (Clean / OTA / Opto / FET) -> compMode param.
-        mModes = std::make_unique<SegmentedControl>(apvts, "compMode",
-                                                    juce::StringArray{"Clean", "OTA", "Opto", "FET"});
-        mModes->onChange = [this](int) { updateCurveShape(); };
-        addAndMakeVisible(*mModes);
+        // Voicing selector (Clean / OTA / Opto / FET) -> compMode param. A dropdown
+        // (the box stays visible; the menu opens below it via the global combo options).
+        mModeBox.addItemList({"Clean", "OTA", "Opto", "FET"}, 1);
+        mModeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, "compMode", mModeBox);
+        mModeBox.onChange = [this] { updateCurveShape(); };
+        addAndMakeVisible(mModeBox);
         updateCurveShape();
 
         mDetail.setButtonText("DETAIL");
@@ -888,8 +932,8 @@ public:
         auto hr = headerArea();
         mDetail.setBounds(hr.removeFromRight(62).withSizeKeepingCentre(62, 26));
         hr.removeFromRight(10);
-        const int mw = juce::jmin(mModes->idealWidth(), hr.getWidth());
-        mModes->setBounds(hr.removeFromRight(mw).withSizeKeepingCentre(mw, 24));
+        const int mw = juce::jmin(120, hr.getWidth());
+        mModeBox.setBounds(hr.removeFromRight(mw).withSizeKeepingCentre(mw, 26));
 
         auto area = bodyArea().reduced(24, 14);
 
@@ -929,7 +973,7 @@ private:
 
     void updateCurveShape()
     {
-        const int idx = mModes ? mModes->index() : 0;
+        const int idx = juce::jmax(0, mModeBox.getSelectedItemIndex());
         const auto v = nam_rig::CompBlock::voicingFor((nam_rig::CompBlock::Mode)idx);
         mCurve.setShape(v.ratio, v.kneeDb);
     }
@@ -939,7 +983,8 @@ private:
     PeakMeter mIn, mOut;
     juce::Rectangle<int> mInLabelCol, mOutLabelCol;
     CompCurve mCurve;
-    std::unique_ptr<SegmentedControl> mModes;
+    juce::ComboBox mModeBox;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mModeAtt;
     juce::TextButton mDetail;
 };
 
@@ -1007,45 +1052,422 @@ private:
 
 // Monochrome silkscreen art glyph per drive family, drawn from the design's
 // 64x48-viewBox paths, scaled/centred into box.
-inline void paintDriveGlyph(juce::Graphics &g, int type, juce::Rectangle<float> box, juce::Colour col)
+// Per-MODEL silkscreen art, one motif per real pedal. The category
+// representatives keep the exact glyphs shipped today (sparkle, hill, rat, round
+// wave); the off-category models get their own. All art is authored on a shared
+// 64x48 viewBox. type: 1 boost, 2 od, 3 dist, 4 fuzz.
+inline void paintDriveGlyph(juce::Graphics &g, int type, int model,
+                            juce::Rectangle<float> box, juce::Colour col)
 {
-    juce::Path p;
-    bool fill = false;
+    enum Motif { None, Spark, Hill, Rat, RoundWave, Germanium, Sd1, Klon, Bluesbreaker, BigMuff };
+    Motif motif = None;
     switch (type)
     {
-    case 1: // Boost -> twin sparkle (filled)
+    case 1: motif = (model == 0) ? Germanium : Spark; break;                       // Range '65 / EP Boost
+    case 2: motif = (model == 1) ? Sd1 : (model == 2) ? Klon
+                  : (model == 3) ? Bluesbreaker : Hill; break;                     // SD-1 / Klon / BB / Green Drive
+    case 3: motif = Rat; break;                                                    // Black Rodent
+    case 4: motif = (model == 1) ? BigMuff : RoundWave; break;                     // Violet Ram / Round Fuzz
+    default: return;
+    }
+
+    const float s = juce::jmin(box.getWidth() / 64.0f, box.getHeight() / 48.0f);
+    const auto xf = juce::AffineTransform::scale(s)
+                        .translated(box.getCentreX() - 32.0f * s, box.getCentreY() - 24.0f * s);
+    g.setColour(col);
+
+    // ---- multi-part motifs (mixed fill + stroke): drawn directly with the xf ----
+    if (motif == Bluesbreaker) // combo amp + speaker
+    {
+        juce::Path lines;
+        lines.addRoundedRectangle(15.0f, 9.0f, 34.0f, 30.0f, 3.0f);           // cabinet
+        lines.startNewSubPath(15, 16); lines.lineTo(49, 16);                  // control-panel divider
+        lines.addEllipse(24.5f, 19.5f, 15.0f, 15.0f);                         // speaker (cx32 cy27 r7.5)
+        g.strokePath(lines, juce::PathStrokeType(2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded), xf);
+        juce::Path dots;                                                      // 3 panel knobs + speaker dust-cap
+        dots.addEllipse(21.0f - 1.1f, 12.5f - 1.1f, 2.2f, 2.2f);
+        dots.addEllipse(27.0f - 1.1f, 12.5f - 1.1f, 2.2f, 2.2f);
+        dots.addEllipse(33.0f - 1.1f, 12.5f - 1.1f, 2.2f, 2.2f);
+        dots.addEllipse(32.0f - 1.8f, 27.0f - 1.8f, 3.6f, 3.6f);
+        g.fillPath(dots, xf);
+        return;
+    }
+    if (motif == Sd1) // Super Drive -> Robbie's vector design (Super-Drive Design 2.svg): outline shield + FILLED bolt
+    {
+        juce::Path shield; // path2 "Shield" -- stroked outline
+        shield.startNewSubPath(31.69f, 3.36f);
+        shield.cubicTo(33.22f, 3.27f, 45.80f, 7.37f, 45.80f, 7.37f);
+        shield.cubicTo(46.69f, 7.63f, 49.80f, 8.38f, 50.09f, 9.13f);
+        shield.cubicTo(50.44f, 9.78f, 49.62f, 17.81f, 49.62f, 17.81f);
+        shield.cubicTo(49.15f, 22.96f, 47.54f, 30.48f, 44.75f, 34.83f);
+        shield.cubicTo(43.27f, 37.13f, 41.01f, 39.34f, 38.85f, 41.01f);
+        shield.cubicTo(37.72f, 41.89f, 33.65f, 44.60f, 32.36f, 44.77f);
+        shield.cubicTo(31.44f, 44.89f, 25.76f, 41.48f, 23.85f, 39.74f);
+        shield.cubicTo(22.15f, 38.20f, 20.77f, 36.77f, 19.52f, 34.83f);
+        shield.cubicTo(16.39f, 29.96f, 15.29f, 23.24f, 14.60f, 17.58f);
+        shield.cubicTo(14.60f, 17.58f, 13.81f, 9.81f, 14.18f, 9.13f);
+        shield.cubicTo(14.49f, 8.33f, 17.56f, 7.62f, 18.47f, 7.34f);
+        shield.cubicTo(18.47f, 7.34f, 31.69f, 3.36f, 31.69f, 3.36f);
+        shield.closeSubPath();
+        g.strokePath(shield, juce::PathStrokeType(2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded), xf);
+
+        juce::Path bolt; // path1 "Bolt" -- filled solid with the accent
+        bolt.startNewSubPath(34.60f, 8.62f);
+        bolt.lineTo(34.15f, 12.21f);
+        bolt.lineTo(32.81f, 19.38f);
+        bolt.lineTo(38.63f, 20.05f);
+        bolt.lineTo(32.90f, 30.35f);
+        bolt.lineTo(29.45f, 35.95f);
+        bolt.lineTo(31.69f, 23.86f);
+        bolt.lineTo(25.41f, 23.18f);
+        bolt.lineTo(28.46f, 18.26f);
+        bolt.closeSubPath();
+        g.fillPath(bolt, xf);
+        return;
+    }
+
+    // ---- single-path motifs: pre-transform the path (keeps the existing glyphs
+    //      pixel-for-pixel) then fill or stroke ----
+    juce::Path p;
+    bool fill = false;
+    float w = 2.0f * s + 0.4f;
+    switch (motif)
+    {
+    case Spark: // EP Boost -> twin sparkle (filled)
         p.startNewSubPath(28, 7);  p.quadraticTo(28, 23, 44, 23); p.quadraticTo(28, 23, 28, 39);
         p.quadraticTo(28, 23, 12, 23); p.quadraticTo(28, 23, 28, 7); p.closeSubPath();
         p.startNewSubPath(47, 9);  p.quadraticTo(47, 16, 54, 16); p.quadraticTo(47, 16, 47, 23);
         p.quadraticTo(47, 16, 40, 16); p.quadraticTo(47, 16, 47, 9); p.closeSubPath();
         fill = true; break;
-    case 2: // Overdrive -> smooth hill (stroked)
+    case Hill: // Green Drive -> smooth mid-hump
         p.startNewSubPath(8, 33); p.cubicTo(19, 33, 23, 15, 32, 15); p.cubicTo(41, 15, 45, 33, 56, 33);
         break;
-    case 3: // Distortion -> rodent (stroked)
+    case Rat: // Black Rodent -> rodent
         p.startNewSubPath(53, 27); p.cubicTo(46, 21, 36, 20, 27, 22); p.cubicTo(18, 24, 12, 26, 12, 30);
         p.cubicTo(12, 34, 19, 36, 28, 34); p.cubicTo(38, 33, 47, 32, 53, 27); p.closeSubPath();
         p.startNewSubPath(36, 21); p.cubicTo(33, 13, 39, 8, 42, 10); p.cubicTo(45, 12, 46, 16, 44, 21);
         p.startNewSubPath(14, 31); p.cubicTo(8, 33, 3, 31, 3, 25); p.cubicTo(3, 21, 5, 18, 8, 17);
         break;
-    case 4: // Fuzz -> round wave (stroked)
+    case RoundWave: // Round Fuzz -> hard-clipped round wave
         p.startNewSubPath(4, 24); p.cubicTo(5, 14, 9, 13, 13, 13); p.lineTo(20, 13);
         p.cubicTo(24, 13, 25, 35, 29, 35); p.lineTo(36, 35); p.cubicTo(40, 35, 41, 13, 45, 13);
         p.lineTo(52, 13); p.cubicTo(56, 13, 58, 19, 60, 24);
         p.applyTransform(juce::AffineTransform(0.82f, 0.0f, 5.76f, 0.0f, 1.0f, 0.0f));
         break;
+    case Germanium: // Range '65 -> germanium transistor (TO can + 3 legs), from range-65.svg
+        p.startNewSubPath(22, 27); p.lineTo(22, 19); p.quadraticTo(22, 13, 28, 13);
+        p.lineTo(36, 13); p.quadraticTo(42, 13, 42, 19); p.lineTo(42, 27); p.closeSubPath(); // can body
+        p.startNewSubPath(27, 27); p.lineTo(25, 39);                                          // leg
+        p.startNewSubPath(32, 27); p.lineTo(32, 39);                                          // leg
+        p.startNewSubPath(37, 27); p.lineTo(39, 39);                                          // leg
+        break;
+    case Klon: // Gold Horse -> simple bow & arrow (archer motif, minimal line art)
+        p.startNewSubPath(40, 9); p.quadraticTo(14, 16, 14, 24); p.quadraticTo(14, 32, 40, 39); // bow limb
+        p.startNewSubPath(40, 9); p.lineTo(40, 39);                                              // bowstring
+        p.startNewSubPath(16, 24); p.lineTo(54, 24);                                             // arrow shaft
+        p.startNewSubPath(54, 24); p.lineTo(48, 20); p.startNewSubPath(54, 24); p.lineTo(48, 28);// arrowhead
+        break;
+    case BigMuff: // Violet Ram -> pi symbol (a touch bolder)
+        p.startNewSubPath(13, 16); p.cubicTo(22, 14, 42, 14, 51, 16);
+        p.startNewSubPath(24, 16); p.cubicTo(24, 25, 23, 31, 20, 35);
+        p.startNewSubPath(41, 16); p.lineTo(41, 32); p.cubicTo(41, 35, 43, 35, 46, 34);
+        w = 3.0f * s + 0.4f; break;
     default: return;
     }
-    const float s = juce::jmin(box.getWidth() / 64.0f, box.getHeight() / 48.0f);
-    p.applyTransform(juce::AffineTransform::scale(s)
-                         .translated(box.getCentreX() - 32.0f * s, box.getCentreY() - 24.0f * s));
-    g.setColour(col);
+    p.applyTransform(xf);
     if (fill)
         g.fillPath(p);
     else
-        g.strokePath(p, juce::PathStrokeType(2.0f * s + 0.4f, juce::PathStrokeType::curved,
+        g.strokePath(p, juce::PathStrokeType(w, juce::PathStrokeType::curved,
                                              juce::PathStrokeType::rounded));
 }
+
+// Fully custom drive picker -- a real Component (NOT juce::PopupMenu), so it has no
+// OS window and therefore none of PopupMenu's window-level headaches (opaque/white
+// clear, drop-shadow box, corner ring, 1x scale). It's added to the SCALED content
+// canvas so it scales with the plugin automatically, draws its own rounded panels,
+// and shows a two-pane cascade: categories on the left, the hovered category's
+// models (two-line: bold name + mono descriptor) on the right.
+class DrivePickerOverlay : public juce::Component
+{
+public:
+    struct Model { juce::String name, sub; juce::Colour led; };
+    struct Cat   { juce::String name; std::vector<Model> models; };
+
+    std::function<void(int /*type 0..4*/, int /*model*/)> onPick;
+    std::function<void()> onDismiss;
+
+    DrivePickerOverlay(std::vector<Cat> cats, int curType, int curModel)
+        : mCats(std::move(cats)), mCurType(curType), mCurModel(curModel)
+    {
+        setWantsKeyboardFocus(true);
+        // Open the current category's models by default (so the selection is visible).
+        mOpenCat = (curType >= 1 && curType <= (int)mCats.size()) ? curType - 1 : -1;
+    }
+
+    // Pill rect expressed in THIS overlay's coordinate space; anchors the menu.
+    void setAnchor(juce::Rectangle<int> a) { mAnchor = a; layout(); repaint(); }
+
+    void resized() override { layout(); }
+    void mouseMove(const juce::MouseEvent &e) override { updateHover(e.getPosition()); }
+    void mouseDrag(const juce::MouseEvent &e) override { updateHover(e.getPosition()); }
+
+    void mouseDown(const juce::MouseEvent &e) override
+    {
+        const auto p = e.getPosition();
+        if (mOpenCat >= 0 && mModelPanel.contains(p))
+        {
+            const int idx = modelIndexAt(p);
+            if (idx >= 0) pick(mOpenCat + 1, idx);
+            return; // click on panel padding: keep open
+        }
+        if (mCatPanel.contains(p))
+        {
+            const int row = catRowAt(p);
+            if (row == kOffRow) { pick(0, 0); return; }
+            if (row >= 0)
+            {
+                if ((int)mCats[(size_t)row].models.size() <= 1) pick(row + 1, 0);
+                else { mOpenCat = row; mHoverModel = -1; layout(); repaint(); }
+            }
+            return;
+        }
+        dismiss(); // click anywhere outside the panels closes the picker
+    }
+
+    bool keyPressed(const juce::KeyPress &k) override
+    {
+        if (k == juce::KeyPress::escapeKey) { dismiss(); return true; }
+        return false;
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        paintPanel(g, mCatPanel);
+        g.setColour(colors::caption);
+        g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.14f));
+        g.drawText("CHOOSE DRIVE",
+                   juce::Rectangle<int>(mCatPanel.getX() + 14, mCatPanel.getY() + kPad,
+                                        mCatPanel.getWidth() - 28, kHeaderH),
+                   juce::Justification::centredLeft);
+
+        paintRow(g, offRowRect(), "Off", mCurType == 0, juce::Colour(), false,
+                 mHoverCatRow == kOffRow);
+        auto sep = juce::Rectangle<int>(mCatPanel.getX() + 12, catRowY(0) - kSep / 2 - 1,
+                                        mCatPanel.getWidth() - 24, 1);
+        g.setColour(colors::divider);
+        g.fillRect(sep);
+
+        for (int i = 0; i < (int)mCats.size(); ++i)
+            paintCatRow(g, i);
+
+        if (mOpenCat >= 0)
+        {
+            paintPanel(g, mModelPanel);
+            const auto &ms = mCats[(size_t)mOpenCat].models;
+            for (int i = 0; i < (int)ms.size(); ++i)
+                paintModelRow(g, i);
+        }
+    }
+
+private:
+    static constexpr int kHeaderH = 22, kRowH = 38, kModelH = 46, kSep = 13, kPad = 6;
+    static constexpr int kCatW = 200;
+    static constexpr int kOffRow = -2;
+
+    void layout()
+    {
+        const int n = (int)mCats.size();
+        const int h = kPad + kHeaderH + n * kRowH + kSep + kRowH + kPad;
+        int x = mAnchor.getX();
+        int y = mAnchor.getY() - h - 4; // float ABOVE the pill so the button stays visible
+        if (auto *par = getParentComponent())
+        {
+            if (y < 4) y = mAnchor.getBottom() + 4; // no room above -> drop below
+            x = juce::jlimit(4, juce::jmax(4, par->getWidth() - kCatW - 4), x);
+            y = juce::jlimit(4, juce::jmax(4, par->getHeight() - h - 4), y);
+        }
+        mCatPanel = {x, y, kCatW, h};
+
+        if (mOpenCat >= 0 && mOpenCat < (int)mCats.size())
+        {
+            const auto &ms = mCats[(size_t)mOpenCat].models;
+            int mw = 160;
+            for (auto &m : ms)
+            {
+                mw = juce::jmax(mw, (int)std::ceil(juce::GlyphArrangement::getStringWidth(
+                                        fonts::archivo(15.0f, fonts::Bold), m.name)) + 44);
+                mw = juce::jmax(mw, (int)std::ceil(juce::GlyphArrangement::getStringWidth(
+                                        fonts::mono(11.0f), m.sub)) + 44);
+            }
+            const int mh = kPad * 2 + (int)ms.size() * kModelH;
+            int mx = mCatPanel.getRight(); // flush against the category panel (no gap)
+            int my = catRowY(mOpenCat) - kPad;
+            if (auto *par = getParentComponent())
+            {
+                if (mx + mw + 4 > par->getWidth()) mx = mCatPanel.getX() - mw; // flip to the left, still flush
+                my = juce::jlimit(4, juce::jmax(4, par->getHeight() - mh - 4), my);
+            }
+            mModelPanel = {mx, my, mw, mh};
+        }
+        else
+            mModelPanel = {};
+    }
+
+    // Order top-to-bottom: header, Off, divider, then the category rows.
+    int offRowY() const { return mCatPanel.getY() + kPad + kHeaderH; }
+    int catRowY(int i) const
+    {
+        return mCatPanel.getY() + kPad + kHeaderH + kRowH + kSep + i * kRowH;
+    }
+    juce::Rectangle<int> catRowRect(int i) const
+    {
+        return {mCatPanel.getX() + 4, catRowY(i), mCatPanel.getWidth() - 8, kRowH};
+    }
+    juce::Rectangle<int> offRowRect() const
+    {
+        return {mCatPanel.getX() + 4, offRowY(), mCatPanel.getWidth() - 8, kRowH};
+    }
+    juce::Rectangle<int> modelRowRect(int i) const
+    {
+        return {mModelPanel.getX() + 4, mModelPanel.getY() + kPad + i * kModelH,
+                mModelPanel.getWidth() - 8, kModelH};
+    }
+    int catRowAt(juce::Point<int> p) const
+    {
+        for (int i = 0; i < (int)mCats.size(); ++i)
+            if (catRowRect(i).contains(p)) return i;
+        if (offRowRect().contains(p)) return kOffRow;
+        return -1;
+    }
+    int modelIndexAt(juce::Point<int> p) const
+    {
+        if (mOpenCat < 0) return -1;
+        const auto &ms = mCats[(size_t)mOpenCat].models;
+        for (int i = 0; i < (int)ms.size(); ++i)
+            if (modelRowRect(i).contains(p)) return i;
+        return -1;
+    }
+
+    void updateHover(juce::Point<int> p)
+    {
+        const int row = mCatPanel.contains(p) ? catRowAt(p) : -1;
+        if (row >= 0 && row != mOpenCat && !mCats[(size_t)row].models.empty())
+        {
+            mOpenCat = row;
+            layout();
+        }
+        mHoverCatRow = row;
+        mHoverModel = (mOpenCat >= 0 && mModelPanel.contains(p)) ? modelIndexAt(p) : -1;
+        repaint();
+    }
+
+    void pick(int type, int model)
+    {
+        if (onPick) onPick(type, model);
+        dismiss();
+    }
+    void dismiss()
+    {
+        if (mDismissing) return;
+        mDismissing = true;
+        juce::Component::SafePointer<DrivePickerOverlay> self(this);
+        juce::MessageManager::callAsync([self]() mutable {
+            if (self == nullptr) return;
+            auto cb = self->onDismiss; // local copy: invoking it deletes the overlay
+            if (cb) cb();              // (and thus the member std::function) -- safe via the copy
+        });
+    }
+
+    void paintPanel(juce::Graphics &g, juce::Rectangle<int> r)
+    {
+        auto b = r.toFloat();
+        const float rad = 9.0f;
+        g.setColour(juce::Colour(0xff1c2027)); // opaque base
+        g.fillRoundedRectangle(b, rad);
+        juce::ColourGradient grad(juce::Colour(0xff232830), b.getTopLeft(),
+                                  juce::Colour(0xff171a21), b.getBottomLeft(), false);
+        dither::fillRoundedRectangle(g, grad, b, rad);
+        g.setColour(juce::Colours::black.withAlpha(0.25f));
+        g.drawRoundedRectangle(b.reduced(0.5f), rad, 1.0f);
+    }
+
+    void drawChevron(juce::Graphics &g, juce::Rectangle<int> row)
+    {
+        const float x = (float)row.getRight() - 14.0f, cy = (float)row.getCentreY(), s = 4.0f;
+        juce::Path p;
+        p.startNewSubPath(x - s * 0.5f, cy - s);
+        p.lineTo(x + s * 0.5f, cy);
+        p.lineTo(x - s * 0.5f, cy + s);
+        g.setColour(colors::caption);
+        g.strokePath(p, juce::PathStrokeType(1.6f, juce::PathStrokeType::curved,
+                                             juce::PathStrokeType::rounded));
+    }
+
+    // Single-line row (categories + Off). dot = accent dot when selected.
+    void paintRow(juce::Graphics &g, juce::Rectangle<int> r, const juce::String &name,
+                  bool selected, juce::Colour, bool hasChevron, bool hovered)
+    {
+        if (hovered)
+        {
+            g.setColour(colors::tileSel);
+            g.fillRoundedRectangle(r.toFloat().reduced(1.0f), 7.0f);
+        }
+        auto tx = r.reduced(14, 0);
+        if (selected)
+        {
+            auto dot = juce::Rectangle<float>(6.0f, 6.0f)
+                           .withCentre({(float)r.getX() + 11.0f, (float)r.getCentreY()});
+            g.setColour(colors::accent);
+            g.fillEllipse(dot);
+            tx = tx.withTrimmedLeft(10);
+        }
+        g.setColour(colors::textBright);
+        g.setFont(fonts::archivo(14.0f, fonts::SemiBold));
+        g.drawText(name, tx, juce::Justification::centredLeft);
+        if (hasChevron) drawChevron(g, r);
+    }
+
+    void paintCatRow(juce::Graphics &g, int i)
+    {
+        paintRow(g, catRowRect(i), mCats[(size_t)i].name, mCurType == i + 1, juce::Colour(),
+                 true, mHoverCatRow == i || mOpenCat == i);
+    }
+
+    void paintModelRow(juce::Graphics &g, int i)
+    {
+        const auto &m = mCats[(size_t)mOpenCat].models[(size_t)i];
+        auto r = modelRowRect(i);
+        if (mHoverModel == i)
+        {
+            g.setColour(colors::tileSel);
+            g.fillRoundedRectangle(r.toFloat().reduced(1.0f), 7.0f);
+        }
+        auto tx = r.reduced(14, 0);
+        const bool sel = (mCurType == mOpenCat + 1 && mCurModel == i);
+        if (sel)
+        {
+            auto dot = juce::Rectangle<float>(6.0f, 6.0f)
+                           .withCentre({(float)r.getX() + 11.0f, (float)r.getCentreY()});
+            g.setColour(m.led);
+            g.fillEllipse(dot);
+            tx = tx.withTrimmedLeft(10);
+        }
+        auto top = tx.removeFromTop(tx.getHeight() / 2 + 3);
+        g.setColour(colors::textBright);
+        g.setFont(fonts::archivo(15.0f, fonts::Bold));
+        g.drawText(m.name, top, juce::Justification::bottomLeft);
+        g.setColour(colors::caption);
+        g.setFont(fonts::mono(11.0f));
+        g.drawText(m.sub, tx.withTrimmedTop(1), juce::Justification::topLeft);
+    }
+
+    std::vector<Cat> mCats;
+    int mCurType, mCurModel;
+    int mOpenCat = -1, mHoverCatRow = -1, mHoverModel = -1;
+    bool mDismissing = false;
+    juce::Rectangle<int> mAnchor, mCatPanel, mModelPanel;
+};
 
 // One drive "stomp" in the pedalboard. Top-to-bottom: Type (category), a model
 // selector (when the category has several models), the model's descriptive
@@ -1075,6 +1497,11 @@ public:
                                                        juce::StringArray{"Treble", "Mid", "Full"});
         addChildComponent(*mRangeSeg);
 
+        // Fuzz-only bias-starved Gate (Off/Gate), shown when the model has a gate.
+        mGateSeg = std::make_unique<SegmentedControl>(apvts, p + "fGate",
+                                                      juce::StringArray{"Off", "Gate"});
+        addChildComponent(*mGateSeg);
+
         mOnAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             apvts, p + "On", mOn);
         mOn.onClick = [this] { refresh(); };
@@ -1095,8 +1522,13 @@ public:
 
     void refresh()
     {
-        const int type = mType.getSelectedItemIndex();
         const juce::String pid = "drv" + juce::String(mSlot + 1);
+        // Type is read from the param (authoritative), not the hidden bridge combo,
+        // so a fresh selection always takes effect immediately. Keep the combo in
+        // sync for the APVTS attachment, without re-triggering onChange.
+        const int type = curTypeIndex();
+        if (mType.getSelectedItemIndex() != type)
+            mType.setSelectedItemIndex(type, juce::dontSendNotification);
         const bool on = mApvts.getRawParameterValue(pid + "On")->load() >= 0.5f;
         if (type != mLastType)
             populateModels(type);
@@ -1117,7 +1549,7 @@ public:
     void paint(juce::Graphics &g) override
     {
         auto b = getLocalBounds().toFloat().reduced(1.0f);
-        const auto pair = colors::driveAccent(accentIndex());
+        const auto pair = colors::driveModelAccent(mLastType, mLastModel);
         const juce::Colour tint = mActive ? pair.tint : juce::Colour(0xff343a43);
 
         // Enclosure: neutral base + tint wash, pre-composited into one opaque
@@ -1139,14 +1571,17 @@ public:
         g.drawText(mKindStr, mHeaderRect, juce::Justification::centredLeft);
         auto jewel = juce::Rectangle<float>(13.0f, 13.0f).withCentre(
             {(float)mHeaderRect.getRight() - 6.5f, (float)mHeaderRect.getCentreY()});
-        if (mActive) fx::glowEllipse(g, jewel, pair.accent, 13, 0.6f, 6, 0.55f);
-        g.setColour(mActive ? pair.accent : juce::Colour(0xff2a2f37));
+        // Jewel uses the model's LED colour (= accent for every pedal except those
+        // that override it, e.g. Violet Ram = chrome body with a violet LED).
+        if (mActive) fx::glowEllipse(g, jewel, pair.led, 13, 0.6f, 6, 0.55f);
+        g.setColour(mActive ? pair.led : juce::Colour(0xff2a2f37));
         g.fillEllipse(jewel);
 
-        // Silkscreen art glyph.
+        // Silkscreen art glyph (the Fuzz Gate toggle now lives up in the knob row,
+        // so the art always shows for an active pedal type).
         if (mLastType != 0)
-            paintDriveGlyph(g, mLastType, mGlyphRect.toFloat(),
-                            mActive ? pair.accent.withAlpha(0.85f) : juce::Colour(0xff5a616b));
+            paintDriveGlyph(g, mLastType, mLastModel, mGlyphRect.toFloat(),
+                            mActive ? pair.led.withAlpha(0.85f) : juce::Colour(0xff5a616b));
 
         // Model-name pill + sub.
         auto pill = mPillRect.toFloat();
@@ -1198,11 +1633,17 @@ public:
         LabeledKnob *ks[3] = {mDrive.get(), mTone.get(), mLevel.get()};
         int nVis = 0;
         for (auto *k : ks) if (k->isVisible()) ++nVis;
-        if (nVis > 0)
+        // Round Fuzz's Off/Gate toggle rides up in the knob row as a trailing
+        // column (instead of sitting down in the silkscreen area), so the art shows.
+        const bool gateInRow = mGateSeg->isVisible();
+        const int nSlots = nVis + (gateInRow ? 1 : 0);
+        if (nSlots > 0)
         {
-            const int gap = (nVis == 2) ? 16 : 0; // two-knob pedals: extra breathing room
-            const int kw = juce::jmin(78, juce::jmax(1, (knobRow.getWidth() - gap * (nVis - 1)) / nVis));
-            auto grp = knobRow.withSizeKeepingCentre(kw * nVis + gap * (nVis - 1), knobRow.getHeight());
+            // Non-gate pedals keep their exact shipped spacing (2 knobs = 16, else 0);
+            // only Round Fuzz's extra gate column introduces a gap at 3 slots.
+            const int gap = gateInRow ? 8 : ((nVis == 2) ? 16 : 0);
+            const int kw = juce::jmin(78, juce::jmax(1, (knobRow.getWidth() - gap * (nSlots - 1)) / nSlots));
+            auto grp = knobRow.withSizeKeepingCentre(kw * nSlots + gap * (nSlots - 1), knobRow.getHeight());
             bool first = true;
             for (auto *k : ks)
                 if (k->isVisible())
@@ -1211,6 +1652,19 @@ public:
                     k->setBounds(grp.removeFromLeft(kw).reduced(3, 0));
                     first = false;
                 }
+            if (gateInRow) // Off/Gate as a vertical 2-cell column, level with the knob dials
+            {
+                if (!first) grp.removeFromLeft(gap);
+                auto cell = grp.removeFromLeft(kw);
+                mGateSeg->setVertical(true);
+                const int sw = juce::jlimit(36, mGateSeg->idealCellWidth(), kw);
+                const int sh = 58;
+                int dialCy = knobRow.getCentreY();
+                for (auto *k : ks)
+                    if (k->isVisible())
+                        dialCy = k->getBounds().getY() + k->slider().getBounds().getCentreY();
+                mGateSeg->setBounds(cell.getCentreX() - sw / 2, dialCy - sh / 2, sw, sh);
+            }
         }
 
         // Range '65 (Boost): Treble/Mid/Full stacked vertically (equal size) to
@@ -1226,48 +1680,88 @@ public:
             const int sh = 58;
             mRangeSeg->setBounds(kb.getRight() + 10, dialCy - sh / 2, sw, sh);
         }
+        // (Fuzz Off/Gate toggle is now positioned up in the knob row above.)
     }
 
 private:
-    int accentIndex() const // map drive type -> driveAccent palette index
+    int curModel() const
     {
-        switch (mLastType) { case 1: return 0; case 2: return 1; case 3: return 2; case 4: return 3; default: return 5; }
+        return juce::jmax(0,
+            (int)mApvts.getRawParameterValue("drv" + juce::String(mSlot + 1) + "bModel")->load());
     }
-    int curModel() const { return juce::jmax(0, mModel.getSelectedItemIndex()); }
 
     void showMenu()
     {
         using DB = nam_rig::DriveBlock;
-        static const char *names[] = {"Off", "Boost", "Overdrive", "Distortion", "Fuzz"};
-        juce::PopupMenu m;
-        m.addItem(1, "Off", true, mType.getSelectedItemIndex() == 0);
+        if (mPicker != nullptr) { mPicker.reset(); return; } // click pill again = close
+
+        // Build the category/model tree for the custom picker.
+        std::vector<DrivePickerOverlay::Cat> cats;
         for (int t = 1; t <= 4; ++t)
         {
+            static const char *names[] = {"Off", "Boost", "Overdrive", "Distortion", "Fuzz"};
             const auto cat = (DB::Kind)t;
+            DrivePickerOverlay::Cat c;
+            c.name = names[t];
             const int n = DB::modelCount(cat);
-            if (n > 1)
-            {
-                juce::PopupMenu sub;
-                for (int i = 0; i < n; ++i)
-                    sub.addItem(t * 100 + i + 10, DB::modelName(cat, i), true,
-                                mType.getSelectedItemIndex() == t && curModel() == i);
-                m.addSubMenu(names[t], sub);
-            }
-            else
-                m.addItem(t * 100 + 10, DB::modelName(cat, 0), true, mType.getSelectedItemIndex() == t);
+            for (int i = 0; i < n; ++i)
+                c.models.push_back({DB::modelName(cat, i), DB::modelSub(cat, i),
+                                    colors::driveModelAccent(t, i).led});
+            cats.push_back(std::move(c));
         }
-        m.showMenuAsync(juce::PopupMenu::Options()
-                            .withTargetScreenArea(localAreaToGlobal(mPillRect))
-                            .withMinimumWidth(180),
-                        [this](int r)
-                        {
-                            if (r <= 0) return;
-                            if (r == 1) { mType.setSelectedItemIndex(0); return; }
-                            const int t = (r - 10) / 100, i = (r - 10) % 100;
-                            mType.setSelectedItemIndex(t);
-                            if (nam_rig::DriveBlock::modelCount((nam_rig::DriveBlock::Kind)t) > 1)
-                                mModel.setSelectedItemIndex(i);
-                        });
+
+        // Host the overlay on the SCALED content canvas so it scales with the plugin
+        // and can position anywhere without clipping. The editor scales mContent via an
+        // AffineTransform, so the canvas is the nearest ancestor with a non-identity
+        // transform. At 1:1 zoom that transform is identity, so fall back to our
+        // grandparent (DrivePedal -> DrivePanel -> mContent), which is the same canvas.
+        juce::Component *host = nullptr;
+        for (auto *c = getParentComponent(); c != nullptr; c = c->getParentComponent())
+            if (!c->getTransform().isIdentity()) { host = c; break; }
+        if (host == nullptr)
+        {
+            host = getParentComponent();                       // DrivePanel
+            if (host != nullptr) host = host->getParentComponent(); // mContent
+        }
+        if (host == nullptr) return; // safety
+
+        auto overlay = std::make_unique<DrivePickerOverlay>(std::move(cats), curTypeIndex(), curModel());
+        auto *ov = overlay.get();
+        ov->onPick = [this](int t, int m) { setTypeModel(t, m); };
+        ov->onDismiss = [this] { mPicker.reset(); };
+        mPicker = std::move(overlay);
+
+        host->addAndMakeVisible(*ov);
+        ov->setBounds(host->getLocalBounds());
+        ov->setAnchor(host->getLocalArea(this, mPillRect)); // pill rect in host coords
+        ov->grabKeyboardFocus();
+    }
+
+    // Selection is param-authoritative (mirrors the modulation panel's
+    // ParameterAttachment fix): write the APVTS params directly with a full change
+    // gesture and let refresh() read them back, so a re-pick can never get "stuck"
+    // on a hidden ComboBox that didn't fire its change.
+    void setTypeModel(int type, int model)
+    {
+        const juce::String p = "drv" + juce::String(mSlot + 1);
+        setChoiceParam(p + "Type", type);
+        if (nam_rig::DriveBlock::modelCount((nam_rig::DriveBlock::Kind)type) > 1)
+            setChoiceParam(p + "bModel", model);
+        refresh();
+    }
+    void setChoiceParam(const juce::String &id, int idx)
+    {
+        if (auto *prm = mApvts.getParameter(id))
+        {
+            prm->beginChangeGesture();
+            prm->setValueNotifyingHost(prm->convertTo0to1((float)juce::jmax(0, idx)));
+            prm->endChangeGesture();
+        }
+    }
+    int curTypeIndex() const
+    {
+        return juce::jlimit(0, 4,
+            (int)mApvts.getRawParameterValue("drv" + juce::String(mSlot + 1) + "Type")->load());
     }
 
     void populateModels(int type)
@@ -1302,11 +1796,20 @@ private:
             mDrive->setVisible(true); mTone->setVisible(false); mLevel->setVisible(false);
             break;
         case 2:
-            mDrive->rebind(mApvts, p + "oDrive"); mDrive->setCaption("Drive");
-            mTone->rebind(mApvts, p + "oTone");   mTone->setCaption("Tone");
-            mLevel->rebind(mApvts, p + "oLevel"); mLevel->setCaption("Level");
+        {
+            // Per-model control names match each real pedal: Gold Horse (Klon,
+            // model 2) = Gain/Treble/Output; Breaker Drive (Bluesbreaker, model 3)
+            // = Gain/Tone/Volume; the TS-family OD models (Green Drive / Super Drive)
+            // keep Drive/Tone/Level. Only the captions differ -- the params
+            // (oDrive/oTone/oLevel) are unchanged, so presets/automation are intact.
+            const bool klon = (model == 2);
+            const bool bb   = (model == 3); // Breaker Drive (Marshall Bluesbreaker)
+            mDrive->rebind(mApvts, p + "oDrive"); mDrive->setCaption((klon || bb) ? "Gain" : "Drive");
+            mTone->rebind(mApvts, p + "oTone");   mTone->setCaption(klon ? "Treble" : "Tone");
+            mLevel->rebind(mApvts, p + "oLevel"); mLevel->setCaption(klon ? "Output" : (bb ? "Volume" : "Level"));
             mDrive->setVisible(true); mTone->setVisible(true); mLevel->setVisible(true);
             break;
+        }
         case 3:
             mDrive->rebind(mApvts, p + "dDrive"); mDrive->setCaption("Dist");
             mTone->rebind(mApvts, p + "dTone");   mTone->setCaption("Filter");
@@ -1314,17 +1817,24 @@ private:
             mDrive->setVisible(true); mTone->setVisible(true); mLevel->setVisible(true);
             break;
         case 4:
-            mDrive->rebind(mApvts, p + "fDrive"); mDrive->setCaption("Fuzz");
+        {
+            // Round Fuzz = Fuzz / Volume (no tone). The Big Muff (Violet Ram, model 1)
+            // is filed under Fuzz but exposes its own Sustain / Tone / Volume
+            // (the only fuzz with a Tone knob -- bound to fTone, shown only here).
+            const bool muff = (model == 1);
+            mDrive->rebind(mApvts, p + "fDrive"); mDrive->setCaption(muff ? "Sustain" : "Fuzz");
+            mTone->rebind(mApvts, p + "fTone");   mTone->setCaption("Tone");
             mLevel->rebind(mApvts, p + "fLevel"); mLevel->setCaption("Volume");
-            mDrive->setVisible(true); mTone->setVisible(false); mLevel->setVisible(true);
+            mDrive->setVisible(true); mTone->setVisible(muff); mLevel->setVisible(true);
             break;
+        }
         default:
             mDrive->setVisible(false); mTone->setVisible(false); mLevel->setVisible(false);
             break;
         }
         // Knob value-ring colour follows the pedal: accent when engaged, neutral
         // grey when bypassed (so the colour drains like the rest of the pedal).
-        const juce::Colour knobAcc = mActive ? colors::driveAccent(accentIndex()).accent
+        const juce::Colour knobAcc = mActive ? colors::driveModelAccent(type, model).led
                                              : juce::Colour(0xff5a616b);
         for (auto *k : {mDrive.get(), mTone.get(), mLevel.get()})
             k->setAccent(knobAcc);
@@ -1333,9 +1843,17 @@ private:
         mKindStr = names[juce::jlimit(0, 4, type)];
         mSubStr = type == 0 ? juce::String("select a pedal")
                             : juce::String(nam_rig::DriveBlock::modelSub(cat, model));
+        // Range/Gate segmented controls take the pedal's own accent (the LED colour),
+        // so e.g. Round Fuzz's Off/Gate is red, not the global amber. They grey
+        // themselves via setEnabled(false) when the pedal is bypassed.
+        const juce::Colour segAcc = colors::driveModelAccent(type, model).led;
+        mRangeSeg->setAccent(segAcc);
         mRangeSeg->setVisible(nam_rig::DriveBlock::modelHasRange(cat, model));
         mRangeSeg->setEnabled(mActive); // drains its colour when the pedal is bypassed
-        mOn.setAccent(colors::driveAccent(accentIndex()).accent);
+        mGateSeg->setAccent(segAcc);
+        mGateSeg->setVisible(nam_rig::DriveBlock::modelHasGate(cat, model)); // Round Fuzz only
+        mGateSeg->setEnabled(mActive);
+        mOn.setAccent(colors::driveModelAccent(type, model).led); // footswitch glow tracks the LED (= accent, except Violet Ram = violet)
         mOn.setLit(mActive);
     }
 
@@ -1343,6 +1861,7 @@ private:
     int mSlot;
     juce::ComboBox mType, mModel;
     std::unique_ptr<SegmentedControl> mRangeSeg;
+    std::unique_ptr<SegmentedControl> mGateSeg; // fuzz bias-starved gate (Off/Gate)
     Footswitch mOn;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mOnAtt;
@@ -1351,6 +1870,7 @@ private:
     juce::Rectangle<int> mHeaderRect, mGlyphRect, mPillRect, mSubRect;
     int mLastType = -1, mLastModel = -1;
     bool mLastOn = true, mActive = false;
+    std::unique_ptr<DrivePickerOverlay> mPicker; // custom drive picker (in-canvas, not a PopupMenu)
 };
 
 //==============================================================================
@@ -3850,7 +4370,7 @@ public:
                 return i == 11 ? juce::String("Reverb") : juce::String(i + 1);
             };
         mHeadKnob->slider().updateText();
-        mHeadKnob->setValueMenu(headNames);
+        mHeadKnob->setValueMenu(headNames, "Echo Mode");
         addChildComponent(*mHeadKnob); // visibility toggled in refresh()
 
         // Stereo MODE selector as a dropdown (Single / Dual / Ping-Pong). Single =
@@ -3889,9 +4409,11 @@ public:
         addAndMakeVisible(mPresetBtn);
         mPresetBtn.onClick = [this] {
             juce::PopupMenu m;
+            m.addCustomItem(-1, std::make_unique<MenuSectionHeader>("Delay Presets"), nullptr, {});
             const auto &ps = delayPresets();
             for (int i = 0; i < (int)ps.size(); ++i)
                 m.addItem(i + 1, ps[(size_t)i].name);
+            m.setLookAndFeel(&getLookAndFeel());
             m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&mPresetBtn),
                             [this](int r) { if (r > 0) applyDelayPreset(r - 1); });
         };
@@ -3980,11 +4502,11 @@ public:
             {
                 mKnobs[0]->rebind(mApvts, "delaySync");
                 mKnobs[0]->slider().setRange(1.0, 13.0, 1.0); // exclude Free (0): the toggle owns that
-                mKnobs[0]->setValueMenu(mDivNames);           // click the readout -> pick a division
+                mKnobs[0]->setValueMenu(mDivNames, "Sync Division"); // click the readout -> pick a division
                 // Sync R follows: its own R division (can't reach Link -> stays Dual).
                 mSyncRKnob->rebind(mApvts, "delaySyncR");
                 mSyncRKnob->slider().setRange(1.0, 13.0, 1.0);
-                mSyncRKnob->setValueMenu(mDivNames);
+                mSyncRKnob->setValueMenu(mDivNames, "Sync R Division");
             }
             else
             {

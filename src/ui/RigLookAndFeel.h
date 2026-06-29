@@ -68,8 +68,15 @@ namespace colors
     }
 
     // Drive-pedal accent / tint pairs (per model family). first = bright accent
-    // (LED, knob arcs), second = enclosure tint.
-    struct AccentPair { juce::Colour accent, tint; };
+    // (knob arcs, footswitch), second = enclosure tint, third = jewel LED colour
+    // (defaults to the accent when not given, so the LED tracks the accent unless a
+    // model deliberately overrides it -- e.g. Violet Ram is chrome with a violet LED).
+    struct AccentPair
+    {
+        juce::Colour accent, tint, led;
+        AccentPair(juce::Colour a = {}, juce::Colour t = {}, juce::Colour l = {})
+            : accent(a), tint(t), led(l.isTransparent() ? a : l) {}
+    };
     inline AccentPair driveAccent(int kind) // 0 boost,1 od,2 dist,3 fuzz,4 fuzz-alt
     {
         switch (kind)
@@ -79,6 +86,38 @@ namespace colors
         case 2: return {juce::Colour(0xffcfd5dd), juce::Colour(0xff3a4049)}; // Black Rodent
         case 3: return {juce::Colour(0xffcaa6f0), juce::Colour(0xff8a5cc6)}; // Round Fuzz
         case 4: return {juce::Colour(0xffff7d6b), juce::Colour(0xffa23d31)}; // Range '65
+        default: return {accent, accentDim};
+        }
+    }
+
+    // Per-MODEL accent / tint / LED, keyed by (drive type, model index). Each real
+    // pedal gets its own livery. The v1 stand-ins are gone, so indices are compact:
+    // Boost 0 Range '65 / 1 EP Boost; OD 0 Green Drive / 1 Super Drive / 2 Gold Horse
+    // / 3 Breaker Drive; Dist 0 Black Rodent; Fuzz 0 Round Fuzz / 1 Violet Ram.
+    // type: 1 boost,2 od,3 dist,4 fuzz.
+    inline AccentPair driveModelAccent(int type, int model)
+    {
+        using C = juce::Colour;
+        switch (type)
+        {
+        case 1: // Boost
+            return (model == 0)
+                       ? AccentPair{C(0xffff7d6b), C(0xffa23d31)}  // Range '65 (warm red)
+                       : AccentPair{C(0xfff0d68a), C(0xffc79a3e)}; // EP Boost  (gold)
+        case 2: // Overdrive
+            switch (model)
+            {
+            case 1:  return {C(0xfff2c230), C(0xffb8902a)};        // Super Drive   (Boss SD-1, yellow)
+            case 2:  return {C(0xffe0b347), C(0xff8a6622)};        // Gold Horse    (Klon, gold)
+            case 3:  return {C(0xff5b9bd5), C(0xff2f5d8a)};        // Breaker Drive (Bluesbreaker, blue)
+            default: return {C(0xff3fd45f), C(0xff3f9d57)};        // Green Drive   (0)
+            }
+        case 3: // Distortion: Black Rodent
+            return {C(0xffcfd5dd), C(0xff3a4049)};
+        case 4: // Fuzz
+            return (model == 1)
+                       ? AccentPair{C(0xffd7dde2), C(0xff5a626b), C(0xffb06bd8)} // Violet Ram (Big Muff): chrome body, VIOLET LED
+                       : AccentPair{C(0xffff5a4d), C(0xffa83229)};               // Round Fuzz (Fuzz Face red)
         default: return {accent, accentDim};
         }
     }
@@ -356,6 +395,10 @@ public:
         setColour(juce::ComboBox::textColourId, colors::text);
         setColour(juce::ComboBox::outlineColourId, colors::outline);
         setColour(juce::ComboBox::arrowColourId, colors::textDim);
+        // Opaque -> JUCE makes the popup window opaque (no transparent-corner / drop-
+        // shadow-box games). These standard PopupMenus are drawn SQUARE + opaque by
+        // drawPopupMenuBackground below, so there's no ring. (The fancy ROUNDED drive
+        // picker is a custom in-canvas component, not a PopupMenu -- see DrivePickerOverlay.)
         setColour(juce::PopupMenu::backgroundColourId, colors::panel);
         setColour(juce::PopupMenu::textColourId, colors::text);
         setColour(juce::PopupMenu::highlightedBackgroundColourId, colors::tileSel);
@@ -566,7 +609,132 @@ public:
     {
         return fonts::archivo(juce::jlimit(9.0f, 14.0f, (float)l.getHeight() - 2.0f));
     }
-    juce::Font getPopupMenuFont() override { return fonts::archivo(13.0f); }
+    juce::Font getPopupMenuFont() override { return fonts::archivo(14.0f, fonts::SemiBold); }
+
+    // ComboBox popups drop BELOW the box instead of overlaying the selected item on
+    // top of it, so the box (button) stays visible. Omitting withItemThatMustBeVisible
+    // is what stops JUCE from aligning the chosen item over the target.
+    juce::PopupMenu::Options getOptionsForComboBoxPopupMenu(juce::ComboBox &box,
+                                                            juce::Label &label) override
+    {
+        return juce::PopupMenu::Options()
+            .withTargetComponent(&box)
+            .withInitiallySelectedItem(box.getSelectedId())
+            .withMinimumWidth(box.getWidth())
+            .withMaximumNumColumns(1)
+            .withStandardItemHeight(label.getHeight());
+    }
+
+    // ---- Styled dropdown menus (matches the drive picker design) -------------
+    // Every PopupMenu + ComboBox dropdown in the editor uses this LookAndFeel, so
+    // styling it here gives the whole plugin the one rounded dark menu look.
+
+    // Inner margin so the rounded border + corners have room around the items.
+    int getPopupMenuBorderSize() override { return 6; }
+
+    // Rounded dark panel with a soft border (the popup window is transparent on
+    // Windows, so the corners outside the rounded rect stay clear).
+    void drawPopupMenuBackground(juce::Graphics &g, int width, int height) override
+    {
+        // Standard PopupMenus only (combos, delay, presets). Opaque SQUARE fill edge-
+        // to-edge -> no white/dark ring, the OS gives a normal drop shadow. Rounded
+        // corners on an opaque popup window are impossible without a corner ring, so
+        // rounding lives only in the custom DrivePickerOverlay (a real component).
+        juce::ColourGradient grad(juce::Colour(0xff232830), 0.0f, 0.0f,
+                                  juce::Colour(0xff171a21), 0.0f, (float)height, false);
+        dither::fillRect(g, grad, juce::Rectangle<float>(0.0f, 0.0f, (float)width, (float)height));
+    }
+
+    // Comfortable rows; section headers and separators get their own heights.
+    void getIdealPopupMenuItemSize(const juce::String &text, bool isSeparator,
+                                   int /*standardMenuItemHeight*/,
+                                   int &idealWidth, int &idealHeight) override
+    {
+        if (isSeparator)
+        {
+            idealWidth = 60;
+            idealHeight = 11;
+            return;
+        }
+        const auto f = getPopupMenuFont();
+        idealWidth = (int)std::ceil(juce::GlyphArrangement::getStringWidth(f, text)) + 60;
+        idealHeight = 32;
+    }
+
+    // "CHOOSE DRIVE"-style header: small tracked caption, left aligned.
+    void drawPopupMenuSectionHeader(juce::Graphics &g, const juce::Rectangle<int> &area,
+                                    const juce::String &sectionName) override
+    {
+        g.setColour(colors::caption);
+        g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.14f));
+        g.drawText(sectionName.toUpperCase(), area.reduced(14, 0).withTrimmedTop(4),
+                   juce::Justification::bottomLeft, true);
+    }
+
+    void drawPopupMenuItem(juce::Graphics &g, const juce::Rectangle<int> &area,
+                           bool isSeparator, bool isActive, bool isHighlighted,
+                           bool isTicked, bool hasSubMenu, const juce::String &text,
+                           const juce::String &shortcutKeyText,
+                           const juce::Drawable * /*icon*/,
+                           const juce::Colour *textColour) override
+    {
+        if (isSeparator)
+        {
+            auto s = area.reduced(12, 0);
+            g.setColour(colors::divider);
+            g.fillRect(s.withSizeKeepingCentre(s.getWidth(), 1));
+            return;
+        }
+
+        auto row = area.toFloat().reduced(5.0f, 1.5f);
+        if (isHighlighted && isActive)
+        {
+            g.setColour(colors::tileSel);
+            g.fillRoundedRectangle(row, 7.0f);
+        }
+
+        const float ga = isActive ? 1.0f : 0.4f;
+        auto txt = area.reduced(14, 0);
+
+        if (isTicked) // current selection -> accent dot at the left
+        {
+            auto dot = juce::Rectangle<float>(6.0f, 6.0f)
+                           .withCentre({(float)area.getX() + 11.0f, (float)area.getCentreY()});
+            g.setColour(colors::accent);
+            g.fillEllipse(dot);
+            txt = txt.withTrimmedLeft(10);
+        }
+
+        juce::Colour col = textColour != nullptr
+                               ? *textColour
+                               : (isTicked ? colors::textBright
+                                           : (isHighlighted ? colors::textBright : colors::text));
+        g.setColour(col.withMultipliedAlpha(ga));
+        g.setFont(getPopupMenuFont());
+        g.drawText(text, txt, juce::Justification::centredLeft, true);
+
+        if (hasSubMenu) // right chevron ">"
+        {
+            const float h = (float)area.getHeight();
+            const float x = (float)area.getRight() - 16.0f;
+            const float cy = (float)area.getCentreY();
+            const float s = juce::jmin(4.5f, h * 0.18f);
+            juce::Path p;
+            p.startNewSubPath(x - s * 0.5f, cy - s);
+            p.lineTo(x + s * 0.5f, cy);
+            p.lineTo(x - s * 0.5f, cy + s);
+            g.setColour(colors::caption.withMultipliedAlpha(ga));
+            g.strokePath(p, juce::PathStrokeType(1.6f, juce::PathStrokeType::curved,
+                                                 juce::PathStrokeType::rounded));
+        }
+        else if (shortcutKeyText.isNotEmpty())
+        {
+            g.setColour(colors::caption.withMultipliedAlpha(ga));
+            g.setFont(fonts::mono(11.0f));
+            g.drawText(shortcutKeyText, area.reduced(14, 0),
+                       juce::Justification::centredRight, true);
+        }
+    }
 
     // Back-compat helper used throughout the UI; resolves to Archivo via the
     // typeface override (bold flag picks Archivo-Bold).
