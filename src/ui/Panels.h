@@ -5103,13 +5103,11 @@ public:
         mPitchAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
             apvts, "revPitch", mPitch);
 
-        // Freeze — infinite sustain. Only on the lush/evolving characters (Hall/Shimmer/
-        // Bloom); hidden elsewhere via refresh() + RB::freezeExposed.
+        // Freeze — REMOVED from the reverb section (RB::freezeExposed() == false). The button is
+        // built but stays hidden (addChildComponent + refresh() never shows it); no param is bound.
         mFreeze.setButtonText("Freeze");
         mFreeze.getProperties().set("pill", true);
         addChildComponent(mFreeze);
-        mFreezeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            apvts, juce::String(nam_rig::ReverbBlock::paramId("Freeze", nam_rig::ReverbBlock::kHall)), mFreeze);
 
         // Build every knob once; refresh() rebinds Decay/Tone/Size/Predelay/Mod to the
         // ACTIVE character's per-character param + shows the subset the character uses.

@@ -549,9 +549,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
             const auto dr = RB::decayRange(T);
             params.push_back(std::make_unique<juce::AudioParameterFloat>(
                 juce::ParameterID(juce::String(RB::paramId("Decay", t)), 1), nm + " Decay",
-                (T == RB::kPlate ? juce::NormalisableRange<float>(dr.lo, dr.hi, (dr.hi - dr.lo) / 4.0f)   // 5 discrete detents -> the 5 real plate IRs
-                                 : juce::NormalisableRange<float>(dr.lo, dr.hi, 0.01f, 0.5f)),
-                (T == RB::kPlate ? (dr.lo + (dr.hi - dr.lo) / 4.0f) : (T == RB::kRoom ? 1.5f : RB::rangeDefault(dr))),
+                juce::NormalisableRange<float>(dr.lo, dr.hi, 0.01f, 0.5f),   // continuous Decay for all characters (plate now sweeps its reshaped-IR bank)
+                (T == RB::kRoom || T == RB::kPlate ? 1.5f : RB::rangeDefault(dr)),
                 juce::AudioParameterFloatAttributes().withLabel("s")));
             params.push_back(std::make_unique<juce::AudioParameterFloat>(
                 juce::ParameterID(juce::String(RB::paramId("Tone", t)), 1), nm + " Tone",

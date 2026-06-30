@@ -282,8 +282,12 @@ int main()
         CHECK(c1 < 0.9, "T17 Width=1 -> stereo (corr=%.2f)", c1);
     }
 
-    // ===================== T18: Freeze sustains the tail =====================
+    // ===================== T18: Freeze REMOVED from the reverb section (inert) =====================
     {
+        // Freeze is no longer exposed on any character, and setFreeze() is a no-op.
+        CHECK(!ReverbBlock::freezeExposed(ReverbBlock::kHall),    "T18 Freeze not on Hall");
+        CHECK(!ReverbBlock::freezeExposed(ReverbBlock::kShimmer), "T18 Freeze not on Shimmer");
+        CHECK(!ReverbBlock::freezeExposed(ReverbBlock::kBloom),   "T18 Freeze not on Bloom");
         ReverbBlock v; v.setType(ReverbBlock::kHall); v.setMix(1.0f); v.setDecaySeconds(2.0f); v.prepare({SR, BLK});
         std::mt19937 rng(9); std::uniform_real_distribution<float> dist(-0.4f, 0.4f);
         const size_t N = (size_t)SR * 9;
@@ -291,14 +295,14 @@ int main()
         for (size_t i = 0; i < (size_t)(SR*0.5); ++i) l[i] = r[i] = dist(rng);
         size_t p = 0; bool froze = false;
         for (; p < N; p += BLK) {
-            if (!froze && p >= (size_t)(SR*0.6)) { v.setFreeze(true); froze = true; }
+            if (!froze && p >= (size_t)(SR*0.6)) { v.setFreeze(true); froze = true; } // ignored now
             v.process(l.data()+p, r.data()+p, (int)std::min<size_t>(BLK, N-p));
         }
         auto e=[&](double t0,double t1){double s=0;for(size_t i=(size_t)(SR*t0);i<(size_t)(SR*t1);++i)s+=(double)l[i]*l[i];return s;};
         const double early = e(3.0,3.5), late = e(8.0,8.5);
         bool finite=true; for(auto s:l) if(!std::isfinite(s)) finite=false;
-        CHECK(finite, "T18 freeze stays finite");
-        CHECK(late > early * 0.5, "T18 freeze sustains (late %.3g vs early %.3g)", late, early);
+        CHECK(finite, "T18 stays finite");
+        CHECK(late < early * 0.5, "T18 Freeze inert: tail still decays (late %.3g vs early %.3g)", late, early);
     }
 
     // ===================== T19: Bloom swells in (slower onset for higher Swell) =====================
