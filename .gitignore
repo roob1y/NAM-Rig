@@ -45,14 +45,12 @@ plate_*_demos/
 
 # reverb_analysis: keep code (.py/.cpp) + docs (.md/.txt); ignore renders, demo
 # wavs, compiled drivers and frozen engine-snapshot headers (all local/regenerable)
-reverb_analysis/*.wav
-reverb_analysis/render_fit
-reverb_analysis/render_plate_plugin
-reverb_analysis/*.bak
-reverb_analysis/*.csv
-reverb_analysis/plate_proto_ReverbBlock_*.h
+
+reverb_analysis/
 plate_onset_release/*.wav
 plate_onset_release/*.f32
+reverb_ir_candidates/
+reverb_references/
 
 # UI dev/verification scratch (screenshots + capture script, local only)
 ui_shot.png
@@ -78,3 +76,6 @@ Guitar plugin design exploration/
 
 # local agent/editor config
 .claude/
+
+*_backup/
+*_demos/

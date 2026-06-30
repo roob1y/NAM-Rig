@@ -37,7 +37,9 @@
 #include <cmath>
 #if __has_include(<juce_dsp/juce_dsp.h>) && __has_include("BinaryData.h")
 #include "EarlyConvolver.h"
+#include "IrConvolver.h"
 #define NAM_PLATE_EARLY_CONV 1
+#define NAM_DERIVED_CONV 1
 #endif
 
 namespace nam_rig
@@ -399,6 +401,46 @@ private:
 // the knob). Decay = the ~1 kHz T60 in true seconds (scales the whole matched curve).
 // Renders WET only. Voiced via the offline metric battery against the plate reference.
 // ===========================================================================
+
+// ===========================================================================
+// TailSustainer — smooth diffuse feedback that EXTENDS a reverb's decay for the
+// Decay knob above its default. Fed the (already diffuse) derived-IR convolution
+// wet; returns the extension tail, which is exactly ZERO when fb==0 so the default
+// Decay position is bit-exactly the matched convolution. fb>0 lengthens smoothly
+// (validated offline: effective-IR RT 3.45->6.12 s as fb 0->0.88, metallic ~0.04-0.08
+// = smooth, not ringy). Used by the derived-IR hybrid plate/room. One per channel.
+// ===========================================================================
+class TailSustainer
+{
+public:
+    void prepare(double fs, double Dms, double dampHz, double ap1ms, double ap2ms)
+    {
+        mD  = std::max(1, (int)std::round(Dms  * 0.001 * fs)); mDelay.prepare(mD  + 8);
+        mA1 = std::max(1, (int)std::round(ap1ms* 0.001 * fs)); mAp1.prepare(mA1 + 8);
+        mA2 = std::max(1, (int)std::round(ap2ms* 0.001 * fs)); mAp2.prepare(mA2 + 8);
+        mK  = reverb_detail::onePole(dampHz, fs);
+        reset();
+    }
+    void reset() { mDelay.reset(); mAp1.reset(); mAp2.reset(); mLp = 0.0f; }
+    // Per-sample. Returns the extension to ADD to the convolution wet (0 when fb==0).
+    inline float process(float x, float fb)
+    {
+        const float d = mDelay.readInt(mD);
+        mLp += mK * (d - mLp);                       // in-loop HF damping
+        float v = x + fb * mLp;
+        v = reverb_detail::allpassInt(mAp1, mA1, 0.5f, v);   // diffusion (keeps it smooth, not echoey)
+        v = reverb_detail::allpassInt(mAp2, mA2, 0.5f, v);
+        mDelay.write(v);
+        return fb * mLp;
+    }
+    void flushState() { reverb_detail::flush(mLp); }
+private:
+    FracDelayLine mDelay, mAp1, mAp2;
+    int mD = 1, mA1 = 1, mA2 = 1;
+    float mLp = 0.0f, mK = 0.0f;
+};
+
+// ===========================================================================
 class PlateFdn
 {
 public:
@@ -428,15 +470,19 @@ public:
     static constexpr double kBloomB1 = 0.213, kBloomC1 = 0.819;       // rB = B1*dd^2 + C1*max(0,dd-1)^2 (hinge: body <=knob3, big bloom knob4+)
     static constexpr double kBloomA2 = -8.13e-6, kBloomB2 = 4.149e-5; // lo1 shelf coeffs (dB)
 
+    // ---- one mono-in -> stereo-out core; two instances = true per-channel stereo ----
+    struct Core {
+        float seed = 0.0f;   // per-core input-diffuser jitter -> L/R decorrelation
     void loadProtoLines() {
         for (int i=0;i<kNumLines;++i) mLineMsRt[(size_t)i]=kLineMs[(size_t)i];
         mDispGRt=kDispG; mDispG2Rt=kDispG2;
         
         
     }
-    void prepare(double fs)
+    void prepare(double fs, float seedphase)
     {
         mFs = fs;
+        seed = seedphase;
         loadProtoLines();
         for (int i = 0; i < kNumLines; ++i)
             mLine[(size_t)i].prepare((int)std::ceil(mLineMsRt[(size_t)i] * kMaxSize * 0.001 * mFs) + 8);
@@ -486,20 +532,15 @@ public:
     void setFreeze(bool f) { mFreeze = f; }
     void setEarlyTap(float g) { mEarly = g; }   // onset-fix: convolver supplies early -> drop FDN early tap
 
-    void process(float *left, float *right, int numSamples)
+    void process(float in, float &outL, float &outR)
     {
         using namespace reverb_detail;
-        const bool stereo = (left != right);
         const int pre = (int)std::round((double)mPredelayMs * 0.001 * mFs);
         const float inGain = mFreeze ? 0.0f : 1.0f;
         const float invsq = 1.0f / std::sqrt((float)kNumLines);
 
-        for (int n = 0; n < numSamples; ++n)
         {
-            const float dryL = left[n];
-            const float dryR = stereo ? right[n] : dryL;
-
-            mPredelay.write(0.5f * (dryL + dryR));
+            mPredelay.write(in);
             float x = inGain * mPredelay.readInt(std::max(1, pre));
             const float xWide = x;   // full-band bright tap (pre-driver) -> velvet HF feed
             x = mLmEq.processSample(x);                 // input low-mid body (plate resonance)
@@ -558,8 +599,8 @@ public:
             if (mVelvet && !mFreeze) {   // VELVET HF late-field: dense diffuse 6-12k rising shimmer, fed by the BRIGHT input
                 for (auto &b : mVlv) b.tick(xWide, kHfSignL, kHfSignR, oL, oR);
             }
-            left[n] = oL;
-            if (stereo) right[n] = oR;
+            outL = oL;
+            outR = oR;
 
             std::array<float, kNumLines> fb;
             for (int i = 0; i < kNumLines; ++i)
@@ -646,7 +687,7 @@ private:
             mLo1[(size_t)i] = Biquad::highshelf(mFs, kBloomF1, s * lo1, kDampS);
         }
         for (size_t a = 0; a < mDiff.size(); ++a)
-            mDiffLen[a] = std::max(2, (int)std::round(kDiffMs[a] * (double)mSize * 0.001 * mFs));
+            mDiffLen[a] = std::max(2, (int)std::round(kDiffMs[a] * (double)mSize * 0.001 * mFs) + (int)std::round(seed * (3.0 + 2.0 * (double)a)));
         mLmEq = Biquad::peaking(mFs, 160.0, 0.7, 5.0);     // low-mid body
         mPresL = Biquad::peaking(mFs, 3300.0, 0.5, 4.2);   // presence (wider/higher -> lifts the dull 2-6k vs reference)
         mDip2kL = Biquad::peaking(mFs, 2000.0, 2.4, -1.9); mDip2kR = mDip2kL; // tail 2k dip (narrow -> match 2k tonal notch, spare 2-6k lushness)
@@ -810,6 +851,38 @@ private:
     float mNarrow2k = 0.14f;                    // 2k side narrower (reference width notch)
     float mSize = 1.25f, mT60 = 2.92f, mDampHz = 5250.0f, mPredelayMs = 0.0f;
     bool mPrepared = false, mFreeze = false;
+    };   // ---- struct Core ----
+
+    // dual-instance shell: true per-channel stereo (L->coreL take L, R->coreR take R),
+    // cores decorrelated by a per-core input-diffuser seedphase. CPU ~2x the single core
+    // (still N32 per core). Dry mix + the early-reflection convolver stay outside, per channel.
+    void prepare(double fs) { mFs = fs; mCoreL.prepare(fs, 0.0f); mCoreR.prepare(fs, 0.37f); mPrepared = true; }
+    void reset() { mCoreL.reset(); mCoreR.reset(); }
+    void setSize(float s) { mCoreL.setSize(s); mCoreR.setSize(s); }
+    void setDecaySeconds(float t60) { mCoreL.setDecaySeconds(t60); mCoreR.setDecaySeconds(t60); }
+    void setDampHz(float hz) { mCoreL.setDampHz(hz); mCoreR.setDampHz(hz); }
+    void setPredelayMs(float ms) { mCoreL.setPredelayMs(ms); mCoreR.setPredelayMs(ms); }
+    void setFreeze(bool f) { mCoreL.setFreeze(f); mCoreR.setFreeze(f); }
+    void setEarlyTap(float g) { mCoreL.setEarlyTap(g); mCoreR.setEarlyTap(g); }
+    void process(float *left, float *right, int numSamples)
+    {
+        const bool stereo = (left != right);
+        for (int n = 0; n < numSamples; ++n)
+        {
+            const float inL = left[n];
+            const float inR = stereo ? right[n] : inL;
+            float lL, lR, rL, rR;
+            mCoreL.process(inL, lL, lR);
+            mCoreR.process(inR, rL, rR);
+            left[n] = lL;
+            if (stereo) right[n] = rR;
+        }
+    }
+
+private:
+    double mFs = 48000.0;
+    Core mCoreL, mCoreR;
+    bool mPrepared = false;
 };
 
 // ===========================================================================
@@ -1290,122 +1363,222 @@ private:
 };
 
 // ===========================================================================
-// SmallRoomFdn — short-line 8-channel FWHT feedback delay network voiced as a
-// small room. Smooth/diffuse by design (no comb coloration), but its SHORT delay
-// lines let it decay fast and FLAT across frequency (RT60 ~0.15-0.8s) — matching
-// a real small dead room (profiled from a Convology "House Den" sweep capture:
-// RT60 ~0.29s flat, warm centroid ~2.4kHz, diffuse by ~15ms, wide). Tone darkens
-// at the INPUT (like the plate's bandwidth) + a low-mid warmth shelf; no output EQ.
-// Renders WET only.
+// SmallRoomFdn — DUAL-INSTANCE Dattorro/Griesinger allpass tank, voiced to the wood-room
+// reference by the honest 2026-06-30 rebuild (surface distance 2.8 vs the 2.5 same-unit floor).
+// Two independent mono-in -> stereo-out figure-8 tanks (L->coreL take L, R->coreR take R) = true
+// per-channel stereo. Per-core input-diffuser jitter (seedphase) decorrelates L/R. Genuine levers
+// only — NO decay-scaled damping, NO separate ER FIR. Stages: input bandwidth (Tone) + high-shelf
+// (darkens onset top w/o blunting transient) -> 6 allpass diffusers -> EARLYSEND (taps the diffused
+// signal to the output = dense early field/definition, ESLP-darkened) -> figure-8 tank (body+bloom,
+// plain in-loop HF damping) -> pre-delayed full-band late-reverb FDN (sustain AFTER the attack =
+// lush not washed; in-loop low-cut so lows decay faster than mids, per the reference). Decay = true
+// RT60 (seconds). Tone = input bandwidth. Size = tank scale (baked 0.30 * knob). Renders WET only.
 // ===========================================================================
 class SmallRoomFdn
 {
 public:
-    static constexpr int kN = 16;
+    static constexpr int kN = 16; // retained for interface compatibility (unused)
+
+    // ----- one mono-in -> stereo-out Dattorro figure-8 tank + early + late stages ----
+    struct TankCore
+    {
+        static constexpr float kIdif1 = 0.75f, kIdif2 = 0.625f;   // input diffusion coeffs (fitted)
+        static constexpr float kDdif1 = 0.60f, kDdif2 = 0.60f;    // tank decay-diffusion coeffs (fitted)
+        FracDelayLine id[6];
+        FracDelayLine apL1, dA, apL2, dB, apR1, dC, apR2, dD, predelay;
+        FracDelayLine lfdn[4], lfPre;                              // late-reverb FDN + its predelay
+        int idLen[6]{}, lfLen[4]{}, lfPreLen = 1; double ltmMs[4]{};
+        int apL1Len = 1, dAlen = 1, apL2Len = 1, dBlen = 1, apR1Len = 1, dClen = 1, apR2Len = 1, dDlen = 1;
+        int tap[14]{}, preSamp = 1;
+        float bw = 0.65f, decay = 0.3f, effDamp = 0.0f; double exc = 0.0;
+        float bwS = 0.0f, dpL = 0.0f, dpR = 0.0f;
+        float shG = kShelfG, shK = 0.0f, shpS = 0.0f;             // input high-shelf
+        float esLpK = 1.0f, esLpS = 0.0f, earlySend = kEarlySend; // early send (diffuse early field)
+        float lfFb[4]{}, lfLp[4]{}, lfLoop[4]{}, lfDampK = 0.0f, lfLoopK = 0.0f, lfHpK = 0.0f, lfHpS = 0.0f, lateG = kLateG;
+        float seed = 0.0f; double cfs = 48000.0;
+        Lfo lfo1, lfo2, lfLfo;
+
+        static inline float apMod(FracDelayLine &dl, int len, float g, double mod, float x)
+        { const float z = (float)dl.readFrac((double)len + mod); const float y = -g * x + z; dl.write(x + g * y); return y; }
+
+        void prepare(double fs, float seedphase)
+        {
+            seed = seedphase; cfs = fs;
+            const double S = fs / 29761.0;
+            const double Tmax = S * kSizeBase * 1.5;
+            const int idl[6] = {142, 107, 379, 277, 193, 457};
+            for (int k = 0; k < 6; ++k) id[k].prepare((int)std::ceil(idl[k] * S) + 16);
+            const int excMax = (int)std::ceil(6.0 * S) + 8;
+            apL1.prepare((int)std::ceil(672.0 * Tmax) + excMax + 16);
+            apR1.prepare((int)std::ceil(908.0 * Tmax) + excMax + 16);
+            dA.prepare((int)std::ceil(4453.0 * Tmax) + 16);
+            apL2.prepare((int)std::ceil(1800.0 * Tmax) + 16);
+            dB.prepare((int)std::ceil(3720.0 * Tmax) + 16);
+            dC.prepare((int)std::ceil(4217.0 * Tmax) + 16);
+            apR2.prepare((int)std::ceil(2656.0 * Tmax) + 16);
+            dD.prepare((int)std::ceil(3163.0 * Tmax) + 16);
+            predelay.prepare((int)std::ceil(0.08 * fs) + 8);
+            // late-reverb FDN (full-band, mid/long sustain), pre-delayed so it sits behind the attack
+            const double ltm[4] = {53.0, 67.0, 79.0, 97.0};
+            for (int k = 0; k < 4; ++k)
+            {
+                ltmMs[k] = ltm[k];
+                lfLen[k] = std::max(1, (int)std::round(ltm[k] * 0.001 * fs * kSizeBase));
+                lfdn[k].prepare(lfLen[k] + 8);
+                lfFb[k] = (float)std::clamp(std::pow(10.0, -3.0 * ltm[k] / (kLateDecay * 1000.0)), 0.0, 0.999);
+            }
+            lfPreLen = std::max(1, (int)std::round(kLatePreMs * 0.001 * fs));
+            lfPre.prepare(lfPreLen + 8);
+            lfDampK = (float)reverb_detail::onePole(kLateDampHz, fs);
+            lfHpK   = (float)reverb_detail::onePole(kLateHpHz, fs);
+            lfLoopK = (float)reverb_detail::onePole(kLateLoopHpHz, fs);
+            esLpK   = (float)reverb_detail::onePole(kEsLpHz, fs);
+            lfo1.prepare(fs); lfo1.setRateHz(0.70f);
+            lfo2.prepare(fs); lfo2.setRateHz(0.50f);
+            lfLfo.prepare(fs); lfLfo.setRateHz(0.31f);
+            reset();
+        }
+        void reset()
+        {
+            for (auto &l : id) l.reset();
+            apL1.reset(); dA.reset(); apL2.reset(); dB.reset(); apR1.reset(); dC.reset(); apR2.reset(); dD.reset(); predelay.reset();
+            for (auto &l : lfdn) l.reset(); lfPre.reset();
+            for (auto &z : lfLp) z = 0.0f; for (auto &z : lfLoop) z = 0.0f;
+            lfo1.reset(); lfo2.reset(); lfLfo.reset();
+            bwS = dpL = dpR = shpS = esLpS = lfHpS = 0.0f;
+        }
+        void setShelf(float fs_unused) { (void)fs_unused; }
+        void setSize(double scale, double fs)
+        {
+            const double S = fs / 29761.0, T = S * scale;
+            const int idl[6] = {142, 107, 379, 277, 193, 457};
+            // per-core jitter (seed) decorrelates the L/R early field; diffusers stay size-independent
+            for (int k = 0; k < 6; ++k) idLen[k] = std::max(1, (int)std::round(idl[k] * S) + (int)std::round(seed * (3.0 + 2.0 * k)));
+            apL1Len = std::max(1, (int)std::round(672.0 * T)); dAlen = std::max(1, (int)std::round(4453.0 * T));
+            apL2Len = std::max(1, (int)std::round(1800.0 * T)); dBlen = std::max(1, (int)std::round(3720.0 * T));
+            apR1Len = std::max(1, (int)std::round(908.0 * T)); dClen = std::max(1, (int)std::round(4217.0 * T));
+            apR2Len = std::max(1, (int)std::round(2656.0 * T)); dDlen = std::max(1, (int)std::round(3163.0 * T));
+            const double tp[14] = {266, 2974, 1913, 1996, 1990, 187, 1066, 353, 3627, 1228, 2673, 2111, 335, 121};
+            for (int i = 0; i < 14; ++i) tap[i] = std::max(1, (int)std::round(tp[i] * T));
+        }
+        void setBw(float b) { bw = b; }
+        void setShelfK(float k) { shK = k; }
+        void setPredelay(float ms, double fs) { preSamp = std::max(1, (int)std::round((double)ms * 0.001 * fs)); }
+        void setDecay(float fb, float ed, double e, double lateT60) { decay = fb; effDamp = ed; exc = e;
+            for (int k = 0; k < 4; ++k) lfFb[k] = (float)std::clamp(std::pow(10.0, -3.0 * ltmMs[k] / (lateT60 * 1000.0)), 0.0, 0.999); }
+        double loopMs(double fs) const { return (dAlen + apL2Len + dBlen) / fs * 1000.0; }
+
+        inline void process(float in, float &oL, float &oR)
+        {
+            using reverb_detail::allpassInt;
+            predelay.write(in); float x = predelay.readInt(preSamp);
+            bwS += bw * (x - bwS); x = bwS;
+            shpS += shK * (bwS - shpS); x = shpS + shG * (bwS - shpS);   // input high-shelf (onset top)
+            x = allpassInt(id[0], idLen[0], kIdif1, x); x = allpassInt(id[1], idLen[1], kIdif1, x);
+            x = allpassInt(id[2], idLen[2], kIdif2, x); x = allpassInt(id[3], idLen[3], kIdif2, x);
+            x = allpassInt(id[4], idLen[4], kIdif2, x); x = allpassInt(id[5], idLen[5], kIdif2, x);
+            const float fromLeft = dB.readInt(dBlen), fromRight = dD.readInt(dDlen);
+            float lt = x + decay * fromRight; lt = apMod(apL1, apL1Len, -kDdif1, exc * lfo1.value(0.0), lt);
+            dA.write(lt); float a = dA.readInt(dAlen); dpL = a + effDamp * (dpL - a); a = dpL; lt = allpassInt(apL2, apL2Len, kDdif2, decay * a); dB.write(lt);
+            float rt = x + decay * fromLeft; rt = apMod(apR1, apR1Len, -kDdif1, exc * lfo2.value(0.0), rt);
+            dC.write(rt); float c = dC.readInt(dClen); dpR = c + effDamp * (dpR - c); c = dpR; rt = allpassInt(apR2, apR2Len, kDdif2, decay * c); dD.write(rt);
+            oL = 0.6f * (dC.readInt(tap[0]) + dC.readInt(tap[1]) - apR2.readInt(tap[2]) + dD.readInt(tap[3]) - dA.readInt(tap[4]) - apL2.readInt(tap[5]) - dB.readInt(tap[6]));
+            oR = 0.6f * (dA.readInt(tap[7]) + dA.readInt(tap[8]) - apL2.readInt(tap[9]) + dB.readInt(tap[10]) - dC.readInt(tap[11]) - apR2.readInt(tap[12]) - dD.readInt(tap[13]));
+            // dense early field: tap the diffused, darkened input straight to the output (definition, no wash)
+            esLpS += esLpK * (x - esLpS); const float es = earlySend * esLpS; oL += es; oR += es;
+            // pre-delayed full-band late reverb (sustain behind the attack); in-loop low-cut => lows decay faster
+            float r0 = lfdn[0].readInt(lfLen[0]), r1 = lfdn[1].readInt(lfLen[1]);
+            float r2 = (float)lfdn[2].readFrac((double)lfLen[2] + 1.5 * lfLfo.value(0.0)), r3 = lfdn[3].readInt(lfLen[3]);
+            lfLp[0] += lfDampK * (r0 - lfLp[0]); r0 = lfLp[0]; lfLp[1] += lfDampK * (r1 - lfLp[1]); r1 = lfLp[1];
+            lfLp[2] += lfDampK * (r2 - lfLp[2]); r2 = lfLp[2]; lfLp[3] += lfDampK * (r3 - lfLp[3]); r3 = lfLp[3];
+            lfLoop[0] += lfLoopK * (r0 - lfLoop[0]); r0 -= lfLoop[0]; lfLoop[1] += lfLoopK * (r1 - lfLoop[1]); r1 -= lfLoop[1];
+            lfLoop[2] += lfLoopK * (r2 - lfLoop[2]); r2 -= lfLoop[2]; lfLoop[3] += lfLoopK * (r3 - lfLoop[3]); r3 -= lfLoop[3];
+            const float sm = 0.5f * (r0 + r1 + r2 + r3);
+            const float h0 = r0 - sm, h1 = r1 - sm, h2 = r2 - sm, h3 = r3 - sm;
+            lfHpS += lfHpK * (x - lfHpS); float lin = x - lfHpS; lfPre.write(lin); lin = lfPre.readInt(lfPreLen);
+            lfdn[0].write(lin + lfFb[0] * h0); lfdn[1].write(lin + lfFb[1] * h1); lfdn[2].write(lin + lfFb[2] * h2); lfdn[3].write(lin + lfFb[3] * h3);
+            oL += lateG * 0.5f * (h0 - h1 + h2 - h3);
+            oR += lateG * 0.5f * (h0 + h1 - h2 - h3);
+            lfo1.advance(); lfo2.advance(); lfLfo.advance();
+        }
+        void flushState()
+        {
+            reverb_detail::flush(bwS); reverb_detail::flush(dpL); reverb_detail::flush(dpR);
+            reverb_detail::flush(shpS); reverb_detail::flush(esLpS); reverb_detail::flush(lfHpS);
+            for (auto &z : lfLp) reverb_detail::flush(z); for (auto &z : lfLoop) reverb_detail::flush(z);
+        }
+    };
 
     void prepare(double fs)
     {
         mFs = fs;
-        for (int i = 0; i < kN; ++i)
-            mLine[(size_t)i].prepare((int)std::ceil(kBaseMs[(size_t)i] * 2.2 * 0.001 * fs) + 16);
-        for (int k = 0; k < kNap; ++k) mAp[(size_t)k].prepare((int)std::ceil(kApMs[(size_t)k] * 0.001 * fs) + 8);
-        for (int k = 0; k < 2; ++k) { mEarlyLen[(size_t)k] = std::max(2, (int)std::round(kEarlyMs[(size_t)k] * 0.001 * fs)); mEarly[(size_t)k].prepare(mEarlyLen[(size_t)k] + 8); }
-        mPredelay.prepare((int)std::ceil(0.08 * fs) + 8);
-        mLfo.prepare(fs); mLfo.setRateHz(0.6f);
-        mUmidEq = Biquad::peaking(fs, 1850.0, 0.9, -4.5); // tame the FDN upper-mid (den dips there)
-        mBoxEq = Biquad::peaking(fs, 540.0, 0.65, -3.0);  // guitar: scoop the boxy 400-900Hz (sits under the amp)
-        mHiCut = Biquad::lowpass(fs, 10000.0, 0.5);       // guitar: gentle safety rolloff (cab already limits the input)
-        mLoK = (float)reverb_detail::onePole(350.0, fs);
-        setToneHz(1750.0f);
+        mCoreL.prepare(fs, 0.0f); mCoreR.prepare(fs, 0.37f);
+        mShelfK = (float)reverb_detail::onePole(kShelfHz, fs);
+        mCoreL.setShelfK(mShelfK); mCoreR.setShelfK(mShelfK);
+        setToneHz(8000.0f);   // input bandwidth coeff ~0.65 (the voiced default)
         setSize(1.0f);
         reset(); mPrepared = true;
     }
-    void reset()
-    {
-        for (auto &l : mLine) l.reset();
-        for (auto &l : mAp) l.reset();
-        mPredelay.reset(); mLfo.reset(); for (auto &l : mEarly) l.reset(); mLoSh = 0.0f; mUmidEq.reset(); mBoxEq.reset(); mHiCut.reset();
-        mInLp = 0.0f;
-    }
+    void reset() { mCoreL.reset(); mCoreR.reset(); }
     void setDecaySeconds(float t60) { mT60 = std::max(0.05f, t60); mDirty = true; }
-    void setToneHz(float hz) { mToneHz = std::clamp(hz, 600.0f, 8000.0f); mInLpK = (float)reverb_detail::onePole(mToneHz, mFs); }
-    void setPredelayMs(float ms) { mPredelayMs = std::clamp(ms, 0.0f, 80.0f); mPreSamp = std::max(1, (int)std::round((double)mPredelayMs * 0.001 * mFs)); }
-    void setModDepth(float d) { mMod = std::clamp(d, 0.0f, 1.0f); }
-    // Size = room dimensions: a curved scale of the delay lines (small tight booth ..
-    // big roomy space) plus a size-dependent low-mid body. Default (1.0) = the House Den match.
+    void setToneHz(float hz) { mToneHz = std::clamp(hz, 600.0f, 9000.0f); mBw = (float)reverb_detail::onePole(mToneHz, mFs); mCoreL.setBw(mBw); mCoreR.setBw(mBw); }
+    void setPredelayMs(float ms) { mPredelayMs = std::clamp(ms, 0.0f, 80.0f); mCoreL.setPredelay(mPredelayMs, mFs); mCoreR.setPredelay(mPredelayMs, mFs); }
+    void setModDepth(float d) { mMod = std::clamp(d, 0.0f, 1.0f); mDirty = true; }
     void setSize(float s)
     {
         mSize = std::clamp(s, 0.5f, 1.5f);
-        const double scale = std::clamp(std::pow((double)mSize, 1.7), 0.42, 2.05); // dramatic but bounded
-        for (int i = 0; i < kN; ++i) mLen[(size_t)i] = std::max(2, (int)std::round(kBaseMs[(size_t)i] * scale * 0.001 * mFs));
-        for (int k = 0; k < kNap; ++k) mApLen[(size_t)k] = std::max(2, (int)std::round(kApMs[(size_t)k] * 0.001 * mFs));
-        mLoG = (float)std::clamp(0.80 + (scale - 1.0) * 0.30, 0.30, 1.30); // low-shelf gain: den is ~5dB fuller below ~350Hz; more with Size
+        const double scale = kSizeBase * (double)mSize;
+        mCoreL.setSize(scale, mFs); mCoreR.setSize(scale, mFs);
         mDirty = true;
     }
-    void setFreeze(bool f) { mFreeze = f; }
+    void setFreeze(bool f) { mFreeze = f; mDirty = true; }
 
     void process(float *left, float *right, int numSamples)
     {
-        using namespace reverb_detail;
         if (mDirty) recompute();
         const bool stereo = (left != right);
-        const float fb = mFreeze ? 1.0f : mFb;
-        const float inG = mFreeze ? 0.0f : 1.0f;
-        const float modS = mFreeze ? 2.0f : (mMod * 3.0f); // while frozen: a fixed gentle modulation slowly detunes the held FDN eigenmodes so they don't ring as fixed metallic pitches (the "kooky" freeze). Live path (mMod*3) unchanged.
         for (int n = 0; n < numSamples; ++n)
         {
-            mPredelay.write(inG * 0.5f * (left[n] + (stereo ? right[n] : left[n])));
-            float in = mPredelay.readInt(mPreSamp);            // predelay
-            for (int k = 0; k < kNap; ++k) in = allpassInt(mAp[(size_t)k], mApLen[(size_t)k], 0.65f, in); // input diffuser cascade -> dense diffuse onset
-            mInLp += mInLpK * (in - mInLp); in = mInLp;        // input darkening (Tone)
-            mLoSh += mLoK * (in - mLoSh); in += mLoG * mLoSh; // low-shelf: den warmth below ~350Hz
-            in = mUmidEq.processSample(in);                    // tame upper-mid
-            in = mBoxEq.processSample(in);                     // scoop boxy low-mids (guitar)
-            in = mHiCut.processSample(in);                     // cab-style top rolloff (guitar)
-            float d[kN];
-            for (int i = 0; i < kN; ++i) d[i] = mLine[(size_t)i].readFrac((double)mLen[(size_t)i] + (double)(modS * mLfo.value((double)i * 0.13)));
-            float h[kN]; for (int i = 0; i < kN; ++i) h[i] = d[i];
-            for (int s = 1; s < kN; s <<= 1) for (int i = 0; i < kN; i += s << 1) for (int j = i; j < i + s; ++j) { float a = h[j], b = h[j + s]; h[j] = a + b; h[j + s] = a - b; }
-            for (int i = 0; i < kN; ++i) mLine[(size_t)i].write(fb * h[i] * kFwhtNorm + in * kInInject);
-            float el = allpassInt(mEarly[0], mEarlyLen[0], 0.6f, in);  // immediate early energy (decorrelated)
-            float er = allpassInt(mEarly[1], mEarlyLen[1], 0.6f, in);
-            float l = 0.0f, r = 0.0f;
-            for (int i = 0; i < kN; ++i) { float sgn = (i & 1) ? -1.0f : 1.0f; l += d[i] * ((i % 3) ? 1.0f : 0.7f); r += d[i] * sgn * ((i % 2) ? 0.8f : 1.0f); }
-            left[n] = kEarlyG * el + kTailG * 0.5f * l; if (stereo) right[n] = kEarlyG * er + kTailG * 0.5f * r;
-            mLfo.advance();
+            const float inL = left[n];
+            const float inR = stereo ? right[n] : inL;
+            float lL, lR, rL, rR;
+            mCoreL.process(inL, lL, lR);
+            mCoreR.process(inR, rL, rR);
+            left[n] = lL;
+            if (stereo) right[n] = rR;
         }
-        flush(mInLp);
+        mCoreL.flushState(); mCoreR.flushState();
     }
 
 private:
     void recompute()
     {
-        double loopMs = 0; for (int i = 0; i < kN; ++i) loopMs += mLen[(size_t)i] / mFs * 1000.0; loopMs /= kN;
-        mFb = (float)std::clamp(std::pow(10.0, -3.0 * loopMs / ((double)mT60 * 1000.0)), 0.0, 0.995);
+        const double loopMs = mCoreL.loopMs(mFs);
+        float fb = (float)std::clamp(std::pow(10.0, -3.0 * loopMs / ((double)mT60 * 1000.0)), 0.0, 0.92);
+        if (mFreeze) fb = 1.0f;
+        const float effDamp = kDamp;   // plain in-loop HF damping (NO decay-scaling)
+        const double exc = (mFreeze ? 0.0 : (double)mMod * 6.0) * (mFs / 29761.0);
+        const double lateT60 = (double)mT60 * (1.0 + kLateRatio * (double)mT60);
+        mCoreL.setDecay(fb, effDamp, exc, lateT60); mCoreR.setDecay(fb, effDamp, exc, lateT60);
         mDirty = false;
     }
-    static constexpr double kBaseMs[kN] = {6.7, 8.3, 9.7, 11.3, 12.9, 14.3, 15.9, 17.3,
-                                            18.9, 20.3, 21.7, 23.3, 24.7, 26.1, 27.7, 29.3};
-    static constexpr float kFwhtNorm = 0.25f; // 1/sqrt(16)
-    static constexpr float kInInject = 0.35f;
+    static constexpr double kSizeBase = 0.30;            // baked voicing size (fitted)
+    static constexpr float  kDamp = 0.45f;               // plain in-loop HF damping (fitted)
+    static constexpr float  kShelfG = 0.60f;             // input high-shelf gain (onset top)
+    static constexpr double kShelfHz = 4500.0;           // input high-shelf corner
+    static constexpr float  kEarlySend = 0.78f;          // diffuse early field level
+    static constexpr double kEsLpHz = 12000.0;           // early-send darkening corner
+    static constexpr float  kLateG = 0.28f;              // late-reverb mix
+    static constexpr double kLateDecay = 4.5;            // late-reverb T60 (s) (init only)
+    static constexpr double kLateRatio = 2.5;            // late T60 = Decay*(1+2.5*Decay): lush at long Decay, short when short
+    static constexpr double kLateDampHz = 12000.0;       // late in-loop HF damp
+    static constexpr double kLateHpHz = 600.0;           // late input low-cut
+    static constexpr double kLateLoopHpHz = 150.0;       // late in-loop low-cut (lows decay faster)
+    static constexpr double kLatePreMs = 80.0;           // late predelay (sustain behind attack)
     double mFs = 48000.0;
-    std::array<FracDelayLine, kN> mLine;
-    std::array<int, kN> mLen{};
-    static constexpr int kNap = 3;
-    static constexpr double kApMs[kNap] = {2.3, 3.7, 5.9};
-    std::array<FracDelayLine, kNap> mAp;
-    std::array<int, kNap> mApLen{};
-    FracDelayLine mPredelay;
-    Lfo mLfo;
-    static constexpr double kEarlyMs[2] = {7.3, 9.7};
-    std::array<FracDelayLine, 2> mEarly;
-    std::array<int, 2> mEarlyLen{};
-    static constexpr float kEarlyG = 0.85f, kTailG = 0.5f;
-    float mInLp = 0.0f, mInLpK = 0.0f;
-    Biquad mUmidEq, mBoxEq, mHiCut;
-    float mLoSh = 0.0f, mLoK = 0.0f, mLoG = 0.8f;
-    float mFb = 0.0f, mT60 = 0.3f, mToneHz = 1750.0f, mSize = 1.0f;
-    float mPredelayMs = 0.0f, mMod = 0.0f; int mPreSamp = 1;
+    TankCore mCoreL, mCoreR;
+    float mBw = 0.65f, mShelfK = 0.0f;
+    float mT60 = 1.13f, mToneHz = 8000.0f, mSize = 1.0f, mMod = 0.0f, mPredelayMs = 2.7f;
     bool mFreeze = false, mPrepared = false, mDirty = true;
 };
 
@@ -1565,7 +1738,7 @@ private:
 class ReverbBlock : public StereoBlock
 {
 public:
-    enum Type { kRoom = 0, kHall, kPlate, kSpring, kShimmer, kAmbience, kBloom };
+    enum Type { kRoom = 0, kPlate, kHall, kSpring, kShimmer, kAmbience, kBloom }; // Room+Plate shipped first; rest hidden via kNumShipped
     static constexpr int kNumTypes = 7;
 
     // ---- shipped set (v1 commercial release) ----------------------------------
@@ -1575,7 +1748,7 @@ public:
     // LAST in the enum, so the shipped set is exactly [0, kNumShipped), keeping
     // automation indices of shipped characters stable. UI + the revType choice param
     // build their lists from shipped()/kNumShipped — this is the single source of truth.
-    static constexpr int kNumShipped = 5;
+    static constexpr int kNumShipped = 2;
     static bool shipped(Type t) { return (int)t >= 0 && (int)t < kNumShipped; }
 
     static constexpr int kNumLines = FdnReverb::kNumLines;
@@ -1587,7 +1760,7 @@ public:
     static std::string paramId(const char *knob, int t) { return std::string("rev") + knob + typeName(t); }
     static const char *typeName(int t)
     {
-        static const char *n[kNumTypes] = {"Room", "Hall", "Plate", "Spring", "Shimmer", "Ambience", "Bloom"};
+        static const char *n[kNumTypes] = {"Room", "Plate", "Hall", "Spring", "Shimmer", "Ambience", "Bloom"};
         return (t >= 0 && t < kNumTypes) ? n[t] : "Room";
     }
     static bool usesFdn(Type t) { return t == kRoom || t == kHall || t == kAmbience || t == kBloom; }
@@ -1622,9 +1795,9 @@ public:
     static Range decayRange(Type t)
     {
         switch (t) {
-        case kRoom:     return {0.15f, 0.8f}; // small room: dead booth -> small room, reads true RT60
+        case kRoom:     return {0.2f, 1.5f}; // derived-conv: capped at the matched length (no synthetic stretch; hybrid longer-tail is backlog)
         case kHall:     return {0.8f, 6.0f};
-        case kPlate:    return {0.5f, 5.5f};   // vintage plate spec
+        case kPlate:    return {0.5f, 3.45f};   // derived-conv: capped at the matched length (no synthetic stretch; hybrid longer-tail is backlog)
         case kSpring:   return {1.0f, 9.0f}; // long studio-spring tails (rings ~8s)
         case kShimmer:  return {1.5f, 8.0f};
         case kAmbience: return {0.3f, 1.2f};
@@ -1635,7 +1808,7 @@ public:
     static Range dampRange(Type t)
     {
         switch (t) {
-        case kRoom:     return {600.0f, 3500.0f}; // Tone = input darkening (warm small room)
+        case kRoom:     return {800.0f, 9000.0f}; // Tone = tank input bandwidth; default ~8k = voiced bw 0.65
         case kHall:     return {2000.0f, 7000.0f}; // warm default (30%% knob = 3500 Hz) - the voiced lush hall
         case kPlate:    return {1500.0f, 14000.0f}; // full span; linear. Tone value 0.2 = 4000 Hz (warm); knob10c shows that as 5
         case kSpring:   return {1500.0f,  8000.0f};
@@ -1680,6 +1853,20 @@ public:
         mFsRB = ctx.sampleRate;
         { const int ring = (int)(0.001 * 200.0 * ctx.sampleRate) + std::max(16, ctx.maxBlockSize) + 4;
           mEpL.assign((size_t)ring, 0.0f); mEpR.assign((size_t)ring, 0.0f); mEpW = 0; }
+#endif
+#ifdef NAM_DERIVED_CONV
+        mPlateConv.prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::plate_derived_wav, (size_t)BinaryData::plate_derived_wavSize);
+        mPlateConvShort.prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::plate_derived_short_wav, (size_t)BinaryData::plate_derived_short_wavSize);
+        mRoomConv.prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::room_derived_wav, (size_t)BinaryData::room_derived_wavSize);
+        mRoomConvShort.prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::room_derived_short_wav, (size_t)BinaryData::room_derived_short_wavSize);
+        mPlateSusL.prepare(ctx.sampleRate, 67.0, 6500.0, 13.0, 23.0); mPlateSusR.prepare(ctx.sampleRate, 67.0, 6500.0, 17.0, 29.0);
+        mRoomSusL.prepare(ctx.sampleRate, 67.0, 6500.0, 13.0, 23.0);  mRoomSusR.prepare(ctx.sampleRate, 67.0, 6500.0, 17.0, 29.0);
+        mPlateIr[0].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::plate_ir_1_wav, (size_t)BinaryData::plate_ir_1_wavSize);
+        mPlateIr[1].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::plate_ir_2_wav, (size_t)BinaryData::plate_ir_2_wavSize);
+        mPlateIr[2].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::plate_ir_3_wav, (size_t)BinaryData::plate_ir_3_wavSize);
+        mPlateIr[3].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::plate_ir_4_wav, (size_t)BinaryData::plate_ir_4_wavSize);
+        mPlateIr[4].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::plate_ir_5_wav, (size_t)BinaryData::plate_ir_5_wavSize);
+        mPlateXfadeLen = std::max(1, (int)(0.15 * ctx.sampleRate)); mPlateIrInit = false;
 #endif
         mSpring.prepare(ctx.sampleRate);
         mShimmer.prepare(ctx.sampleRate);
@@ -1727,6 +1914,79 @@ public:
     int lineLengthSamples(int i) const { return mType == kHall ? mHall.lineLengthSamples(i) : mFdn.lineLengthSamples(i); }
     float lineGain(int i) const { return mType == kHall ? mHall.lineGain(i) : mFdn.lineGain(i); }
 
+#ifdef NAM_DERIVED_CONV
+    // Derived-IR hybrid: convolution(derived IR) = the matched character; TailSustainer extends decay
+    // above the matched default; crossfade to the short IR below it; post-conv Tone shelf (identity at
+    // Tone 0.5). matchedSec = the Decay-knob value that gives the exact matched tone (the default).
+    void processDerived(float *left, float *right, int n,
+                        IrConvolver &conv, IrConvolver &convShort,
+                        TailSustainer &susL, TailSustainer &susR, float matchedSec)
+    {
+        const Range dr = decayRange(mType);
+        float blend, fb;
+        if (mT60 >= matchedSec) { blend = 1.0f; fb = std::clamp((mT60 - matchedSec) / std::max(0.01f, dr.hi - matchedSec), 0.0f, 1.0f) * 0.9f; }
+        else                    { blend = std::clamp((mT60 - dr.lo) / std::max(0.01f, matchedSec - dr.lo), 0.0f, 1.0f); fb = 0.0f; }
+        conv.renderReplace(mDryL.data(), mDryR.data(), left, right, n);          // matched conv = wet
+        const bool stereo = (left != right);
+        if (blend < 0.999f) {                                                    // shorter: crossfade to the short IR
+            if ((int)mCScratchL.size() < n) { mCScratchL.assign((size_t)n, 0.0f); mCScratchR.assign((size_t)n, 0.0f); }
+            convShort.renderReplace(mDryL.data(), mDryR.data(), mCScratchL.data(), mCScratchR.data(), n);
+            for (int i = 0; i < n; ++i) { left[i] = blend * left[i] + (1.0f - blend) * mCScratchL[(size_t)i];
+                                          if (stereo) right[i] = blend * right[i] + (1.0f - blend) * mCScratchR[(size_t)i]; }
+        }
+        if (fb > 0.0f) {                                                         // longer: add the sustainer tail
+            for (int i = 0; i < n; ++i) { left[i] += susL.process(left[i], fb); if (stereo) right[i] += susR.process(right[i], fb); }
+            susL.flushState(); susR.flushState();
+        }
+        const Range tr = dampRange(mType);                                       // Tone shelf: default 0.5 -> 0 dB -> identity
+        const float tone01 = (float)((mDampHz - tr.lo) / std::max(1.0f, tr.hi - tr.lo));
+        const float g = (tone01 - 0.5f) * 16.0f;
+        if (std::abs(g) > 0.01f) {
+            if (mDampHz != mDerToneHz) { mDerToneL = Biquad::highshelf(mFsRB, 2500.0, (double)g, 0.7); mDerToneR = mDerToneL; mDerToneHz = mDampHz; }
+            for (int i = 0; i < n; ++i) { left[i] = mDerToneL.processSample(left[i]); if (stereo) right[i] = mDerToneR.processSample(right[i]); }
+        }
+    }
+
+    // 5-WAY PLATE: the Decay knob picks one of the five REAL plate captures (no stretch — different
+    // damper lengths captured natively). Equal-power crossfade (~150 ms) on a selection change so it
+    // never clicks. Only the selected IR is convolved (lean CPU); the previous one runs only during the
+    // brief crossfade. Post-conv Tone shelf matches the derived path (identity at Tone 0.5).
+    void processPlateIr(float *left, float *right, int n)
+    {
+        const Range dr = decayRange(kPlate);
+        const float x01 = std::clamp((mT60 - dr.lo) / std::max(0.01f, dr.hi - dr.lo), 0.0f, 1.0f);
+        const int idx = std::clamp((int)(x01 * 5.0f), 0, 4);
+        if (!mPlateIrInit) { mPlateIrIdx = mPlatePrevIdx = idx; mPlateIrInit = true; mPlateXfade = 0.0f; }
+        else if (idx != mPlateIrIdx) { mPlatePrevIdx = mPlateIrIdx; mPlateIrIdx = idx; mPlateXfade = 1.0f; }
+
+        const bool stereo = (left != right);
+        mPlateIr[(size_t)mPlateIrIdx].renderReplace(mDryL.data(), mDryR.data(), left, right, n);
+
+        if (mPlateXfade > 0.0f && mPlatePrevIdx != mPlateIrIdx)
+        {
+            if ((int)mCScratchL.size() < n) { mCScratchL.assign((size_t)n, 0.0f); mCScratchR.assign((size_t)n, 0.0f); }
+            mPlateIr[(size_t)mPlatePrevIdx].renderReplace(mDryL.data(), mDryR.data(), mCScratchL.data(), mCScratchR.data(), n);
+            const float step = 1.0f / (float)std::max(1, mPlateXfadeLen);
+            float xf = mPlateXfade;
+            for (int i = 0; i < n; ++i) {
+                xf = std::max(0.0f, xf - step);
+                const float gNew = std::sqrt(1.0f - xf), gOld = std::sqrt(xf);
+                left[i] = gNew * left[i] + gOld * mCScratchL[(size_t)i];
+                if (stereo) right[i] = gNew * right[i] + gOld * mCScratchR[(size_t)i];
+            }
+            mPlateXfade = xf;
+        }
+
+        const Range tr = dampRange(kPlate);                                      // Tone shelf: default 0.5 -> 0 dB -> identity
+        const float tone01 = (float)((mDampHz - tr.lo) / std::max(1.0f, tr.hi - tr.lo));
+        const float g = (tone01 - 0.5f) * 16.0f;
+        if (std::abs(g) > 0.01f) {
+            if (mDampHz != mDerToneHz) { mDerToneL = Biquad::highshelf(mFsRB, 2500.0, (double)g, 0.7); mDerToneR = mDerToneL; mDerToneHz = mDampHz; }
+            for (int i = 0; i < n; ++i) { left[i] = mDerToneL.processSample(left[i]); if (stereo) right[i] = mDerToneR.processSample(right[i]); }
+        }
+    }
+#endif
+
     void process(float *left, float *right, int numSamples) override
     {
         pushParams();
@@ -1742,7 +2002,10 @@ public:
         switch (mType)
         {
         case kPlate:
-            mPlateFdn.process(left, right, numSamples); // FDN tail
+#ifdef NAM_DERIVED_CONV
+            processPlateIr(left, right, numSamples); // 5 real plate captures (Hopkins CC-BY) -> 5-way Decay selector
+#else
+            mPlateFdn.process(left, right, numSamples); // FDN tail (offline/fallback)
 #ifdef NAM_PLATE_EARLY_CONV
             { const int pre = (int)std::round((double)mPredelayMs * 0.001 * mFsRB); const int R = (int)mEpL.size();
               if ((int)mEpoL.size() < numSamples) { mEpoL.resize((size_t)numSamples); mEpoR.resize((size_t)numSamples); }
@@ -1750,10 +2013,17 @@ public:
                   int rd = mEpW - pre; if (rd < 0) rd += R; mEpoL[(size_t)n] = mEpL[(size_t)rd]; mEpoR[(size_t)n] = mEpR[(size_t)rd]; if (++mEpW >= R) mEpW = 0; }
               mPlateEarly.addEarly(mEpoL.data(), mEpoR.data(), left, right, numSamples, 0.14f); } // predelayed dry -> kernel onset tracks predelay (matches FDN)
 #endif
+#endif
             break;
         case kSpring: mSpring.process(left, right, numSamples); break;
         case kShimmer: mShimmer.process(left, right, numSamples); break;
-        case kRoom: mSmallRoom.process(left, right, numSamples); break;
+        case kRoom:
+#ifdef NAM_DERIVED_CONV
+            processDerived(left, right, numSamples, mRoomConv, mRoomConvShort, mRoomSusL, mRoomSusR, 1.5f); // derived-IR hybrid
+#else
+            mSmallRoom.process(left, right, numSamples);
+#endif
+            break;
         case kHall: mHall.process(left, right, numSamples); break; // dedicated dispersion-FDN hall
         default: mFdn.process(left, right, numSamples); break;
         }
@@ -1925,13 +2195,21 @@ private:
 #ifdef NAM_PLATE_EARLY_CONV
     EarlyConvolver mPlateEarly;   // plate onset: dense early-reflection kernel
 #endif
+#ifdef NAM_DERIVED_CONV
+    IrConvolver mPlateConv, mPlateConvShort, mRoomConv, mRoomConvShort; // derived-IR hybrid (matched + short)
+    TailSustainer mPlateSusL, mPlateSusR, mRoomSusL, mRoomSusR;         // live-Decay tail extender
+    Biquad mDerToneL, mDerToneR; float mDerToneHz = -1.0f;             // post-conv Tone shelf (default = identity)
+    std::vector<float> mCScratchL, mCScratchR;                         // short-IR crossfade scratch
+    IrConvolver mPlateIr[5];                                           // 5 real plate captures (Hopkins, CC-BY) -> 5-way Decay selector
+    int mPlateIrIdx = 0, mPlatePrevIdx = 0, mPlateXfadeLen = 1; float mPlateXfade = 0.0f; bool mPlateIrInit = false;
+#endif
     SpringReverb mSpring;
     ShimmerReverb mShimmer;
     GuardMixer mMixer;
     std::vector<float> mDryL, mDryR;
     std::vector<float> mEpL, mEpR, mEpoL, mEpoR; int mEpW = 0; double mFsRB = 48000.0; // plate kernel predelay ring
 
-    Type mType = kHall;
+    Type mType = kPlate;
     float mSize = 1.0f, mT60 = 2.0f, mDampHz = 6000.0f, mPredelayMs = 0.0f, mMix = 0.25f;
     float mMod = 0.3f, mShimmerAmt = 0.5f, mTension = 0.5f, mBoing = 0.20f, mWidth = 1.0f, mSwell = 0.4f;
     float mInputFilterHz = 95.0f; // Plate Input Filter corner (20-400 Hz); 95 = prior hardwired Plate low-cut

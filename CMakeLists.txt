@@ -31,6 +31,17 @@ juce_add_plugin(NAM_Rig
 
 juce_add_binary_data(NAM_RigData SOURCES
     resources/plate_early_kernel.wav
+    # --- derived-IR hybrid plate/room (brand-free, derive_ir.py) ---
+    resources/derived_irs/plate_derived.wav
+    resources/derived_irs/plate_derived_short.wav
+    resources/derived_irs/room_derived.wav
+    resources/derived_irs/room_derived_short.wav
+    # --- 5 real plate captures (Greg Hopkins, CC-BY 4.0) -> 5-way Decay selector ---
+    resources/plate_irs/plate_ir_1.wav
+    resources/plate_irs/plate_ir_2.wav
+    resources/plate_irs/plate_ir_3.wav
+    resources/plate_irs/plate_ir_4.wav
+    resources/plate_irs/plate_ir_5.wav
     # --- UI fonts (SIL OFL 1.1 — see resources/fonts/*-OFL.txt) ---
     resources/fonts/Archivo-Regular.ttf
     resources/fonts/Archivo-Medium.ttf

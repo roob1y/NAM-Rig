@@ -13,7 +13,19 @@ Once the architecture is right, remaining work is integration + gain-structure t
 search for a missing mechanism. (Diagnostic that tells you which stage you're in: EDR residuals go
 from *structured* errors [wrong mechanism] to *spectral-balance* errors [just tuning].)
 
-## The workflow (in order — do NOT skip step 2)
+## The workflow (in order — do NOT skip step 2 OR step 5)
+
+> **MANDATORY METRICS — DO NOT SHIP/SIGN-OFF WITHOUT THEM (added 2026-06-30, Robbie's
+> correction — this has now been skipped TWICE).** A hand-picked scalar subset (C80/EDT/Ts/
+> centroid/echo/crest) is NOT enough and overstates the match. Before any sign-off you MUST run,
+> against the reference: (a) the **mid/side + per-band spatial battery** (side/mid energy ratio,
+> IACC broadband + per octave, inter-channel coherence — `full_measure.py` / `room_battery.spatial_full`),
+> and (b) the **masking-weighted NULL TEST** (`masking_abx.py` / `room_battery.null_nmr`: NMR =
+> error vs masked threshold in program context; reports % of audible tiles). Scalars can all "match"
+> while the null test shows the difference is still plainly audible. **These are not optional tools
+> to reach for — they are required steps (5 below). The time-box rules ("localize fast, fix the
+> dominant gap, move on") govern the TUNING loop, NOT the final battery: never let them justify
+> skipping the spatial battery or the null test.**
 
 1. **Build the fast offline loop first.** Compile the LIVE engine standalone via the juce stub
    (`reverb_analysis/render_character.cpp`, `g++ -I../src -Istub`), render an IR with an impulse,
@@ -40,6 +52,41 @@ from *structured* errors [wrong mechanism] to *spectral-balance* errors [just tu
    report them and move on. Do not end an analytical result with "want me to render a demo for your
    ears?"; when an ear test is actually warranted, render it and state the ONE narrow question as
    optional, not as a gate. (Robbie's explicit correction, 2026-06-22.)
+
+5. **FULL BATTERY + NULL TEST before sign-off (MANDATORY — added 2026-06-30).** Once the tuning loop
+   has converged, run the COMPLETE battery against the reference, not the subset you fit on:
+   - **Spatial / mid-side:** side/mid energy ratio (broadband + per octave), IACC (broadband + low/high
+     band), inter-channel coherence. Width and the mid/side balance are a defining part of a reverb's
+     character and a pure scalar centroid/decay fit is blind to them.
+   - **Modulation spectrum / texture** (`full_measure.py`) — catches metallic/fluttery tails.
+   - **Masking-weighted NULL TEST** (`masking_abx.py` / `room_battery.null_nmr`): convolve the SAME dry
+     phrase with our IR and the reference IR, loudness-match, and measure NMR (how much of the literal
+     difference survives masking and is actually audible, % of tiles). This is the honest "are we
+     there?" gate — every other metric can read "matched" while the null test says 78% of tiles are
+     audibly different. Report the NMR and the audible-tile fraction; that number, not the scalars,
+     says whether the character is reproduced. (Room 2026-06-30: scalars all close, null test +9 dB /
+     78% audible → not there yet. This step is exactly what was skipped twice.)
+
+   **CAUTION — the null-test % SATURATES; it is a LOCALIZER, not a ship-gate (Room 2026-06-30).**
+   The masking-% audible metric has a HIGH floor for reverb: nulling the reference's OWN two channels
+   (L vs R = two specimens of the same unit, decorrelated by design) scores ~79% audible — so NO two
+   reverb realizations can score below ~79%, and "ours = 79%" can mean "at the floor" OR "way off."
+   Use the null test to RANK which region/factor is most audible (as the Plate work did for the onset),
+   NOT as an absolute target. NEVER set a "< X% audible" goal — it is physically unreachable.
+
+   **THE OBJECTIVE MATCH METRIC THAT WORKS = audible-range per-band time-energy SURFACE distance vs the
+   SAME-UNIT FLOOR (Room 2026-06-30, the breakthrough).** A reverb's *statistics* (per-band decay/level
+   over time) ARE unique to the unit and identical across its realizations, unlike the waveform.
+   Build a surface = per-octave (125–8k) smoothed energy-vs-time (dB rel global peak) at ~10 log-spaced
+   times to ~1.5 s, **clamped at −45 dB (below that is masked/inaudible — do NOT chase −50 dB tails, it
+   wildly inflates the distance with sub-audible energy)**. Distance = MSE(ours, ref). Calibrate it with
+   two anchors every time: (a) FLOOR = MSE(ref-L-channel, ref-R-channel) = "as close as two takes of the
+   same unit" (~2.5 for the wood room); (b) SCALE = MSE(this ref, a DIFFERENT room) (~58). Then "done" =
+   ours ≈ the floor. Room 2026-06-30 result: ours 2.8 vs floor 2.5 vs different-room 58 → objectively as
+   close to the reference as its own two channels, WITHOUT relying on ears to adjudicate the match (the
+   user's key point: ears can't tell one good algorithm from another, so they can't be the match metric —
+   THIS can). Fit directly to minimize it (`room_fitfinal.py` / `room_battery` surface). NB at a −55 dB
+   clamp ours read 7.3 — almost all of that gap was the inaudible sub-45 dB low tail; clamp before judging.
 
 ## Measurement — what actually tracks perception
 
