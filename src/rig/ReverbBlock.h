@@ -1275,6 +1275,7 @@ public:
         float makeup = 1.0f;   // auto level
         float duckAmt = 0.3f;  // 0..1 ducking depth
         float width = 1.0f;    // 0 = mono, 1 = full
+        float lpfHz = 20000.0f;// wet high-cut (low-pass) corner; >=~19k = off
         float swellRate = 0.0f;// >0 = Bloom slow attack (per-sample rise)
         bool freeze = false;
     };
@@ -1291,7 +1292,7 @@ public:
 
     void reset()
     {
-        mHpL = mHpR = 0.0f; mDuckEnv = 0.0f; mSwell = 0.0f;
+        mHpL = mHpR = 0.0f; mLpL = mLpR = 0.0f; mDuckEnv = 0.0f; mSwell = 0.0f;
         mMixZ = 0.0f; mMakeupZ = 1.0f;
     }
 
@@ -1302,6 +1303,8 @@ public:
                  int numSamples, bool stereo, const Config &c)
     {
         const float hpK = reverb_detail::onePole(c.hpfHz, mFs);
+        const bool useLp = c.lpfHz < 19000.0f;
+        const float lpK = reverb_detail::onePole(c.lpfHz, mFs);
         for (int n = 0; n < numSamples; ++n)
         {
             mMixZ += mSmoothK * (c.mix - mMixZ);
@@ -1313,6 +1316,9 @@ public:
             // wet low-cut (one-pole high-pass), per channel
             mHpL += hpK * (wL - mHpL); wL -= mHpL;
             mHpR += hpK * (wR - mHpR); wR -= mHpR;
+
+            // wet high-cut (one-pole low-pass), per channel
+            if (useLp) { mLpL += lpK * (wL - mLpL); wL = mLpL; mLpR += lpK * (wR - mLpR); wR = mLpR; }
 
             // auto-makeup
             wL *= mMakeupZ; wR *= mMakeupZ;
@@ -1352,13 +1358,13 @@ public:
             if (stereo)
                 right[n] = gDry * dryR[n] + gWet * wR;
         }
-        reverb_detail::flush(mHpL); reverb_detail::flush(mHpR); reverb_detail::flush(mDuckEnv);
+        reverb_detail::flush(mHpL); reverb_detail::flush(mHpR); reverb_detail::flush(mLpL); reverb_detail::flush(mLpR); reverb_detail::flush(mDuckEnv);
     }
 
 private:
     double mFs = 48000.0;
     float mSmoothK = 0.01f, mDuckAtt = 0.1f, mDuckRel = 0.001f, mSwellRel = 0.001f;
-    float mHpL = 0.0f, mHpR = 0.0f, mDuckEnv = 0.0f, mSwell = 0.0f;
+    float mHpL = 0.0f, mHpR = 0.0f, mLpL = 0.0f, mLpR = 0.0f, mDuckEnv = 0.0f, mSwell = 0.0f;
     float mMixZ = 0.0f, mMakeupZ = 1.0f;
 };
 
@@ -1769,13 +1775,13 @@ public:
     static bool sizeExposed(Type t) { return t == kHall; } // Hall only; Room is convolution (Size can't resize an IR) and Decay covers length
     static bool toneExposed(Type) { return true; }
     static bool predelayExposed(Type t) { return t == kPlate || t == kBloom || t == kRoom; } // Hall folds it into Size; Shimmer/Room/Spring/Ambience hardwire
-    static bool modExposed(Type t) { return t == kHall || t == kBloom || t == kShimmer || t == kRoom; } // Plate (static IR) + Ambience have no mod knob
+    static bool modExposed(Type t) { return t == kHall || t == kBloom || t == kShimmer; } // Plate/Room (static IR) + Ambience have no mod knob
     static bool shimmerExposed(Type t) { return t == kShimmer; }
     static bool pitchExposed(Type t) { return t == kShimmer; }
     static bool tensionExposed(Type t) { return t == kSpring; }
     static bool boingExposed(Type t) { return t == kSpring; } // dispersion/sproing amount, Spring only
     static bool swellExposed(Type t) { return t == kBloom; }
-    static bool inputFilterExposed(Type t) { return t == kPlate; } // studio-style wet low-cut on the plate amp
+    static bool cutsExposed(Type t) { return t == kPlate || t == kRoom; } // Low Cut (HPF) + High Cut (LPF) on the IR characters (Plate/Room)
     static bool freezeExposed(Type) { return false; } // Freeze removed from the reverb section (was Hall/Shimmer/Bloom); engines keep the code path inert
     static const char *toneCaption(Type) { return "Tone"; }
 
@@ -1910,7 +1916,8 @@ public:
     void setTension(float t) { mTension = std::clamp(t, 0.0f, 1.0f); if (mPrepared) pushParams(); }
     void setBoing(float b) { mBoing = std::clamp(b, 0.0f, 1.0f); if (mPrepared) pushParams(); } // Spring dispersion/sproing
     void setWidth(float w) { mWidth = std::clamp(w, 0.0f, 1.0f); } // 0=full mono .. 1=full stereo (M/S width)
-    void setInputFilterHz(float hz) { mInputFilterHz = std::clamp(hz, 20.0f, 400.0f); } // Plate Input Filter (wet low-cut corner)
+    void setLowCutHz(float hz)  { mLowCutHz  = std::clamp(hz, 20.0f, 1000.0f); }    // wet Low Cut (HPF)
+    void setHighCutHz(float hz) { mHighCutHz = std::clamp(hz, 1000.0f, 20000.0f); } // wet High Cut (LPF)
     void setSwell(float s) { mSwell = std::clamp(s, 0.0f, 1.0f); }
     void setPitch(int p) { mPitch = std::clamp(p, 0, 2); if (mPrepared) pushParams(); }
     void setFreeze(bool f) { mFreeze = f && freezeExposed(mType); if (mPrepared) pushParams(); } // Freeze is gated to Hall/Shimmer/Bloom; inert on other characters even if the param/MIDI is on
@@ -2063,7 +2070,8 @@ public:
 
         GuardMixer::Config c;
         c.mix = effMix();
-        c.hpfHz = inputFilterExposed(mType) ? mInputFilterHz : hpfForType(mType);
+        c.hpfHz = cutsExposed(mType) ? mLowCutHz : hpfForType(mType);
+        c.lpfHz = cutsExposed(mType) ? mHighCutHz : 20000.0f;
         c.makeup = makeupForType(mType, effT60()) * levelTrim(mType);
         c.duckAmt = duckForType(mType);
         c.width = mWidth;
@@ -2248,7 +2256,7 @@ private:
     Type mType = kPlate;
     float mSize = 1.0f, mT60 = 2.0f, mDampHz = 6000.0f, mPredelayMs = 0.0f, mMix = 0.25f;
     float mMod = 0.3f, mShimmerAmt = 0.5f, mTension = 0.5f, mBoing = 0.20f, mWidth = 1.0f, mSwell = 0.4f;
-    float mInputFilterHz = 95.0f; // Plate Input Filter corner (20-400 Hz); 95 = prior hardwired Plate low-cut
+    float mLowCutHz = 95.0f, mHighCutHz = 20000.0f; // wet Low Cut (HPF) + High Cut (LPF) corners (Plate/Room)
     int mPitch = 0;
     bool mFreeze = false, mPrepared = false;
 };

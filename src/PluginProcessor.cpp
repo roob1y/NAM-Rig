@@ -529,12 +529,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("revPitch", 1), "Reverb Shimmer Pitch",
         juce::StringArray{"Octave", "+2 Oct", "Fifth+Oct"}, 0));
-    // Plate Input Filter (studio-style wet low-cut at the plate amp). Plate-only
-    // in the UI via ReverbBlock::inputFilterExposed; default 95 Hz = prior hardwired
-    // Plate low-cut, so existing Plate sessions are unchanged. Appended last.
+    // Reverb Low Cut (HPF) + High Cut (LPF) on the wet — exposed on the IR characters
+    // (Plate/Room) via ReverbBlock::cutsExposed. Defaults: 95 Hz low-cut (= prior plate
+    // value) and 20 kHz high-cut (off), so existing Plate sessions are unchanged. Appended last.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("revInputFilter", 1), "Reverb Input Filter",
-        juce::NormalisableRange<float>(20.0f, 400.0f, 1.0f, 0.5f), 95.0f,
+        juce::ParameterID("revLowCut", 1), "Reverb Low Cut",
+        juce::NormalisableRange<float>(20.0f, 1000.0f, 1.0f, 0.5f), 95.0f,
+        juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("revHighCut", 1), "Reverb High Cut",
+        juce::NormalisableRange<float>(1000.0f, 20000.0f, 1.0f, 0.5f), 20000.0f,
         juce::AudioParameterFloatAttributes().withLabel("Hz")));
 
     // --- Per-character reverb knobs (independent state + own ranges, like the drive
@@ -1058,7 +1062,8 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.reverb.setWidth(apvts.getRawParameterValue("revWidth")->load());
     mChain.reverb.setSwell(apvts.getRawParameterValue("revSwell")->load());
     mChain.reverb.setPitch((int)apvts.getRawParameterValue("revPitch")->load());
-    mChain.reverb.setInputFilterHz(apvts.getRawParameterValue("revInputFilter")->load());
+    mChain.reverb.setLowCutHz(apvts.getRawParameterValue("revLowCut")->load());
+    mChain.reverb.setHighCutHz(apvts.getRawParameterValue("revHighCut")->load());
     // Reverb on/off: user param, unless Space Tape's mode dial overrides it.
     const bool userReverbOff = apvts.getRawParameterValue("reverbOn")->load() < 0.5f;
     mChain.reverb.setBypassed(stReverbOverride == 1 ? false

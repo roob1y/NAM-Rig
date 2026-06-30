@@ -5115,7 +5115,8 @@ public:
         mDecay = std::make_unique<LabeledKnob>(apvts, juce::String(RB0::paramId("Decay", RB0::kHall)), "Decay");
         mSize = std::make_unique<LabeledKnob>(apvts, juce::String(RB0::paramId("Size", RB0::kHall)), "Size");
         mPredelay = std::make_unique<LabeledKnob>(apvts, juce::String(RB0::paramId("Predelay", RB0::kPlate)), "Pre-Delay");
-        mInputFilter = std::make_unique<LabeledKnob>(apvts, "revInputFilter", "Input Filter"); // Plate only
+        mLowCut = std::make_unique<LabeledKnob>(apvts, "revLowCut", "Low Cut");    // Plate/Room
+        mHighCut = std::make_unique<LabeledKnob>(apvts, "revHighCut", "High Cut"); // Plate/Room
         mTone = std::make_unique<LabeledKnob>(apvts, juce::String(RB0::paramId("Tone", RB0::kHall)), "Damping");
         mMod = std::make_unique<LabeledKnob>(apvts, juce::String(RB0::paramId("Mod", RB0::kHall)), "Mod");
         mShimmer = std::make_unique<LabeledKnob>(apvts, "revShimmer", "Shimmer");
@@ -5131,7 +5132,8 @@ public:
         addAndMakeVisible(*mMix);
         addChildComponent(*mSize);
         addChildComponent(*mPredelay);
-        addChildComponent(*mInputFilter);
+        addChildComponent(*mLowCut);
+        addChildComponent(*mHighCut);
         addChildComponent(*mMod);
         addChildComponent(*mShimmer);
         addChildComponent(*mTension);
@@ -5191,7 +5193,8 @@ public:
             const auto t = (RB::Type)type;
             mSize->setVisible(RB::sizeExposed(t));
             mPredelay->setVisible(RB::predelayExposed(t));
-            mInputFilter->setVisible(RB::inputFilterExposed(t));
+            mLowCut->setVisible(RB::cutsExposed(t));
+            mHighCut->setVisible(RB::cutsExposed(t));
             mMod->setVisible(RB::modExposed(t));
             mShimmer->setVisible(RB::shimmerExposed(t));
             mTension->setVisible(RB::tensionExposed(t));
@@ -5300,12 +5303,12 @@ public:
         right.removeFromTop(10);
 
         std::vector<juce::Component *> vis;
-        for (juce::Component *k : {(juce::Component *)mDecay.get(), (juce::Component *)mSize.get(),
-                                   (juce::Component *)mPredelay.get(), (juce::Component *)mInputFilter.get(),
-                                   (juce::Component *)mTone.get(),
+        for (juce::Component *k : {(juce::Component *)mPredelay.get(), (juce::Component *)mDecay.get(),
+                                   (juce::Component *)mSize.get(), (juce::Component *)mTone.get(),
+                                   (juce::Component *)mLowCut.get(), (juce::Component *)mHighCut.get(),
                                    (juce::Component *)mMod.get(), (juce::Component *)mTension.get(),
-                                   (juce::Component *)mBoing.get(),
-                                   (juce::Component *)mShimmer.get(), (juce::Component *)mSwell.get(),
+                                   (juce::Component *)mBoing.get(), (juce::Component *)mShimmer.get(),
+                                   (juce::Component *)mSwell.get(),
                                    (juce::Component *)mWidth.get(), (juce::Component *)mMix.get()})
             if (k->isVisible())
                 vis.push_back(k);
@@ -5329,7 +5332,7 @@ private:
     ReverbField mField;
     std::vector<juce::Rectangle<int>> mCardRects;
     juce::Rectangle<int> mCharCap, mNameRect;
-    std::unique_ptr<LabeledKnob> mDecay, mSize, mPredelay, mTone, mMod, mShimmer, mTension, mBoing, mSwell, mWidth, mMix, mInputFilter;
+    std::unique_ptr<LabeledKnob> mDecay, mSize, mPredelay, mTone, mMod, mShimmer, mTension, mBoing, mSwell, mWidth, mMix, mLowCut, mHighCut;
 };
 
 //==============================================================================
