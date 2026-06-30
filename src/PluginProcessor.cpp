@@ -553,7 +553,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
                 juce::AudioParameterFloatAttributes().withLabel("s")));
             params.push_back(std::make_unique<juce::AudioParameterFloat>(
                 juce::ParameterID(juce::String(RB::paramId("Tone", t)), 1), nm + " Tone",
-                juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), (T == RB::kPlate ? 0.2f : 0.4f), knob10(0.0f, 1.0f)));
+                juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), (T == RB::kRoom ? 0.85f : (T == RB::kPlate ? 0.2f : 0.4f)), knob10(0.0f, 1.0f)));
             if (RB::predelayExposed(T))
             {
                 const auto pr = RB::predelayRange(T);
@@ -565,7 +565,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
             if (RB::modExposed(T))
                 params.push_back(std::make_unique<juce::AudioParameterFloat>(
                     juce::ParameterID(juce::String(RB::paramId("Mod", t)), 1), nm + " Modulation",
-                    juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.3f, knob10(0.0f, 1.0f)));
+                    juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), (T == RB::kRoom ? 0.0f : 0.3f), knob10(0.0f, 1.0f)));
             if (RB::sizeExposed(T))
                 params.push_back(std::make_unique<juce::AudioParameterFloat>(
                     juce::ParameterID(juce::String(RB::paramId("Size", t)), 1), nm + " Size",

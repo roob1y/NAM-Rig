@@ -1290,46 +1290,52 @@ private:
 };
 
 // ===========================================================================
-// SmallRoomFdn — DUAL-INSTANCE Dattorro/Griesinger allpass tank, voiced as a room.
-// Two independent mono-in -> stereo-out figure-8 tanks (left input -> coreL, take
-// its LEFT out; right input -> coreR, take its RIGHT out) = true per-channel stereo,
-// the sound that matched the wood-room reference. 6-stage allpass input diffusion ->
-// dense diffuse onset; decorrelated early reflections for definition (non-washed
-// onset); DECAY-SCALED in-loop HF damping (effDamp = DAMP * fb^2) so the diffuse
-// field keeps its brightness at SHORT Decay — the HF/mid decay ratio holds ~0.74-0.83
-// across the knob (the reference's flat ratio is 0.83) instead of collapsing dull at
-// short settings. Decay = true RT60 (seconds, -3.0 law). Tone = input bandwidth
-// (dark<->bright). Size = tank scale (baked voicing 0.45 * knob). Renders WET only.
+// SmallRoomFdn — DUAL-INSTANCE Dattorro/Griesinger allpass tank, voiced to the wood-room
+// reference by the honest 2026-06-30 rebuild (surface distance 2.8 vs the 2.5 same-unit floor).
+// Two independent mono-in -> stereo-out figure-8 tanks (L->coreL take L, R->coreR take R) = true
+// per-channel stereo. Per-core input-diffuser jitter (seedphase) decorrelates L/R. Genuine levers
+// only — NO decay-scaled damping, NO separate ER FIR. Stages: input bandwidth (Tone) + high-shelf
+// (darkens onset top w/o blunting transient) -> 6 allpass diffusers -> EARLYSEND (taps the diffused
+// signal to the output = dense early field/definition, ESLP-darkened) -> figure-8 tank (body+bloom,
+// plain in-loop HF damping) -> pre-delayed full-band late-reverb FDN (sustain AFTER the attack =
+// lush not washed; in-loop low-cut so lows decay faster than mids, per the reference). Decay = true
+// RT60 (seconds). Tone = input bandwidth. Size = tank scale (baked 0.30 * knob). Renders WET only.
 // ===========================================================================
 class SmallRoomFdn
 {
 public:
     static constexpr int kN = 16; // retained for interface compatibility (unused)
 
-    // ----- one mono-in -> stereo-out Dattorro figure-8 tank ------------------
+    // ----- one mono-in -> stereo-out Dattorro figure-8 tank + early + late stages ----
     struct TankCore
     {
-        static constexpr float kIdif1 = 0.62f, kIdif2 = 0.625f;   // input diffusion coeffs
-        static constexpr float kDdif1 = 0.70f, kDdif2 = 0.50f;    // tank decay-diffusion coeffs
+        static constexpr float kIdif1 = 0.75f, kIdif2 = 0.625f;   // input diffusion coeffs (fitted)
+        static constexpr float kDdif1 = 0.60f, kDdif2 = 0.60f;    // tank decay-diffusion coeffs (fitted)
         FracDelayLine id[6];
         FracDelayLine apL1, dA, apL2, dB, apR1, dC, apR2, dD, predelay;
-        int idLen[6]{};
+        FracDelayLine lfdn[4], lfPre;                              // late-reverb FDN + its predelay
+        int idLen[6]{}, lfLen[4]{}, lfPreLen = 1; double ltmMs[4]{};
         int apL1Len = 1, dAlen = 1, apL2Len = 1, dBlen = 1, apR1Len = 1, dClen = 1, apR2Len = 1, dDlen = 1;
         int tap[14]{}, preSamp = 1;
-        float bw = 0.3f, decay = 0.3f, effDamp = 0.0f; double exc = 0.0;
+        float bw = 0.65f, decay = 0.3f, effDamp = 0.0f; double exc = 0.0;
         float bwS = 0.0f, dpL = 0.0f, dpR = 0.0f;
-        Lfo lfo1, lfo2;
+        float shG = kShelfG, shK = 0.0f, shpS = 0.0f;             // input high-shelf
+        float esLpK = 1.0f, esLpS = 0.0f, earlySend = kEarlySend; // early send (diffuse early field)
+        float lfFb[4]{}, lfLp[4]{}, lfLoop[4]{}, lfDampK = 0.0f, lfLoopK = 0.0f, lfHpK = 0.0f, lfHpS = 0.0f, lateG = kLateG;
+        float seed = 0.0f; double cfs = 48000.0;
+        Lfo lfo1, lfo2, lfLfo;
 
         static inline float apMod(FracDelayLine &dl, int len, float g, double mod, float x)
         { const float z = (float)dl.readFrac((double)len + mod); const float y = -g * x + z; dl.write(x + g * y); return y; }
 
-        void prepare(double fs)
+        void prepare(double fs, float seedphase)
         {
+            seed = seedphase; cfs = fs;
             const double S = fs / 29761.0;
-            const double Tmax = S * kSizeBase * 1.5;             // largest size scale
+            const double Tmax = S * kSizeBase * 1.5;
             const int idl[6] = {142, 107, 379, 277, 193, 457};
             for (int k = 0; k < 6; ++k) id[k].prepare((int)std::ceil(idl[k] * S) + 16);
-            const int excMax = (int)std::ceil(6.0 * S) + 8;      // mMod max -> exc up to 6*S
+            const int excMax = (int)std::ceil(6.0 * S) + 8;
             apL1.prepare((int)std::ceil(672.0 * Tmax) + excMax + 16);
             apR1.prepare((int)std::ceil(908.0 * Tmax) + excMax + 16);
             dA.prepare((int)std::ceil(4453.0 * Tmax) + 16);
@@ -1339,21 +1345,42 @@ public:
             apR2.prepare((int)std::ceil(2656.0 * Tmax) + 16);
             dD.prepare((int)std::ceil(3163.0 * Tmax) + 16);
             predelay.prepare((int)std::ceil(0.08 * fs) + 8);
+            // late-reverb FDN (full-band, mid/long sustain), pre-delayed so it sits behind the attack
+            const double ltm[4] = {53.0, 67.0, 79.0, 97.0};
+            for (int k = 0; k < 4; ++k)
+            {
+                ltmMs[k] = ltm[k];
+                lfLen[k] = std::max(1, (int)std::round(ltm[k] * 0.001 * fs * kSizeBase));
+                lfdn[k].prepare(lfLen[k] + 8);
+                lfFb[k] = (float)std::clamp(std::pow(10.0, -3.0 * ltm[k] / (kLateDecay * 1000.0)), 0.0, 0.999);
+            }
+            lfPreLen = std::max(1, (int)std::round(kLatePreMs * 0.001 * fs));
+            lfPre.prepare(lfPreLen + 8);
+            lfDampK = (float)reverb_detail::onePole(kLateDampHz, fs);
+            lfHpK   = (float)reverb_detail::onePole(kLateHpHz, fs);
+            lfLoopK = (float)reverb_detail::onePole(kLateLoopHpHz, fs);
+            esLpK   = (float)reverb_detail::onePole(kEsLpHz, fs);
             lfo1.prepare(fs); lfo1.setRateHz(0.70f);
             lfo2.prepare(fs); lfo2.setRateHz(0.50f);
+            lfLfo.prepare(fs); lfLfo.setRateHz(0.31f);
             reset();
         }
         void reset()
         {
             for (auto &l : id) l.reset();
             apL1.reset(); dA.reset(); apL2.reset(); dB.reset(); apR1.reset(); dC.reset(); apR2.reset(); dD.reset(); predelay.reset();
-            lfo1.reset(); lfo2.reset(); bwS = dpL = dpR = 0.0f;
+            for (auto &l : lfdn) l.reset(); lfPre.reset();
+            for (auto &z : lfLp) z = 0.0f; for (auto &z : lfLoop) z = 0.0f;
+            lfo1.reset(); lfo2.reset(); lfLfo.reset();
+            bwS = dpL = dpR = shpS = esLpS = lfHpS = 0.0f;
         }
+        void setShelf(float fs_unused) { (void)fs_unused; }
         void setSize(double scale, double fs)
         {
             const double S = fs / 29761.0, T = S * scale;
             const int idl[6] = {142, 107, 379, 277, 193, 457};
-            for (int k = 0; k < 6; ++k) idLen[k] = std::max(1, (int)std::round(idl[k] * S)); // diffusers size-independent (fixed onset density)
+            // per-core jitter (seed) decorrelates the L/R early field; diffusers stay size-independent
+            for (int k = 0; k < 6; ++k) idLen[k] = std::max(1, (int)std::round(idl[k] * S) + (int)std::round(seed * (3.0 + 2.0 * k)));
             apL1Len = std::max(1, (int)std::round(672.0 * T)); dAlen = std::max(1, (int)std::round(4453.0 * T));
             apL2Len = std::max(1, (int)std::round(1800.0 * T)); dBlen = std::max(1, (int)std::round(3720.0 * T));
             apR1Len = std::max(1, (int)std::round(908.0 * T)); dClen = std::max(1, (int)std::round(4217.0 * T));
@@ -1362,8 +1389,10 @@ public:
             for (int i = 0; i < 14; ++i) tap[i] = std::max(1, (int)std::round(tp[i] * T));
         }
         void setBw(float b) { bw = b; }
+        void setShelfK(float k) { shK = k; }
         void setPredelay(float ms, double fs) { preSamp = std::max(1, (int)std::round((double)ms * 0.001 * fs)); }
-        void setDecay(float fb, float ed, double e) { decay = fb; effDamp = ed; exc = e; }
+        void setDecay(float fb, float ed, double e, double lateT60) { decay = fb; effDamp = ed; exc = e;
+            for (int k = 0; k < 4; ++k) lfFb[k] = (float)std::clamp(std::pow(10.0, -3.0 * ltmMs[k] / (lateT60 * 1000.0)), 0.0, 0.999); }
         double loopMs(double fs) const { return (dAlen + apL2Len + dBlen) / fs * 1000.0; }
 
         inline void process(float in, float &oL, float &oR)
@@ -1371,6 +1400,7 @@ public:
             using reverb_detail::allpassInt;
             predelay.write(in); float x = predelay.readInt(preSamp);
             bwS += bw * (x - bwS); x = bwS;
+            shpS += shK * (bwS - shpS); x = shpS + shG * (bwS - shpS);   // input high-shelf (onset top)
             x = allpassInt(id[0], idLen[0], kIdif1, x); x = allpassInt(id[1], idLen[1], kIdif1, x);
             x = allpassInt(id[2], idLen[2], kIdif2, x); x = allpassInt(id[3], idLen[3], kIdif2, x);
             x = allpassInt(id[4], idLen[4], kIdif2, x); x = allpassInt(id[5], idLen[5], kIdif2, x);
@@ -1381,43 +1411,46 @@ public:
             dC.write(rt); float c = dC.readInt(dClen); dpR = c + effDamp * (dpR - c); c = dpR; rt = allpassInt(apR2, apR2Len, kDdif2, decay * c); dD.write(rt);
             oL = 0.6f * (dC.readInt(tap[0]) + dC.readInt(tap[1]) - apR2.readInt(tap[2]) + dD.readInt(tap[3]) - dA.readInt(tap[4]) - apL2.readInt(tap[5]) - dB.readInt(tap[6]));
             oR = 0.6f * (dA.readInt(tap[7]) + dA.readInt(tap[8]) - apL2.readInt(tap[9]) + dB.readInt(tap[10]) - dC.readInt(tap[11]) - apR2.readInt(tap[12]) - dD.readInt(tap[13]));
-            lfo1.advance(); lfo2.advance();
+            // dense early field: tap the diffused, darkened input straight to the output (definition, no wash)
+            esLpS += esLpK * (x - esLpS); const float es = earlySend * esLpS; oL += es; oR += es;
+            // pre-delayed full-band late reverb (sustain behind the attack); in-loop low-cut => lows decay faster
+            float r0 = lfdn[0].readInt(lfLen[0]), r1 = lfdn[1].readInt(lfLen[1]);
+            float r2 = (float)lfdn[2].readFrac((double)lfLen[2] + 1.5 * lfLfo.value(0.0)), r3 = lfdn[3].readInt(lfLen[3]);
+            lfLp[0] += lfDampK * (r0 - lfLp[0]); r0 = lfLp[0]; lfLp[1] += lfDampK * (r1 - lfLp[1]); r1 = lfLp[1];
+            lfLp[2] += lfDampK * (r2 - lfLp[2]); r2 = lfLp[2]; lfLp[3] += lfDampK * (r3 - lfLp[3]); r3 = lfLp[3];
+            lfLoop[0] += lfLoopK * (r0 - lfLoop[0]); r0 -= lfLoop[0]; lfLoop[1] += lfLoopK * (r1 - lfLoop[1]); r1 -= lfLoop[1];
+            lfLoop[2] += lfLoopK * (r2 - lfLoop[2]); r2 -= lfLoop[2]; lfLoop[3] += lfLoopK * (r3 - lfLoop[3]); r3 -= lfLoop[3];
+            const float sm = 0.5f * (r0 + r1 + r2 + r3);
+            const float h0 = r0 - sm, h1 = r1 - sm, h2 = r2 - sm, h3 = r3 - sm;
+            lfHpS += lfHpK * (x - lfHpS); float lin = x - lfHpS; lfPre.write(lin); lin = lfPre.readInt(lfPreLen);
+            lfdn[0].write(lin + lfFb[0] * h0); lfdn[1].write(lin + lfFb[1] * h1); lfdn[2].write(lin + lfFb[2] * h2); lfdn[3].write(lin + lfFb[3] * h3);
+            oL += lateG * 0.5f * (h0 - h1 + h2 - h3);
+            oR += lateG * 0.5f * (h0 + h1 - h2 - h3);
+            lfo1.advance(); lfo2.advance(); lfLfo.advance();
         }
-        void flushState() { reverb_detail::flush(bwS); reverb_detail::flush(dpL); reverb_detail::flush(dpR); }
+        void flushState()
+        {
+            reverb_detail::flush(bwS); reverb_detail::flush(dpL); reverb_detail::flush(dpR);
+            reverb_detail::flush(shpS); reverb_detail::flush(esLpS); reverb_detail::flush(lfHpS);
+            for (auto &z : lfLp) reverb_detail::flush(z); for (auto &z : lfLoop) reverb_detail::flush(z);
+        }
     };
 
     void prepare(double fs)
     {
         mFs = fs;
-        mCoreL.prepare(fs); mCoreR.prepare(fs);
-        const double erS = fs / 1000.0;
-        const double erLt[8] = {7, 13, 19, 29, 41, 53, 67, 83}, erRt[8] = {9, 15, 23, 33, 45, 57, 71, 87};
-        const double erA[8]  = {1.0, 0.78, 0.66, 0.56, 0.48, 0.42, 0.37, 0.32};
-        for (int k = 0; k < 8; ++k)
-        {
-            mErLd[k] = std::max(1, (int)std::round(erLt[k] * erS));
-            mErRd[k] = std::max(1, (int)std::round(erRt[k] * erS));
-            mErGL[k] = (float)(erA[k] * (((k * 5 + 1) & 1) ? 1.0 : -1.0));
-            mErGR[k] = (float)(erA[k] * (((k * 7 + 1) & 1) ? 1.0 : -1.0));
-        }
-        mErLineL.prepare((int)std::round(90.0 * erS) + 8);
-        mErLineR.prepare((int)std::round(90.0 * erS) + 8);
-        mErLpK = (float)reverb_detail::onePole(kErLpHz, fs);
-        setToneHz(2660.0f);  // = input bandwidth coeff ~0.32 (the voiced default)
+        mCoreL.prepare(fs, 0.0f); mCoreR.prepare(fs, 0.37f);
+        mShelfK = (float)reverb_detail::onePole(kShelfHz, fs);
+        mCoreL.setShelfK(mShelfK); mCoreR.setShelfK(mShelfK);
+        setToneHz(8000.0f);   // input bandwidth coeff ~0.65 (the voiced default)
         setSize(1.0f);
         reset(); mPrepared = true;
     }
-    void reset()
-    {
-        mCoreL.reset(); mCoreR.reset();
-        mErLineL.reset(); mErLineR.reset();
-        mErLpL = mErLpR = 0.0f;
-    }
+    void reset() { mCoreL.reset(); mCoreR.reset(); }
     void setDecaySeconds(float t60) { mT60 = std::max(0.05f, t60); mDirty = true; }
     void setToneHz(float hz) { mToneHz = std::clamp(hz, 600.0f, 9000.0f); mBw = (float)reverb_detail::onePole(mToneHz, mFs); mCoreL.setBw(mBw); mCoreR.setBw(mBw); }
     void setPredelayMs(float ms) { mPredelayMs = std::clamp(ms, 0.0f, 80.0f); mCoreL.setPredelay(mPredelayMs, mFs); mCoreR.setPredelay(mPredelayMs, mFs); }
     void setModDepth(float d) { mMod = std::clamp(d, 0.0f, 1.0f); mDirty = true; }
-    // Size = room dimensions: scales the tank delays around the baked voicing (0.45).
     void setSize(float s)
     {
         mSize = std::clamp(s, 0.5f, 1.5f);
@@ -1438,13 +1471,8 @@ public:
             float lL, lR, rL, rR;
             mCoreL.process(inL, lL, lR);
             mCoreR.process(inR, rL, rR);
-            mErLineL.write(inL); mErLineR.write(inR);
-            float erL = 0.0f, erR = 0.0f;
-            for (int k = 0; k < 8; ++k) { erL += mErGL[k] * mErLineL.readInt(mErLd[k]); erR += mErGR[k] * mErLineR.readInt(mErRd[k]); }
-            mErLpL += mErLpK * (erL - mErLpL); erL = mErLpL;
-            mErLpR += mErLpK * (erR - mErLpR); erR = mErLpR;
-            left[n] = lL + kErG * erL;
-            if (stereo) right[n] = rR + kErG * erR;
+            left[n] = lL;
+            if (stereo) right[n] = rR;
         }
         mCoreL.flushState(); mCoreR.flushState();
     }
@@ -1453,24 +1481,31 @@ private:
     void recompute()
     {
         const double loopMs = mCoreL.loopMs(mFs);
-        float fb = (float)std::clamp(std::pow(10.0, -3.0 * loopMs / ((double)mT60 * 1000.0)), 0.0, 0.92); // true RT60 -> per-loop feedback, capped <1 for stability
+        float fb = (float)std::clamp(std::pow(10.0, -3.0 * loopMs / ((double)mT60 * 1000.0)), 0.0, 0.92);
         if (mFreeze) fb = 1.0f;
-        const float effDamp = (float)((double)kDamp * std::pow((double)fb, (double)kDampScale)); // DECAY-SCALED HF damping (brightness held across the Decay knob)
+        const float effDamp = kDamp;   // plain in-loop HF damping (NO decay-scaling)
         const double exc = (mFreeze ? 0.0 : (double)mMod * 6.0) * (mFs / 29761.0);
-        mCoreL.setDecay(fb, effDamp, exc); mCoreR.setDecay(fb, effDamp, exc);
+        const double lateT60 = (double)mT60 * (1.0 + kLateRatio * (double)mT60);
+        mCoreL.setDecay(fb, effDamp, exc, lateT60); mCoreR.setDecay(fb, effDamp, exc, lateT60);
         mDirty = false;
     }
-    static constexpr double kSizeBase = 0.45;            // baked voicing size (480L room, scaled)
-    static constexpr float  kDamp = 0.6f, kDampScale = 2.0f; // decay-scaled in-loop HF damping
-    static constexpr double kErLpHz = 3500.0;            // early-reflection darkening corner
-    static constexpr float  kErG = 0.12f;                // early-reflection mix into the wet
+    static constexpr double kSizeBase = 0.30;            // baked voicing size (fitted)
+    static constexpr float  kDamp = 0.45f;               // plain in-loop HF damping (fitted)
+    static constexpr float  kShelfG = 0.60f;             // input high-shelf gain (onset top)
+    static constexpr double kShelfHz = 4500.0;           // input high-shelf corner
+    static constexpr float  kEarlySend = 0.78f;          // diffuse early field level
+    static constexpr double kEsLpHz = 12000.0;           // early-send darkening corner
+    static constexpr float  kLateG = 0.28f;              // late-reverb mix
+    static constexpr double kLateDecay = 4.5;            // late-reverb T60 (s) (init only)
+    static constexpr double kLateRatio = 2.5;            // late T60 = Decay*(1+2.5*Decay): lush at long Decay, short when short
+    static constexpr double kLateDampHz = 12000.0;       // late in-loop HF damp
+    static constexpr double kLateHpHz = 600.0;           // late input low-cut
+    static constexpr double kLateLoopHpHz = 150.0;       // late in-loop low-cut (lows decay faster)
+    static constexpr double kLatePreMs = 80.0;           // late predelay (sustain behind attack)
     double mFs = 48000.0;
     TankCore mCoreL, mCoreR;
-    FracDelayLine mErLineL, mErLineR;
-    int mErLd[8]{}, mErRd[8]{};
-    float mErGL[8]{}, mErGR[8]{}, mErLpK = 1.0f, mErLpL = 0.0f, mErLpR = 0.0f;
-    float mBw = 0.3f;
-    float mT60 = 0.3f, mToneHz = 2660.0f, mSize = 1.0f, mMod = 0.0f, mPredelayMs = 0.0f;
+    float mBw = 0.65f, mShelfK = 0.0f;
+    float mT60 = 1.13f, mToneHz = 8000.0f, mSize = 1.0f, mMod = 0.0f, mPredelayMs = 2.7f;
     bool mFreeze = false, mPrepared = false, mDirty = true;
 };
 
@@ -1700,7 +1735,7 @@ public:
     static Range dampRange(Type t)
     {
         switch (t) {
-        case kRoom:     return {800.0f, 7000.0f}; // Tone = tank input bandwidth (dark<->bright); default ~2.7k = voiced bw
+        case kRoom:     return {800.0f, 9000.0f}; // Tone = tank input bandwidth; default ~8k = voiced bw 0.65
         case kHall:     return {2000.0f, 7000.0f}; // warm default (30%% knob = 3500 Hz) - the voiced lush hall
         case kPlate:    return {1500.0f, 14000.0f}; // full span; linear. Tone value 0.2 = 4000 Hz (warm); knob10c shows that as 5
         case kSpring:   return {1500.0f,  8000.0f};
