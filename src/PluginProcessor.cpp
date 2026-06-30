@@ -509,7 +509,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         for (int t = 0; t < RB::kNumShipped; ++t)
             revTypes.add(RB::typeName(t));
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
-            juce::ParameterID("revType", 1), "Reverb Character", revTypes, RB::kHall));
+            juce::ParameterID("revType", 1), "Reverb Character", revTypes, RB::kPlate));
     }
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("revShimmer", 1), "Reverb Shimmer",
@@ -549,11 +549,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
             const auto dr = RB::decayRange(T);
             params.push_back(std::make_unique<juce::AudioParameterFloat>(
                 juce::ParameterID(juce::String(RB::paramId("Decay", t)), 1), nm + " Decay",
-                juce::NormalisableRange<float>(dr.lo, dr.hi, 0.01f, 0.5f), RB::rangeDefault(dr),
+                (T == RB::kPlate ? juce::NormalisableRange<float>(dr.lo, dr.hi, (dr.hi - dr.lo) / 4.0f)   // 5 discrete detents -> the 5 real plate IRs
+                                 : juce::NormalisableRange<float>(dr.lo, dr.hi, 0.01f, 0.5f)),
+                (T == RB::kPlate ? (dr.lo + (dr.hi - dr.lo) / 4.0f) : (T == RB::kRoom ? 1.5f : RB::rangeDefault(dr))),
                 juce::AudioParameterFloatAttributes().withLabel("s")));
             params.push_back(std::make_unique<juce::AudioParameterFloat>(
                 juce::ParameterID(juce::String(RB::paramId("Tone", t)), 1), nm + " Tone",
-                juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), (T == RB::kRoom ? 0.85f : (T == RB::kPlate ? 0.2f : 0.4f)), knob10(0.0f, 1.0f)));
+                juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), ((T == RB::kRoom || T == RB::kPlate) ? 0.5f : 0.4f), knob10(0.0f, 1.0f)));
             if (RB::predelayExposed(T))
             {
                 const auto pr = RB::predelayRange(T);
@@ -1173,4 +1175,4 @@ void NamRigProcessor::setStateInformation(const void *data, int sizeInBytes)
 juce::AudioProcessor *JUCE_CALLTYPE createPluginFilter()
 {
     return new NamRigProcessor();
-}
+}

@@ -4759,7 +4759,7 @@ public:
         // we divide it by the reverb character count (kNumShipped) instead of our 3.
         // A Delay card == a Reverb card; with fewer characters the column's lower
         // space is simply left empty rather than stretching the cards taller.
-        const int rvN = nam_rig::ReverbBlock::kNumShipped;
+        const int rvN = 5; // fixed 5-slot reference so cards keep their original size (was ReverbBlock::kNumShipped)
         const int ch = juce::jmax(34, (left.getHeight() - gap * (rvN - 1)) / rvN);
         mCardRects.clear();
         for (int i = 0; i < n; ++i)
@@ -5282,7 +5282,8 @@ public:
         left.removeFromTop(8);
         const int n = nam_rig::ReverbBlock::kNumShipped;
         const int gap = 8;
-        const int ch = juce::jmax(34, (left.getHeight() - gap * (n - 1)) / n);
+        const int slots = 5; // reserve 5 card slots so buttons keep their original size; unused slots stay empty
+        const int ch = juce::jmax(34, (left.getHeight() - gap * (slots - 1)) / slots);
         mCardRects.clear();
         for (int i = 0; i < n; ++i)
         {

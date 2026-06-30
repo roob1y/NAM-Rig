@@ -62,7 +62,7 @@ public:
             }
             break;
         }
-        case 1: // Hall — concentric expanding arcs (a big space)
+        case 2: // Hall — concentric expanding arcs (a big space)
         {
             for (int i = 0; i < 3; ++i)
             {
@@ -75,7 +75,7 @@ public:
             }
             break;
         }
-        case 2: // Plate — a taut rectangle rippling (horizontal standing waves)
+        case 1: // Plate — a taut rectangle rippling (horizontal standing waves)
         {
             g.setColour(c.withAlpha(0.35f));
             g.drawRoundedRectangle(L, T + H * 0.12f, W, H * 0.76f, 2.0f, 1.2f);

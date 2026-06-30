@@ -37,7 +37,9 @@
 #include <cmath>
 #if __has_include(<juce_dsp/juce_dsp.h>) && __has_include("BinaryData.h")
 #include "EarlyConvolver.h"
+#include "IrConvolver.h"
 #define NAM_PLATE_EARLY_CONV 1
+#define NAM_DERIVED_CONV 1
 #endif
 
 namespace nam_rig
@@ -398,6 +400,46 @@ private:
 // driver cutoff; the matched damping stays fixed so the decay match is robust across
 // the knob). Decay = the ~1 kHz T60 in true seconds (scales the whole matched curve).
 // Renders WET only. Voiced via the offline metric battery against the plate reference.
+// ===========================================================================
+
+// ===========================================================================
+// TailSustainer — smooth diffuse feedback that EXTENDS a reverb's decay for the
+// Decay knob above its default. Fed the (already diffuse) derived-IR convolution
+// wet; returns the extension tail, which is exactly ZERO when fb==0 so the default
+// Decay position is bit-exactly the matched convolution. fb>0 lengthens smoothly
+// (validated offline: effective-IR RT 3.45->6.12 s as fb 0->0.88, metallic ~0.04-0.08
+// = smooth, not ringy). Used by the derived-IR hybrid plate/room. One per channel.
+// ===========================================================================
+class TailSustainer
+{
+public:
+    void prepare(double fs, double Dms, double dampHz, double ap1ms, double ap2ms)
+    {
+        mD  = std::max(1, (int)std::round(Dms  * 0.001 * fs)); mDelay.prepare(mD  + 8);
+        mA1 = std::max(1, (int)std::round(ap1ms* 0.001 * fs)); mAp1.prepare(mA1 + 8);
+        mA2 = std::max(1, (int)std::round(ap2ms* 0.001 * fs)); mAp2.prepare(mA2 + 8);
+        mK  = reverb_detail::onePole(dampHz, fs);
+        reset();
+    }
+    void reset() { mDelay.reset(); mAp1.reset(); mAp2.reset(); mLp = 0.0f; }
+    // Per-sample. Returns the extension to ADD to the convolution wet (0 when fb==0).
+    inline float process(float x, float fb)
+    {
+        const float d = mDelay.readInt(mD);
+        mLp += mK * (d - mLp);                       // in-loop HF damping
+        float v = x + fb * mLp;
+        v = reverb_detail::allpassInt(mAp1, mA1, 0.5f, v);   // diffusion (keeps it smooth, not echoey)
+        v = reverb_detail::allpassInt(mAp2, mA2, 0.5f, v);
+        mDelay.write(v);
+        return fb * mLp;
+    }
+    void flushState() { reverb_detail::flush(mLp); }
+private:
+    FracDelayLine mDelay, mAp1, mAp2;
+    int mD = 1, mA1 = 1, mA2 = 1;
+    float mLp = 0.0f, mK = 0.0f;
+};
+
 // ===========================================================================
 class PlateFdn
 {
@@ -1696,7 +1738,7 @@ private:
 class ReverbBlock : public StereoBlock
 {
 public:
-    enum Type { kRoom = 0, kHall, kPlate, kSpring, kShimmer, kAmbience, kBloom };
+    enum Type { kRoom = 0, kPlate, kHall, kSpring, kShimmer, kAmbience, kBloom }; // Room+Plate shipped first; rest hidden via kNumShipped
     static constexpr int kNumTypes = 7;
 
     // ---- shipped set (v1 commercial release) ----------------------------------
@@ -1706,7 +1748,7 @@ public:
     // LAST in the enum, so the shipped set is exactly [0, kNumShipped), keeping
     // automation indices of shipped characters stable. UI + the revType choice param
     // build their lists from shipped()/kNumShipped — this is the single source of truth.
-    static constexpr int kNumShipped = 5;
+    static constexpr int kNumShipped = 2;
     static bool shipped(Type t) { return (int)t >= 0 && (int)t < kNumShipped; }
 
     static constexpr int kNumLines = FdnReverb::kNumLines;
@@ -1718,7 +1760,7 @@ public:
     static std::string paramId(const char *knob, int t) { return std::string("rev") + knob + typeName(t); }
     static const char *typeName(int t)
     {
-        static const char *n[kNumTypes] = {"Room", "Hall", "Plate", "Spring", "Shimmer", "Ambience", "Bloom"};
+        static const char *n[kNumTypes] = {"Room", "Plate", "Hall", "Spring", "Shimmer", "Ambience", "Bloom"};
         return (t >= 0 && t < kNumTypes) ? n[t] : "Room";
     }
     static bool usesFdn(Type t) { return t == kRoom || t == kHall || t == kAmbience || t == kBloom; }
@@ -1753,9 +1795,9 @@ public:
     static Range decayRange(Type t)
     {
         switch (t) {
-        case kRoom:     return {0.2f, 3.0f}; // tight booth -> big room, reads true RT60 (dual-tank Dattorro)
+        case kRoom:     return {0.2f, 1.5f}; // derived-conv: capped at the matched length (no synthetic stretch; hybrid longer-tail is backlog)
         case kHall:     return {0.8f, 6.0f};
-        case kPlate:    return {0.5f, 5.5f};   // vintage plate spec
+        case kPlate:    return {0.5f, 3.45f};   // derived-conv: capped at the matched length (no synthetic stretch; hybrid longer-tail is backlog)
         case kSpring:   return {1.0f, 9.0f}; // long studio-spring tails (rings ~8s)
         case kShimmer:  return {1.5f, 8.0f};
         case kAmbience: return {0.3f, 1.2f};
@@ -1812,6 +1854,20 @@ public:
         { const int ring = (int)(0.001 * 200.0 * ctx.sampleRate) + std::max(16, ctx.maxBlockSize) + 4;
           mEpL.assign((size_t)ring, 0.0f); mEpR.assign((size_t)ring, 0.0f); mEpW = 0; }
 #endif
+#ifdef NAM_DERIVED_CONV
+        mPlateConv.prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::plate_derived_wav, (size_t)BinaryData::plate_derived_wavSize);
+        mPlateConvShort.prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::plate_derived_short_wav, (size_t)BinaryData::plate_derived_short_wavSize);
+        mRoomConv.prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::room_derived_wav, (size_t)BinaryData::room_derived_wavSize);
+        mRoomConvShort.prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::room_derived_short_wav, (size_t)BinaryData::room_derived_short_wavSize);
+        mPlateSusL.prepare(ctx.sampleRate, 67.0, 6500.0, 13.0, 23.0); mPlateSusR.prepare(ctx.sampleRate, 67.0, 6500.0, 17.0, 29.0);
+        mRoomSusL.prepare(ctx.sampleRate, 67.0, 6500.0, 13.0, 23.0);  mRoomSusR.prepare(ctx.sampleRate, 67.0, 6500.0, 17.0, 29.0);
+        mPlateIr[0].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::plate_ir_1_wav, (size_t)BinaryData::plate_ir_1_wavSize);
+        mPlateIr[1].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::plate_ir_2_wav, (size_t)BinaryData::plate_ir_2_wavSize);
+        mPlateIr[2].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::plate_ir_3_wav, (size_t)BinaryData::plate_ir_3_wavSize);
+        mPlateIr[3].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::plate_ir_4_wav, (size_t)BinaryData::plate_ir_4_wavSize);
+        mPlateIr[4].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::plate_ir_5_wav, (size_t)BinaryData::plate_ir_5_wavSize);
+        mPlateXfadeLen = std::max(1, (int)(0.15 * ctx.sampleRate)); mPlateIrInit = false;
+#endif
         mSpring.prepare(ctx.sampleRate);
         mShimmer.prepare(ctx.sampleRate);
         mMixer.prepare(ctx.sampleRate);
@@ -1858,6 +1914,79 @@ public:
     int lineLengthSamples(int i) const { return mType == kHall ? mHall.lineLengthSamples(i) : mFdn.lineLengthSamples(i); }
     float lineGain(int i) const { return mType == kHall ? mHall.lineGain(i) : mFdn.lineGain(i); }
 
+#ifdef NAM_DERIVED_CONV
+    // Derived-IR hybrid: convolution(derived IR) = the matched character; TailSustainer extends decay
+    // above the matched default; crossfade to the short IR below it; post-conv Tone shelf (identity at
+    // Tone 0.5). matchedSec = the Decay-knob value that gives the exact matched tone (the default).
+    void processDerived(float *left, float *right, int n,
+                        IrConvolver &conv, IrConvolver &convShort,
+                        TailSustainer &susL, TailSustainer &susR, float matchedSec)
+    {
+        const Range dr = decayRange(mType);
+        float blend, fb;
+        if (mT60 >= matchedSec) { blend = 1.0f; fb = std::clamp((mT60 - matchedSec) / std::max(0.01f, dr.hi - matchedSec), 0.0f, 1.0f) * 0.9f; }
+        else                    { blend = std::clamp((mT60 - dr.lo) / std::max(0.01f, matchedSec - dr.lo), 0.0f, 1.0f); fb = 0.0f; }
+        conv.renderReplace(mDryL.data(), mDryR.data(), left, right, n);          // matched conv = wet
+        const bool stereo = (left != right);
+        if (blend < 0.999f) {                                                    // shorter: crossfade to the short IR
+            if ((int)mCScratchL.size() < n) { mCScratchL.assign((size_t)n, 0.0f); mCScratchR.assign((size_t)n, 0.0f); }
+            convShort.renderReplace(mDryL.data(), mDryR.data(), mCScratchL.data(), mCScratchR.data(), n);
+            for (int i = 0; i < n; ++i) { left[i] = blend * left[i] + (1.0f - blend) * mCScratchL[(size_t)i];
+                                          if (stereo) right[i] = blend * right[i] + (1.0f - blend) * mCScratchR[(size_t)i]; }
+        }
+        if (fb > 0.0f) {                                                         // longer: add the sustainer tail
+            for (int i = 0; i < n; ++i) { left[i] += susL.process(left[i], fb); if (stereo) right[i] += susR.process(right[i], fb); }
+            susL.flushState(); susR.flushState();
+        }
+        const Range tr = dampRange(mType);                                       // Tone shelf: default 0.5 -> 0 dB -> identity
+        const float tone01 = (float)((mDampHz - tr.lo) / std::max(1.0f, tr.hi - tr.lo));
+        const float g = (tone01 - 0.5f) * 16.0f;
+        if (std::abs(g) > 0.01f) {
+            if (mDampHz != mDerToneHz) { mDerToneL = Biquad::highshelf(mFsRB, 2500.0, (double)g, 0.7); mDerToneR = mDerToneL; mDerToneHz = mDampHz; }
+            for (int i = 0; i < n; ++i) { left[i] = mDerToneL.processSample(left[i]); if (stereo) right[i] = mDerToneR.processSample(right[i]); }
+        }
+    }
+
+    // 5-WAY PLATE: the Decay knob picks one of the five REAL plate captures (no stretch — different
+    // damper lengths captured natively). Equal-power crossfade (~150 ms) on a selection change so it
+    // never clicks. Only the selected IR is convolved (lean CPU); the previous one runs only during the
+    // brief crossfade. Post-conv Tone shelf matches the derived path (identity at Tone 0.5).
+    void processPlateIr(float *left, float *right, int n)
+    {
+        const Range dr = decayRange(kPlate);
+        const float x01 = std::clamp((mT60 - dr.lo) / std::max(0.01f, dr.hi - dr.lo), 0.0f, 1.0f);
+        const int idx = std::clamp((int)(x01 * 5.0f), 0, 4);
+        if (!mPlateIrInit) { mPlateIrIdx = mPlatePrevIdx = idx; mPlateIrInit = true; mPlateXfade = 0.0f; }
+        else if (idx != mPlateIrIdx) { mPlatePrevIdx = mPlateIrIdx; mPlateIrIdx = idx; mPlateXfade = 1.0f; }
+
+        const bool stereo = (left != right);
+        mPlateIr[(size_t)mPlateIrIdx].renderReplace(mDryL.data(), mDryR.data(), left, right, n);
+
+        if (mPlateXfade > 0.0f && mPlatePrevIdx != mPlateIrIdx)
+        {
+            if ((int)mCScratchL.size() < n) { mCScratchL.assign((size_t)n, 0.0f); mCScratchR.assign((size_t)n, 0.0f); }
+            mPlateIr[(size_t)mPlatePrevIdx].renderReplace(mDryL.data(), mDryR.data(), mCScratchL.data(), mCScratchR.data(), n);
+            const float step = 1.0f / (float)std::max(1, mPlateXfadeLen);
+            float xf = mPlateXfade;
+            for (int i = 0; i < n; ++i) {
+                xf = std::max(0.0f, xf - step);
+                const float gNew = std::sqrt(1.0f - xf), gOld = std::sqrt(xf);
+                left[i] = gNew * left[i] + gOld * mCScratchL[(size_t)i];
+                if (stereo) right[i] = gNew * right[i] + gOld * mCScratchR[(size_t)i];
+            }
+            mPlateXfade = xf;
+        }
+
+        const Range tr = dampRange(kPlate);                                      // Tone shelf: default 0.5 -> 0 dB -> identity
+        const float tone01 = (float)((mDampHz - tr.lo) / std::max(1.0f, tr.hi - tr.lo));
+        const float g = (tone01 - 0.5f) * 16.0f;
+        if (std::abs(g) > 0.01f) {
+            if (mDampHz != mDerToneHz) { mDerToneL = Biquad::highshelf(mFsRB, 2500.0, (double)g, 0.7); mDerToneR = mDerToneL; mDerToneHz = mDampHz; }
+            for (int i = 0; i < n; ++i) { left[i] = mDerToneL.processSample(left[i]); if (stereo) right[i] = mDerToneR.processSample(right[i]); }
+        }
+    }
+#endif
+
     void process(float *left, float *right, int numSamples) override
     {
         pushParams();
@@ -1873,7 +2002,10 @@ public:
         switch (mType)
         {
         case kPlate:
-            mPlateFdn.process(left, right, numSamples); // FDN tail
+#ifdef NAM_DERIVED_CONV
+            processPlateIr(left, right, numSamples); // 5 real plate captures (Hopkins CC-BY) -> 5-way Decay selector
+#else
+            mPlateFdn.process(left, right, numSamples); // FDN tail (offline/fallback)
 #ifdef NAM_PLATE_EARLY_CONV
             { const int pre = (int)std::round((double)mPredelayMs * 0.001 * mFsRB); const int R = (int)mEpL.size();
               if ((int)mEpoL.size() < numSamples) { mEpoL.resize((size_t)numSamples); mEpoR.resize((size_t)numSamples); }
@@ -1881,10 +2013,17 @@ public:
                   int rd = mEpW - pre; if (rd < 0) rd += R; mEpoL[(size_t)n] = mEpL[(size_t)rd]; mEpoR[(size_t)n] = mEpR[(size_t)rd]; if (++mEpW >= R) mEpW = 0; }
               mPlateEarly.addEarly(mEpoL.data(), mEpoR.data(), left, right, numSamples, 0.14f); } // predelayed dry -> kernel onset tracks predelay (matches FDN)
 #endif
+#endif
             break;
         case kSpring: mSpring.process(left, right, numSamples); break;
         case kShimmer: mShimmer.process(left, right, numSamples); break;
-        case kRoom: mSmallRoom.process(left, right, numSamples); break;
+        case kRoom:
+#ifdef NAM_DERIVED_CONV
+            processDerived(left, right, numSamples, mRoomConv, mRoomConvShort, mRoomSusL, mRoomSusR, 1.5f); // derived-IR hybrid
+#else
+            mSmallRoom.process(left, right, numSamples);
+#endif
+            break;
         case kHall: mHall.process(left, right, numSamples); break; // dedicated dispersion-FDN hall
         default: mFdn.process(left, right, numSamples); break;
         }
@@ -2056,13 +2195,21 @@ private:
 #ifdef NAM_PLATE_EARLY_CONV
     EarlyConvolver mPlateEarly;   // plate onset: dense early-reflection kernel
 #endif
+#ifdef NAM_DERIVED_CONV
+    IrConvolver mPlateConv, mPlateConvShort, mRoomConv, mRoomConvShort; // derived-IR hybrid (matched + short)
+    TailSustainer mPlateSusL, mPlateSusR, mRoomSusL, mRoomSusR;         // live-Decay tail extender
+    Biquad mDerToneL, mDerToneR; float mDerToneHz = -1.0f;             // post-conv Tone shelf (default = identity)
+    std::vector<float> mCScratchL, mCScratchR;                         // short-IR crossfade scratch
+    IrConvolver mPlateIr[5];                                           // 5 real plate captures (Hopkins, CC-BY) -> 5-way Decay selector
+    int mPlateIrIdx = 0, mPlatePrevIdx = 0, mPlateXfadeLen = 1; float mPlateXfade = 0.0f; bool mPlateIrInit = false;
+#endif
     SpringReverb mSpring;
     ShimmerReverb mShimmer;
     GuardMixer mMixer;
     std::vector<float> mDryL, mDryR;
     std::vector<float> mEpL, mEpR, mEpoL, mEpoR; int mEpW = 0; double mFsRB = 48000.0; // plate kernel predelay ring
 
-    Type mType = kHall;
+    Type mType = kPlate;
     float mSize = 1.0f, mT60 = 2.0f, mDampHz = 6000.0f, mPredelayMs = 0.0f, mMix = 0.25f;
     float mMod = 0.3f, mShimmerAmt = 0.5f, mTension = 0.5f, mBoing = 0.20f, mWidth = 1.0f, mSwell = 0.4f;
     float mInputFilterHz = 95.0f; // Plate Input Filter corner (20-400 Hz); 95 = prior hardwired Plate low-cut

@@ -101,7 +101,7 @@ int main()
     }
     { // T3 T60 tracks Decay
         for (const float t60Set : {1.0f, 3.0f}) {
-            ReverbBlock v; v.setMix(1.0f); v.setDecaySeconds(t60Set); v.setDampHz(16000.0f); v.setPredelayMs(0.0f); v.prepare({SR, BLK});
+            ReverbBlock v; v.setType(ReverbBlock::kHall); v.setMix(1.0f); v.setDecaySeconds(t60Set); v.setDampHz(16000.0f); v.setPredelayMs(0.0f); v.prepare({SR, BLK}); // T3 tests Hall T60-tracking explicitly (default char is now Plate)
             bool gainsOk = true;
             for (int i = 0; i < ReverbBlock::kNumLines; ++i) {
                 const double want = std::pow(10.0, -3.0 * v.lineLengthSamples(i) / ((double)t60Set * SR));
@@ -355,13 +355,13 @@ int main()
         const float atMax = RB::mapToRange(RB::kDecayMax, RB::kDecayMin, RB::kDecayMax, pr);
         CHECK(std::fabs(atMin - pr.lo) < 1e-4f && std::fabs(atMax - pr.hi) < 1e-4f,
               "T22 mapToRange spans the window (%.2f..%.2f)", atMin, atMax);
-        CHECK(std::fabs(pr.lo - 0.5f) < 1e-4f && std::fabs(pr.hi - 5.5f) < 1e-4f,
-              "T22 Plate decay window is 0.5-5.5 s (%.2f..%.2f)", pr.lo, pr.hi);
+        CHECK(std::fabs(pr.lo - 0.5f) < 1e-4f && std::fabs(pr.hi - 3.45f) < 1e-4f,
+              "T22 Plate decay window is 0.5-3.45 s capped (%.2f..%.2f)", pr.lo, pr.hi);
         // Decay knob -> APPROXIMATELY-true RENDERED T60 (engines track within ~+/-20%, not literal
         // exact-seconds), and it must clamp at the window caps. We measure the real decaying tail
         // (not just the knob readout) so a wrong/non-tracking decay is caught.
         ReverbBlock pv; pv.setType(RB::kPlate);
-        CHECK(std::fabs(pv.mappedDecay(8.0f) - 5.5f) < 1e-4f,
+        CHECK(std::fabs(pv.mappedDecay(8.0f) - 3.45f) < 1e-4f,
               "T22 Plate decay clamps at cap (8.0 -> %.2f s)", pv.mappedDecay(8.0f));
         auto renderedT60 = [&](RB::Type ty, float setSec, float dampHz){
             ReverbBlock v; v.setType(ty); v.setMix(1.0f); v.setDecaySeconds(setSec); v.setDampHz(dampHz); v.setPredelayMs(0.0f); v.prepare({SR, BLK});
