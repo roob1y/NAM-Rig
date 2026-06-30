@@ -1290,122 +1290,187 @@ private:
 };
 
 // ===========================================================================
-// SmallRoomFdn — short-line 8-channel FWHT feedback delay network voiced as a
-// small room. Smooth/diffuse by design (no comb coloration), but its SHORT delay
-// lines let it decay fast and FLAT across frequency (RT60 ~0.15-0.8s) — matching
-// a real small dead room (profiled from a Convology "House Den" sweep capture:
-// RT60 ~0.29s flat, warm centroid ~2.4kHz, diffuse by ~15ms, wide). Tone darkens
-// at the INPUT (like the plate's bandwidth) + a low-mid warmth shelf; no output EQ.
-// Renders WET only.
+// SmallRoomFdn — DUAL-INSTANCE Dattorro/Griesinger allpass tank, voiced as a room.
+// Two independent mono-in -> stereo-out figure-8 tanks (left input -> coreL, take
+// its LEFT out; right input -> coreR, take its RIGHT out) = true per-channel stereo,
+// the sound that matched the wood-room reference. 6-stage allpass input diffusion ->
+// dense diffuse onset; decorrelated early reflections for definition (non-washed
+// onset); DECAY-SCALED in-loop HF damping (effDamp = DAMP * fb^2) so the diffuse
+// field keeps its brightness at SHORT Decay — the HF/mid decay ratio holds ~0.74-0.83
+// across the knob (the reference's flat ratio is 0.83) instead of collapsing dull at
+// short settings. Decay = true RT60 (seconds, -3.0 law). Tone = input bandwidth
+// (dark<->bright). Size = tank scale (baked voicing 0.45 * knob). Renders WET only.
 // ===========================================================================
 class SmallRoomFdn
 {
 public:
-    static constexpr int kN = 16;
+    static constexpr int kN = 16; // retained for interface compatibility (unused)
+
+    // ----- one mono-in -> stereo-out Dattorro figure-8 tank ------------------
+    struct TankCore
+    {
+        static constexpr float kIdif1 = 0.62f, kIdif2 = 0.625f;   // input diffusion coeffs
+        static constexpr float kDdif1 = 0.70f, kDdif2 = 0.50f;    // tank decay-diffusion coeffs
+        FracDelayLine id[6];
+        FracDelayLine apL1, dA, apL2, dB, apR1, dC, apR2, dD, predelay;
+        int idLen[6]{};
+        int apL1Len = 1, dAlen = 1, apL2Len = 1, dBlen = 1, apR1Len = 1, dClen = 1, apR2Len = 1, dDlen = 1;
+        int tap[14]{}, preSamp = 1;
+        float bw = 0.3f, decay = 0.3f, effDamp = 0.0f; double exc = 0.0;
+        float bwS = 0.0f, dpL = 0.0f, dpR = 0.0f;
+        Lfo lfo1, lfo2;
+
+        static inline float apMod(FracDelayLine &dl, int len, float g, double mod, float x)
+        { const float z = (float)dl.readFrac((double)len + mod); const float y = -g * x + z; dl.write(x + g * y); return y; }
+
+        void prepare(double fs)
+        {
+            const double S = fs / 29761.0;
+            const double Tmax = S * kSizeBase * 1.5;             // largest size scale
+            const int idl[6] = {142, 107, 379, 277, 193, 457};
+            for (int k = 0; k < 6; ++k) id[k].prepare((int)std::ceil(idl[k] * S) + 16);
+            const int excMax = (int)std::ceil(6.0 * S) + 8;      // mMod max -> exc up to 6*S
+            apL1.prepare((int)std::ceil(672.0 * Tmax) + excMax + 16);
+            apR1.prepare((int)std::ceil(908.0 * Tmax) + excMax + 16);
+            dA.prepare((int)std::ceil(4453.0 * Tmax) + 16);
+            apL2.prepare((int)std::ceil(1800.0 * Tmax) + 16);
+            dB.prepare((int)std::ceil(3720.0 * Tmax) + 16);
+            dC.prepare((int)std::ceil(4217.0 * Tmax) + 16);
+            apR2.prepare((int)std::ceil(2656.0 * Tmax) + 16);
+            dD.prepare((int)std::ceil(3163.0 * Tmax) + 16);
+            predelay.prepare((int)std::ceil(0.08 * fs) + 8);
+            lfo1.prepare(fs); lfo1.setRateHz(0.70f);
+            lfo2.prepare(fs); lfo2.setRateHz(0.50f);
+            reset();
+        }
+        void reset()
+        {
+            for (auto &l : id) l.reset();
+            apL1.reset(); dA.reset(); apL2.reset(); dB.reset(); apR1.reset(); dC.reset(); apR2.reset(); dD.reset(); predelay.reset();
+            lfo1.reset(); lfo2.reset(); bwS = dpL = dpR = 0.0f;
+        }
+        void setSize(double scale, double fs)
+        {
+            const double S = fs / 29761.0, T = S * scale;
+            const int idl[6] = {142, 107, 379, 277, 193, 457};
+            for (int k = 0; k < 6; ++k) idLen[k] = std::max(1, (int)std::round(idl[k] * S)); // diffusers size-independent (fixed onset density)
+            apL1Len = std::max(1, (int)std::round(672.0 * T)); dAlen = std::max(1, (int)std::round(4453.0 * T));
+            apL2Len = std::max(1, (int)std::round(1800.0 * T)); dBlen = std::max(1, (int)std::round(3720.0 * T));
+            apR1Len = std::max(1, (int)std::round(908.0 * T)); dClen = std::max(1, (int)std::round(4217.0 * T));
+            apR2Len = std::max(1, (int)std::round(2656.0 * T)); dDlen = std::max(1, (int)std::round(3163.0 * T));
+            const double tp[14] = {266, 2974, 1913, 1996, 1990, 187, 1066, 353, 3627, 1228, 2673, 2111, 335, 121};
+            for (int i = 0; i < 14; ++i) tap[i] = std::max(1, (int)std::round(tp[i] * T));
+        }
+        void setBw(float b) { bw = b; }
+        void setPredelay(float ms, double fs) { preSamp = std::max(1, (int)std::round((double)ms * 0.001 * fs)); }
+        void setDecay(float fb, float ed, double e) { decay = fb; effDamp = ed; exc = e; }
+        double loopMs(double fs) const { return (dAlen + apL2Len + dBlen) / fs * 1000.0; }
+
+        inline void process(float in, float &oL, float &oR)
+        {
+            using reverb_detail::allpassInt;
+            predelay.write(in); float x = predelay.readInt(preSamp);
+            bwS += bw * (x - bwS); x = bwS;
+            x = allpassInt(id[0], idLen[0], kIdif1, x); x = allpassInt(id[1], idLen[1], kIdif1, x);
+            x = allpassInt(id[2], idLen[2], kIdif2, x); x = allpassInt(id[3], idLen[3], kIdif2, x);
+            x = allpassInt(id[4], idLen[4], kIdif2, x); x = allpassInt(id[5], idLen[5], kIdif2, x);
+            const float fromLeft = dB.readInt(dBlen), fromRight = dD.readInt(dDlen);
+            float lt = x + decay * fromRight; lt = apMod(apL1, apL1Len, -kDdif1, exc * lfo1.value(0.0), lt);
+            dA.write(lt); float a = dA.readInt(dAlen); dpL = a + effDamp * (dpL - a); a = dpL; lt = allpassInt(apL2, apL2Len, kDdif2, decay * a); dB.write(lt);
+            float rt = x + decay * fromLeft; rt = apMod(apR1, apR1Len, -kDdif1, exc * lfo2.value(0.0), rt);
+            dC.write(rt); float c = dC.readInt(dClen); dpR = c + effDamp * (dpR - c); c = dpR; rt = allpassInt(apR2, apR2Len, kDdif2, decay * c); dD.write(rt);
+            oL = 0.6f * (dC.readInt(tap[0]) + dC.readInt(tap[1]) - apR2.readInt(tap[2]) + dD.readInt(tap[3]) - dA.readInt(tap[4]) - apL2.readInt(tap[5]) - dB.readInt(tap[6]));
+            oR = 0.6f * (dA.readInt(tap[7]) + dA.readInt(tap[8]) - apL2.readInt(tap[9]) + dB.readInt(tap[10]) - dC.readInt(tap[11]) - apR2.readInt(tap[12]) - dD.readInt(tap[13]));
+            lfo1.advance(); lfo2.advance();
+        }
+        void flushState() { reverb_detail::flush(bwS); reverb_detail::flush(dpL); reverb_detail::flush(dpR); }
+    };
 
     void prepare(double fs)
     {
         mFs = fs;
-        for (int i = 0; i < kN; ++i)
-            mLine[(size_t)i].prepare((int)std::ceil(kBaseMs[(size_t)i] * 2.2 * 0.001 * fs) + 16);
-        for (int k = 0; k < kNap; ++k) mAp[(size_t)k].prepare((int)std::ceil(kApMs[(size_t)k] * 0.001 * fs) + 8);
-        for (int k = 0; k < 2; ++k) { mEarlyLen[(size_t)k] = std::max(2, (int)std::round(kEarlyMs[(size_t)k] * 0.001 * fs)); mEarly[(size_t)k].prepare(mEarlyLen[(size_t)k] + 8); }
-        mPredelay.prepare((int)std::ceil(0.08 * fs) + 8);
-        mLfo.prepare(fs); mLfo.setRateHz(0.6f);
-        mUmidEq = Biquad::peaking(fs, 1850.0, 0.9, -4.5); // tame the FDN upper-mid (den dips there)
-        mBoxEq = Biquad::peaking(fs, 540.0, 0.65, -3.0);  // guitar: scoop the boxy 400-900Hz (sits under the amp)
-        mHiCut = Biquad::lowpass(fs, 10000.0, 0.5);       // guitar: gentle safety rolloff (cab already limits the input)
-        mLoK = (float)reverb_detail::onePole(350.0, fs);
-        setToneHz(1750.0f);
+        mCoreL.prepare(fs); mCoreR.prepare(fs);
+        const double erS = fs / 1000.0;
+        const double erLt[8] = {7, 13, 19, 29, 41, 53, 67, 83}, erRt[8] = {9, 15, 23, 33, 45, 57, 71, 87};
+        const double erA[8]  = {1.0, 0.78, 0.66, 0.56, 0.48, 0.42, 0.37, 0.32};
+        for (int k = 0; k < 8; ++k)
+        {
+            mErLd[k] = std::max(1, (int)std::round(erLt[k] * erS));
+            mErRd[k] = std::max(1, (int)std::round(erRt[k] * erS));
+            mErGL[k] = (float)(erA[k] * (((k * 5 + 1) & 1) ? 1.0 : -1.0));
+            mErGR[k] = (float)(erA[k] * (((k * 7 + 1) & 1) ? 1.0 : -1.0));
+        }
+        mErLineL.prepare((int)std::round(90.0 * erS) + 8);
+        mErLineR.prepare((int)std::round(90.0 * erS) + 8);
+        mErLpK = (float)reverb_detail::onePole(kErLpHz, fs);
+        setToneHz(2660.0f);  // = input bandwidth coeff ~0.32 (the voiced default)
         setSize(1.0f);
         reset(); mPrepared = true;
     }
     void reset()
     {
-        for (auto &l : mLine) l.reset();
-        for (auto &l : mAp) l.reset();
-        mPredelay.reset(); mLfo.reset(); for (auto &l : mEarly) l.reset(); mLoSh = 0.0f; mUmidEq.reset(); mBoxEq.reset(); mHiCut.reset();
-        mInLp = 0.0f;
+        mCoreL.reset(); mCoreR.reset();
+        mErLineL.reset(); mErLineR.reset();
+        mErLpL = mErLpR = 0.0f;
     }
     void setDecaySeconds(float t60) { mT60 = std::max(0.05f, t60); mDirty = true; }
-    void setToneHz(float hz) { mToneHz = std::clamp(hz, 600.0f, 8000.0f); mInLpK = (float)reverb_detail::onePole(mToneHz, mFs); }
-    void setPredelayMs(float ms) { mPredelayMs = std::clamp(ms, 0.0f, 80.0f); mPreSamp = std::max(1, (int)std::round((double)mPredelayMs * 0.001 * mFs)); }
-    void setModDepth(float d) { mMod = std::clamp(d, 0.0f, 1.0f); }
-    // Size = room dimensions: a curved scale of the delay lines (small tight booth ..
-    // big roomy space) plus a size-dependent low-mid body. Default (1.0) = the House Den match.
+    void setToneHz(float hz) { mToneHz = std::clamp(hz, 600.0f, 9000.0f); mBw = (float)reverb_detail::onePole(mToneHz, mFs); mCoreL.setBw(mBw); mCoreR.setBw(mBw); }
+    void setPredelayMs(float ms) { mPredelayMs = std::clamp(ms, 0.0f, 80.0f); mCoreL.setPredelay(mPredelayMs, mFs); mCoreR.setPredelay(mPredelayMs, mFs); }
+    void setModDepth(float d) { mMod = std::clamp(d, 0.0f, 1.0f); mDirty = true; }
+    // Size = room dimensions: scales the tank delays around the baked voicing (0.45).
     void setSize(float s)
     {
         mSize = std::clamp(s, 0.5f, 1.5f);
-        const double scale = std::clamp(std::pow((double)mSize, 1.7), 0.42, 2.05); // dramatic but bounded
-        for (int i = 0; i < kN; ++i) mLen[(size_t)i] = std::max(2, (int)std::round(kBaseMs[(size_t)i] * scale * 0.001 * mFs));
-        for (int k = 0; k < kNap; ++k) mApLen[(size_t)k] = std::max(2, (int)std::round(kApMs[(size_t)k] * 0.001 * mFs));
-        mLoG = (float)std::clamp(0.80 + (scale - 1.0) * 0.30, 0.30, 1.30); // low-shelf gain: den is ~5dB fuller below ~350Hz; more with Size
+        const double scale = kSizeBase * (double)mSize;
+        mCoreL.setSize(scale, mFs); mCoreR.setSize(scale, mFs);
         mDirty = true;
     }
-    void setFreeze(bool f) { mFreeze = f; }
+    void setFreeze(bool f) { mFreeze = f; mDirty = true; }
 
     void process(float *left, float *right, int numSamples)
     {
-        using namespace reverb_detail;
         if (mDirty) recompute();
         const bool stereo = (left != right);
-        const float fb = mFreeze ? 1.0f : mFb;
-        const float inG = mFreeze ? 0.0f : 1.0f;
-        const float modS = mFreeze ? 2.0f : (mMod * 3.0f); // while frozen: a fixed gentle modulation slowly detunes the held FDN eigenmodes so they don't ring as fixed metallic pitches (the "kooky" freeze). Live path (mMod*3) unchanged.
         for (int n = 0; n < numSamples; ++n)
         {
-            mPredelay.write(inG * 0.5f * (left[n] + (stereo ? right[n] : left[n])));
-            float in = mPredelay.readInt(mPreSamp);            // predelay
-            for (int k = 0; k < kNap; ++k) in = allpassInt(mAp[(size_t)k], mApLen[(size_t)k], 0.65f, in); // input diffuser cascade -> dense diffuse onset
-            mInLp += mInLpK * (in - mInLp); in = mInLp;        // input darkening (Tone)
-            mLoSh += mLoK * (in - mLoSh); in += mLoG * mLoSh; // low-shelf: den warmth below ~350Hz
-            in = mUmidEq.processSample(in);                    // tame upper-mid
-            in = mBoxEq.processSample(in);                     // scoop boxy low-mids (guitar)
-            in = mHiCut.processSample(in);                     // cab-style top rolloff (guitar)
-            float d[kN];
-            for (int i = 0; i < kN; ++i) d[i] = mLine[(size_t)i].readFrac((double)mLen[(size_t)i] + (double)(modS * mLfo.value((double)i * 0.13)));
-            float h[kN]; for (int i = 0; i < kN; ++i) h[i] = d[i];
-            for (int s = 1; s < kN; s <<= 1) for (int i = 0; i < kN; i += s << 1) for (int j = i; j < i + s; ++j) { float a = h[j], b = h[j + s]; h[j] = a + b; h[j + s] = a - b; }
-            for (int i = 0; i < kN; ++i) mLine[(size_t)i].write(fb * h[i] * kFwhtNorm + in * kInInject);
-            float el = allpassInt(mEarly[0], mEarlyLen[0], 0.6f, in);  // immediate early energy (decorrelated)
-            float er = allpassInt(mEarly[1], mEarlyLen[1], 0.6f, in);
-            float l = 0.0f, r = 0.0f;
-            for (int i = 0; i < kN; ++i) { float sgn = (i & 1) ? -1.0f : 1.0f; l += d[i] * ((i % 3) ? 1.0f : 0.7f); r += d[i] * sgn * ((i % 2) ? 0.8f : 1.0f); }
-            left[n] = kEarlyG * el + kTailG * 0.5f * l; if (stereo) right[n] = kEarlyG * er + kTailG * 0.5f * r;
-            mLfo.advance();
+            const float inL = left[n];
+            const float inR = stereo ? right[n] : inL;
+            float lL, lR, rL, rR;
+            mCoreL.process(inL, lL, lR);
+            mCoreR.process(inR, rL, rR);
+            mErLineL.write(inL); mErLineR.write(inR);
+            float erL = 0.0f, erR = 0.0f;
+            for (int k = 0; k < 8; ++k) { erL += mErGL[k] * mErLineL.readInt(mErLd[k]); erR += mErGR[k] * mErLineR.readInt(mErRd[k]); }
+            mErLpL += mErLpK * (erL - mErLpL); erL = mErLpL;
+            mErLpR += mErLpK * (erR - mErLpR); erR = mErLpR;
+            left[n] = lL + kErG * erL;
+            if (stereo) right[n] = rR + kErG * erR;
         }
-        flush(mInLp);
+        mCoreL.flushState(); mCoreR.flushState();
     }
 
 private:
     void recompute()
     {
-        double loopMs = 0; for (int i = 0; i < kN; ++i) loopMs += mLen[(size_t)i] / mFs * 1000.0; loopMs /= kN;
-        mFb = (float)std::clamp(std::pow(10.0, -3.0 * loopMs / ((double)mT60 * 1000.0)), 0.0, 0.995);
+        const double loopMs = mCoreL.loopMs(mFs);
+        float fb = (float)std::clamp(std::pow(10.0, -3.0 * loopMs / ((double)mT60 * 1000.0)), 0.0, 0.92); // true RT60 -> per-loop feedback, capped <1 for stability
+        if (mFreeze) fb = 1.0f;
+        const float effDamp = (float)((double)kDamp * std::pow((double)fb, (double)kDampScale)); // DECAY-SCALED HF damping (brightness held across the Decay knob)
+        const double exc = (mFreeze ? 0.0 : (double)mMod * 6.0) * (mFs / 29761.0);
+        mCoreL.setDecay(fb, effDamp, exc); mCoreR.setDecay(fb, effDamp, exc);
         mDirty = false;
     }
-    static constexpr double kBaseMs[kN] = {6.7, 8.3, 9.7, 11.3, 12.9, 14.3, 15.9, 17.3,
-                                            18.9, 20.3, 21.7, 23.3, 24.7, 26.1, 27.7, 29.3};
-    static constexpr float kFwhtNorm = 0.25f; // 1/sqrt(16)
-    static constexpr float kInInject = 0.35f;
+    static constexpr double kSizeBase = 0.45;            // baked voicing size (480L room, scaled)
+    static constexpr float  kDamp = 0.6f, kDampScale = 2.0f; // decay-scaled in-loop HF damping
+    static constexpr double kErLpHz = 3500.0;            // early-reflection darkening corner
+    static constexpr float  kErG = 0.12f;                // early-reflection mix into the wet
     double mFs = 48000.0;
-    std::array<FracDelayLine, kN> mLine;
-    std::array<int, kN> mLen{};
-    static constexpr int kNap = 3;
-    static constexpr double kApMs[kNap] = {2.3, 3.7, 5.9};
-    std::array<FracDelayLine, kNap> mAp;
-    std::array<int, kNap> mApLen{};
-    FracDelayLine mPredelay;
-    Lfo mLfo;
-    static constexpr double kEarlyMs[2] = {7.3, 9.7};
-    std::array<FracDelayLine, 2> mEarly;
-    std::array<int, 2> mEarlyLen{};
-    static constexpr float kEarlyG = 0.85f, kTailG = 0.5f;
-    float mInLp = 0.0f, mInLpK = 0.0f;
-    Biquad mUmidEq, mBoxEq, mHiCut;
-    float mLoSh = 0.0f, mLoK = 0.0f, mLoG = 0.8f;
-    float mFb = 0.0f, mT60 = 0.3f, mToneHz = 1750.0f, mSize = 1.0f;
-    float mPredelayMs = 0.0f, mMod = 0.0f; int mPreSamp = 1;
+    TankCore mCoreL, mCoreR;
+    FracDelayLine mErLineL, mErLineR;
+    int mErLd[8]{}, mErRd[8]{};
+    float mErGL[8]{}, mErGR[8]{}, mErLpK = 1.0f, mErLpL = 0.0f, mErLpR = 0.0f;
+    float mBw = 0.3f;
+    float mT60 = 0.3f, mToneHz = 2660.0f, mSize = 1.0f, mMod = 0.0f, mPredelayMs = 0.0f;
     bool mFreeze = false, mPrepared = false, mDirty = true;
 };
 
@@ -1622,7 +1687,7 @@ public:
     static Range decayRange(Type t)
     {
         switch (t) {
-        case kRoom:     return {0.15f, 0.8f}; // small room: dead booth -> small room, reads true RT60
+        case kRoom:     return {0.2f, 3.0f}; // tight booth -> big room, reads true RT60 (dual-tank Dattorro)
         case kHall:     return {0.8f, 6.0f};
         case kPlate:    return {0.5f, 5.5f};   // vintage plate spec
         case kSpring:   return {1.0f, 9.0f}; // long studio-spring tails (rings ~8s)
@@ -1635,7 +1700,7 @@ public:
     static Range dampRange(Type t)
     {
         switch (t) {
-        case kRoom:     return {600.0f, 3500.0f}; // Tone = input darkening (warm small room)
+        case kRoom:     return {800.0f, 7000.0f}; // Tone = tank input bandwidth (dark<->bright); default ~2.7k = voiced bw
         case kHall:     return {2000.0f, 7000.0f}; // warm default (30%% knob = 3500 Hz) - the voiced lush hall
         case kPlate:    return {1500.0f, 14000.0f}; // full span; linear. Tone value 0.2 = 4000 Hz (warm); knob10c shows that as 5
         case kSpring:   return {1500.0f,  8000.0f};
