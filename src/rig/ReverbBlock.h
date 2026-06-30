@@ -1909,7 +1909,7 @@ public:
     void setShimmer(float s) { mShimmerAmt = std::clamp(s, 0.0f, 1.0f); if (mPrepared) pushParams(); }
     void setTension(float t) { mTension = std::clamp(t, 0.0f, 1.0f); if (mPrepared) pushParams(); }
     void setBoing(float b) { mBoing = std::clamp(b, 0.0f, 1.0f); if (mPrepared) pushParams(); } // Spring dispersion/sproing
-    void setWidth(float w) { mWidth = std::clamp(w, 0.0f, 2.0f); } // 0=mono, 1=natural, 2=extra-wide (M/S side gain)
+    void setWidth(float w) { mWidth = std::clamp(w, 0.0f, 1.0f); } // 0=full mono .. 1=full stereo (M/S width)
     void setInputFilterHz(float hz) { mInputFilterHz = std::clamp(hz, 20.0f, 400.0f); } // Plate Input Filter (wet low-cut corner)
     void setSwell(float s) { mSwell = std::clamp(s, 0.0f, 1.0f); }
     void setPitch(int p) { mPitch = std::clamp(p, 0, 2); if (mPrepared) pushParams(); }

@@ -522,7 +522,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     // are global; Swell is Bloom-only; Pitch is Shimmer-only. Appended last.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("revWidth", 1), "Reverb Width",
-        juce::NormalisableRange<float>(0.0f, 2.0f, 0.01f), 1.0f, knob10(0.0f, 2.0f)));   // 0=mono, 1(center)=natural, 2=extra-wide
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f, knob10(0.0f, 1.0f)));   // display 1=full mono .. 10=full stereo, sweeps through
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("revSwell", 1), "Reverb Swell",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.4f, knob10(0.0f, 1.0f)));
