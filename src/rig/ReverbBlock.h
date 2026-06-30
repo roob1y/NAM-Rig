@@ -1766,7 +1766,7 @@ public:
     static bool usesFdn(Type t) { return t == kRoom || t == kHall || t == kAmbience || t == kBloom; }
 
     // ---- voicing introspection (UI + tests) ----
-    static bool sizeExposed(Type t) { return t == kHall || t == kRoom; } // Room: scales the room size
+    static bool sizeExposed(Type t) { return t == kHall; } // Hall only; Room is convolution (Size can't resize an IR) and Decay covers length
     static bool toneExposed(Type) { return true; }
     static bool predelayExposed(Type t) { return t == kPlate || t == kBloom || t == kRoom; } // Hall folds it into Size; Shimmer/Room/Spring/Ambience hardwire
     static bool modExposed(Type t) { return t == kHall || t == kBloom || t == kShimmer || t == kRoom; } // Plate (static IR) + Ambience have no mod knob
@@ -1888,6 +1888,9 @@ public:
         mPlateEarly.reset();
         std::fill(mEpL.begin(), mEpL.end(), 0.0f); std::fill(mEpR.begin(), mEpR.end(), 0.0f); mEpW = 0;
 #endif
+#ifdef NAM_DERIVED_CONV
+        std::fill(mPpL.begin(), mPpL.end(), 0.0f); std::fill(mPpR.begin(), mPpR.end(), 0.0f); mPpW = 0; // IR-path pre-delay ring
+#endif
         mMixer.reset();
         mMixer.snapMix(mPrepared ? effMix() : 0.0f);
     }
@@ -1927,11 +1930,25 @@ public:
         float blend, fb;
         if (mT60 >= matchedSec) { blend = 1.0f; fb = std::clamp((mT60 - matchedSec) / std::max(0.01f, dr.hi - matchedSec), 0.0f, 1.0f) * 0.9f; }
         else                    { blend = std::clamp((mT60 - dr.lo) / std::max(0.01f, matchedSec - dr.lo), 0.0f, 1.0f); fb = 0.0f; }
-        conv.renderReplace(mDryL.data(), mDryR.data(), left, right, n);          // matched conv = wet
+        // Pre-Delay: delay the dry feeding the convolver(s) — a real control on the IR path. The ring runs
+        // every block (pre==0 -> passthrough) so moving the knob never clicks. Shared with the plate path.
+        const float *exL = mDryL.data(), *exR = mDryR.data();
+        if (mPpRing > 1) {
+            const int pre = std::clamp((int)std::lround((double)mPredelayMs * 0.001 * mFsRB), 0, mPpRing - 1);
+            if ((int)mPpoL.size() < n) { mPpoL.assign((size_t)n, 0.0f); mPpoR.assign((size_t)n, 0.0f); }
+            for (int i = 0; i < n; ++i) {
+                mPpL[(size_t)mPpW] = mDryL[(size_t)i]; mPpR[(size_t)mPpW] = mDryR[(size_t)i];
+                int rd = mPpW - pre; if (rd < 0) rd += mPpRing;
+                mPpoL[(size_t)i] = mPpL[(size_t)rd]; mPpoR[(size_t)i] = mPpR[(size_t)rd];
+                if (++mPpW >= mPpRing) mPpW = 0;
+            }
+            exL = mPpoL.data(); exR = mPpoR.data();
+        }
+        conv.renderReplace(exL, exR, left, right, n);          // matched conv = wet
         const bool stereo = (left != right);
         if (blend < 0.999f) {                                                    // shorter: crossfade to the short IR
             if ((int)mCScratchL.size() < n) { mCScratchL.assign((size_t)n, 0.0f); mCScratchR.assign((size_t)n, 0.0f); }
-            convShort.renderReplace(mDryL.data(), mDryR.data(), mCScratchL.data(), mCScratchR.data(), n);
+            convShort.renderReplace(exL, exR, mCScratchL.data(), mCScratchR.data(), n);
             for (int i = 0; i < n; ++i) { left[i] = blend * left[i] + (1.0f - blend) * mCScratchL[(size_t)i];
                                           if (stereo) right[i] = blend * right[i] + (1.0f - blend) * mCScratchR[(size_t)i]; }
         }
@@ -2069,6 +2086,9 @@ private:
         case kHall: mHall.reset(); break;
         default: mFdn.reset(); break;
         }
+#ifdef NAM_DERIVED_CONV
+        std::fill(mPpL.begin(), mPpL.end(), 0.0f); std::fill(mPpR.begin(), mPpR.end(), 0.0f); mPpW = 0; // clear IR-path pre-delay ring on character switch
+#endif
     }
 
     float effMix() const { return mMix; }
