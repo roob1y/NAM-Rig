@@ -428,15 +428,19 @@ public:
     static constexpr double kBloomB1 = 0.213, kBloomC1 = 0.819;       // rB = B1*dd^2 + C1*max(0,dd-1)^2 (hinge: body <=knob3, big bloom knob4+)
     static constexpr double kBloomA2 = -8.13e-6, kBloomB2 = 4.149e-5; // lo1 shelf coeffs (dB)
 
+    // ---- one mono-in -> stereo-out core; two instances = true per-channel stereo ----
+    struct Core {
+        float seed = 0.0f;   // per-core input-diffuser jitter -> L/R decorrelation
     void loadProtoLines() {
         for (int i=0;i<kNumLines;++i) mLineMsRt[(size_t)i]=kLineMs[(size_t)i];
         mDispGRt=kDispG; mDispG2Rt=kDispG2;
         
         
     }
-    void prepare(double fs)
+    void prepare(double fs, float seedphase)
     {
         mFs = fs;
+        seed = seedphase;
         loadProtoLines();
         for (int i = 0; i < kNumLines; ++i)
             mLine[(size_t)i].prepare((int)std::ceil(mLineMsRt[(size_t)i] * kMaxSize * 0.001 * mFs) + 8);
@@ -486,20 +490,15 @@ public:
     void setFreeze(bool f) { mFreeze = f; }
     void setEarlyTap(float g) { mEarly = g; }   // onset-fix: convolver supplies early -> drop FDN early tap
 
-    void process(float *left, float *right, int numSamples)
+    void process(float in, float &outL, float &outR)
     {
         using namespace reverb_detail;
-        const bool stereo = (left != right);
         const int pre = (int)std::round((double)mPredelayMs * 0.001 * mFs);
         const float inGain = mFreeze ? 0.0f : 1.0f;
         const float invsq = 1.0f / std::sqrt((float)kNumLines);
 
-        for (int n = 0; n < numSamples; ++n)
         {
-            const float dryL = left[n];
-            const float dryR = stereo ? right[n] : dryL;
-
-            mPredelay.write(0.5f * (dryL + dryR));
+            mPredelay.write(in);
             float x = inGain * mPredelay.readInt(std::max(1, pre));
             const float xWide = x;   // full-band bright tap (pre-driver) -> velvet HF feed
             x = mLmEq.processSample(x);                 // input low-mid body (plate resonance)
@@ -558,8 +557,8 @@ public:
             if (mVelvet && !mFreeze) {   // VELVET HF late-field: dense diffuse 6-12k rising shimmer, fed by the BRIGHT input
                 for (auto &b : mVlv) b.tick(xWide, kHfSignL, kHfSignR, oL, oR);
             }
-            left[n] = oL;
-            if (stereo) right[n] = oR;
+            outL = oL;
+            outR = oR;
 
             std::array<float, kNumLines> fb;
             for (int i = 0; i < kNumLines; ++i)
@@ -646,7 +645,7 @@ private:
             mLo1[(size_t)i] = Biquad::highshelf(mFs, kBloomF1, s * lo1, kDampS);
         }
         for (size_t a = 0; a < mDiff.size(); ++a)
-            mDiffLen[a] = std::max(2, (int)std::round(kDiffMs[a] * (double)mSize * 0.001 * mFs));
+            mDiffLen[a] = std::max(2, (int)std::round(kDiffMs[a] * (double)mSize * 0.001 * mFs) + (int)std::round(seed * (3.0 + 2.0 * (double)a)));
         mLmEq = Biquad::peaking(mFs, 160.0, 0.7, 5.0);     // low-mid body
         mPresL = Biquad::peaking(mFs, 3300.0, 0.5, 4.2);   // presence (wider/higher -> lifts the dull 2-6k vs reference)
         mDip2kL = Biquad::peaking(mFs, 2000.0, 2.4, -1.9); mDip2kR = mDip2kL; // tail 2k dip (narrow -> match 2k tonal notch, spare 2-6k lushness)
@@ -810,6 +809,38 @@ private:
     float mNarrow2k = 0.14f;                    // 2k side narrower (reference width notch)
     float mSize = 1.25f, mT60 = 2.92f, mDampHz = 5250.0f, mPredelayMs = 0.0f;
     bool mPrepared = false, mFreeze = false;
+    };   // ---- struct Core ----
+
+    // dual-instance shell: true per-channel stereo (L->coreL take L, R->coreR take R),
+    // cores decorrelated by a per-core input-diffuser seedphase. CPU ~2x the single core
+    // (still N32 per core). Dry mix + the early-reflection convolver stay outside, per channel.
+    void prepare(double fs) { mFs = fs; mCoreL.prepare(fs, 0.0f); mCoreR.prepare(fs, 0.37f); mPrepared = true; }
+    void reset() { mCoreL.reset(); mCoreR.reset(); }
+    void setSize(float s) { mCoreL.setSize(s); mCoreR.setSize(s); }
+    void setDecaySeconds(float t60) { mCoreL.setDecaySeconds(t60); mCoreR.setDecaySeconds(t60); }
+    void setDampHz(float hz) { mCoreL.setDampHz(hz); mCoreR.setDampHz(hz); }
+    void setPredelayMs(float ms) { mCoreL.setPredelayMs(ms); mCoreR.setPredelayMs(ms); }
+    void setFreeze(bool f) { mCoreL.setFreeze(f); mCoreR.setFreeze(f); }
+    void setEarlyTap(float g) { mCoreL.setEarlyTap(g); mCoreR.setEarlyTap(g); }
+    void process(float *left, float *right, int numSamples)
+    {
+        const bool stereo = (left != right);
+        for (int n = 0; n < numSamples; ++n)
+        {
+            const float inL = left[n];
+            const float inR = stereo ? right[n] : inL;
+            float lL, lR, rL, rR;
+            mCoreL.process(inL, lL, lR);
+            mCoreR.process(inR, rL, rR);
+            left[n] = lL;
+            if (stereo) right[n] = rR;
+        }
+    }
+
+private:
+    double mFs = 48000.0;
+    Core mCoreL, mCoreR;
+    bool mPrepared = false;
 };
 
 // ===========================================================================
