@@ -615,6 +615,9 @@ NamRigProcessor::NamRigProcessor()
     for (int s = 1; s <= nam_rig::ModBlock::kSlots; ++s)
         apvts.addParameterListener("mod" + juce::String(s) + "Type", this);
     apvts.addParameterListener("postType", this); // the post block resets too
+    // Drive Auto Gain: any drive/amp/mode change invalidates the measured makeup.
+    for (const auto &id : driveMakeupWatchIds())
+        apvts.addParameterListener(id, this);
 }
 
 NamRigProcessor::~NamRigProcessor()
@@ -622,12 +625,43 @@ NamRigProcessor::~NamRigProcessor()
     for (int s = 1; s <= nam_rig::ModBlock::kSlots; ++s)
         apvts.removeParameterListener("mod" + juce::String(s) + "Type", this);
     apvts.removeParameterListener("postType", this);
+    for (const auto &id : driveMakeupWatchIds())
+        apvts.removeParameterListener(id, this);
+}
+
+// Parameter IDs whose change should re-measure the Drive Auto Gain makeup: every
+// drive-rack control (drv1..3 + all per-type knobs), the rack enable, the toggle
+// itself, plus the amp/mode selection (each amp responds differently, so Dual
+// needs its own makeup per side).
+std::vector<juce::String> NamRigProcessor::driveMakeupWatchIds()
+{
+    std::vector<juce::String> ids;
+    static const char *const sfx[] = {"Type", "On", "bDrive", "bRange", "bModel",
+                                      "oDrive", "oTone", "oLevel", "dDrive", "dTone",
+                                      "dLevel", "fDrive", "fTone", "fLevel", "fGate"};
+    for (int s = 1; s <= nam_rig::DriveBlock::kSlots; ++s)
+        for (auto *x : sfx)
+            ids.push_back("drv" + juce::String(s) + x);
+    ids.push_back("driveOn");
+    ids.push_back("driveAutoGain");
+    ids.push_back("rigMode");
+    ids.push_back("ampOnB");
+    return ids;
 }
 
 void NamRigProcessor::parameterChanged(const juce::String &paramID, float)
 {
     if (mSuppressTypeReset.load())
         return; // a state/preset load is in progress -> keep the saved knobs
+    // Drive Auto Gain: any drive/amp/mode change invalidates the measured makeup.
+    // Flag it and let the async handler debounce the (suspending) re-measure.
+    if (paramID.startsWith("drv") || paramID == "driveOn" ||
+        paramID == "driveAutoGain" || paramID == "rigMode" || paramID == "ampOnB")
+    {
+        mDriveMakeupDirty.store(true);
+        triggerAsyncUpdate();
+        // fall through -- none of these are mod-type params
+    }
     if (paramID == "postType")
     {
         mPendingTypeReset.fetch_or(1 << nam_rig::ModBlock::kSlots); // post = bit kSlots
@@ -646,6 +680,19 @@ void NamRigProcessor::parameterChanged(const juce::String &paramID, float)
 
 void NamRigProcessor::handleAsyncUpdate()
 {
+    // Drive Auto Gain: debounce the re-measure. Each dirtying tags a generation;
+    // callAfterDelay fires 150 ms later and only the LATEST tag actually renders,
+    // so dragging a drive knob re-measures once, after the user settles.
+    if (mDriveMakeupDirty.exchange(false))
+    {
+        const int gen = mDriveMakeupGen.fetch_add(1) + 1;
+        juce::Timer::callAfterDelay(150, [sp = juce::WeakReference<NamRigProcessor>(this), gen] {
+            if (auto *self = sp.get())
+                if (self->mDriveMakeupGen.load() == gen) // no newer change since -> settled
+                    self->refreshDriveMakeup();
+        });
+    }
+
     const int mask = mPendingTypeReset.exchange(0);
     // Reset everything on the slot EXCEPT its Type and On (enable) to defaults.
     static const char *const suffix[] = {"Wave", "Sync", "Rate", "Depth", "Feedback",
@@ -743,6 +790,29 @@ void NamRigProcessor::matchLevels()
     };
     setLevel("rigLevelA", ref / lv.rmsA);
     setLevel("rigLevelB", ref / lv.rmsB);
+}
+
+void NamRigProcessor::refreshDriveMakeup()
+{
+    if (!mChain.isPrepared())
+        return; // nothing to render into yet (load can fire before prepareToPlay)
+    const bool on = apvts.getRawParameterValue("driveAutoGain")->load() >= 0.5f;
+    if (!on)
+    {
+        mChain.setDriveMakeup(1.0f, 1.0f); // off -> no compensation
+        return;
+    }
+    // Only measure amps that are actually in the path; if a needed amp isn't
+    // loaded yet, keep the current makeup (loadModel re-triggers this on arrival).
+    const int mode = (int)apvts.getRawParameterValue("rigMode")->load();
+    const bool needA = (mode != 1), needB = (mode != 0);
+    if ((needA && !isModelLoaded(0)) || (needB && !isModelLoaded(1)))
+        return;
+
+    suspendProcessing(true);
+    const auto mk = mChain.measureDriveMakeup();
+    mChain.setDriveMakeup(mk.a, mk.b); // store while suspended (audio thread parked)
+    suspendProcessing(false);
 }
 
 int NamRigProcessor::requestedFactorNow(int rig) const
@@ -890,7 +960,11 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         default: break; // Off
         }
     }
-    mChain.drive.setAutoGain(apvts.getRawParameterValue("driveAutoGain")->load() >= 0.5f);
+    // Drive Auto Gain now means per-amp amp-OUTPUT matching (RigChain measures a
+    // makeup so a pedal doesn't change the amp's loudness). The DriveBlock's own
+    // static Drive/Tone makeup stays OFF -- the measured makeup subsumes it.
+    mChain.drive.setAutoGain(false);
+    mChain.setDriveAutoGain(apvts.getRawParameterValue("driveAutoGain")->load() >= 0.5f);
     mChain.drive.setBypassed(apvts.getRawParameterValue("driveOn")->load() < 0.5f
                              || !mChain.drive.anyActive());
     // Graphic EQ band gains (Rig A; zero latency; chain bypass via eqOn is safe).
@@ -1153,6 +1227,10 @@ void NamRigProcessor::loadModel(const juce::File &namFile, int rig)
     mModelLoaded[rig].store(true);
 
     updateLatency(); // available factors may have changed
+    // A new amp responds differently to the drive, so re-measure the auto-gain
+    // makeup (debounced; no-op when the toggle is off).
+    mDriveMakeupDirty.store(true);
+    triggerAsyncUpdate();
 }
 
 void NamRigProcessor::loadIr(const juce::File &irFile, int rig)

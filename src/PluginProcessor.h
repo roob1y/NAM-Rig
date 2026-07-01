@@ -3,6 +3,7 @@
 #include <juce_dsp/juce_dsp.h>
 #include <atomic>
 #include <memory>
+#include <vector>
 
 #include "rig/RigChain.h"
 
@@ -107,6 +108,13 @@ public:
     // louder rig is brought down, no boost. Suspends processing; message thread.
     void matchLevels();
 
+    // Drive Auto Gain: when on, measure a per-amp makeup so engaging the drive
+    // rack (at any pedal output level) doesn't change the amp capture's loudness,
+    // independently for A and B in Dual mode. Recomputed off the audio thread
+    // (debounced) whenever the drive/amp/mode changes. Suspends processing while
+    // it renders the probe; message thread. Off -> makeup resets to unity.
+    void refreshDriveMakeup();
+
     // --- Input calibration / output normalization (NAM-AA parity; CalNorm.h) ---
     // Per-rig: each rig is calibrated/normalized from its OWN model metadata,
     // applied as that rig's voice in/out trims. The enable toggles are global;
@@ -170,7 +178,13 @@ public:
     void endStateLoadDeferred()
     {
         juce::MessageManager::callAsync([sp = juce::WeakReference<NamRigProcessor>(this)] {
-            if (auto *self = sp.get()) self->mSuppressTypeReset.store(false);
+            if (auto *self = sp.get())
+            {
+                self->mSuppressTypeReset.store(false);
+                // The loaded preset may carry new drive/amp settings -> re-measure.
+                self->mDriveMakeupDirty.store(true);
+                self->triggerAsyncUpdate();
+            }
         });
     }
 
@@ -183,8 +197,14 @@ private:
 
     std::atomic<bool> mSuppressTypeReset{false};
     std::atomic<int> mPendingTypeReset{0}; // bitmask of slots awaiting a knob reset
+    // Drive Auto Gain recompute: a drive/amp/mode change sets the dirty flag; the
+    // async handler schedules a debounced measure tagged with mDriveMakeupGen, so
+    // only the latest change (after the user settles) actually re-renders.
+    std::atomic<bool> mDriveMakeupDirty{false};
+    std::atomic<int> mDriveMakeupGen{0};
     void updateLatency();
     int requestedFactorNow(int rig) const; // per-rig oversample param + offline bump
+    static std::vector<juce::String> driveMakeupWatchIds(); // params that invalidate the drive makeup
 
     // Per-rig block access (rig 0 = A, 1 = B).
     nam_rig::AmpBlock &ampFor(int rig) { return rig ? mChain.ampB : mChain.amp; }

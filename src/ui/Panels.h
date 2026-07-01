@@ -1893,6 +1893,9 @@ public:
         }
         mAutoGain.getProperties().set("pill", true);
         mAutoGain.setButtonText("Auto Gain");
+        mAutoGain.setTooltip("Auto Gain: keeps the amp's output volume the same whether a "
+                             "drive pedal is on or off, no matter the pedal's output level. "
+                             "Measured per amp, so each amp holds its own level in Dual mode.");
         addAndMakeVisible(mAutoGain);
         mAutoGainAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             apvts, "driveAutoGain", mAutoGain);

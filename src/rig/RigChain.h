@@ -106,6 +106,16 @@ public:
     void setOutTrimA(float g) { mOutTrimA = g; }
     void setOutTrimB(float g) { mOutTrimB = g; }
 
+    // ---- drive auto-gain (per amp) ----
+    // When on, a measured per-amp makeup (see measureDriveMakeup) is applied at
+    // each amp's OUTPUT so engaging the drive rack -- at any pedal output level --
+    // doesn't change that amp's loudness. Independent for A and B in Dual mode.
+    void setDriveAutoGain(bool on) { mDriveAgc = on; }
+    bool driveAutoGain() const { return mDriveAgc; }
+    void setDriveMakeup(float a, float b) { mDriveMakeupA = a; mDriveMakeupB = b; }
+    float driveMakeupA() const { return mDriveMakeupA; }
+    float driveMakeupB() const { return mDriveMakeupB; }
+
     // Apply a measured A/B lag (samples; >0 => B later than A, so delay A):
     // delays the earlier voice so the two line up. Manual nudge uses setAlignA/B.
     void setAlignmentLag(double lagSamples)
@@ -210,6 +220,33 @@ public:
         return r;
     }
 
+    // Per-amp DRIVE auto-gain makeup. For each amp, render a pink probe through
+    //   clean  = amp(probe)            (drive rack bypassed)
+    //   driven = amp(drive(probe))     (through the shared drive rack)
+    // and return the gain that makes the DRIVEN amp output as loud as the CLEAN
+    // one -- so switching a pedal on (at ANY output-volume setting) leaves that
+    // amp's loudness unchanged, only its tone/gain character. EQ + cab are linear
+    // and identical in both paths, so they cancel in the ratio: we measure at the
+    // amp output and skip the cab entirely (no async convolver settle -> fast
+    // enough to re-run whenever the drive changes). Per amp, so Dual holds A and B
+    // independently. Loudness = the same guitar-weighted band RMS as measureLevels.
+    // Same threading contract as measureLevels/measureAlignment (caller suspends).
+    struct DriveMakeup { float a = 1.0f, b = 1.0f; };
+    DriveMakeup measureDriveMakeup()
+    {
+        if (drive.isBypassed())
+            return {}; // no drive in the path -> unity makeup (nothing to match)
+        const int n = 8192;
+        reset();
+        std::vector<float> probe((size_t)n);
+        makePinkProbe(probe.data(), n, 0.15f);
+        DriveMakeup mk;
+        mk.a = (mMode != SoloB) ? ampDriveMakeup(0, probe.data(), n) : 1.0f;
+        mk.b = (mMode != SoloA) ? ampDriveMakeup(1, probe.data(), n) : 1.0f;
+        reset();
+        return mk;
+    }
+
     // Full chain on a DAW-rate buffer (1 = mono fold, 2 = stereo).
     void process(juce::AudioBuffer<float> &buffer)
     {
@@ -259,6 +296,9 @@ public:
             if (!eq.isBypassed())  { eq.process(vA, numSamples);  heal(eq, vA, numSamples); }
             if (!cab.isBypassed()) { cab.process(vA, numSamples); heal(cab, vA, numSamples); }
             if (mOutTrimA != 1.0f) scale(vA, numSamples, mOutTrimA);
+            // Per-amp drive auto-gain: hold this amp's loudness constant vs no drive.
+            if (mDriveAgc && !drive.isBypassed() && mDriveMakeupA != 1.0f)
+                scale(vA, numSamples, mDriveMakeupA);
             alignVoice(mFdlA, vA, numSamples, compA + mAlignA, mPolA);
         }
         if (runB)
@@ -268,6 +308,8 @@ public:
             if (!eqB.isBypassed())  { eqB.process(vB, numSamples);  heal(eqB, vB, numSamples); }
             if (!cabB.isBypassed()) { cabB.process(vB, numSamples); heal(cabB, vB, numSamples); }
             if (mOutTrimB != 1.0f) scale(vB, numSamples, mOutTrimB);
+            if (mDriveAgc && !drive.isBypassed() && mDriveMakeupB != 1.0f)
+                scale(vB, numSamples, mDriveMakeupB);
             alignVoice(mFdlB, vB, numSamples, compB + mAlignB, mPolB);
         }
 
@@ -511,6 +553,71 @@ private:
         }
     }
 
+    // One amp's drive makeup = clean-output loudness / driven-output loudness.
+    // Renders the probe through the amp twice (clean, then drive->amp), matching
+    // the live signal order (shared drive rack -> per-rig in-trim -> amp). Blocks
+    // are reset around each render; the caller has already suspended the audio
+    // thread. Clamped to +-12 dB so a pathological measurement can't run away.
+    float ampDriveMakeup(int rig, const float *probe, int n)
+    {
+        AmpBlock &a = rig ? ampB : amp;
+        const float inTrim = rig ? mInTrimB : mInTrimA;
+        std::vector<float> clean((size_t)n), driven((size_t)n);
+        std::memcpy(clean.data(), probe, (size_t)n * sizeof(float));
+        std::memcpy(driven.data(), probe, (size_t)n * sizeof(float));
+
+        drive.reset(); a.reset();
+        renderAmp(a, driven.data(), n, inTrim, true);  // drive rack -> in-trim -> amp
+        drive.reset(); a.reset();
+        renderAmp(a, clean.data(), n, inTrim, false);  // in-trim -> amp (drive bypassed)
+        drive.reset(); a.reset();
+
+        bandLimit(clean.data(), n);   // same guitar-weighted loudness as measureLevels
+        bandLimit(driven.data(), n);
+        const double rc = voiceRms(clean.data(), n);
+        const double rd = voiceRms(driven.data(), n);
+        if (rd < 1.0e-9) return 1.0f; // driven output silent -> nothing to match
+        return juce::jlimit(0.25f, 4.0f, (float)(rc / rd));
+    }
+
+    // Render a probe through (optionally the shared drive rack, then) the per-rig
+    // in-trim and amp, in place, chunked to the prepared block size. Block on/off
+    // flags are ignored so the measurement reflects the configured drive+amp.
+    void renderAmp(AmpBlock &a, float *buf, int n, float inTrim, bool withDrive)
+    {
+        const int chunk = juce::jmax(1, juce::jmin(mMaxBlock, n));
+        for (int pos = 0; pos < n; pos += chunk)
+        {
+            const int m = juce::jmin(chunk, n - pos);
+            if (withDrive) drive.process(buf + pos, m);
+            if (inTrim != 1.0f) scale(buf + pos, m, inTrim);
+            a.process(buf + pos, m);
+        }
+    }
+
+    // Deterministic pink (equal-energy-per-octave) probe normalized to ~targetRms
+    // -- guitar-like spectral balance so the amp distorts it like real playing.
+    // Same Paul Kellett economy filter measureLevels uses.
+    static void makePinkProbe(float *out, int n, float targetRms)
+    {
+        std::uint32_t s = 0x9e3779b9u;
+        float k0 = 0.0f, k1 = 0.0f, k2 = 0.0f;
+        double sq = 0.0;
+        for (int i = 0; i < n; ++i)
+        {
+            s = s * 1103515245u + 12345u;
+            const float w = (float)((int)((s >> 16) & 0x7fff) - 16384) / 16384.0f;
+            k0 = 0.99765f * k0 + w * 0.0990460f;
+            k1 = 0.96300f * k1 + w * 0.2965164f;
+            k2 = 0.57000f * k2 + w * 1.0526913f;
+            const float p = k0 + k1 + k2 + w * 0.1848f;
+            out[i] = p;
+            sq += (double)p * p;
+        }
+        const float norm = (sq > 0.0) ? (float)((double)targetRms / std::sqrt(sq / (double)n)) : 1.0f;
+        for (int i = 0; i < n; ++i) out[i] *= norm;
+    }
+
     // RMS of a rendered voice, skipping the amp's startup ramp.
     static double voiceRms(const float *x, int n)
     {
@@ -584,6 +691,8 @@ private:
     float mInTrimA = 1.0f, mInTrimB = 1.0f;
     float mOutTrimA = 1.0f, mOutTrimB = 1.0f;
     double mAlignA = 0.0, mAlignB = 0.0; // fractional align delay (samples)
+    bool mDriveAgc = false;                       // drive auto-gain (amp-output match) on/off
+    float mDriveMakeupA = 1.0f, mDriveMakeupB = 1.0f; // per-amp measured makeup gains
     FracDelayLine mFdlA, mFdlB;
     std::vector<float> mVoiceA, mVoiceB;
     int mMaxBlock = 512; // prepared block size (probe render chunk size)
