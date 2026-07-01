@@ -522,19 +522,23 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     // are global; Swell is Bloom-only; Pitch is Shimmer-only. Appended last.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("revWidth", 1), "Reverb Width",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f, knob10(0.0f, 1.0f)));
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f, knob10(0.0f, 1.0f)));   // display 1=full mono .. 10=full stereo, sweeps through
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("revSwell", 1), "Reverb Swell",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.4f, knob10(0.0f, 1.0f)));
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("revPitch", 1), "Reverb Shimmer Pitch",
         juce::StringArray{"Octave", "+2 Oct", "Fifth+Oct"}, 0));
-    // Plate Input Filter (studio-style wet low-cut at the plate amp). Plate-only
-    // in the UI via ReverbBlock::inputFilterExposed; default 95 Hz = prior hardwired
-    // Plate low-cut, so existing Plate sessions are unchanged. Appended last.
+    // Reverb Low Cut (HPF) + High Cut (LPF) on the wet — exposed on the IR characters
+    // (Plate/Room) via ReverbBlock::cutsExposed. Defaults: 95 Hz low-cut (= prior plate
+    // value) and 20 kHz high-cut (off), so existing Plate sessions are unchanged. Appended last.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("revInputFilter", 1), "Reverb Input Filter",
-        juce::NormalisableRange<float>(20.0f, 400.0f, 1.0f, 0.5f), 95.0f,
+        juce::ParameterID("revLowCut", 1), "Reverb Low Cut",
+        juce::NormalisableRange<float>(20.0f, 1000.0f, 1.0f, 0.5f), 95.0f,
+        juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("revHighCut", 1), "Reverb High Cut",
+        juce::NormalisableRange<float>(1000.0f, 20000.0f, 1.0f, 0.5f), 20000.0f,
         juce::AudioParameterFloatAttributes().withLabel("Hz")));
 
     // --- Per-character reverb knobs (independent state + own ranges, like the drive
@@ -549,9 +553,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
             const auto dr = RB::decayRange(T);
             params.push_back(std::make_unique<juce::AudioParameterFloat>(
                 juce::ParameterID(juce::String(RB::paramId("Decay", t)), 1), nm + " Decay",
-                (T == RB::kPlate ? juce::NormalisableRange<float>(dr.lo, dr.hi, (dr.hi - dr.lo) / 4.0f)   // 5 discrete detents -> the 5 real plate IRs
-                                 : juce::NormalisableRange<float>(dr.lo, dr.hi, 0.01f, 0.5f)),
-                (T == RB::kPlate ? (dr.lo + (dr.hi - dr.lo) / 4.0f) : (T == RB::kRoom ? 1.5f : RB::rangeDefault(dr))),
+                juce::NormalisableRange<float>(dr.lo, dr.hi, 0.01f, 0.5f),   // continuous Decay for all characters (plate now sweeps its reshaped-IR bank)
+                (T == RB::kRoom || T == RB::kPlate ? 1.5f : RB::rangeDefault(dr)),
                 juce::AudioParameterFloatAttributes().withLabel("s")));
             params.push_back(std::make_unique<juce::AudioParameterFloat>(
                 juce::ParameterID(juce::String(RB::paramId("Tone", t)), 1), nm + " Tone",
@@ -1059,7 +1062,8 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.reverb.setWidth(apvts.getRawParameterValue("revWidth")->load());
     mChain.reverb.setSwell(apvts.getRawParameterValue("revSwell")->load());
     mChain.reverb.setPitch((int)apvts.getRawParameterValue("revPitch")->load());
-    mChain.reverb.setInputFilterHz(apvts.getRawParameterValue("revInputFilter")->load());
+    mChain.reverb.setLowCutHz(apvts.getRawParameterValue("revLowCut")->load());
+    mChain.reverb.setHighCutHz(apvts.getRawParameterValue("revHighCut")->load());
     // Reverb on/off: user param, unless Space Tape's mode dial overrides it.
     const bool userReverbOff = apvts.getRawParameterValue("reverbOn")->load() < 0.5f;
     mChain.reverb.setBypassed(stReverbOverride == 1 ? false

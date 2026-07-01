@@ -1275,6 +1275,7 @@ public:
         float makeup = 1.0f;   // auto level
         float duckAmt = 0.3f;  // 0..1 ducking depth
         float width = 1.0f;    // 0 = mono, 1 = full
+        float lpfHz = 20000.0f;// wet high-cut (low-pass) corner; >=~19k = off
         float swellRate = 0.0f;// >0 = Bloom slow attack (per-sample rise)
         bool freeze = false;
     };
@@ -1291,7 +1292,7 @@ public:
 
     void reset()
     {
-        mHpL = mHpR = 0.0f; mDuckEnv = 0.0f; mSwell = 0.0f;
+        mHpL = mHpR = 0.0f; mLpL = mLpR = 0.0f; mDuckEnv = 0.0f; mSwell = 0.0f;
         mMixZ = 0.0f; mMakeupZ = 1.0f;
     }
 
@@ -1302,6 +1303,8 @@ public:
                  int numSamples, bool stereo, const Config &c)
     {
         const float hpK = reverb_detail::onePole(c.hpfHz, mFs);
+        const bool useLp = c.lpfHz < 19000.0f;
+        const float lpK = reverb_detail::onePole(c.lpfHz, mFs);
         for (int n = 0; n < numSamples; ++n)
         {
             mMixZ += mSmoothK * (c.mix - mMixZ);
@@ -1313,6 +1316,9 @@ public:
             // wet low-cut (one-pole high-pass), per channel
             mHpL += hpK * (wL - mHpL); wL -= mHpL;
             mHpR += hpK * (wR - mHpR); wR -= mHpR;
+
+            // wet high-cut (one-pole low-pass), per channel
+            if (useLp) { mLpL += lpK * (wL - mLpL); wL = mLpL; mLpR += lpK * (wR - mLpR); wR = mLpR; }
 
             // auto-makeup
             wL *= mMakeupZ; wR *= mMakeupZ;
@@ -1352,13 +1358,13 @@ public:
             if (stereo)
                 right[n] = gDry * dryR[n] + gWet * wR;
         }
-        reverb_detail::flush(mHpL); reverb_detail::flush(mHpR); reverb_detail::flush(mDuckEnv);
+        reverb_detail::flush(mHpL); reverb_detail::flush(mHpR); reverb_detail::flush(mLpL); reverb_detail::flush(mLpR); reverb_detail::flush(mDuckEnv);
     }
 
 private:
     double mFs = 48000.0;
     float mSmoothK = 0.01f, mDuckAtt = 0.1f, mDuckRel = 0.001f, mSwellRel = 0.001f;
-    float mHpL = 0.0f, mHpR = 0.0f, mDuckEnv = 0.0f, mSwell = 0.0f;
+    float mHpL = 0.0f, mHpR = 0.0f, mLpL = 0.0f, mLpR = 0.0f, mDuckEnv = 0.0f, mSwell = 0.0f;
     float mMixZ = 0.0f, mMakeupZ = 1.0f;
 };
 
@@ -1738,7 +1744,7 @@ private:
 class ReverbBlock : public StereoBlock
 {
 public:
-    enum Type { kRoom = 0, kPlate, kHall, kSpring, kShimmer, kAmbience, kBloom }; // Room+Plate shipped first; rest hidden via kNumShipped
+    enum Type { kRoom = 0, kPlate, kSpring, kHall, kShimmer, kAmbience, kBloom }; // Room+Plate+Spring shipped first; rest hidden via kNumShipped
     static constexpr int kNumTypes = 7;
 
     // ---- shipped set (v1 commercial release) ----------------------------------
@@ -1748,7 +1754,7 @@ public:
     // LAST in the enum, so the shipped set is exactly [0, kNumShipped), keeping
     // automation indices of shipped characters stable. UI + the revType choice param
     // build their lists from shipped()/kNumShipped — this is the single source of truth.
-    static constexpr int kNumShipped = 2;
+    static constexpr int kNumShipped = 3;
     static bool shipped(Type t) { return (int)t >= 0 && (int)t < kNumShipped; }
 
     static constexpr int kNumLines = FdnReverb::kNumLines;
@@ -1760,23 +1766,23 @@ public:
     static std::string paramId(const char *knob, int t) { return std::string("rev") + knob + typeName(t); }
     static const char *typeName(int t)
     {
-        static const char *n[kNumTypes] = {"Room", "Plate", "Hall", "Spring", "Shimmer", "Ambience", "Bloom"};
+        static const char *n[kNumTypes] = {"Room", "Plate", "Spring", "Hall", "Shimmer", "Ambience", "Bloom"};
         return (t >= 0 && t < kNumTypes) ? n[t] : "Room";
     }
     static bool usesFdn(Type t) { return t == kRoom || t == kHall || t == kAmbience || t == kBloom; }
 
     // ---- voicing introspection (UI + tests) ----
-    static bool sizeExposed(Type t) { return t == kHall || t == kRoom; } // Room: scales the room size
+    static bool sizeExposed(Type t) { return t == kHall; } // Hall only; Room is convolution (Size can't resize an IR) and Decay covers length
     static bool toneExposed(Type) { return true; }
-    static bool predelayExposed(Type t) { return t == kPlate || t == kBloom || t == kRoom; } // Hall folds it into Size; Shimmer/Room/Spring/Ambience hardwire
-    static bool modExposed(Type t) { return t == kHall || t == kPlate || t == kBloom || t == kShimmer || t == kRoom; } // Ambience hardwires
+    static bool predelayExposed(Type t) { return t == kPlate || t == kBloom || t == kRoom || t == kSpring; } // Hall folds it into Size; Shimmer/Ambience hardwire
+    static bool modExposed(Type t) { return t == kHall || t == kBloom || t == kShimmer; } // Plate/Room (static IR) + Ambience have no mod knob
     static bool shimmerExposed(Type t) { return t == kShimmer; }
     static bool pitchExposed(Type t) { return t == kShimmer; }
-    static bool tensionExposed(Type t) { return t == kSpring; }
-    static bool boingExposed(Type t) { return t == kSpring; } // dispersion/sproing amount, Spring only
+    static bool tensionExposed(Type) { return false; } // Spring is IR-based now (no tension control)
+    static bool boingExposed(Type) { return false; } // Spring is IR-based now (no boing control)
     static bool swellExposed(Type t) { return t == kBloom; }
-    static bool inputFilterExposed(Type t) { return t == kPlate; } // studio-style wet low-cut on the plate amp
-    static bool freezeExposed(Type t) { return t == kHall || t == kShimmer || t == kBloom; } // infinite-sustain pad only makes sense on the lush/evolving characters
+    static bool cutsExposed(Type t) { return t == kPlate || t == kRoom || t == kSpring; } // Low Cut (HPF) + High Cut (LPF) on the IR characters (Plate/Room/Spring)
+    static bool freezeExposed(Type) { return false; } // Freeze removed from the reverb section (was Hall/Shimmer/Bloom); engines keep the code path inert
     static const char *toneCaption(Type) { return "Tone"; }
 
     // ---- per-character "sweet spot" knob windows ------------------------------
@@ -1798,7 +1804,7 @@ public:
         case kRoom:     return {0.2f, 1.5f}; // derived-conv: capped at the matched length (no synthetic stretch; hybrid longer-tail is backlog)
         case kHall:     return {0.8f, 6.0f};
         case kPlate:    return {0.5f, 3.45f};   // derived-conv: capped at the matched length (no synthetic stretch; hybrid longer-tail is backlog)
-        case kSpring:   return {1.0f, 9.0f}; // long studio-spring tails (rings ~8s)
+        case kSpring:   return {1.0f, 5.0f}; // IR spring (BX20) decay bank
         case kShimmer:  return {1.5f, 8.0f};
         case kAmbience: return {0.3f, 1.2f};
         case kBloom:    return {2.5f, 8.0f};
@@ -1824,6 +1830,7 @@ public:
         case kPlate: return {0.0f,  80.0f};
         case kBloom: return {0.0f, 160.0f};
         case kRoom:  return {0.0f,  60.0f};
+        case kSpring:return {0.0f,  80.0f};
         default:     return {0.0f, kPreMax};
         }
     }
@@ -1866,7 +1873,14 @@ public:
         mPlateIr[2].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::plate_ir_3_wav, (size_t)BinaryData::plate_ir_3_wavSize);
         mPlateIr[3].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::plate_ir_4_wav, (size_t)BinaryData::plate_ir_4_wavSize);
         mPlateIr[4].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::plate_ir_5_wav, (size_t)BinaryData::plate_ir_5_wavSize);
-        mPlateXfadeLen = std::max(1, (int)(0.15 * ctx.sampleRate)); mPlateIrInit = false;
+        mPlateIr[5].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::plate_ir_6_wav, (size_t)BinaryData::plate_ir_6_wavSize);
+        mSpringIr[0].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_ir_1_wav, (size_t)BinaryData::spring_ir_1_wavSize);
+        mSpringIr[1].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_ir_2_wav, (size_t)BinaryData::spring_ir_2_wavSize);
+        mSpringIr[2].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_ir_3_wav, (size_t)BinaryData::spring_ir_3_wavSize);
+        mSpringIr[3].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_ir_4_wav, (size_t)BinaryData::spring_ir_4_wavSize);
+        mSpringIr[4].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_ir_5_wav, (size_t)BinaryData::spring_ir_5_wavSize);
+        mSpringIr[5].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_ir_6_wav, (size_t)BinaryData::spring_ir_6_wavSize);
+        { const int r = (int)(0.001 * 90.0 * ctx.sampleRate) + std::max(16, ctx.maxBlockSize) + 4; mPpL.assign((size_t)r, 0.0f); mPpR.assign((size_t)r, 0.0f); mPpRing = r; mPpW = 0; } // plate IR-path pre-delay ring (predelayRange max 80ms)
 #endif
         mSpring.prepare(ctx.sampleRate);
         mShimmer.prepare(ctx.sampleRate);
@@ -1887,6 +1901,9 @@ public:
         mPlateEarly.reset();
         std::fill(mEpL.begin(), mEpL.end(), 0.0f); std::fill(mEpR.begin(), mEpR.end(), 0.0f); mEpW = 0;
 #endif
+#ifdef NAM_DERIVED_CONV
+        std::fill(mPpL.begin(), mPpL.end(), 0.0f); std::fill(mPpR.begin(), mPpR.end(), 0.0f); mPpW = 0; // IR-path pre-delay ring
+#endif
         mMixer.reset();
         mMixer.snapMix(mPrepared ? effMix() : 0.0f);
     }
@@ -1905,8 +1922,9 @@ public:
     void setShimmer(float s) { mShimmerAmt = std::clamp(s, 0.0f, 1.0f); if (mPrepared) pushParams(); }
     void setTension(float t) { mTension = std::clamp(t, 0.0f, 1.0f); if (mPrepared) pushParams(); }
     void setBoing(float b) { mBoing = std::clamp(b, 0.0f, 1.0f); if (mPrepared) pushParams(); } // Spring dispersion/sproing
-    void setWidth(float w) { mWidth = std::clamp(w, 0.0f, 1.0f); }
-    void setInputFilterHz(float hz) { mInputFilterHz = std::clamp(hz, 20.0f, 400.0f); } // Plate Input Filter (wet low-cut corner)
+    void setWidth(float w) { mWidth = std::clamp(w, 0.0f, 1.0f); } // 0=full mono .. 1=full stereo (M/S width)
+    void setLowCutHz(float hz)  { mLowCutHz  = std::clamp(hz, 20.0f, 1000.0f); }    // wet Low Cut (HPF)
+    void setHighCutHz(float hz) { mHighCutHz = std::clamp(hz, 1000.0f, 20000.0f); } // wet High Cut (LPF)
     void setSwell(float s) { mSwell = std::clamp(s, 0.0f, 1.0f); }
     void setPitch(int p) { mPitch = std::clamp(p, 0, 2); if (mPrepared) pushParams(); }
     void setFreeze(bool f) { mFreeze = f && freezeExposed(mType); if (mPrepared) pushParams(); } // Freeze is gated to Hall/Shimmer/Bloom; inert on other characters even if the param/MIDI is on
@@ -1926,11 +1944,25 @@ public:
         float blend, fb;
         if (mT60 >= matchedSec) { blend = 1.0f; fb = std::clamp((mT60 - matchedSec) / std::max(0.01f, dr.hi - matchedSec), 0.0f, 1.0f) * 0.9f; }
         else                    { blend = std::clamp((mT60 - dr.lo) / std::max(0.01f, matchedSec - dr.lo), 0.0f, 1.0f); fb = 0.0f; }
-        conv.renderReplace(mDryL.data(), mDryR.data(), left, right, n);          // matched conv = wet
+        // Pre-Delay: delay the dry feeding the convolver(s) — a real control on the IR path. The ring runs
+        // every block (pre==0 -> passthrough) so moving the knob never clicks. Shared with the plate path.
+        const float *exL = mDryL.data(), *exR = mDryR.data();
+        if (mPpRing > 1) {
+            const int pre = std::clamp((int)std::lround((double)mPredelayMs * 0.001 * mFsRB), 0, mPpRing - 1);
+            if ((int)mPpoL.size() < n) { mPpoL.assign((size_t)n, 0.0f); mPpoR.assign((size_t)n, 0.0f); }
+            for (int i = 0; i < n; ++i) {
+                mPpL[(size_t)mPpW] = mDryL[(size_t)i]; mPpR[(size_t)mPpW] = mDryR[(size_t)i];
+                int rd = mPpW - pre; if (rd < 0) rd += mPpRing;
+                mPpoL[(size_t)i] = mPpL[(size_t)rd]; mPpoR[(size_t)i] = mPpR[(size_t)rd];
+                if (++mPpW >= mPpRing) mPpW = 0;
+            }
+            exL = mPpoL.data(); exR = mPpoR.data();
+        }
+        conv.renderReplace(exL, exR, left, right, n);          // matched conv = wet
         const bool stereo = (left != right);
         if (blend < 0.999f) {                                                    // shorter: crossfade to the short IR
             if ((int)mCScratchL.size() < n) { mCScratchL.assign((size_t)n, 0.0f); mCScratchR.assign((size_t)n, 0.0f); }
-            convShort.renderReplace(mDryL.data(), mDryR.data(), mCScratchL.data(), mCScratchR.data(), n);
+            convShort.renderReplace(exL, exR, mCScratchL.data(), mCScratchR.data(), n);
             for (int i = 0; i < n; ++i) { left[i] = blend * left[i] + (1.0f - blend) * mCScratchL[(size_t)i];
                                           if (stereo) right[i] = blend * right[i] + (1.0f - blend) * mCScratchR[(size_t)i]; }
         }
@@ -1947,34 +1979,94 @@ public:
         }
     }
 
-    // 5-WAY PLATE: the Decay knob picks one of the five REAL plate captures (no stretch — different
-    // damper lengths captured natively). Equal-power crossfade (~150 ms) on a selection change so it
-    // never clicks. Only the selected IR is convolved (lean CPU); the previous one runs only during the
-    // brief crossfade. Post-conv Tone shelf matches the derived path (identity at Tone 0.5).
+    // CONTINUOUS SPRING DECAY: BX20 IR bank (6 decay-reshaped captures) + calibrated crossfade + pre-delay,
+    // exactly like the plate. Post-conv Tone shelf = identity at Tone 0.5.
+    void processSpringIr(float *left, float *right, int n)
+    {
+        const Range dr = decayRange(kSpring);
+        const float sec = std::clamp(mT60, dr.lo, dr.hi);
+        static const float kSpringPos[16] = {0.0000f, 0.2846f, 0.9408f, 1.1209f, 1.7516f, 2.0145f, 2.2968f, 2.8703f, 3.0214f, 3.2614f, 3.8139f, 3.9832f, 4.1027f, 4.5292f, 4.9056f, 5.0000f};
+        const float u = (sec - dr.lo) / std::max(1e-3f, dr.hi - dr.lo) * 15.0f;
+        const int ui = std::clamp((int)u, 0, 14);
+        const float posf = kSpringPos[ui] + (u - (float)ui) * (kSpringPos[ui + 1] - kSpringPos[ui]);
+        const int idx = std::clamp((int)posf, 0, 5);
+        const int idxN = std::min(idx + 1, 5);
+        const float frac = std::clamp(posf - (float)idx, 0.0f, 1.0f);
+        const float gA = std::sqrt(1.0f - frac), gB = std::sqrt(frac);
+        const float *exL = mDryL.data(), *exR = mDryR.data();
+        if (mPpRing > 1) {
+            const int pre = std::clamp((int)std::lround((double)mPredelayMs * 0.001 * mFsRB), 0, mPpRing - 1);
+            if ((int)mPpoL.size() < n) { mPpoL.assign((size_t)n, 0.0f); mPpoR.assign((size_t)n, 0.0f); }
+            for (int i = 0; i < n; ++i) {
+                mPpL[(size_t)mPpW] = mDryL[(size_t)i]; mPpR[(size_t)mPpW] = mDryR[(size_t)i];
+                int rd = mPpW - pre; if (rd < 0) rd += mPpRing;
+                mPpoL[(size_t)i] = mPpL[(size_t)rd]; mPpoR[(size_t)i] = mPpR[(size_t)rd];
+                if (++mPpW >= mPpRing) mPpW = 0;
+            }
+            exL = mPpoL.data(); exR = mPpoR.data();
+        }
+        const bool stereo = (left != right);
+        mSpringIr[(size_t)idx].renderReplace(exL, exR, left, right, n);
+        if (frac > 1e-4f && idxN != idx) {
+            if ((int)mCScratchL.size() < n) { mCScratchL.assign((size_t)n, 0.0f); mCScratchR.assign((size_t)n, 0.0f); }
+            mSpringIr[(size_t)idxN].renderReplace(exL, exR, mCScratchL.data(), mCScratchR.data(), n);
+            for (int i = 0; i < n; ++i) {
+                left[i] = gA * left[i] + gB * mCScratchL[(size_t)i];
+                if (stereo) right[i] = gA * right[i] + gB * mCScratchR[(size_t)i];
+            }
+        }
+        const Range tr = dampRange(kSpring);
+        const float tone01 = (float)((mDampHz - tr.lo) / std::max(1.0f, tr.hi - tr.lo));
+        const float g = (tone01 - 0.5f) * 16.0f;
+        if (std::abs(g) > 0.01f) {
+            if (mDampHz != mDerToneHz) { mDerToneL = Biquad::highshelf(mFsRB, 2500.0, (double)g, 0.7); mDerToneR = mDerToneL; mDerToneHz = mDampHz; }
+            for (int i = 0; i < n; ++i) { left[i] = mDerToneL.processSample(left[i]); if (stereo) right[i] = mDerToneR.processSample(right[i]); }
+        }
+    }
+
+    // CONTINUOUS PLATE DECAY: the Decay knob (true seconds, decayRange) sweeps smoothly across a bank of
+    // 6 decay-RESHAPED versions of ONE plate capture (identical character throughout — only the tail
+    // length changes, early loudness matched). A calibrated knob->position table compensates the
+    // crossfade-of-exponentials so the knob reads ~true seconds (<=4% T60 error, monotonic, no steps).
+    // Pre-Delay delays the dry feeding the convolver. Post-conv Tone shelf = identity at Tone 0.5.
     void processPlateIr(float *left, float *right, int n)
     {
         const Range dr = decayRange(kPlate);
-        const float x01 = std::clamp((mT60 - dr.lo) / std::max(0.01f, dr.hi - dr.lo), 0.0f, 1.0f);
-        const int idx = std::clamp((int)(x01 * 5.0f), 0, 4);
-        if (!mPlateIrInit) { mPlateIrIdx = mPlatePrevIdx = idx; mPlateIrInit = true; mPlateXfade = 0.0f; }
-        else if (idx != mPlateIrIdx) { mPlatePrevIdx = mPlateIrIdx; mPlateIrIdx = idx; mPlateXfade = 1.0f; }
+        const float sec = std::clamp(mT60, dr.lo, dr.hi);
+        // knob seconds -> continuous bank position 0..5 (calibrated against the actual crossfade output)
+        static const float kPlatePos[16] = {0.0000f, 0.5041f, 1.0256f, 1.4456f, 1.9866f, 2.1862f, 2.8012f, 2.9944f, 3.1342f, 3.6282f, 3.9417f, 4.0451f, 4.2261f, 4.6120f, 4.9151f, 5.0000f};
+        const float u = (sec - dr.lo) / std::max(1e-3f, dr.hi - dr.lo) * 15.0f;
+        const int ui = std::clamp((int)u, 0, 14);
+        const float posf = kPlatePos[ui] + (u - (float)ui) * (kPlatePos[ui + 1] - kPlatePos[ui]);
+        const int idx = std::clamp((int)posf, 0, 5);
+        const int idxN = std::min(idx + 1, 5);
+        const float frac = std::clamp(posf - (float)idx, 0.0f, 1.0f);
+        const float gA = std::sqrt(1.0f - frac), gB = std::sqrt(frac);
+
+        // Pre-Delay: delay the dry going into the convolver (a real, audible control on the IR path).
+        // The ring runs every block (pre==0 -> passthrough) so moving the knob never clicks.
+        const float *exL = mDryL.data(), *exR = mDryR.data();
+        if (mPpRing > 1) {
+            const int pre = std::clamp((int)std::lround((double)mPredelayMs * 0.001 * mFsRB), 0, mPpRing - 1);
+            if ((int)mPpoL.size() < n) { mPpoL.assign((size_t)n, 0.0f); mPpoR.assign((size_t)n, 0.0f); }
+            for (int i = 0; i < n; ++i) {
+                mPpL[(size_t)mPpW] = mDryL[(size_t)i]; mPpR[(size_t)mPpW] = mDryR[(size_t)i];
+                int rd = mPpW - pre; if (rd < 0) rd += mPpRing;
+                mPpoL[(size_t)i] = mPpL[(size_t)rd]; mPpoR[(size_t)i] = mPpR[(size_t)rd];
+                if (++mPpW >= mPpRing) mPpW = 0;
+            }
+            exL = mPpoL.data(); exR = mPpoR.data();
+        }
 
         const bool stereo = (left != right);
-        mPlateIr[(size_t)mPlateIrIdx].renderReplace(mDryL.data(), mDryR.data(), left, right, n);
-
-        if (mPlateXfade > 0.0f && mPlatePrevIdx != mPlateIrIdx)
-        {
+        mPlateIr[(size_t)idx].renderReplace(exL, exR, left, right, n);
+        if (frac > 1e-4f && idxN != idx) {                                       // continuous equal-power crossfade to the next bank IR
             if ((int)mCScratchL.size() < n) { mCScratchL.assign((size_t)n, 0.0f); mCScratchR.assign((size_t)n, 0.0f); }
-            mPlateIr[(size_t)mPlatePrevIdx].renderReplace(mDryL.data(), mDryR.data(), mCScratchL.data(), mCScratchR.data(), n);
-            const float step = 1.0f / (float)std::max(1, mPlateXfadeLen);
-            float xf = mPlateXfade;
+            mPlateIr[(size_t)idxN].renderReplace(exL, exR, mCScratchL.data(), mCScratchR.data(), n);
             for (int i = 0; i < n; ++i) {
-                xf = std::max(0.0f, xf - step);
-                const float gNew = std::sqrt(1.0f - xf), gOld = std::sqrt(xf);
-                left[i] = gNew * left[i] + gOld * mCScratchL[(size_t)i];
-                if (stereo) right[i] = gNew * right[i] + gOld * mCScratchR[(size_t)i];
+                left[i] = gA * left[i] + gB * mCScratchL[(size_t)i];
+                if (stereo) right[i] = gA * right[i] + gB * mCScratchR[(size_t)i];
             }
-            mPlateXfade = xf;
         }
 
         const Range tr = dampRange(kPlate);                                      // Tone shelf: default 0.5 -> 0 dB -> identity
@@ -2015,7 +2107,13 @@ public:
 #endif
 #endif
             break;
-        case kSpring: mSpring.process(left, right, numSamples); break;
+        case kSpring:
+#ifdef NAM_DERIVED_CONV
+            processSpringIr(left, right, numSamples); // BX20 IR bank -> continuous Decay
+#else
+            mSpring.process(left, right, numSamples); // algorithmic spring (offline/fallback)
+#endif
+            break;
         case kShimmer: mShimmer.process(left, right, numSamples); break;
         case kRoom:
 #ifdef NAM_DERIVED_CONV
@@ -2030,7 +2128,8 @@ public:
 
         GuardMixer::Config c;
         c.mix = effMix();
-        c.hpfHz = inputFilterExposed(mType) ? mInputFilterHz : hpfForType(mType);
+        c.hpfHz = cutsExposed(mType) ? mLowCutHz : hpfForType(mType);
+        c.lpfHz = cutsExposed(mType) ? mHighCutHz : 20000.0f;
         c.makeup = makeupForType(mType, effT60()) * levelTrim(mType);
         c.duckAmt = duckForType(mType);
         c.width = mWidth;
@@ -2053,6 +2152,9 @@ private:
         case kHall: mHall.reset(); break;
         default: mFdn.reset(); break;
         }
+#ifdef NAM_DERIVED_CONV
+        std::fill(mPpL.begin(), mPpL.end(), 0.0f); std::fill(mPpR.begin(), mPpR.end(), 0.0f); mPpW = 0; // clear IR-path pre-delay ring on character switch
+#endif
     }
 
     float effMix() const { return mMix; }
@@ -2114,7 +2216,7 @@ private:
         case kRoom:     return 0.88f;
         case kHall:     return 1.62f; // dispersion-FDN hall (re-measured at default Tone 3500, balanced wet/dry)
         case kPlate:    return 1.16f;  // v3 multiband plate ~1.6 dB hotter than v2; trimmed to keep the Mix knob level-matched (re-verify by ear)
-        case kSpring:   return 0.138f;  // Spring intrinsically ~+20dB hot -> big cut
+        case kSpring:   return 0.085f;  // IR spring (BX20 bank): 100%-wet matched to plate/dry so Mix tracks (was 0.138 for the old algo spring)
         case kShimmer:  return 1.82f;
         case kAmbience: return 1.81f;
         case kBloom:    return 3.10f;
@@ -2200,8 +2302,9 @@ private:
     TailSustainer mPlateSusL, mPlateSusR, mRoomSusL, mRoomSusR;         // live-Decay tail extender
     Biquad mDerToneL, mDerToneR; float mDerToneHz = -1.0f;             // post-conv Tone shelf (default = identity)
     std::vector<float> mCScratchL, mCScratchR;                         // short-IR crossfade scratch
-    IrConvolver mPlateIr[5];                                           // 5 real plate captures (Hopkins, CC-BY) -> 5-way Decay selector
-    int mPlateIrIdx = 0, mPlatePrevIdx = 0, mPlateXfadeLen = 1; float mPlateXfade = 0.0f; bool mPlateIrInit = false;
+    IrConvolver mPlateIr[6];                                           // 6 decay-reshaped versions of ONE plate capture -> continuous Decay
+    IrConvolver mSpringIr[6];                                          // 6 decay-reshaped BX20 spring captures -> continuous Decay
+    std::vector<float> mPpL, mPpR, mPpoL, mPpoR; int mPpW = 0, mPpRing = 0;   // IR-path pre-delay ring + delayed-dry scratch
 #endif
     SpringReverb mSpring;
     ShimmerReverb mShimmer;
@@ -2212,7 +2315,7 @@ private:
     Type mType = kPlate;
     float mSize = 1.0f, mT60 = 2.0f, mDampHz = 6000.0f, mPredelayMs = 0.0f, mMix = 0.25f;
     float mMod = 0.3f, mShimmerAmt = 0.5f, mTension = 0.5f, mBoing = 0.20f, mWidth = 1.0f, mSwell = 0.4f;
-    float mInputFilterHz = 95.0f; // Plate Input Filter corner (20-400 Hz); 95 = prior hardwired Plate low-cut
+    float mLowCutHz = 95.0f, mHighCutHz = 20000.0f; // wet Low Cut (HPF) + High Cut (LPF) corners (Plate/Room)
     int mPitch = 0;
     bool mFreeze = false, mPrepared = false;
 };
