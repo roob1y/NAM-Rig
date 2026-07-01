@@ -588,6 +588,18 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::ParameterID("revBoing", 1), "Reverb Boing",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.20f, knob10(0.0f, 1.0f)));
 
+    // (Spring flavour is NOT a user parameter: the Studio bank is the only manual
+    // Spring voicing; the Space Tank bank is engaged internally by Space Tape's
+    // spring modes only — see processBlock.)
+
+    // Space Tape spring DRIVE (0..1): the tape unit's spring has a fixed decay, so this
+    // is its tone/intensity control — it crossfades the lo/md/hi spring-tank captures.
+    // Only meaningful on Space Tape's spring modes; lives on the Space Tape panel.
+    // Appended last for automation-index stability.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("spaceTapeDrive", 1), "Space Tape Drive",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f, knob10(0.0f, 1.0f)));
+
     return {params.begin(), params.end()};
 }
 
@@ -1034,19 +1046,31 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.delay.setMix(apvts.getRawParameterValue("delayMix")->load());
     mChain.delay.setBypassed(apvts.getRawParameterValue("delayOn")->load() < 0.5f);
 
-    // Space Tape auto-spring: the multi-head tape echo mode dial engages the spring for modes
-    // 5-11 + Reverb (echo-only modes 1-4 force it off). When Space Tape is active it
-    // drives the rig's Spring reverb from the head mode, overriding the manual reverb.
-    int stReverbOverride = 0; // 0 none, +1 force Spring on, -1 force off
-    if (delayChar == (int)nam_rig::DelayBlock::Character::SpaceTape)
-        stReverbOverride = nam_rig::DelayBlock::spaceTapeReverbOn(
-            (int)apvts.getRawParameterValue("delayHeadMode")->load()) ? 1 : -1;
+    // Space Tape auto-spring: on its spring modes (5-11 + Reverb) the tape echo engages
+    // the rig Spring and drives it with the Space Tank IR bank (the tape unit's own
+    // spring tank). Echo-only modes (1-4) and non-Space-Tape delays leave the reverb
+    // FULLY under the user's control — it keeps whatever character it was on and stays
+    // ON if the user had it on (fix: the old code force-muted the reverb in echo-only
+    // "dry" modes, and forced the Spring character on the spring modes without a way
+    // back). Space Tank is engaged ONLY here, never selectable from the reverb panel.
+    const bool spaceTapeSpring =
+        (apvts.getRawParameterValue("delayOn")->load() >= 0.5f) &&  // delay must be enabled
+        (delayChar == (int)nam_rig::DelayBlock::Character::SpaceTape) &&
+        nam_rig::DelayBlock::spaceTapeReverbOn(
+            (int)apvts.getRawParameterValue("delayHeadMode")->load());
     {
         using RB = nam_rig::ReverbBlock;
-        int rt = (int)apvts.getRawParameterValue("revType")->load();
-        if (stReverbOverride == 1) rt = (int)RB::kSpring; // Space Tape -> rig Spring
+        // revType is never written, so releasing Space Tape's spring reverts the live
+        // reverb to the user's chosen character automatically.
+        int rt = spaceTapeSpring ? (int)RB::kSpring
+                                 : (int)apvts.getRawParameterValue("revType")->load();
         const RB::Type T = (RB::Type)rt;
         mChain.reverb.setType(rt);
+        // Space Tank only while Space Tape drives the spring; manual Spring = Studio.
+        mChain.reverb.setSpringFlavour(spaceTapeSpring ? 1 : 0);
+        // Space Tank has a fixed decay; its Drive knob (on the Space Tape panel)
+        // crossfades the lo/md/hi tank captures for tone/intensity.
+        mChain.reverb.setSpringDrive(apvts.getRawParameterValue("spaceTapeDrive")->load());
         auto pv = [&](const char *knob) { return apvts.getRawParameterValue(juce::String(RB::paramId(knob, rt)))->load(); };
         mChain.reverb.setDecaySeconds(pv("Decay"));                 // per-character param is already true seconds in-range
         mChain.reverb.setDampHz(mChain.reverb.mappedTone(pv("Tone")));
@@ -1064,11 +1088,10 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.reverb.setPitch((int)apvts.getRawParameterValue("revPitch")->load());
     mChain.reverb.setLowCutHz(apvts.getRawParameterValue("revLowCut")->load());
     mChain.reverb.setHighCutHz(apvts.getRawParameterValue("revHighCut")->load());
-    // Reverb on/off: user param, unless Space Tape's mode dial overrides it.
+    // Reverb on/off: the user's control, except Space Tape's spring modes force it on
+    // (so the tape echo's spring always sounds). Echo-only modes do NOT mute it.
     const bool userReverbOff = apvts.getRawParameterValue("reverbOn")->load() < 0.5f;
-    mChain.reverb.setBypassed(stReverbOverride == 1 ? false
-                              : stReverbOverride == -1 ? true
-                                                       : userReverbOff);
+    mChain.reverb.setBypassed(spaceTapeSpring ? false : userReverbOff);
 
     mChain.process(buffer);
 
