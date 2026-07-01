@@ -268,6 +268,20 @@ namespace dither
         set(grad.getColour(n - 1));
     }
 
+    // Cache entry for image(): a geometry+colour key plus the rendered gradient Image.
+    struct ImageCacheEntry { int w, h, n; bool radial; float p1x, p1y, p2x, p2y;
+                             float sp[6]; juce::uint32 sc[6]; juce::Image img; };
+
+    // The gradient-image cache, reached through an accessor (NOT a bare
+    // function-local static) so it can be cleared before the plugin unloads. The
+    // cached juce::Images pick up GPU-side (Direct2D) bitmaps once they're drawn; if
+    // they're released at DLL-unload time on host exit, that GPU teardown hangs in
+    // the graphics driver and leaves the DAW running as a background process.
+    // clearImageCache() (called from ~RigLookAndFeel, i.e. when the last editor
+    // closes) empties it while the GPU device is still live.
+    inline std::vector<ImageCacheEntry> &imageCache() { static std::vector<ImageCacheEntry> c; return c; }
+    inline void clearImageCache() { imageCache().clear(); }
+
     // Render `grad` into a dithered ARGB image covering `bounds` (pixel (0,0) ->
     // bounds.getTopLeft()). Cached by geometry+colour; juce::Image is a cheap
     // ref-counted handle so returning by value is fine.
@@ -280,13 +294,11 @@ namespace dither
         grad.point1 -= bounds.getTopLeft();
         grad.point2 -= bounds.getTopLeft();
 
-        struct Entry { int w, h, n; bool radial; float p1x, p1y, p2x, p2y;
-                       float sp[6]; juce::uint32 sc[6]; juce::Image img; };
-        static std::vector<Entry> cache;
+        auto &cache = imageCache();
 
         const int ns = juce::jmin(6, grad.getNumColours());
         const bool radial = grad.isRadial;
-        auto matches = [&](const Entry &e)
+        auto matches = [&](const ImageCacheEntry &e)
         {
             if (e.w != w || e.h != h || e.n != ns || e.radial != radial) return false;
             if (e.p1x != grad.point1.x || e.p1y != grad.point1.y
@@ -343,7 +355,7 @@ namespace dither
         }
 
         if (cache.size() >= 64) cache.clear(); // bound memory; geometry set is small
-        Entry e {}; e.w = w; e.h = h; e.n = ns; e.radial = radial;
+        ImageCacheEntry e {}; e.w = w; e.h = h; e.n = ns; e.radial = radial;
         e.p1x = grad.point1.x; e.p1y = grad.point1.y;
         e.p2x = grad.point2.x; e.p2y = grad.point2.y;
         for (int i = 0; i < ns; ++i) { e.sp[i] = (float) grad.getColourPosition(i);
@@ -448,6 +460,10 @@ public:
     {
         if (&juce::LookAndFeel::getDefaultLookAndFeel() == this)
             juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
+        // Free cached gradient Images (and their GPU-side bitmaps) now, while the
+        // graphics device is still alive -- NOT at DLL unload, where releasing
+        // GPU-backed images hangs the driver and keeps the host process running.
+        dither::clearImageCache();
     }
 
     // Resolve any non-explicit Font (Labels, combos, tooltips) to Archivo.
