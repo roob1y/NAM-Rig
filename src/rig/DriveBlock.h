@@ -138,7 +138,6 @@ public:
     void setDrive(int slot, float v)   { at(slot).drive.store(clamp01(v)); }
     void setTone(int slot, float v)    { at(slot).tone.store(clamp01(v)); }
     void setLevelDb(int slot, float v) { at(slot).levelDb.store(v); }
-    void setAutoGain(bool on) { mAutoGain.store(on); } // level-compensate Drive/Tone (default off)
     void setRange(int slot, int r) { at(slot).range.store(r); } // treble-boost cap switch: 0 Treble/1 Mid/2 Full
     void setOn(int slot, bool on) { at(slot).on.store(on); }            // footswitch (default on)
     void setModel(int slot, int m) { at(slot).model.store(m); }         // model within the category
@@ -452,8 +451,6 @@ public:
             const double inBias = (v.clip == 2 || v.clip == 4) ? 0.0 : (double)v.bias; // type 0/1/3 input bias (4 = in-shaper asym)
             const bool useGate = (v.gate > 0.0f) && s.gateOn.load(); // model has a gate AND it's switched on
             float levelLin = std::pow(10.0f, s.levelDb.load() * 0.05f) * v.outTrim;
-            if (mAutoGain.load()) // OFF by default: Drive then naturally pushes the amp harder
-                levelLin *= driveMakeup(k, model, s.drive.load()) * toneMakeup(k, model, s.tone.load());
 
             const float tilt = (s.tone.load() - 0.5f) * 2.0f;
             // Active treble shelf (Klon): bass FIXED, treble swings asymmetrically
@@ -916,58 +913,6 @@ private:
         return (2.0 / (x - x2)) * (hardD(x, x1) - hardD(x1, x2));
     }
 
-    // ---- auto-gain: keep output level ~constant as Drive / Tone move ----
-    // Per-voicing makeup measured against a guitar-like reference, normalised so
-    // the knob centres (drive 0.5, tone 0.5) = unity (default sound unchanged).
-    // Drive table is 6 points (0..1), Tone table 5 points (0..1).
-    static float lerpTbl(const float *t, int n, float x)
-    {
-        const float pos = clamp01(x) * (float)(n - 1);
-        int i = (int)pos;
-        if (i >= n - 1) return t[n - 1];
-        return t[i] + (pos - (float)i) * (t[i + 1] - t[i]);
-    }
-    // Auto-gain is UNITY-REFERENCED: the drive table = rms_in / rms_out(drive),
-    // so Auto Gain ON brings the pedal to ~bypass level at every Drive (was
-    // normalised to the pedal's own mid-drive level, which sat +11..+18 dB hot).
-    // Per-MODEL because Boost holds two very different models (Range '65 / EP
-    // Boost) a single category table can't level. Tone table stays relative.
-    static float driveMakeup(Kind k, int model, float drive)
-    {
-        static const float B2[6] = {1.556f, 0.916f, 0.557f, 0.378f, 0.295f, 0.260f}; // Range '65 (Rangemaster, pink-noise ref)
-        static const float B3[6] = {1.073f, 0.801f, 0.601f, 0.456f, 0.352f, 0.279f}; // Plex Boost (clean boost, pink-noise ref)
-        static const float O[6]  = {0.666f, 0.435f, 0.296f, 0.212f, 0.161f, 0.129f};  // Green Drive (mid-hump OD)
-        static const float O2[6] = {0.438f, 0.410f, 0.401f, 0.398f, 0.396f, 0.396f}; // Super Drive (SD-1, asym cubic, pink-noise ref; near-flat = the clipper compresses)
-        static const float O3[6] = {0.427f, 0.322f, 0.240f, 0.206f, 0.199f, 0.201f}; // Gold Horse / Breaker Drive (hard/soft clip + clean blend, pink-noise ref)
-        static const float D[6]  = {1.229f, 0.568f, 0.310f, 0.242f, 0.223f, 0.214f};  // Black Rodent (ProCo RAT)
-        static const float F1[6] = {0.439f, 0.371f, 0.346f, 0.338f, 0.335f, 0.334f}; // Round Fuzz (asym cubic, pink-noise ref)
-        static const float F2[6] = {0.587f, 0.396f, 0.316f, 0.286f, 0.275f, 0.272f}; // Violet Ram (Big Muff 2-stage cascade, pink-noise ref; compresses as both stages saturate)
-        // model indices are now compact (v1 stand-ins removed): Boost 0 Range '65 / 1 Plex Boost;
-        // OD 0 Green Drive / 1 Super Drive / 2 Gold Horse / 3 Breaker Drive; Fuzz 0 Round Fuzz / 1 Violet Ram.
-        const float *t = (k == Kind::Boost) ? (model <= 0 ? B2 : B3)
-                       : (k == Kind::Overdrive) ? (model >= 2 ? O3 : model == 1 ? O2 : O)
-                       : (k == Kind::Distortion) ? D
-                       : (model <= 0 ? F1 : F2);
-        return lerpTbl(t, 6, drive);
-    }
-    static float toneMakeup(Kind k, int model, float tone)
-    {
-        static const float B0[5] = {0.604f, 0.895f, 1.000f, 0.767f, 0.490f};
-        // Boost has no user Tone (processor pins it to 0.5) -> the centre point is unity;
-        // both Boost models reuse B0's symmetric tilt table (Tone never moves in the UI).
-        static const float O[5]  = {0.472f, 0.757f, 1.000f, 0.851f, 0.548f};
-        static const float D[5]  = {0.450f, 0.725f, 1.000f, 0.916f, 0.609f};
-        static const float F[5]  = {0.533f, 0.833f, 1.000f, 0.773f, 0.485f};
-        static const float F2[5] = {0.858f, 0.952f, 1.000f, 0.994f, 0.929f}; // Violet Ram (Big Muff PASSIVE tone stack, pink-noise ref; very gentle gradient)
-        // Round Fuzz pins Tone to 0.5 (no tone) -> F centre is unity; the Muff (model 1)
-        // is the only fuzz with a real Tone knob, so it gets its own table.
-        const float *t = (k == Kind::Boost) ? B0
-                       : (k == Kind::Overdrive) ? O
-                       : (k == Kind::Distortion) ? D
-                       : (model == 1 ? F2 : F);
-        return lerpTbl(t, 5, tone);
-    }
-
     static float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
     static float coefForHz(double hz, double sr)
     {
@@ -980,7 +925,6 @@ private:
     static double flushD(double v) { return std::isfinite(v) ? v : 0.0; }
 
     Slot mSlot[kSlots];
-    std::atomic<bool> mAutoGain{false};
     double mSampleRate = 48000.0;
     bool mPrepared = false;
 };

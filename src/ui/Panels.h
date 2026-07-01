@@ -1891,14 +1891,6 @@ public:
             mPedals[(size_t)s] = std::make_unique<DrivePedal>(apvts, s);
             addAndMakeVisible(*mPedals[(size_t)s]);
         }
-        mAutoGain.getProperties().set("pill", true);
-        mAutoGain.setButtonText("Auto Gain");
-        mAutoGain.setTooltip("Auto Gain: keeps the amp's output volume the same whether a "
-                             "drive pedal is on or off, no matter the pedal's output level. "
-                             "Measured per amp, so each amp holds its own level in Dual mode.");
-        addAndMakeVisible(mAutoGain);
-        mAutoGainAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            apvts, "driveAutoGain", mAutoGain);
     }
 
     void refresh()
@@ -1918,10 +1910,6 @@ public:
 
     void resized() override
     {
-        // Auto-Gain pill in the header-right.
-        auto hr = headerArea();
-        mAutoGain.setBounds(hr.removeFromRight(96).withSizeKeepingCentre(96, 26));
-
         auto area = bodyArea().reduced(26, 24);
         const int n = nam_rig::DriveBlock::kSlots;
         const int joiner = 40;
@@ -1944,8 +1932,6 @@ public:
 
 private:
     std::array<std::unique_ptr<DrivePedal>, (size_t)nam_rig::DriveBlock::kSlots> mPedals;
-    juce::ToggleButton mAutoGain;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mAutoGainAtt;
     std::vector<juce::Rectangle<float>> mJoiners;
 };
 
