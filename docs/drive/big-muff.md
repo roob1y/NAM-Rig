@@ -147,8 +147,6 @@ Output is **A/B level-matched** to Black Rodent II (noon RMS 0.446 vs 0.443).
 Input-level dependent / calibration-referenced (a humbucker drives it clearly
 harder than a single-coil: THD 0.28 vs 0.07 at the same low Sustain).
 
-Auto-gain table `D2` measured (pink noise): compresses as both stages saturate.
-
 ---
 
 ## 5. UI

@@ -97,10 +97,6 @@ The corners were already right in the stand-in. The substance of the rework:
   input-level dependent (humbucker drives harder than single-coil).
 - **T25** no spikes across a full-scale sweep, all drives and all ranges.
 
-Auto-gain (off by default) table `B2` measured against the same pink-noise
-reference the existing B0/B1 tables use (`rms_in/rms_out`), so switching Boost
-models with Auto Gain on stays level-consistent.
-
 ## Lessons reinforced
 
 - **The gain range is the fix, not more filters.** The Rangemaster's whole EQ is

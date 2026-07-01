@@ -9,7 +9,7 @@ What the engine does *today*, before the Option A overdrive rework. Source:
 - Categories (`Kind`): Off, Boost (2 models: Range '65, EP Boost), Overdrive
   (1: Green Drive), Distortion (1: Black Rodent), Fuzz (1: Round Fuzz).
 - Per slot: Drive, Tone, Level, on/off footswitch, model, range switch
-  (treble-boost only). Optional global **Auto Gain** (off by default).
+  (treble-boost only).
 
 ## Per-slot signal path
 

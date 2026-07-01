@@ -77,7 +77,6 @@ shaper, fully backward-compatible).
 | **Static vs blooming voicing** | shaper-at-drive-off vs scoop-that-blooms | `shapeTrack`: 0 = EQ always on (real fixed tone stack, works as an always-on shaper); 1 = EQ blooms with the Drive knob |
 | **Tone topology** | the Tone knob feels right | treble-shelf (bass fixed, TS) via the `clip==3` path; or the engine default symmetric tilt. See §6 |
 | **Asymmetry** | even-harmonic "crunch" (SD-1, fuzz) | `bias` (input bias for clip 0/1/3; negative-rail for clip 2) |
-| **Auto-gain** | level-match as Drive/Tone move (off by default) | per-model makeup tables; measure rms_in/rms_out (§7) |
 
 ---
 
@@ -208,8 +207,6 @@ single-bin magnitude, `harmRatio` for THD-ish, `realSlotM` to pick a model):
 - **Drive sweep:** THD-vs-knob has the right shape / minimum grit.
 - **Regression:** existing models stay **byte-for-byte** (T11 pattern) — add
   models, never edit shipped ones.
-- For auto-gain tables: measure `rms_in/rms_out(drive)` per model and bake the
-  6-point Drive / 5-point Tone tables.
 
 ---
 

@@ -72,8 +72,7 @@ the "where we are, what to do next" layer on top.
 ## 3. The engine model (the `Voicing` struct)
 
 Categories (`Kind`): Off, Boost, Overdrive, Distortion, Fuzz. Per slot: Drive,
-Tone, Level, on/off footswitch, model select, range switch (treble-boost only),
-optional global Auto Gain (off by default).
+Tone, Level, on/off footswitch, model select, range switch (treble-boost only).
 
 Signal path per slot:
 `drive gain → pre low-cut → mid/treble peak → waveshaper (ADAA) → post LP → DC
@@ -174,8 +173,7 @@ stay byte-for-byte; there are regression tests asserting model 0 == legacy).
   feel as GD2 (pre/de-emphasis `10@700`, clean blend 0.15, dynamics 0.40), static
   voicing, mid post-clip. **Engine change:** the pre/de-emphasis pair is now enabled
   for clip 3 **OR 4** when `emphDb > 0` — Round Fuzz II has `emphDb 0` so it is
-  unaffected (byte-exact); no other shipped model changes. Auto-gain `O2` table
-  measured (near-flat ~0.40, like the fuzz's `F1` — the asym clipper compresses).
+  unaffected (byte-exact); no other shipped model changes.
   Tests T38–T44 (incl. the maxabs no-spike sweep + alias cut). Worked example in
   [`sd1.md`](sd1.md). **UNCOMMITTED** — offline build green (drive_test **68 CHECKs,
   0 failures**), pending commit on Windows + play-test. UI just works (the Overdrive
@@ -196,7 +194,7 @@ stay byte-for-byte; there are regression tests asserting model 0 == legacy).
   at low Drive (THD ~0.001), dirties up cranked (the Klon reputation). `gMin 2/gMax
   70`, bright/open `lpHz 4700`, `outTrim 0.95` (≈ GD2 at noon; the boost lives on the
   Level knob, kept safe so the clean sum doesn't overshoot — worst |out| 1.39 < 1.5).
-  Auto-gain `O3` measured. Tests T45–T50. Worked example in [`klon.md`](klon.md).
+  Tests T45–T50. Worked example in [`klon.md`](klon.md).
   **UNCOMMITTED** — offline build green (drive_test **79 CHECKs, 0 failures**),
   pending commit on Windows + play-test. UI just works (Overdrive reads `bModel`;
   menu generic; model 3 fills the last `bModel` 0..3 slot — no param widening).
@@ -389,7 +387,5 @@ the clipping-stage EQ, fit as usual (`*_response.py`).
 - **Set test thresholds to MEASURED reality**, not a priori guesses — probe the new
   model in a tiny C++ harness first, read the numbers, then write the CHECK bounds
   (with a little cross-compiler margin; Robbie builds on MSVC).
-- **Auto-gain tables (`O`/`O2`/`O3`/...) are measured** with a pink-noise probe
-  (`rms_in/rms_out` per drive point); hard clippers come out near-flat.
 - **Per-model control labels** live in `Panels.h` `configure()` (keyed on `model`);
   **per-model voicing** is just a new zero-filled `Voicing` field + a guarded branch.
