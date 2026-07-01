@@ -3137,7 +3137,7 @@ public:
                 mRate->updateReadout(); // re-evaluate the 0..10 text against the new range
             }
             mSync.setVisible(!rotary && type != 9);         // ring mod: carrier is audio-rate, no tempo sync
-            mDrive->setVisible(rotary);                    // rotary: Leslie tube drive
+            mDrive->setVisible(false);                     // rotary Leslie drive hardwired to full -> knob hidden (layout skips it)
             mHornDrum->setVisible(rotary);                 // rotary: horn<->drum balance
             mRotFast.setVisible(rotary);
             mManual->setVisible(type == 1);                // flanger: static comb position

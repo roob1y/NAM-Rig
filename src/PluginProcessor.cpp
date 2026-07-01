@@ -970,7 +970,13 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         mChain.mod.setFeedback(s, apvts.getRawParameterValue(modIds[s][5])->load());
         mChain.mod.setMix(s, apvts.getRawParameterValue(modIds[s][6])->load());
         mChain.mod.setWidth(s, apvts.getRawParameterValue(modIds[s][7])->load());
-        mChain.mod.setDrive(s, apvts.getRawParameterValue(modIds[s][8])->load());
+        // Rotary Leslie: the tube-amp Drive is voiced permanently at full and hidden
+        // from the UI (the exposed range never bettered "all the way up", so it's
+        // hardwired). Non-rotary types ignore Drive anyway.
+        {
+            const bool rotary = (int)apvts.getRawParameterValue(modIds[s][0])->load() == nam_rig::ModVoice::kRotary;
+            mChain.mod.setDrive(s, rotary ? 1.0f : apvts.getRawParameterValue(modIds[s][8])->load());
+        }
         mChain.mod.setRotFast(s, apvts.getRawParameterValue(modIds[s][9])->load() >= 0.5f);
         mChain.mod.setManual(s, apvts.getRawParameterValue(modIds[s][10])->load());
         mChain.mod.setInvert(s, apvts.getRawParameterValue(modIds[s][11])->load() >= 0.5f);
@@ -1003,7 +1009,11 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.mod.setPostFeedback(apvts.getRawParameterValue("postFeedback")->load());
     mChain.mod.setPostMix(apvts.getRawParameterValue("postMix")->load());
     mChain.mod.setPostWidth(apvts.getRawParameterValue("postWidth")->load());
-    mChain.mod.setPostDrive(apvts.getRawParameterValue("postDrive")->load());
+    // Post rotary: Drive hardwired to full (hidden), same as the front slots.
+    {
+        const bool postRotary = (int)apvts.getRawParameterValue("postType")->load() == nam_rig::ModVoice::kRotary;
+        mChain.mod.setPostDrive(postRotary ? 1.0f : apvts.getRawParameterValue("postDrive")->load());
+    }
     mChain.mod.setPostRotFast(apvts.getRawParameterValue("postRotFast")->load() >= 0.5f);
     mChain.mod.setPostManual(apvts.getRawParameterValue("postManual")->load());
     mChain.mod.setPostInvert(apvts.getRawParameterValue("postInvert")->load() >= 0.5f);

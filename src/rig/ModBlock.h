@@ -213,10 +213,17 @@ public:
     static float bbdGain(float baked) { return 1.0f + baked * 0.5f; }
     static float bbdShape(float u, float baked) { return std::tanh(u * bbdGain(baked)); }
     // Antiderivative of bbdShape w.r.t. u: F(u) = ln(cosh(g*u))/g, g = bbdGain.
-    static float bbdAntideriv(float u, float baked)
+    // Evaluated in DOUBLE with a numerically STABLE ln(cosh): the naive
+    // std::log(std::cosh(x)) for small x takes the log of a value ~1.0000001, which
+    // in float retains almost no significant mantissa -- and the ADAA divided
+    // difference (Fc-F1)/dz then amplified that error into a near-constant additive
+    // noise floor (audible on quiet signals, loudest on full-wet vibrato). The
+    // identity ln(cosh x) = |x| + ln1p(e^-2|x|) - ln 2 is accurate for all x.
+    static double bbdAntideriv(double u, float baked)
     {
-        const float g = bbdGain(baked);
-        return std::log(std::cosh(u * g)) / g;
+        const double g = (double)bbdGain(baked);
+        const double x = u * g, ax = std::abs(x);
+        return (ax + std::log1p(std::exp(-2.0 * ax)) - 0.69314718055994531) / g;
     }
 
     // Tremolo gain law (single source of truth, public so the test verifies the
@@ -1041,16 +1048,21 @@ private:
         // ADAA(tanh): the memoryless soft-clip bbdShape(z) aliases on bright/fast
         // content. First-order antiderivative anti-aliasing: soft = (F(z)-F(z1))/(z-z1)
         // with F = bbdAntideriv; fall back to the direct curve when the step is tiny
-        // (z barely moving). At steady state this is bit-identical to the old tanh.
-        float &z1 = mBbdX1[(size_t)ch];
-        float &F1 = mBbdF1[(size_t)ch];
-        const float Fc = bbdAntideriv(z, mBakedBbd);
-        const float dz = z - z1;
-        const float soft = (std::abs(dz) > 1e-4f) ? (Fc - F1) / dz
-                                                   : bbdShape(z, mBakedBbd);
-        z1 = z;
+        // (z barely moving). The antiderivative + divided difference are kept in
+        // DOUBLE (state below is double too): the difference of two nearly equal
+        // F values loses precision fast in float, which is what put a constant noise
+        // floor on quiet signals. The stable ln(cosh) + double math flatten it to
+        // ~-150 dBc at every level, so the tiny-step fallback can also tighten to 1e-7.
+        double &z1 = mBbdX1[(size_t)ch];
+        double &F1 = mBbdF1[(size_t)ch];
+        const double zc = (double)z;
+        const double Fc = bbdAntideriv(zc, mBakedBbd);
+        const double dz = zc - z1;
+        const double soft = (std::abs(dz) > 1e-7) ? (Fc - F1) / dz
+                                                  : (double)bbdShape(z, mBakedBbd);
+        z1 = zc;
         F1 = Fc;
-        return wet + mBakedBbd * (soft - wet);
+        return wet + mBakedBbd * ((float)soft - wet);
     }
 
     // Feedback range select for the Extreme switch. Normal scales the knob into
@@ -1197,7 +1209,7 @@ private:
     std::array<float, 2> mHtLp1Z1{}, mHtLp1Z2{}, mHtLp2Z1{}, mHtLp2Z2{}; // LP cascade state
     std::array<float, 2> mHtHp1Z1{}, mHtHp1Z2{}, mHtHp2Z1{}, mHtHp2Z2{}; // HP cascade state
     std::array<float, 2> mBbdLp{};           // BBD HF-rolloff state
-    std::array<float, 2> mBbdX1{}, mBbdF1{}; // BBD soft-clip ADAA: prev input + prev antiderivative (non-recursive)
+    std::array<double, 2> mBbdX1{}, mBbdF1{}; // BBD soft-clip ADAA: prev input + prev antiderivative (double -> no float-cancellation noise)
 
     // 4x FIR oversampler for the ring-mod carrier multiply (JUCE-free). Zero-stuff
     // interpolation + decimation through a shared windowed-sinc lowpass (cutoff at
