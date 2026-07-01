@@ -131,39 +131,66 @@ namespace fonts
     enum Weight { Regular = 0, Medium, SemiBold, Bold, ExtraBold };
 
 #if NAM_RIG_HAS_FONTS
+    // Bundled typefaces, ref-counted and shared across all plugin instances via
+    // juce::SharedResourcePointer. This is deliberately NOT a function-local
+    // static: a static Typeface::Ptr cache is destroyed at DLL-unload / process
+    // exit, AFTER JUCE's graphics + message subsystems may already be gone, and
+    // that late teardown is a classic cause of the host process hanging (lingering)
+    // on quit on Windows. Held instead by RigLookAndFeel::mFonts, the cache is
+    // released when the last editor closes -- while JUCE is still alive.
+    struct FontCache
+    {
+        std::array<juce::Typeface::Ptr, 5> archivo{};
+        std::array<juce::Typeface::Ptr, 3> mono{};
+
+        juce::Typeface::Ptr archivoFace(Weight w)
+        {
+            auto &slot = archivo[(size_t)w];
+            if (slot == nullptr)
+            {
+                switch (w)
+                {
+                case Regular:   slot = juce::Typeface::createSystemTypefaceFor(BinaryData::ArchivoRegular_ttf,   (size_t)BinaryData::ArchivoRegular_ttfSize); break;
+                case Medium:    slot = juce::Typeface::createSystemTypefaceFor(BinaryData::ArchivoMedium_ttf,    (size_t)BinaryData::ArchivoMedium_ttfSize); break;
+                case SemiBold:  slot = juce::Typeface::createSystemTypefaceFor(BinaryData::ArchivoSemiBold_ttf,  (size_t)BinaryData::ArchivoSemiBold_ttfSize); break;
+                case Bold:      slot = juce::Typeface::createSystemTypefaceFor(BinaryData::ArchivoBold_ttf,      (size_t)BinaryData::ArchivoBold_ttfSize); break;
+                case ExtraBold: slot = juce::Typeface::createSystemTypefaceFor(BinaryData::ArchivoExtraBold_ttf, (size_t)BinaryData::ArchivoExtraBold_ttfSize); break;
+                }
+            }
+            return slot;
+        }
+
+        juce::Typeface::Ptr monoFace(Weight w)
+        {
+            const int idx = w >= SemiBold ? 2 : (int)w; // mono has Regular/Medium/SemiBold
+            auto &slot = mono[(size_t)idx];
+            if (slot == nullptr)
+            {
+                switch (idx)
+                {
+                case 0: slot = juce::Typeface::createSystemTypefaceFor(BinaryData::JetBrainsMonoRegular_ttf,  (size_t)BinaryData::JetBrainsMonoRegular_ttfSize); break;
+                case 1: slot = juce::Typeface::createSystemTypefaceFor(BinaryData::JetBrainsMonoMedium_ttf,   (size_t)BinaryData::JetBrainsMonoMedium_ttfSize); break;
+                default:slot = juce::Typeface::createSystemTypefaceFor(BinaryData::JetBrainsMonoSemiBold_ttf, (size_t)BinaryData::JetBrainsMonoSemiBold_ttfSize); break;
+                }
+            }
+            return slot;
+        }
+    };
+
+    // Free-function API unchanged for the ~100 fonts:: call sites. The local
+    // SharedResourcePointer just shares the one live FontCache (kept alive for the
+    // session by RigLookAndFeel::mFonts), so this still caches; it would only
+    // reload if literally no LookAndFeel were alive.
     inline juce::Typeface::Ptr archivoFace(Weight w)
     {
-        static std::array<juce::Typeface::Ptr, 5> cache;
-        auto &slot = cache[(size_t)w];
-        if (slot == nullptr)
-        {
-            switch (w)
-            {
-            case Regular:   slot = juce::Typeface::createSystemTypefaceFor(BinaryData::ArchivoRegular_ttf,   (size_t)BinaryData::ArchivoRegular_ttfSize); break;
-            case Medium:    slot = juce::Typeface::createSystemTypefaceFor(BinaryData::ArchivoMedium_ttf,    (size_t)BinaryData::ArchivoMedium_ttfSize); break;
-            case SemiBold:  slot = juce::Typeface::createSystemTypefaceFor(BinaryData::ArchivoSemiBold_ttf,  (size_t)BinaryData::ArchivoSemiBold_ttfSize); break;
-            case Bold:      slot = juce::Typeface::createSystemTypefaceFor(BinaryData::ArchivoBold_ttf,      (size_t)BinaryData::ArchivoBold_ttfSize); break;
-            case ExtraBold: slot = juce::Typeface::createSystemTypefaceFor(BinaryData::ArchivoExtraBold_ttf, (size_t)BinaryData::ArchivoExtraBold_ttfSize); break;
-            }
-        }
-        return slot;
+        juce::SharedResourcePointer<FontCache> cache;
+        return cache->archivoFace(w);
     }
 
     inline juce::Typeface::Ptr monoFace(Weight w)
     {
-        const int idx = w >= SemiBold ? 2 : (int)w; // mono has Regular/Medium/SemiBold
-        static std::array<juce::Typeface::Ptr, 3> cache;
-        auto &slot = cache[(size_t)idx];
-        if (slot == nullptr)
-        {
-            switch (idx)
-            {
-            case 0: slot = juce::Typeface::createSystemTypefaceFor(BinaryData::JetBrainsMonoRegular_ttf,  (size_t)BinaryData::JetBrainsMonoRegular_ttfSize); break;
-            case 1: slot = juce::Typeface::createSystemTypefaceFor(BinaryData::JetBrainsMonoMedium_ttf,   (size_t)BinaryData::JetBrainsMonoMedium_ttfSize); break;
-            default:slot = juce::Typeface::createSystemTypefaceFor(BinaryData::JetBrainsMonoSemiBold_ttf, (size_t)BinaryData::JetBrainsMonoSemiBold_ttfSize); break;
-            }
-        }
-        return slot;
+        juce::SharedResourcePointer<FontCache> cache;
+        return cache->monoFace(w);
     }
 #else
     inline juce::Typeface::Ptr archivoFace(Weight) { return {}; }
@@ -406,6 +433,21 @@ public:
         setColour(juce::TooltipWindow::backgroundColourId, colors::panel);
         setColour(juce::TooltipWindow::textColourId, colors::text);
         setColour(juce::TooltipWindow::outlineColourId, colors::outline);
+
+        // Manually-shown PopupMenus (drive/delay pickers, presets) don't inherit a
+        // component's LookAndFeel, so point the process default at ourselves for one
+        // consistent dropdown look. Safe to own here because this LookAndFeel is
+        // SHARED across all plugin instances (NamRigEditor::mLnf is a
+        // SharedResourcePointer): a single object whose lifetime spans "any editor
+        // open", so the global default pointer is set/cleared exactly once and is
+        // never left dangling by out-of-order instance teardown.
+        juce::LookAndFeel::setDefaultLookAndFeel(this);
+    }
+
+    ~RigLookAndFeel() override
+    {
+        if (&juce::LookAndFeel::getDefaultLookAndFeel() == this)
+            juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
     }
 
     // Resolve any non-explicit Font (Labels, combos, tooltips) to Archivo.
@@ -762,6 +804,15 @@ public:
         g.setColour(colors::cardBorder);
         g.drawRoundedRectangle(r.reduced(0.5f), radius, 1.0f);
     }
+
+private:
+#if NAM_RIG_HAS_FONTS
+    // Holds the shared typeface cache alive for this LookAndFeel's lifetime, so the
+    // free-function fonts:: helpers hit the cache instead of reloading every call,
+    // and so the typefaces are freed with the (shared) LookAndFeel rather than at
+    // static-destruction time. See fonts::FontCache above.
+    juce::SharedResourcePointer<fonts::FontCache> mFonts;
+#endif
 };
 
 } // namespace nam_rig::ui

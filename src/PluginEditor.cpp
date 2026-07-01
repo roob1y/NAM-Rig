@@ -26,12 +26,11 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
               &mEqPanelB, &mCabPanel, &mMixPanel,
               &mModPanel, &mDelayPanel, &mReverbPanel}
 {
-    setLookAndFeel(&mLnf);
-    // Manually-shown PopupMenus (drive/delay pickers, presets, etc.) don't inherit
-    // a component's LookAndFeel the way ComboBox dropdowns do -- they fall back to
-    // the default. Point the default at our LookAndFeel so every menu in the plugin
-    // gets the one styled dropdown look.
-    juce::LookAndFeel::setDefaultLookAndFeel(&mLnf);
+    setLookAndFeel(mLnf.get());
+    // The process default LookAndFeel (used by manually-shown PopupMenus that don't
+    // inherit a component's LnF the way ComboBox dropdowns do) is now set/cleared by
+    // RigLookAndFeel's own ctor/dtor, so it tracks the shared LnF's lifetime and is
+    // never left dangling by out-of-order multi-instance teardown.
     addAndMakeVisible(mContent);
     mContent.setSize(kBaseW, kBaseH);
 
@@ -167,8 +166,9 @@ void NamRigEditor::clampSizeToScreen()
 
 NamRigEditor::~NamRigEditor()
 {
-    if (&juce::LookAndFeel::getDefaultLookAndFeel() == &mLnf)
-        juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
+    // Detach from the shared LnF before it (potentially) goes away. The process
+    // default-LnF pointer is cleared by RigLookAndFeel's dtor when the last shared
+    // reference drops, so there's nothing to unwind here.
     setLookAndFeel(nullptr);
 }
 

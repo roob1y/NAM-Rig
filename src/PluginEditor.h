@@ -42,7 +42,11 @@ private:
     int mFitTries = 0;              // ticks spent waiting for valid display info
 
     NamRigProcessor &mProc;
-    nam_rig::ui::RigLookAndFeel mLnf;
+    // Shared across all plugin instances: one LookAndFeel object, ref-counted, so
+    // the bundled typeface cache and the process default-LnF pointer are owned by a
+    // single instance whose lifetime spans "any editor open" -> both are torn down
+    // cleanly (while JUCE is alive) when the last editor closes, not at DLL unload.
+    juce::SharedResourcePointer<nam_rig::ui::RigLookAndFeel> mLnf;
 
     // Everything lives on mContent (fixed kBaseW x kBaseH, scaled to fit).
     juce::Component mContent;

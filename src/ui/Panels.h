@@ -840,11 +840,14 @@ public:
         area.removeFromBottom(12);
         mLive.setBounds(area); // full-width live scope
 
+        // Knob cell matches the Reverb panel (the size "foundation"): up to 104
+        // wide per knob, row centred at 116 tall, reduced(5,0) -> ~85px dial.
         auto row = knobRow.withSizeKeepingCentre(
-            juce::jmin(knobRow.getWidth(), 86 * (int)mKnobs.size()), knobRow.getHeight());
+            juce::jmin(knobRow.getWidth(), 104 * (int)mKnobs.size()),
+            juce::jmin(knobRow.getHeight(), 116));
         const int w = row.getWidth() / (int)mKnobs.size();
         for (auto &k : mKnobs)
-            k->setBounds(row.removeFromLeft(w).reduced(7, 10));
+            k->setBounds(row.removeFromLeft(w).reduced(5, 0));
     }
 
 private:
@@ -947,8 +950,10 @@ public:
         mOutLabelCol = ioCol.reduced(2, 0);
         mOut.setBounds(ioCol.withSizeKeepingCentre(9, 74).translated(0, -1));
 
+        // Knob cell matches the Reverb panel (the size "foundation"): 116-tall row.
         auto row = bottom.withSizeKeepingCentre(
-            juce::jmin(bottom.getWidth(), 104 * (int)mKnobs.size()), bottom.getHeight());
+            juce::jmin(bottom.getWidth(), 104 * (int)mKnobs.size()),
+            juce::jmin(bottom.getHeight(), 116));
         const int w = row.getWidth() / (int)mKnobs.size();
         for (auto &k : mKnobs)
             k->setBounds(row.removeFromLeft(w).reduced(5, 0));
@@ -4816,7 +4821,7 @@ public:
         right.removeFromBottom(10);
         mTaps->setBounds(right);
 
-        const int knobH = 92;                 // shared knob-cell height (caption+dial+value)
+        const int knobH = 116;                // knob-cell height matches the Reverb panel foundation
         const int moduleW = 120;              // grouped sync tile
 
         // Right sync module, inside a faint grouped tile (the tile edge is the fence,
@@ -4839,7 +4844,7 @@ public:
         // Knob slot: Clean's Sync R centres in the space below the dropdown; Space
         // Tape has no dropdown, so its Mode knob centres in the WHOLE tile.
         auto knobArea = space ? tileFull : moduleCol;
-        auto srKnob = knobArea.withSizeKeepingCentre(juce::jmin(96, moduleW),
+        auto srKnob = knobArea.withSizeKeepingCentre(juce::jmin(104, moduleW),
                                                      juce::jmin(knobArea.getHeight(), knobH));
         if (!tape && mSyncRKnob) mSyncRKnob->setBounds(srKnob);
         if (space && mHeadKnob) mHeadKnob->setBounds(srKnob);
@@ -4855,13 +4860,13 @@ public:
             tb.setX(togCell.getX());        // nudge the toggle to the left of its cell
             mSyncToggle->setBounds(tb);
         }
-        const int cellW = mainRow.getWidth() / (int)mKnobs.size();
-        for (int ki = 0; ki < (int)mKnobs.size(); ++ki)
-        {
-            auto cell = mainRow.removeFromLeft(cellW).reduced(0, 8); // fill the band vertically
-            const auto b = cell.withSizeKeepingCentre(juce::jmin(cellW - 12, 108), cell.getHeight());
-            mKnobs[(size_t)ki]->setBounds(b);
-        }
+        // Knob cell matches the Reverb panel (the size "foundation"): up to 104
+        // wide per knob, 116-tall row centred in the band, reduced(5,0) -> ~85px dial.
+        const int nk = (int)mKnobs.size();
+        const int w = juce::jmin(104, mainRow.getWidth() / nk);
+        auto row = mainRow.withSizeKeepingCentre(w * nk, juce::jmin(mainRow.getHeight(), 116));
+        for (int ki = 0; ki < nk; ++ki)
+            mKnobs[(size_t)ki]->setBounds(row.removeFromLeft(w).reduced(5, 0));
     }
 
 private:
