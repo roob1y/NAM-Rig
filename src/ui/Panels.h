@@ -4371,6 +4371,7 @@ public:
             };
         mHeadKnob->slider().updateText();
         mHeadKnob->setValueMenu(headNames, "Echo Mode");
+        mHeadKnob->slider().onValueChange = [this] { repaint(); }; // update the "Reverb Locked" flag
         addChildComponent(*mHeadKnob); // visibility toggled in refresh()
 
         // Stereo MODE selector as a dropdown (Single / Dual / Ping-Pong). Single =
@@ -4722,6 +4723,34 @@ public:
             g.setColour(colors::caption);
             g.setFont(fonts::archivo(9.0f, fonts::SemiBold, 0.10f));
             g.drawText("STEREO MODE", mModeCap, juce::Justification::centred);
+        }
+
+        // Space Tape's spring modes commandeer the reverb (Space Tank) and lock its
+        // character, so flag it under the Mode knob: a padlock + "Reverb Locked" in the
+        // accent colour. Only on the modes that actually engage the spring.
+        if (mHeadKnob && mHeadKnob->isVisible() &&
+            mApvts.getRawParameterValue("delayOn")->load() >= 0.5f &&
+            nam_rig::DelayBlock::spaceTapeReverbOn(
+                (int)mApvts.getRawParameterValue("delayHeadMode")->load()))
+        {
+            const auto kb = mHeadKnob->getBounds();
+            g.setColour(colors::accent);
+            g.setFont(fonts::archivo(10.5f, fonts::SemiBold, 0.04f));
+            const juce::String txt = "Reverb Locked";
+            const float tw = g.getCurrentFont().getStringWidthFloat(txt);
+            const float lockW = 9.0f, gap = 5.0f, total = lockW + gap + tw;
+            const float x = (float)kb.getCentreX() - total * 0.5f;
+            const float cy = (float)kb.getBottom() + 6.0f;
+            // padlock glyph: rounded body + arc shackle
+            juce::Rectangle<float> body(x, cy - 3.5f, lockW, 8.0f);
+            g.fillRoundedRectangle(body, 1.6f);
+            const float sr = lockW * 0.30f;
+            juce::Path shackle;
+            shackle.addCentredArc(body.getCentreX(), body.getY(), sr, sr, 0.0f,
+                                  juce::degreesToRadians(-95.0f), juce::degreesToRadians(95.0f), true);
+            g.strokePath(shackle, juce::PathStrokeType(1.4f));
+            g.drawText(txt, juce::Rectangle<float>(x + lockW + gap, cy - 9.0f, tw + 2.0f, 18.0f),
+                       juce::Justification::centredLeft);
         }
     }
 
