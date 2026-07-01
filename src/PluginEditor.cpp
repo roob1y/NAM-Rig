@@ -286,7 +286,11 @@ void NamRigEditor::timerCallback()
     const bool cabBOff = bOut || off("cabOnB");
     mCabPanel.cabA().setBypassed(cabAOff);
     mCabPanel.cabB().setBypassed(cabBOff);
-    mCabPanel.setBypassed(cabAOff && cabBOff);
+    // Whole-panel "BYPASSED" veil only when BOTH cabs are actually disabled by the
+    // user. Use the raw enable params, NOT cabAOff/cabBOff: those fold in the solo-
+    // out state, so in Solo A (bOut) turning cab A off would falsely veil the whole
+    // panel while cab B is still enabled.
+    mCabPanel.setBypassed(off("cabOn") && off("cabOnB"));
     mModPanel.setBypassed(off("modOn"));
     mDelayPanel.setBypassed(off("delayOn"));
     mReverbPanel.setBypassed(off("reverbOn"));
