@@ -222,7 +222,7 @@ int main()
         using T = ReverbBlock::Type;
         CHECK(ReverbBlock::sizeExposed(T::kHall) && !ReverbBlock::sizeExposed(T::kPlate), "T13 Size only on Hall");
         CHECK(ReverbBlock::shimmerExposed(T::kShimmer) && !ReverbBlock::shimmerExposed(T::kRoom), "T13 Shimmer only on Shimmer");
-        CHECK(ReverbBlock::tensionExposed(T::kSpring) && !ReverbBlock::tensionExposed(T::kHall), "T13 Tension only on Spring");
+        CHECK(!ReverbBlock::tensionExposed(T::kSpring), "T13 Tension removed (Spring is IR-based)");
         bool allNamed = true; for (int t = 0; t < ReverbBlock::kNumTypes; ++t) if (!ReverbBlock::typeName(t) || !ReverbBlock::typeName(t)[0]) allNamed = false;
         CHECK(allNamed, "T13 all %d characters are named", ReverbBlock::kNumTypes);
     }

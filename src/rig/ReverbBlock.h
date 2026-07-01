@@ -1744,7 +1744,7 @@ private:
 class ReverbBlock : public StereoBlock
 {
 public:
-    enum Type { kRoom = 0, kPlate, kHall, kSpring, kShimmer, kAmbience, kBloom }; // Room+Plate shipped first; rest hidden via kNumShipped
+    enum Type { kRoom = 0, kPlate, kSpring, kHall, kShimmer, kAmbience, kBloom }; // Room+Plate+Spring shipped first; rest hidden via kNumShipped
     static constexpr int kNumTypes = 7;
 
     // ---- shipped set (v1 commercial release) ----------------------------------
@@ -1754,7 +1754,7 @@ public:
     // LAST in the enum, so the shipped set is exactly [0, kNumShipped), keeping
     // automation indices of shipped characters stable. UI + the revType choice param
     // build their lists from shipped()/kNumShipped — this is the single source of truth.
-    static constexpr int kNumShipped = 2;
+    static constexpr int kNumShipped = 3;
     static bool shipped(Type t) { return (int)t >= 0 && (int)t < kNumShipped; }
 
     static constexpr int kNumLines = FdnReverb::kNumLines;
@@ -1766,7 +1766,7 @@ public:
     static std::string paramId(const char *knob, int t) { return std::string("rev") + knob + typeName(t); }
     static const char *typeName(int t)
     {
-        static const char *n[kNumTypes] = {"Room", "Plate", "Hall", "Spring", "Shimmer", "Ambience", "Bloom"};
+        static const char *n[kNumTypes] = {"Room", "Plate", "Spring", "Hall", "Shimmer", "Ambience", "Bloom"};
         return (t >= 0 && t < kNumTypes) ? n[t] : "Room";
     }
     static bool usesFdn(Type t) { return t == kRoom || t == kHall || t == kAmbience || t == kBloom; }
@@ -1774,14 +1774,14 @@ public:
     // ---- voicing introspection (UI + tests) ----
     static bool sizeExposed(Type t) { return t == kHall; } // Hall only; Room is convolution (Size can't resize an IR) and Decay covers length
     static bool toneExposed(Type) { return true; }
-    static bool predelayExposed(Type t) { return t == kPlate || t == kBloom || t == kRoom; } // Hall folds it into Size; Shimmer/Room/Spring/Ambience hardwire
+    static bool predelayExposed(Type t) { return t == kPlate || t == kBloom || t == kRoom || t == kSpring; } // Hall folds it into Size; Shimmer/Ambience hardwire
     static bool modExposed(Type t) { return t == kHall || t == kBloom || t == kShimmer; } // Plate/Room (static IR) + Ambience have no mod knob
     static bool shimmerExposed(Type t) { return t == kShimmer; }
     static bool pitchExposed(Type t) { return t == kShimmer; }
-    static bool tensionExposed(Type t) { return t == kSpring; }
-    static bool boingExposed(Type t) { return t == kSpring; } // dispersion/sproing amount, Spring only
+    static bool tensionExposed(Type) { return false; } // Spring is IR-based now (no tension control)
+    static bool boingExposed(Type) { return false; } // Spring is IR-based now (no boing control)
     static bool swellExposed(Type t) { return t == kBloom; }
-    static bool cutsExposed(Type t) { return t == kPlate || t == kRoom; } // Low Cut (HPF) + High Cut (LPF) on the IR characters (Plate/Room)
+    static bool cutsExposed(Type t) { return t == kPlate || t == kRoom || t == kSpring; } // Low Cut (HPF) + High Cut (LPF) on the IR characters (Plate/Room/Spring)
     static bool freezeExposed(Type) { return false; } // Freeze removed from the reverb section (was Hall/Shimmer/Bloom); engines keep the code path inert
     static const char *toneCaption(Type) { return "Tone"; }
 
@@ -1804,7 +1804,7 @@ public:
         case kRoom:     return {0.2f, 1.5f}; // derived-conv: capped at the matched length (no synthetic stretch; hybrid longer-tail is backlog)
         case kHall:     return {0.8f, 6.0f};
         case kPlate:    return {0.5f, 3.45f};   // derived-conv: capped at the matched length (no synthetic stretch; hybrid longer-tail is backlog)
-        case kSpring:   return {1.0f, 9.0f}; // long studio-spring tails (rings ~8s)
+        case kSpring:   return {1.0f, 5.0f}; // IR spring (BX20) decay bank
         case kShimmer:  return {1.5f, 8.0f};
         case kAmbience: return {0.3f, 1.2f};
         case kBloom:    return {2.5f, 8.0f};
@@ -1830,6 +1830,7 @@ public:
         case kPlate: return {0.0f,  80.0f};
         case kBloom: return {0.0f, 160.0f};
         case kRoom:  return {0.0f,  60.0f};
+        case kSpring:return {0.0f,  80.0f};
         default:     return {0.0f, kPreMax};
         }
     }
@@ -1873,6 +1874,12 @@ public:
         mPlateIr[3].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::plate_ir_4_wav, (size_t)BinaryData::plate_ir_4_wavSize);
         mPlateIr[4].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::plate_ir_5_wav, (size_t)BinaryData::plate_ir_5_wavSize);
         mPlateIr[5].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::plate_ir_6_wav, (size_t)BinaryData::plate_ir_6_wavSize);
+        mSpringIr[0].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_ir_1_wav, (size_t)BinaryData::spring_ir_1_wavSize);
+        mSpringIr[1].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_ir_2_wav, (size_t)BinaryData::spring_ir_2_wavSize);
+        mSpringIr[2].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_ir_3_wav, (size_t)BinaryData::spring_ir_3_wavSize);
+        mSpringIr[3].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_ir_4_wav, (size_t)BinaryData::spring_ir_4_wavSize);
+        mSpringIr[4].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_ir_5_wav, (size_t)BinaryData::spring_ir_5_wavSize);
+        mSpringIr[5].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_ir_6_wav, (size_t)BinaryData::spring_ir_6_wavSize);
         { const int r = (int)(0.001 * 90.0 * ctx.sampleRate) + std::max(16, ctx.maxBlockSize) + 4; mPpL.assign((size_t)r, 0.0f); mPpR.assign((size_t)r, 0.0f); mPpRing = r; mPpW = 0; } // plate IR-path pre-delay ring (predelayRange max 80ms)
 #endif
         mSpring.prepare(ctx.sampleRate);
@@ -1972,6 +1979,51 @@ public:
         }
     }
 
+    // CONTINUOUS SPRING DECAY: BX20 IR bank (6 decay-reshaped captures) + calibrated crossfade + pre-delay,
+    // exactly like the plate. Post-conv Tone shelf = identity at Tone 0.5.
+    void processSpringIr(float *left, float *right, int n)
+    {
+        const Range dr = decayRange(kSpring);
+        const float sec = std::clamp(mT60, dr.lo, dr.hi);
+        static const float kSpringPos[16] = {0.0000f, 0.2846f, 0.9408f, 1.1209f, 1.7516f, 2.0145f, 2.2968f, 2.8703f, 3.0214f, 3.2614f, 3.8139f, 3.9832f, 4.1027f, 4.5292f, 4.9056f, 5.0000f};
+        const float u = (sec - dr.lo) / std::max(1e-3f, dr.hi - dr.lo) * 15.0f;
+        const int ui = std::clamp((int)u, 0, 14);
+        const float posf = kSpringPos[ui] + (u - (float)ui) * (kSpringPos[ui + 1] - kSpringPos[ui]);
+        const int idx = std::clamp((int)posf, 0, 5);
+        const int idxN = std::min(idx + 1, 5);
+        const float frac = std::clamp(posf - (float)idx, 0.0f, 1.0f);
+        const float gA = std::sqrt(1.0f - frac), gB = std::sqrt(frac);
+        const float *exL = mDryL.data(), *exR = mDryR.data();
+        if (mPpRing > 1) {
+            const int pre = std::clamp((int)std::lround((double)mPredelayMs * 0.001 * mFsRB), 0, mPpRing - 1);
+            if ((int)mPpoL.size() < n) { mPpoL.assign((size_t)n, 0.0f); mPpoR.assign((size_t)n, 0.0f); }
+            for (int i = 0; i < n; ++i) {
+                mPpL[(size_t)mPpW] = mDryL[(size_t)i]; mPpR[(size_t)mPpW] = mDryR[(size_t)i];
+                int rd = mPpW - pre; if (rd < 0) rd += mPpRing;
+                mPpoL[(size_t)i] = mPpL[(size_t)rd]; mPpoR[(size_t)i] = mPpR[(size_t)rd];
+                if (++mPpW >= mPpRing) mPpW = 0;
+            }
+            exL = mPpoL.data(); exR = mPpoR.data();
+        }
+        const bool stereo = (left != right);
+        mSpringIr[(size_t)idx].renderReplace(exL, exR, left, right, n);
+        if (frac > 1e-4f && idxN != idx) {
+            if ((int)mCScratchL.size() < n) { mCScratchL.assign((size_t)n, 0.0f); mCScratchR.assign((size_t)n, 0.0f); }
+            mSpringIr[(size_t)idxN].renderReplace(exL, exR, mCScratchL.data(), mCScratchR.data(), n);
+            for (int i = 0; i < n; ++i) {
+                left[i] = gA * left[i] + gB * mCScratchL[(size_t)i];
+                if (stereo) right[i] = gA * right[i] + gB * mCScratchR[(size_t)i];
+            }
+        }
+        const Range tr = dampRange(kSpring);
+        const float tone01 = (float)((mDampHz - tr.lo) / std::max(1.0f, tr.hi - tr.lo));
+        const float g = (tone01 - 0.5f) * 16.0f;
+        if (std::abs(g) > 0.01f) {
+            if (mDampHz != mDerToneHz) { mDerToneL = Biquad::highshelf(mFsRB, 2500.0, (double)g, 0.7); mDerToneR = mDerToneL; mDerToneHz = mDampHz; }
+            for (int i = 0; i < n; ++i) { left[i] = mDerToneL.processSample(left[i]); if (stereo) right[i] = mDerToneR.processSample(right[i]); }
+        }
+    }
+
     // CONTINUOUS PLATE DECAY: the Decay knob (true seconds, decayRange) sweeps smoothly across a bank of
     // 6 decay-RESHAPED versions of ONE plate capture (identical character throughout — only the tail
     // length changes, early loudness matched). A calibrated knob->position table compensates the
@@ -2055,7 +2107,13 @@ public:
 #endif
 #endif
             break;
-        case kSpring: mSpring.process(left, right, numSamples); break;
+        case kSpring:
+#ifdef NAM_DERIVED_CONV
+            processSpringIr(left, right, numSamples); // BX20 IR bank -> continuous Decay
+#else
+            mSpring.process(left, right, numSamples); // algorithmic spring (offline/fallback)
+#endif
+            break;
         case kShimmer: mShimmer.process(left, right, numSamples); break;
         case kRoom:
 #ifdef NAM_DERIVED_CONV
@@ -2245,6 +2303,7 @@ private:
     Biquad mDerToneL, mDerToneR; float mDerToneHz = -1.0f;             // post-conv Tone shelf (default = identity)
     std::vector<float> mCScratchL, mCScratchR;                         // short-IR crossfade scratch
     IrConvolver mPlateIr[6];                                           // 6 decay-reshaped versions of ONE plate capture -> continuous Decay
+    IrConvolver mSpringIr[6];                                          // 6 decay-reshaped BX20 spring captures -> continuous Decay
     std::vector<float> mPpL, mPpR, mPpoL, mPpoR; int mPpW = 0, mPpRing = 0;   // IR-path pre-delay ring + delayed-dry scratch
 #endif
     SpringReverb mSpring;
