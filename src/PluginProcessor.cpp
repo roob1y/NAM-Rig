@@ -1054,6 +1054,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     // "dry" modes, and forced the Spring character on the spring modes without a way
     // back). Space Tank is engaged ONLY here, never selectable from the reverb panel.
     const bool spaceTapeSpring =
+        (apvts.getRawParameterValue("delayOn")->load() >= 0.5f) &&  // delay must be enabled
         (delayChar == (int)nam_rig::DelayBlock::Character::SpaceTape) &&
         nam_rig::DelayBlock::spaceTapeReverbOn(
             (int)apvts.getRawParameterValue("delayHeadMode")->load());

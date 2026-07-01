@@ -5189,6 +5189,7 @@ public:
         // is fixed) and LOCKS the character cards. It reverts to the user's character
         // when Space Tape releases the spring. Derived live from the delay params.
         const bool stSpring =
+            (mApvts.getRawParameterValue("delayOn")->load() >= 0.5f) &&
             ((int)mApvts.getRawParameterValue("delayCharacter")->load() == 2) &&
             nam_rig::DelayBlock::spaceTapeReverbOn(
                 (int)mApvts.getRawParameterValue("delayHeadMode")->load());

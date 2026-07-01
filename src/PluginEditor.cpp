@@ -296,6 +296,7 @@ void NamRigEditor::timerCallback()
     // Space Tape's spring modes force the reverb on (Space Tank), so don't veil the
     // reverb panel as bypassed even if the user's reverbOn is off.
     const bool stSpring =
+        (mProc.apvts.getRawParameterValue("delayOn")->load() >= 0.5f) &&
         ((int)mProc.apvts.getRawParameterValue("delayCharacter")->load() == 2) &&
         nam_rig::DelayBlock::spaceTapeReverbOn(
             (int)mProc.apvts.getRawParameterValue("delayHeadMode")->load());
