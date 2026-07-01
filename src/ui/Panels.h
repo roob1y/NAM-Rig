@@ -4373,6 +4373,13 @@ public:
         mHeadKnob->setValueMenu(headNames, "Echo Mode");
         addChildComponent(*mHeadKnob); // visibility toggled in refresh()
 
+        // Space Tape spring DRIVE — the tape unit's spring has a fixed decay, so this is
+        // its tone/intensity control (crossfades the lo/md/hi tank captures). Shown only
+        // for Space Tape, where it replaces the (mono-greyed) Width knob's slot.
+        mDriveKnob = std::make_unique<LabeledKnob>(apvts, "spaceTapeDrive", "Drive");
+        mDriveKnob->setRotationReadout(10.0);
+        addChildComponent(*mDriveKnob); // visibility toggled in refresh()
+
         // Stereo MODE selector as a dropdown (Single / Dual / Ping-Pong). Single =
         // one linked time; Dual = independent L/R divisions (Sync R active);
         // Ping-Pong = L/R bounce. It drives the underlying delaySyncR (Link) +
@@ -4538,6 +4545,9 @@ public:
         if (mSyncRKnob) mSyncRKnob->setVisible(!tape && dual); // only live in Dual
         mModeBox.setVisible(!tape);
         if (tape && mKnobs.size() > 4) mKnobs[4]->setEnabled(false); // Width n/a (mono tape)
+        // Space Tape: swap the greyed Width knob for the spring Drive knob.
+        if (mKnobs.size() > 4) mKnobs[4]->setVisible(!space);
+        if (mDriveKnob) mDriveKnob->setVisible(space);
 
         // Space Tape repurposes the echo-taps well as the per-head time display.
         mTapsCaption.setText(space ? "HEADS / TIME" : "ECHO TAPS", juce::dontSendNotification);
@@ -4826,10 +4836,12 @@ public:
             mSyncToggle->setBounds(tb);
         }
         const int cellW = mainRow.getWidth() / (int)mKnobs.size();
-        for (auto &k : mKnobs)
+        for (int ki = 0; ki < (int)mKnobs.size(); ++ki)
         {
             auto cell = mainRow.removeFromLeft(cellW).reduced(0, 8); // fill the band vertically
-            k->setBounds(cell.withSizeKeepingCentre(juce::jmin(cellW - 12, 108), cell.getHeight()));
+            const auto b = cell.withSizeKeepingCentre(juce::jmin(cellW - 12, 108), cell.getHeight());
+            mKnobs[(size_t)ki]->setBounds(b);
+            if (ki == 4 && mDriveKnob) mDriveKnob->setBounds(b); // Drive shares the Width slot (Space Tape)
         }
     }
 
@@ -4840,6 +4852,7 @@ private:
     std::unique_ptr<VToggle> mSyncToggle; // Free / Sync vertical switch (next to Time)
     juce::ComboBox mModeBox;      // Single / Dual / Ping-Pong stereo dropdown
     std::unique_ptr<LabeledKnob> mSyncRKnob, mHeadKnob;
+    std::unique_ptr<LabeledKnob> mDriveKnob; // Space Tape spring Drive (takes the greyed Width slot)
     std::unique_ptr<SegmentedControl> mCharacter; // Clean / Tape Echo / Space Tape (hidden bridge)
     std::unique_ptr<DelayTaps> mTaps;
     std::vector<std::unique_ptr<LabeledKnob>> mKnobs;

@@ -50,14 +50,12 @@ juce_add_binary_data(NAM_RigData SOURCES
     resources/spring_irs/spring_ir_4.wav
     resources/spring_irs/spring_ir_5.wav
     resources/spring_irs/spring_ir_6.wav
-    # --- Space Tank spring bank: 6 decay-reshaped versions of one vintage tape-echo
-    #     spring-tank capture (brand-free, gen via /tmp/gen_tank.py) -> continuous Decay ---
-    resources/spring_irs/spring_tank_1.wav
-    resources/spring_irs/spring_tank_2.wav
-    resources/spring_irs/spring_tank_3.wav
-    resources/spring_irs/spring_tank_4.wav
-    resources/spring_irs/spring_tank_5.wav
-    resources/spring_irs/spring_tank_6.wav
+    # --- Space Tank spring: 3 drive-graded captures of one vintage tape-echo spring
+    #     tank (brand-free). FIXED decay (the tape unit's spring is non-adjustable);
+    #     the Drive control crossfades lo/md/hi. Energy-matched (gen /tmp/gen_drive.py). ---
+    resources/spring_irs/spring_tank_lo.wav
+    resources/spring_irs/spring_tank_md.wav
+    resources/spring_irs/spring_tank_hi.wav
     # --- UI fonts (SIL OFL 1.1 — see resources/fonts/*-OFL.txt) ---
     resources/fonts/Archivo-Regular.ttf
     resources/fonts/Archivo-Medium.ttf

@@ -1880,12 +1880,9 @@ public:
         mSpringIr[3].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_ir_4_wav, (size_t)BinaryData::spring_ir_4_wavSize);
         mSpringIr[4].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_ir_5_wav, (size_t)BinaryData::spring_ir_5_wavSize);
         mSpringIr[5].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_ir_6_wav, (size_t)BinaryData::spring_ir_6_wavSize);
-        mSpringTankIr[0].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_tank_1_wav, (size_t)BinaryData::spring_tank_1_wavSize);
-        mSpringTankIr[1].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_tank_2_wav, (size_t)BinaryData::spring_tank_2_wavSize);
-        mSpringTankIr[2].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_tank_3_wav, (size_t)BinaryData::spring_tank_3_wavSize);
-        mSpringTankIr[3].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_tank_4_wav, (size_t)BinaryData::spring_tank_4_wavSize);
-        mSpringTankIr[4].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_tank_5_wav, (size_t)BinaryData::spring_tank_5_wavSize);
-        mSpringTankIr[5].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_tank_6_wav, (size_t)BinaryData::spring_tank_6_wavSize);
+        mSpringTankDrive[0].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_tank_lo_wav, (size_t)BinaryData::spring_tank_lo_wavSize);
+        mSpringTankDrive[1].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_tank_md_wav, (size_t)BinaryData::spring_tank_md_wavSize);
+        mSpringTankDrive[2].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_tank_hi_wav, (size_t)BinaryData::spring_tank_hi_wavSize);
         { const int r = (int)(0.001 * 90.0 * ctx.sampleRate) + std::max(16, ctx.maxBlockSize) + 4; mPpL.assign((size_t)r, 0.0f); mPpR.assign((size_t)r, 0.0f); mPpRing = r; mPpW = 0; } // plate IR-path pre-delay ring (predelayRange max 80ms)
 #endif
         mSpring.prepare(ctx.sampleRate);
@@ -1928,10 +1925,14 @@ public:
     void setShimmer(float s) { mShimmerAmt = std::clamp(s, 0.0f, 1.0f); if (mPrepared) pushParams(); }
     void setTension(float t) { mTension = std::clamp(t, 0.0f, 1.0f); if (mPrepared) pushParams(); }
     void setBoing(float b) { mBoing = std::clamp(b, 0.0f, 1.0f); if (mPrepared) pushParams(); } // Spring dispersion/sproing
-    // Spring flavour: 0 = Studio (studio-spring IR bank), 1 = Space Tank (tape-echo
-    // spring-tank IR bank). Only affects the Spring character's convolution bank.
+    // Spring flavour: 0 = Studio (studio-spring IR bank, Decay-graded), 1 = Space Tank
+    // (tape-echo spring-tank, FIXED decay). Only affects the Spring character.
     void setSpringFlavour(int f) { mSpringFlavour = std::clamp(f, 0, 1); }
     int springFlavour() const { return mSpringFlavour; }
+    // Space Tank drive (0..1): crossfades the lo/md/hi spring-tank captures. The real
+    // tape-echo spring has a fixed decay, so on Space Tank the Decay knob is inert and
+    // this is the tone/intensity control instead. No effect on the Studio flavour.
+    void setSpringDrive(float d) { mSpringDrive = std::clamp(d, 0.0f, 1.0f); }
     void setWidth(float w) { mWidth = std::clamp(w, 0.0f, 1.0f); } // 0=full mono .. 1=full stereo (M/S width)
     void setLowCutHz(float hz)  { mLowCutHz  = std::clamp(hz, 20.0f, 1000.0f); }    // wet Low Cut (HPF)
     void setHighCutHz(float hz) { mHighCutHz = std::clamp(hz, 1000.0f, 20000.0f); } // wet High Cut (LPF)
@@ -1989,20 +1990,14 @@ public:
         }
     }
 
-    // CONTINUOUS SPRING DECAY: spring IR bank (6 decay-reshaped captures) + calibrated crossfade + pre-delay,
-    // exactly like the plate. Post-conv Tone shelf = identity at Tone 0.5.
+    // SPRING (two flavours, both IR-convolution with a pre-delay + post Tone shelf):
+    //   Studio    -> Decay knob sweeps a 6-IR decay-reshaped bank (continuous decay).
+    //   Space Tank-> FIXED decay (the tape unit's spring is non-adjustable); the Drive
+    //                control crossfades 3 captures (lo/md/hi). Decay knob is inert here.
+    // Post-conv Tone shelf = identity at Tone 0.5.
     void processSpringIr(float *left, float *right, int n)
     {
-        const Range dr = decayRange(kSpring);
-        const float sec = std::clamp(mT60, dr.lo, dr.hi);
-        static const float kSpringPos[16] = {0.0000f, 0.2846f, 0.9408f, 1.1209f, 1.7516f, 2.0145f, 2.2968f, 2.8703f, 3.0214f, 3.2614f, 3.8139f, 3.9832f, 4.1027f, 4.5292f, 4.9056f, 5.0000f};
-        const float u = (sec - dr.lo) / std::max(1e-3f, dr.hi - dr.lo) * 15.0f;
-        const int ui = std::clamp((int)u, 0, 14);
-        const float posf = kSpringPos[ui] + (u - (float)ui) * (kSpringPos[ui + 1] - kSpringPos[ui]);
-        const int idx = std::clamp((int)posf, 0, 5);
-        const int idxN = std::min(idx + 1, 5);
-        const float frac = std::clamp(posf - (float)idx, 0.0f, 1.0f);
-        const float gA = std::sqrt(1.0f - frac), gB = std::sqrt(frac);
+        // Shared pre-delay: delay the dry feeding the convolver(s).
         const float *exL = mDryL.data(), *exR = mDryR.data();
         if (mPpRing > 1) {
             const int pre = std::clamp((int)std::lround((double)mPredelayMs * 0.001 * mFsRB), 0, mPpRing - 1);
@@ -2016,10 +2011,32 @@ public:
             exL = mPpoL.data(); exR = mPpoR.data();
         }
         const bool stereo = (left != right);
-        // Spring flavour picks the IR bank: 0 = Studio (studio-spring capture),
-        // 1 = Space Tank (tape-echo spring-tank capture). Both are decay-graded the
-        // same way, so the Decay knob + kSpringPos mapping behave identically.
-        IrConvolver *bank = (mSpringFlavour == 1) ? mSpringTankIr : mSpringIr;
+
+        // Pick the bank + the two blend taps and their equal-power gains.
+        IrConvolver *bank;
+        int idx, idxN;
+        float frac;
+        if (mSpringFlavour == 1) {
+            // Space Tank: Drive (0..1) crossfades lo(0) -> md(1) -> hi(2). Fixed decay.
+            bank = mSpringTankDrive;
+            const float d = std::clamp(mSpringDrive, 0.0f, 1.0f) * 2.0f; // 0..2
+            idx = std::clamp((int)d, 0, 2);
+            idxN = std::min(idx + 1, 2);
+            frac = std::clamp(d - (float)idx, 0.0f, 1.0f);
+        } else {
+            // Studio: Decay knob sweeps the 6-IR decay bank via the kSpringPos map.
+            bank = mSpringIr;
+            const Range dr = decayRange(kSpring);
+            const float sec = std::clamp(mT60, dr.lo, dr.hi);
+            static const float kSpringPos[16] = {0.0000f, 0.2846f, 0.9408f, 1.1209f, 1.7516f, 2.0145f, 2.2968f, 2.8703f, 3.0214f, 3.2614f, 3.8139f, 3.9832f, 4.1027f, 4.5292f, 4.9056f, 5.0000f};
+            const float u = (sec - dr.lo) / std::max(1e-3f, dr.hi - dr.lo) * 15.0f;
+            const int ui = std::clamp((int)u, 0, 14);
+            const float posf = kSpringPos[ui] + (u - (float)ui) * (kSpringPos[ui + 1] - kSpringPos[ui]);
+            idx = std::clamp((int)posf, 0, 5);
+            idxN = std::min(idx + 1, 5);
+            frac = std::clamp(posf - (float)idx, 0.0f, 1.0f);
+        }
+        const float gA = std::sqrt(1.0f - frac), gB = std::sqrt(frac);
         bank[(size_t)idx].renderReplace(exL, exR, left, right, n);
         if (frac > 1e-4f && idxN != idx) {
             if ((int)mCScratchL.size() < n) { mCScratchL.assign((size_t)n, 0.0f); mCScratchR.assign((size_t)n, 0.0f); }
@@ -2179,7 +2196,8 @@ private:
         case kRoom: return std::min(mT60, 3.0f);
         case kAmbience: return std::min(mT60, 1.2f);
         case kBloom: return std::max(mT60, 2.5f);
-        case kSpring: return std::min(mT60, 15.0f); // uncapped: reach the long studio-spring tail (~8s)
+        case kSpring: return mSpringFlavour == 1 ? 2.3f          // Space Tank: fixed decay (Decay knob inert)
+                                                 : std::min(mT60, 15.0f); // Studio: uncapped, reach the long tail (~8s)
         case kShimmer: return std::max(mT60, 1.5f);
         default: return mT60;
         }
@@ -2318,7 +2336,7 @@ private:
     std::vector<float> mCScratchL, mCScratchR;                         // short-IR crossfade scratch
     IrConvolver mPlateIr[6];                                           // 6 decay-reshaped versions of ONE plate capture -> continuous Decay
     IrConvolver mSpringIr[6];                                          // 6 decay-reshaped studio-spring captures -> continuous Decay
-    IrConvolver mSpringTankIr[6];                                      // 6 decay-reshaped tape-echo spring-tank captures -> continuous Decay (Space Tank flavour)
+    IrConvolver mSpringTankDrive[3];                                   // 3 drive-graded tape-echo spring-tank captures (lo/md/hi), FIXED decay -> Drive crossfade (Space Tank flavour)
     std::vector<float> mPpL, mPpR, mPpoL, mPpoR; int mPpW = 0, mPpRing = 0;   // IR-path pre-delay ring + delayed-dry scratch
 #endif
     SpringReverb mSpring;
@@ -2328,7 +2346,8 @@ private:
     std::vector<float> mEpL, mEpR, mEpoL, mEpoR; int mEpW = 0; double mFsRB = 48000.0; // plate kernel predelay ring
 
     Type mType = kPlate;
-    int mSpringFlavour = 0; // 0 = Studio, 1 = Space Tank (Spring IR bank select)
+    int mSpringFlavour = 0;      // 0 = Studio, 1 = Space Tank (Spring IR bank select)
+    float mSpringDrive = 0.5f;   // Space Tank drive crossfade (lo/md/hi), 0..1
     float mSize = 1.0f, mT60 = 2.0f, mDampHz = 6000.0f, mPredelayMs = 0.0f, mMix = 0.25f;
     float mMod = 0.3f, mShimmerAmt = 0.5f, mTension = 0.5f, mBoing = 0.20f, mWidth = 1.0f, mSwell = 0.4f;
     float mLowCutHz = 95.0f, mHighCutHz = 20000.0f; // wet Low Cut (HPF) + High Cut (LPF) corners (Plate/Room)

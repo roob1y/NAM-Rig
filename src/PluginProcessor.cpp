@@ -592,6 +592,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     // Spring voicing; the Space Tank bank is engaged internally by Space Tape's
     // spring modes only — see processBlock.)
 
+    // Space Tape spring DRIVE (0..1): the tape unit's spring has a fixed decay, so this
+    // is its tone/intensity control — it crossfades the lo/md/hi spring-tank captures.
+    // Only meaningful on Space Tape's spring modes; lives on the Space Tape panel.
+    // Appended last for automation-index stability.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("spaceTapeDrive", 1), "Space Tape Drive",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f, knob10(0.0f, 1.0f)));
+
     return {params.begin(), params.end()};
 }
 
@@ -1059,6 +1067,9 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         mChain.reverb.setType(rt);
         // Space Tank only while Space Tape drives the spring; manual Spring = Studio.
         mChain.reverb.setSpringFlavour(spaceTapeSpring ? 1 : 0);
+        // Space Tank has a fixed decay; its Drive knob (on the Space Tape panel)
+        // crossfades the lo/md/hi tank captures for tone/intensity.
+        mChain.reverb.setSpringDrive(apvts.getRawParameterValue("spaceTapeDrive")->load());
         auto pv = [&](const char *knob) { return apvts.getRawParameterValue(juce::String(RB::paramId(knob, rt)))->load(); };
         mChain.reverb.setDecaySeconds(pv("Decay"));                 // per-character param is already true seconds in-range
         mChain.reverb.setDampHz(mChain.reverb.mappedTone(pv("Tone")));
