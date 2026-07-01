@@ -5286,16 +5286,13 @@ public:
         }
 
         // Space Tape lock: veil the character cards (they're not selectable while the
-        // Space Tank is engaged) with a "LOCKED · SPACE TAPE" hint.
+        // Space Tank is engaged).
         if (mStSpring && !mCardRects.empty())
         {
             auto u = mCardRects.front();
             for (const auto &cr : mCardRects) u = u.getUnion(cr);
             g.setColour(colors::panel.withAlpha(0.62f));
             g.fillRoundedRectangle(u.toFloat(), 10.0f);
-            g.setColour(colors::accent);
-            g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.12f));
-            g.drawText("LOCKED \xC2\xB7 SPACE TAPE", u, juce::Justification::centred);
         }
 
         // Right column: character name (Space Tank while Space Tape drives the spring).
