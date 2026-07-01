@@ -5103,6 +5103,12 @@ public:
         mPitchAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
             apvts, "revPitch", mPitch);
 
+        // Spring flavour: Studio / Space Tank IR bank (only shown for Spring).
+        mFlavour.addItemList({"Studio", "Space Tank"}, 1);
+        addChildComponent(mFlavour);
+        mFlavourAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, "springFlavour", mFlavour);
+
         // Freeze — REMOVED from the reverb section (RB::freezeExposed() == false). The button is
         // built but stays hidden (addChildComponent + refresh() never shows it); no param is bound.
         mFreeze.setButtonText("Freeze");
@@ -5201,6 +5207,7 @@ public:
             mBoing->setVisible(RB::boingExposed(t));
             mSwell->setVisible(RB::swellExposed(t));
             mPitch.setVisible(RB::pitchExposed(t));
+            mFlavour.setVisible(t == RB::kSpring); // Spring-only: Studio / Space Tank bank
             mFreeze.setVisible(RB::freezeExposed(t));
             // rebind shared knobs to THIS character's own params (own range + state)
             mDecay->rebind(mApvts, juce::String(RB::paramId("Decay", type)));
@@ -5295,6 +5302,8 @@ public:
         auto nameRow = right.removeFromTop(24);
         if (mPitch.isVisible())
             mPitch.setBounds(nameRow.removeFromRight(124).withSizeKeepingCentre(124, 26));
+        else if (mFlavour.isVisible()) // Spring: same slot as the Shimmer pitch combo
+            mFlavour.setBounds(nameRow.removeFromRight(124).withSizeKeepingCentre(124, 26));
         mNameRect = nameRow;
         right.removeFromTop(8);
 
@@ -5325,8 +5334,8 @@ private:
     juce::AudioProcessorValueTreeState &mApvts;
     int mLastType = -1;
     ReverbIcon mIcon;
-    juce::ComboBox mType, mPitch;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt, mPitchAtt;
+    juce::ComboBox mType, mPitch, mFlavour;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt, mPitchAtt, mFlavourAtt;
     juce::ToggleButton mFreeze;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mFreezeAtt;
     ReverbField mField;

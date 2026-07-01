@@ -1804,7 +1804,7 @@ public:
         case kRoom:     return {0.2f, 1.5f}; // derived-conv: capped at the matched length (no synthetic stretch; hybrid longer-tail is backlog)
         case kHall:     return {0.8f, 6.0f};
         case kPlate:    return {0.5f, 3.45f};   // derived-conv: capped at the matched length (no synthetic stretch; hybrid longer-tail is backlog)
-        case kSpring:   return {1.0f, 5.0f}; // IR spring (BX20) decay bank
+        case kSpring:   return {1.0f, 5.0f}; // IR spring (Studio/Space Tank) decay bank
         case kShimmer:  return {1.5f, 8.0f};
         case kAmbience: return {0.3f, 1.2f};
         case kBloom:    return {2.5f, 8.0f};
@@ -1880,6 +1880,12 @@ public:
         mSpringIr[3].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_ir_4_wav, (size_t)BinaryData::spring_ir_4_wavSize);
         mSpringIr[4].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_ir_5_wav, (size_t)BinaryData::spring_ir_5_wavSize);
         mSpringIr[5].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_ir_6_wav, (size_t)BinaryData::spring_ir_6_wavSize);
+        mSpringTankIr[0].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_tank_1_wav, (size_t)BinaryData::spring_tank_1_wavSize);
+        mSpringTankIr[1].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_tank_2_wav, (size_t)BinaryData::spring_tank_2_wavSize);
+        mSpringTankIr[2].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_tank_3_wav, (size_t)BinaryData::spring_tank_3_wavSize);
+        mSpringTankIr[3].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_tank_4_wav, (size_t)BinaryData::spring_tank_4_wavSize);
+        mSpringTankIr[4].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_tank_5_wav, (size_t)BinaryData::spring_tank_5_wavSize);
+        mSpringTankIr[5].prepare(ctx.sampleRate, ctx.maxBlockSize, BinaryData::spring_tank_6_wav, (size_t)BinaryData::spring_tank_6_wavSize);
         { const int r = (int)(0.001 * 90.0 * ctx.sampleRate) + std::max(16, ctx.maxBlockSize) + 4; mPpL.assign((size_t)r, 0.0f); mPpR.assign((size_t)r, 0.0f); mPpRing = r; mPpW = 0; } // plate IR-path pre-delay ring (predelayRange max 80ms)
 #endif
         mSpring.prepare(ctx.sampleRate);
@@ -1922,6 +1928,10 @@ public:
     void setShimmer(float s) { mShimmerAmt = std::clamp(s, 0.0f, 1.0f); if (mPrepared) pushParams(); }
     void setTension(float t) { mTension = std::clamp(t, 0.0f, 1.0f); if (mPrepared) pushParams(); }
     void setBoing(float b) { mBoing = std::clamp(b, 0.0f, 1.0f); if (mPrepared) pushParams(); } // Spring dispersion/sproing
+    // Spring flavour: 0 = Studio (studio-spring IR bank), 1 = Space Tank (tape-echo
+    // spring-tank IR bank). Only affects the Spring character's convolution bank.
+    void setSpringFlavour(int f) { mSpringFlavour = std::clamp(f, 0, 1); }
+    int springFlavour() const { return mSpringFlavour; }
     void setWidth(float w) { mWidth = std::clamp(w, 0.0f, 1.0f); } // 0=full mono .. 1=full stereo (M/S width)
     void setLowCutHz(float hz)  { mLowCutHz  = std::clamp(hz, 20.0f, 1000.0f); }    // wet Low Cut (HPF)
     void setHighCutHz(float hz) { mHighCutHz = std::clamp(hz, 1000.0f, 20000.0f); } // wet High Cut (LPF)
@@ -1979,7 +1989,7 @@ public:
         }
     }
 
-    // CONTINUOUS SPRING DECAY: BX20 IR bank (6 decay-reshaped captures) + calibrated crossfade + pre-delay,
+    // CONTINUOUS SPRING DECAY: spring IR bank (6 decay-reshaped captures) + calibrated crossfade + pre-delay,
     // exactly like the plate. Post-conv Tone shelf = identity at Tone 0.5.
     void processSpringIr(float *left, float *right, int n)
     {
@@ -2006,10 +2016,14 @@ public:
             exL = mPpoL.data(); exR = mPpoR.data();
         }
         const bool stereo = (left != right);
-        mSpringIr[(size_t)idx].renderReplace(exL, exR, left, right, n);
+        // Spring flavour picks the IR bank: 0 = Studio (studio-spring capture),
+        // 1 = Space Tank (tape-echo spring-tank capture). Both are decay-graded the
+        // same way, so the Decay knob + kSpringPos mapping behave identically.
+        IrConvolver *bank = (mSpringFlavour == 1) ? mSpringTankIr : mSpringIr;
+        bank[(size_t)idx].renderReplace(exL, exR, left, right, n);
         if (frac > 1e-4f && idxN != idx) {
             if ((int)mCScratchL.size() < n) { mCScratchL.assign((size_t)n, 0.0f); mCScratchR.assign((size_t)n, 0.0f); }
-            mSpringIr[(size_t)idxN].renderReplace(exL, exR, mCScratchL.data(), mCScratchR.data(), n);
+            bank[(size_t)idxN].renderReplace(exL, exR, mCScratchL.data(), mCScratchR.data(), n);
             for (int i = 0; i < n; ++i) {
                 left[i] = gA * left[i] + gB * mCScratchL[(size_t)i];
                 if (stereo) right[i] = gA * right[i] + gB * mCScratchR[(size_t)i];
@@ -2109,7 +2123,7 @@ public:
             break;
         case kSpring:
 #ifdef NAM_DERIVED_CONV
-            processSpringIr(left, right, numSamples); // BX20 IR bank -> continuous Decay
+            processSpringIr(left, right, numSamples); // spring IR bank (Studio/Space Tank) -> continuous Decay
 #else
             mSpring.process(left, right, numSamples); // algorithmic spring (offline/fallback)
 #endif
@@ -2216,7 +2230,7 @@ private:
         case kRoom:     return 0.88f;
         case kHall:     return 1.62f; // dispersion-FDN hall (re-measured at default Tone 3500, balanced wet/dry)
         case kPlate:    return 1.16f;  // v3 multiband plate ~1.6 dB hotter than v2; trimmed to keep the Mix knob level-matched (re-verify by ear)
-        case kSpring:   return 0.085f;  // IR spring (BX20 bank): 100%-wet matched to plate/dry so Mix tracks (was 0.138 for the old algo spring)
+        case kSpring:   return 0.085f;  // IR spring (Studio/Space Tank banks energy-matched): 100%-wet matched to plate/dry so Mix tracks (was 0.138 for the old algo spring)
         case kShimmer:  return 1.82f;
         case kAmbience: return 1.81f;
         case kBloom:    return 3.10f;
@@ -2303,7 +2317,8 @@ private:
     Biquad mDerToneL, mDerToneR; float mDerToneHz = -1.0f;             // post-conv Tone shelf (default = identity)
     std::vector<float> mCScratchL, mCScratchR;                         // short-IR crossfade scratch
     IrConvolver mPlateIr[6];                                           // 6 decay-reshaped versions of ONE plate capture -> continuous Decay
-    IrConvolver mSpringIr[6];                                          // 6 decay-reshaped BX20 spring captures -> continuous Decay
+    IrConvolver mSpringIr[6];                                          // 6 decay-reshaped studio-spring captures -> continuous Decay
+    IrConvolver mSpringTankIr[6];                                      // 6 decay-reshaped tape-echo spring-tank captures -> continuous Decay (Space Tank flavour)
     std::vector<float> mPpL, mPpR, mPpoL, mPpoR; int mPpW = 0, mPpRing = 0;   // IR-path pre-delay ring + delayed-dry scratch
 #endif
     SpringReverb mSpring;
@@ -2313,6 +2328,7 @@ private:
     std::vector<float> mEpL, mEpR, mEpoL, mEpoR; int mEpW = 0; double mFsRB = 48000.0; // plate kernel predelay ring
 
     Type mType = kPlate;
+    int mSpringFlavour = 0; // 0 = Studio, 1 = Space Tank (Spring IR bank select)
     float mSize = 1.0f, mT60 = 2.0f, mDampHz = 6000.0f, mPredelayMs = 0.0f, mMix = 0.25f;
     float mMod = 0.3f, mShimmerAmt = 0.5f, mTension = 0.5f, mBoing = 0.20f, mWidth = 1.0f, mSwell = 0.4f;
     float mLowCutHz = 95.0f, mHighCutHz = 20000.0f; // wet Low Cut (HPF) + High Cut (LPF) corners (Plate/Room)

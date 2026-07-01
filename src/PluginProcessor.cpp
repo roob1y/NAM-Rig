@@ -588,6 +588,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::ParameterID("revBoing", 1), "Reverb Boing",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.20f, knob10(0.0f, 1.0f)));
 
+    // Spring flavour: which spring-IR bank the Spring character convolves. Studio =
+    // studio-spring capture (default, unchanged), Space Tank = tape-echo spring-tank
+    // capture. Space Tape's auto-spring forces Space Tank. Appended last for
+    // automation-index stability.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("springFlavour", 1), "Spring Flavour",
+        juce::StringArray{"Studio", "Space Tank"}, 0));
+
     return {params.begin(), params.end()};
 }
 
@@ -1047,6 +1055,12 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         if (stReverbOverride == 1) rt = (int)RB::kSpring; // Space Tape -> rig Spring
         const RB::Type T = (RB::Type)rt;
         mChain.reverb.setType(rt);
+        // Spring flavour (Studio / Space Tank). Space Tape's auto-spring forces the
+        // Space Tank bank so the tape echo gets its own tape-unit spring tank; the
+        // user's manual choice applies otherwise.
+        int springFlav = (int)apvts.getRawParameterValue("springFlavour")->load();
+        if (stReverbOverride == 1) springFlav = 1; // Space Tape -> Space Tank
+        mChain.reverb.setSpringFlavour(springFlav);
         auto pv = [&](const char *knob) { return apvts.getRawParameterValue(juce::String(RB::paramId(knob, rt)))->load(); };
         mChain.reverb.setDecaySeconds(pv("Decay"));                 // per-character param is already true seconds in-range
         mChain.reverb.setDampHz(mChain.reverb.mappedTone(pv("Tone")));

@@ -43,13 +43,21 @@ juce_add_binary_data(NAM_RigData SOURCES
     resources/plate_irs/plate_ir_4.wav
     resources/plate_irs/plate_ir_5.wav
     resources/plate_irs/plate_ir_6.wav
-    # --- spring decay bank: 6 decay-reshaped AKG BX20 captures -> continuous Decay ---
+    # --- spring decay bank: 6 decay-reshaped studio-spring captures -> continuous Decay ---
     resources/spring_irs/spring_ir_1.wav
     resources/spring_irs/spring_ir_2.wav
     resources/spring_irs/spring_ir_3.wav
     resources/spring_irs/spring_ir_4.wav
     resources/spring_irs/spring_ir_5.wav
     resources/spring_irs/spring_ir_6.wav
+    # --- Space Tank spring bank: 6 decay-reshaped versions of one vintage tape-echo
+    #     spring-tank capture (brand-free, gen via /tmp/gen_tank.py) -> continuous Decay ---
+    resources/spring_irs/spring_tank_1.wav
+    resources/spring_irs/spring_tank_2.wav
+    resources/spring_irs/spring_tank_3.wav
+    resources/spring_irs/spring_tank_4.wav
+    resources/spring_irs/spring_tank_5.wav
+    resources/spring_irs/spring_tank_6.wav
     # --- UI fonts (SIL OFL 1.1 — see resources/fonts/*-OFL.txt) ---
     resources/fonts/Archivo-Regular.ttf
     resources/fonts/Archivo-Medium.ttf
