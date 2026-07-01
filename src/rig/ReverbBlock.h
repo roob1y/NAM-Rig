@@ -2216,7 +2216,7 @@ private:
         case kRoom:     return 0.88f;
         case kHall:     return 1.62f; // dispersion-FDN hall (re-measured at default Tone 3500, balanced wet/dry)
         case kPlate:    return 1.16f;  // v3 multiband plate ~1.6 dB hotter than v2; trimmed to keep the Mix knob level-matched (re-verify by ear)
-        case kSpring:   return 0.138f;  // Spring intrinsically ~+20dB hot -> big cut
+        case kSpring:   return 0.085f;  // IR spring (BX20 bank): 100%-wet matched to plate/dry so Mix tracks (was 0.138 for the old algo spring)
         case kShimmer:  return 1.82f;
         case kAmbience: return 1.81f;
         case kBloom:    return 3.10f;
