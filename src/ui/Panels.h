@@ -4734,10 +4734,11 @@ public:
                 (int)mApvts.getRawParameterValue("delayHeadMode")->load()))
         {
             const auto kb = mHeadKnob->getBounds();
+            const auto lockFont = fonts::archivo(10.5f, fonts::SemiBold, 0.04f);
             g.setColour(colors::accent);
-            g.setFont(fonts::archivo(10.5f, fonts::SemiBold, 0.04f));
+            g.setFont(lockFont);
             const juce::String txt = "Reverb Locked";
-            const float tw = g.getCurrentFont().getStringWidthFloat(txt);
+            const float tw = juce::GlyphArrangement::getStringWidth(lockFont, txt);
             const float lockW = 9.0f, gap = 5.0f, total = lockW + gap + tw;
             const float x = (float)kb.getCentreX() - total * 0.5f;
             const float cy = (float)kb.getBottom() + 6.0f;
