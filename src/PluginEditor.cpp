@@ -26,7 +26,7 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
               &mEqPanelB, &mCabPanel, &mMixPanel,
               &mModPanel, &mDelayPanel, &mReverbPanel}
 {
-    setLookAndFeel(mLnf.get());
+    setLookAndFeel(&mLnf.get());
     // The process default LookAndFeel (used by manually-shown PopupMenus that don't
     // inherit a component's LnF the way ComboBox dropdowns do) is now set/cleared by
     // RigLookAndFeel's own ctor/dtor, so it tracks the shared LnF's lifetime and is
