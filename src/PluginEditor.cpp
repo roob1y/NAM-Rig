@@ -293,7 +293,13 @@ void NamRigEditor::timerCallback()
     mCabPanel.setBypassed(off("cabOn") && off("cabOnB"));
     mModPanel.setBypassed(off("modOn"));
     mDelayPanel.setBypassed(off("delayOn"));
-    mReverbPanel.setBypassed(off("reverbOn"));
+    // Space Tape's spring modes force the reverb on (Space Tank), so don't veil the
+    // reverb panel as bypassed even if the user's reverbOn is off.
+    const bool stSpring =
+        ((int)mProc.apvts.getRawParameterValue("delayCharacter")->load() == 2) &&
+        nam_rig::DelayBlock::spaceTapeReverbOn(
+            (int)mProc.apvts.getRawParameterValue("delayHeadMode")->load());
+    mReverbPanel.setBypassed(off("reverbOn") && !stSpring);
 
     mPresetBar.updateDirty();       // modified-asterisk on the preset name
     if (++mPresetRefreshTick >= 60) // rescan the preset folder ~every 2 s

@@ -4373,13 +4373,6 @@ public:
         mHeadKnob->setValueMenu(headNames, "Echo Mode");
         addChildComponent(*mHeadKnob); // visibility toggled in refresh()
 
-        // Space Tape spring DRIVE — the tape unit's spring has a fixed decay, so this is
-        // its tone/intensity control (crossfades the lo/md/hi tank captures). Shown only
-        // for Space Tape, where it replaces the (mono-greyed) Width knob's slot.
-        mDriveKnob = std::make_unique<LabeledKnob>(apvts, "spaceTapeDrive", "Drive");
-        mDriveKnob->setRotationReadout(10.0);
-        addChildComponent(*mDriveKnob); // visibility toggled in refresh()
-
         // Stereo MODE selector as a dropdown (Single / Dual / Ping-Pong). Single =
         // one linked time; Dual = independent L/R divisions (Sync R active);
         // Ping-Pong = L/R bounce. It drives the underlying delaySyncR (Link) +
@@ -4545,9 +4538,6 @@ public:
         if (mSyncRKnob) mSyncRKnob->setVisible(!tape && dual); // only live in Dual
         mModeBox.setVisible(!tape);
         if (tape && mKnobs.size() > 4) mKnobs[4]->setEnabled(false); // Width n/a (mono tape)
-        // Space Tape: swap the greyed Width knob for the spring Drive knob.
-        if (mKnobs.size() > 4) mKnobs[4]->setVisible(!space);
-        if (mDriveKnob) mDriveKnob->setVisible(space);
 
         // Space Tape repurposes the echo-taps well as the per-head time display.
         mTapsCaption.setText(space ? "HEADS / TIME" : "ECHO TAPS", juce::dontSendNotification);
@@ -4841,7 +4831,6 @@ public:
             auto cell = mainRow.removeFromLeft(cellW).reduced(0, 8); // fill the band vertically
             const auto b = cell.withSizeKeepingCentre(juce::jmin(cellW - 12, 108), cell.getHeight());
             mKnobs[(size_t)ki]->setBounds(b);
-            if (ki == 4 && mDriveKnob) mDriveKnob->setBounds(b); // Drive shares the Width slot (Space Tape)
         }
     }
 
@@ -4852,7 +4841,6 @@ private:
     std::unique_ptr<VToggle> mSyncToggle; // Free / Sync vertical switch (next to Time)
     juce::ComboBox mModeBox;      // Single / Dual / Ping-Pong stereo dropdown
     std::unique_ptr<LabeledKnob> mSyncRKnob, mHeadKnob;
-    std::unique_ptr<LabeledKnob> mDriveKnob; // Space Tape spring Drive (takes the greyed Width slot)
     std::unique_ptr<SegmentedControl> mCharacter; // Clean / Tape Echo / Space Tape (hidden bridge)
     std::unique_ptr<DelayTaps> mTaps;
     std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
@@ -5126,6 +5114,10 @@ public:
         // ACTIVE character's per-character param + shows the subset the character uses.
         using RB0 = nam_rig::ReverbBlock;
         mDecay = std::make_unique<LabeledKnob>(apvts, juce::String(RB0::paramId("Decay", RB0::kHall)), "Decay");
+        // Space Tank Drive — replaces Decay when Space Tape drives the spring (the tape
+        // unit's spring has a fixed decay). Bound to the delay's spaceTapeDrive param.
+        mDrive = std::make_unique<LabeledKnob>(apvts, "spaceTapeDrive", "Drive");
+        mDrive->setRotationReadout(10.0);
         mSize = std::make_unique<LabeledKnob>(apvts, juce::String(RB0::paramId("Size", RB0::kHall)), "Size");
         mPredelay = std::make_unique<LabeledKnob>(apvts, juce::String(RB0::paramId("Predelay", RB0::kPlate)), "Pre-Delay");
         mLowCut = std::make_unique<LabeledKnob>(apvts, "revLowCut", "Low Cut");    // Plate/Room
@@ -5143,6 +5135,7 @@ public:
         addAndMakeVisible(*mTone);
         addAndMakeVisible(*mWidth);
         addAndMakeVisible(*mMix);
+        addChildComponent(*mDrive);
         addChildComponent(*mSize);
         addChildComponent(*mPredelay);
         addChildComponent(*mLowCut);
@@ -5191,32 +5184,48 @@ public:
 
     void refresh()
     {
+        // Space Tape's spring modes commandeer the reverb as the Space Tank: the panel
+        // shows Spring with a DRIVE knob in place of Decay (the tape unit's spring decay
+        // is fixed) and LOCKS the character cards. It reverts to the user's character
+        // when Space Tape releases the spring. Derived live from the delay params.
+        const bool stSpring =
+            ((int)mApvts.getRawParameterValue("delayCharacter")->load() == 2) &&
+            nam_rig::DelayBlock::spaceTapeReverbOn(
+                (int)mApvts.getRawParameterValue("delayHeadMode")->load());
+        mStSpring = stSpring;
+
         // Read the live selection from the combo (kept in sync with the param by
         // its attachment) so a card click reliably updates the whole panel, with
-        // no read-before-write race against the parameter.
-        const int type = mType.getSelectedItemIndex();
-        const bool on = mApvts.getRawParameterValue("reverbOn")->load() >= 0.5f;
+        // no read-before-write race against the parameter. Space Tape forces Spring.
+        const int userType = mType.getSelectedItemIndex();
+        const int type = stSpring ? (int)nam_rig::ReverbBlock::kSpring : userType;
+        const bool on = stSpring || mApvts.getRawParameterValue("reverbOn")->load() >= 0.5f;
         mIcon.setType(type);
         mIcon.setActive(on);
 
-        if (type != mLastType)
+        if (type != mLastType || stSpring != mLastStSpring)
         {
             mLastType = type;
+            mLastStSpring = stSpring;
             using RB = nam_rig::ReverbBlock;
             const auto t = (RB::Type)type;
+            // Space Tank: Drive replaces Decay; Tension/Boing are inert for the fixed IR
+            // spring, so hide them to keep the locked panel honest.
+            mDecay->setVisible(!stSpring);
+            mDrive->setVisible(stSpring);
             mSize->setVisible(RB::sizeExposed(t));
             mPredelay->setVisible(RB::predelayExposed(t));
             mLowCut->setVisible(RB::cutsExposed(t));
             mHighCut->setVisible(RB::cutsExposed(t));
             mMod->setVisible(RB::modExposed(t));
             mShimmer->setVisible(RB::shimmerExposed(t));
-            mTension->setVisible(RB::tensionExposed(t));
-            mBoing->setVisible(RB::boingExposed(t));
+            mTension->setVisible(RB::tensionExposed(t) && !stSpring);
+            mBoing->setVisible(RB::boingExposed(t) && !stSpring);
             mSwell->setVisible(RB::swellExposed(t));
             mPitch.setVisible(RB::pitchExposed(t));
             mFreeze.setVisible(RB::freezeExposed(t));
             // rebind shared knobs to THIS character's own params (own range + state)
-            mDecay->rebind(mApvts, juce::String(RB::paramId("Decay", type)));
+            if (!stSpring) mDecay->rebind(mApvts, juce::String(RB::paramId("Decay", type)));
             mTone->rebind(mApvts, juce::String(RB::paramId("Tone", type)));
             if (RB::sizeExposed(t)) mSize->rebind(mApvts, juce::String(RB::paramId("Size", type)));
             if (RB::predelayExposed(t)) mPredelay->rebind(mApvts, juce::String(RB::paramId("Predelay", type)));
@@ -5234,6 +5243,7 @@ public:
 
     void mouseUp(const juce::MouseEvent &e) override
     {
+        if (mStSpring) return; // character locked while Space Tape drives the Space Tank
         for (int i = 0; i < (int)mCardRects.size(); ++i)
             if (mCardRects[(size_t)i].contains(e.getPosition()))
             {
@@ -5275,11 +5285,25 @@ public:
                        juce::Justification::centredLeft);
         }
 
-        // Right column: character name (no description).
+        // Space Tape lock: veil the character cards (they're not selectable while the
+        // Space Tank is engaged) with a "LOCKED · SPACE TAPE" hint.
+        if (mStSpring && !mCardRects.empty())
+        {
+            auto u = mCardRects.front();
+            for (const auto &cr : mCardRects) u = u.getUnion(cr);
+            g.setColour(colors::panel.withAlpha(0.62f));
+            g.fillRoundedRectangle(u.toFloat(), 10.0f);
+            g.setColour(colors::accent);
+            g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.12f));
+            g.drawText("LOCKED \xC2\xB7 SPACE TAPE", u, juce::Justification::centred);
+        }
+
+        // Right column: character name (Space Tank while Space Tape drives the spring).
         const int t = juce::jmax(0, mLastType);
         g.setColour(colors::textBright);
         g.setFont(fonts::archivo(18.0f, fonts::Bold));
-        g.drawText(nam_rig::ReverbBlock::typeName(t), mNameRect, juce::Justification::centredLeft);
+        g.drawText(mStSpring ? juce::String("Space Tank") : juce::String(nam_rig::ReverbBlock::typeName(t)),
+                   mNameRect, juce::Justification::centredLeft);
     }
 
     void resized() override
@@ -5317,6 +5341,7 @@ public:
 
         std::vector<juce::Component *> vis;
         for (juce::Component *k : {(juce::Component *)mPredelay.get(), (juce::Component *)mDecay.get(),
+                                   (juce::Component *)mDrive.get(),
                                    (juce::Component *)mSize.get(), (juce::Component *)mTone.get(),
                                    (juce::Component *)mLowCut.get(), (juce::Component *)mHighCut.get(),
                                    (juce::Component *)mMod.get(), (juce::Component *)mTension.get(),
@@ -5337,6 +5362,7 @@ public:
 private:
     juce::AudioProcessorValueTreeState &mApvts;
     int mLastType = -1;
+    bool mStSpring = false, mLastStSpring = false; // Space Tape drives the Space Tank spring
     ReverbIcon mIcon;
     juce::ComboBox mType, mPitch;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt, mPitchAtt;
@@ -5345,7 +5371,7 @@ private:
     ReverbField mField;
     std::vector<juce::Rectangle<int>> mCardRects;
     juce::Rectangle<int> mCharCap, mNameRect;
-    std::unique_ptr<LabeledKnob> mDecay, mSize, mPredelay, mTone, mMod, mShimmer, mTension, mBoing, mSwell, mWidth, mMix, mLowCut, mHighCut;
+    std::unique_ptr<LabeledKnob> mDecay, mDrive, mSize, mPredelay, mTone, mMod, mShimmer, mTension, mBoing, mSwell, mWidth, mMix, mLowCut, mHighCut;
 };
 
 //==============================================================================
