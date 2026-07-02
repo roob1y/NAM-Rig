@@ -164,6 +164,9 @@ public:
     void setTunerActive(bool b) { mTunerActive.store(b); }
     void setTunerMute(bool b) { mTunerMute.store(b); }
     bool tunerMute() const { return mTunerMute.load(); }
+    // Run the (heavy) pitch analysis on any published window. Called from the editor
+    // timer — the MESSAGE thread — so the audio thread never pays for it.
+    void tunerAnalyze() { mTuner.analyzePending(); }
     float tunerFreq() const { return mTuner.frequency(); }  // Hz, 0 = no pitch found
     float tunerClarity() const { return mTuner.clarity(); } // 0..1 confidence
 

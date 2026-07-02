@@ -8,12 +8,20 @@
 // makes MPM robust against octave-up errors on harmonic-rich guitar tone, then
 // refine the lag with parabolic interpolation.
 //
-// RT contract: prepare() (message thread) allocates; push() and analyse() are
-// allocation- and lock-free. push() accumulates samples and analyses one fixed
-// window at a time, publishing frequency (Hz) + clarity (0..1) as atomics for the
-// UI thread. No JUCE dependency, so it is verified offline by tests/tuner_test.cpp.
+// THREADING: the NSDF is an O(N * maxLag) sweep — far too heavy to run on the
+// audio thread (doing so caused dropouts when stacked with the reverb). So the
+// work is split:
+//   * push()          — audio thread: only copies samples into a fill buffer and,
+//                        once a window is full, hands it off to a double buffer via
+//                        a lock-free (slot, generation) publish. Cheap + RT-safe.
+//   * analyzePending() — a NON-audio thread (the editor's 30 Hz timer): if a new
+//                        window has been published, runs the NSDF on it and stores
+//                        frequency (Hz) + clarity (0..1) atomics for the UI.
+// No JUCE dependency, so it is verified offline by tests/tuner_test.cpp (which
+// calls analyzePending() itself, standing in for the timer).
 
 #include <atomic>
+#include <cstdint>
 #include <cmath>
 #include <vector>
 #include <algorithm>
@@ -34,6 +42,8 @@ public:
         mFs = sampleRate;
         mN = windowSize;
         mBuf.assign((size_t)mN, 0.0f);
+        mSnap[0].assign((size_t)mN, 0.0f);
+        mSnap[1].assign((size_t)mN, 0.0f);
         // NSDF only needs lags up to the lowest-frequency period.
         mMaxLag = std::min(mN - 1, (int)(mFs / kMinHz) + 1);
         mMinLag = std::max(2, (int)(mFs / kMaxHz));
@@ -45,13 +55,17 @@ public:
     {
         std::fill(mBuf.begin(), mBuf.end(), 0.0f);
         mWrite = 0;
+        mFillSlot = 0;
+        mGen = 0;
+        mSnapGen.store(0);
+        mConsumedGen = 0;
         mFreq.store(0.0f);
         mClarity.store(0.0f);
     }
 
-    // Push a block of mono samples (audio thread). Analyses whenever a full window
-    // has accumulated; windows are non-overlapping (a tuner needs ~10-20 Hz update,
-    // not every sample).
+    // AUDIO THREAD: accumulate mono samples; when a full window is collected, copy
+    // it into the next double-buffer slot and publish (slot then generation, with a
+    // release store) so a consumer can pick it up. Never analyses here.
     void push(const float *x, int n)
     {
         for (int i = 0; i < n; ++i)
@@ -59,10 +73,29 @@ public:
             mBuf[(size_t)mWrite++] = x[i];
             if (mWrite >= mN)
             {
-                analyze();
+                const int slot = mFillSlot;
+                std::copy(mBuf.begin(), mBuf.end(), mSnap[(size_t)slot].begin());
+                mReadySlot = slot;               // plain; ordered before the gen store
+                mSnapGen.store(++mGen, std::memory_order_release);
+                mFillSlot ^= 1;                  // next window fills the other slot
                 mWrite = 0;
             }
         }
+    }
+
+    // NON-AUDIO THREAD: if a new window has been published since last time, analyse
+    // it and update the published frequency/clarity. Returns true if it analysed.
+    // Safe: the just-published slot is not the one the audio thread is now filling,
+    // and audio won't overwrite it again for two full windows (~170 ms at 48 k),
+    // far longer than an analysis takes.
+    bool analyzePending()
+    {
+        const uint32_t g = mSnapGen.load(std::memory_order_acquire);
+        if (g == mConsumedGen)
+            return false;
+        mConsumedGen = g;
+        analyze(mSnap[(size_t)mReadySlot].data());
+        return true;
     }
 
     // Latest estimate. frequency() is 0 when no pitch is found; clarity() in [0,1]
@@ -71,14 +104,14 @@ public:
     float clarity() const { return mClarity.load(); }
 
 private:
-    void analyze()
+    void analyze(const float *buf)
     {
         const int N = mN;
 
         // Silence gate: ignore near-nothing so a decaying note doesn't chase noise.
         double power = 0.0;
         for (int i = 0; i < N; ++i)
-            power += (double)mBuf[(size_t)i] * mBuf[(size_t)i];
+            power += (double)buf[i] * buf[i];
         if (power < 1.0e-5)
         {
             mFreq.store(0.0f);
@@ -94,8 +127,8 @@ private:
             const int lim = N - tau;
             for (int i = 0; i < lim; ++i)
             {
-                const double a = mBuf[(size_t)i];
-                const double b = mBuf[(size_t)(i + tau)];
+                const double a = buf[i];
+                const double b = buf[i + tau];
                 r += a * b;
                 m += a * a + b * b;
             }
@@ -183,7 +216,17 @@ private:
 
     double mFs = 48000.0;
     int mN = 4096, mWrite = 0, mMinLag = 2, mMaxLag = 2048;
-    std::vector<float> mBuf, mNsdf;
+
+    // Fill buffer (audio) + double-buffer handoff to the analysis thread.
+    std::vector<float> mBuf;
+    std::vector<float> mSnap[2];
+    int mFillSlot = 0;                 // audio: slot being written next
+    int mReadySlot = 0;                // published slot (released via mSnapGen)
+    uint32_t mGen = 0;                 // audio-side publish counter
+    std::atomic<uint32_t> mSnapGen{0}; // published generation (release/acquire)
+    uint32_t mConsumedGen = 0;         // consumer-side last analysed generation
+
+    std::vector<float> mNsdf;          // consumer scratch
     std::atomic<float> mFreq{0.0f};
     std::atomic<float> mClarity{0.0f};
 };

@@ -32,6 +32,7 @@ static double detect(Tuner &t, int n, Gen gen)
     for (int i = 0; i < n; ++i) x[(size_t)i] = (float)gen(i);
     for (int p = 0; p < n; p += BLK)
         t.push(x.data() + p, std::min(BLK, n - p));
+    while (t.analyzePending()) {} // stand in for the editor timer draining published windows
     return t.frequency();
 }
 

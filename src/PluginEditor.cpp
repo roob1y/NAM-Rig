@@ -303,7 +303,10 @@ void NamRigEditor::timerCallback()
     mOutMeter.push(mProc.mOutputPeakDb.load(), dt);
 
     if (mTunerPanel.isVisible())
+    {
+        mProc.tunerAnalyze(); // runs the pitch analysis here, off the audio thread
         mTunerPanel.setPitch(mProc.tunerFreq(), mProc.tunerClarity());
+    }
 
     mAmpPanel.refresh();
     mCabPanel.refresh();

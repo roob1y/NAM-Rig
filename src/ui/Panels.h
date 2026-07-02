@@ -2075,9 +2075,9 @@ public:
         // flat/sharp labels
         g.setColour(colors::caption);
         g.setFont(fonts::archivo(12.0f, fonts::SemiBold));
-        g.drawText(juce::String::fromUTF8("\xE2\x99\xADFLAT"), bar.withTrimmedTop(24),
+        g.drawText(juce::String::fromUTF8("\xE2\x99\xAD" "FLAT"), bar.withTrimmedTop(24),
                    juce::Justification::centredLeft);
-        g.drawText(juce::String::fromUTF8("SHARP\xE2\x99\xAF"), bar.withTrimmedTop(24),
+        g.drawText(juce::String::fromUTF8("SHARP" "\xE2\x99\xAF"), bar.withTrimmedTop(24),
                    juce::Justification::centredRight);
 
         // --- readouts: measured Hz + cents, and the target ---
