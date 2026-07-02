@@ -3,18 +3,10 @@
 #include "ui/RigLookAndFeel.h"
 #include "ui/IrTagCache.h"
 #include "ui/SortableFileList.h"
+#include "ui/SortableFolderTree.h"
 
 namespace nam_rig::ui
 {
-
-// Folders-only filter for the left pane.
-class DirOnlyFilter : public juce::FileFilter
-{
-public:
-    DirOnlyFilter() : juce::FileFilter("Folders") {}
-    bool isFileSuitable(const juce::File &) const override { return false; }
-    bool isDirectorySuitable(const juce::File &) const override { return true; }
-};
 
 // A "load into this cab" target. Accepts the browser's internal drag (a file row
 // dragged from the file list) AND files dragged from the OS file manager.
@@ -87,9 +79,10 @@ private:
     bool mOver = false;
 };
 
-// IR library overlay: TWO PANES — folders on the left, the selected folder's IRs
-// on the right (name-filtered, tone-tag-filtered and sortable). Drag a file onto
-// Cab A / Cab B (or drop OS files); selecting a file previews its tone tag.
+// IR library overlay: TWO PANES — a sortable folder tree on the left, the
+// selected folder's IRs on the right (name-filtered, tone-tag-filtered and
+// sortable). Drag a file onto Cab A / Cab B (or drop OS files); selecting a file
+// previews its tone tag.
 class IrBrowser : public juce::Component,
                   public juce::DragAndDropContainer
 {
@@ -97,21 +90,15 @@ public:
     std::function<void(const juce::File &, int rig)> onLoad; // load file into rig
     std::function<void()> onClose;
 
-    IrBrowser()
-        : mThread("ir-scan"),
-          mFolderList(&mFolderFilter, mThread), mFolders(mFolderList),
-          mZoneA("CAB A"), mZoneB("CAB B")
+    IrBrowser() : mZoneA("CAB A"), mZoneB("CAB B")
     {
-        mThread.startThread();
-
+        mFolders.onFolderSelected = [this](const juce::File &d) { mFileList.setFolder(d); };
         addAndMakeVisible(mFolders);
-        mFolders.setColour(juce::TreeView::backgroundColourId, juce::Colour(0xff121419));
-        mFolderSel.onSel = [this] { folderSelected(); };
-        mFolders.addListener(&mFolderSel);
 
         mFileList.extensions = juce::StringArray{".wav", ".aif", ".aiff"};
         mFileList.onSelChange = [this] { fileSelected(); };
-        // Tone-tag chip filter (cached analysis; cheap after the first pass).
+        // Tone-tag chip filter (cached analysis; cheap after the first pass, and
+        // only runs when a non-"All" chip is active).
         mFileList.extraFilter = [this](const juce::File &f) {
             return mTagFilter.isEmpty() || mCache.tagFor(f).containsIgnoreCase(mTagFilter);
         };
@@ -160,12 +147,6 @@ public:
         mZoneB.onFile = [this](const juce::File &f) { if (onLoad) onLoad(f, 1); mZoneB.setIrName(f.getFileNameWithoutExtension()); };
     }
 
-    ~IrBrowser() override
-    {
-        mFolders.removeListener(&mFolderSel);
-        mThread.stopThread(2000);
-    }
-
     void openFor(int rig, const juce::File &root, const juce::String &irA, const juce::String &irB)
     {
         mActiveRig = rig;
@@ -174,8 +155,8 @@ public:
         mNoRoot = !root.isDirectory();
         if (!mNoRoot)
         {
-            mFolderList.setDirectory(root, true, false); // subfolders (left pane)
-            mFileList.setFolder(root);                   // root's IRs (right pane)
+            mFolders.setRoot(root);    // subfolders (left pane)
+            mFileList.setFolder(root); // root's IRs (right pane)
         }
         mHaveSel = false;
         mFileList.clearSelection();
@@ -276,18 +257,12 @@ private:
                                   if (dir.isDirectory())
                                   {
                                       if (mSetRoot) mSetRoot(dir);
-                                      mFolderList.setDirectory(dir, true, false);
+                                      mFolders.setRoot(dir);
                                       mFileList.setFolder(dir);
                                       mNoRoot = false;
                                       repaint();
                                   }
                               });
-    }
-
-    void folderSelected()
-    {
-        auto d = mFolders.getSelectedFile(0);
-        if (d.isDirectory()) mFileList.setFolder(d);
     }
 
     // Preview the selected IR's tone tag in the hint line.
@@ -306,25 +281,11 @@ private:
         repaint();
     }
 
-    // Adapter so the folder tree's selection drives the file pane.
-    struct FolderSel : juce::FileBrowserListener
-    {
-        std::function<void()> onSel;
-        void selectionChanged() override { if (onSel) onSel(); }
-        void fileClicked(const juce::File &, const juce::MouseEvent &) override {}
-        void fileDoubleClicked(const juce::File &) override {}
-        void browserRootChanged(const juce::File &) override {}
-    };
-
-    juce::TimeSliceThread mThread;
-    DirOnlyFilter mFolderFilter;
-    juce::DirectoryContentsList mFolderList;
-    juce::FileTreeComponent mFolders;      // folders-only (left pane)
-    SortableFileList mFileList;            // sortable IRs (right pane)
-    FolderSel mFolderSel;
+    SortableFolderTree mFolders;          // sortable folder tree (left pane)
+    SortableFileList mFileList;           // sortable IRs (right pane)
     juce::TextEditor mSearch;
     IrTagCache mCache;
-    juce::String mTagFilter;               // active tone-tag chip ("" = All)
+    juce::String mTagFilter;              // active tone-tag chip ("" = All)
     juce::OwnedArray<juce::ToggleButton> mTagChips;
     juce::StringArray mTags;
     juce::TextButton mChooseBtn, mCloseBtn;

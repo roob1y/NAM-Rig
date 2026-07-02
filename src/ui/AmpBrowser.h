@@ -2,18 +2,10 @@
 #include "PluginProcessor.h"
 #include "ui/RigLookAndFeel.h"
 #include "ui/SortableFileList.h"
+#include "ui/SortableFolderTree.h"
 
 namespace nam_rig::ui
 {
-
-// Folders-only filter for the left pane.
-class AmpDirOnlyFilter : public juce::FileFilter
-{
-public:
-    AmpDirOnlyFilter() : juce::FileFilter("Folders") {}
-    bool isFileSuitable(const juce::File &) const override { return false; }
-    bool isDirectorySuitable(const juce::File &) const override { return true; }
-};
 
 // A "load into this amp" target. Accepts the browser's internal drag (a model row
 // dragged from the file list) AND .nam files dragged from the OS file manager.
@@ -85,9 +77,9 @@ private:
     bool mOver = false;
 };
 
-// Amp-model library overlay: TWO PANES — folders on the left, the selected
-// folder's .nam models on the right (name-filtered + sortable). Drag a model onto
-// Amp A / Amp B (or drop OS files).
+// Amp-model library overlay: TWO PANES — a sortable folder tree on the left, the
+// selected folder's .nam models on the right (name-filtered + sortable). Drag a
+// model onto Amp A / Amp B (or drop OS files).
 class AmpBrowser : public juce::Component,
                    public juce::DragAndDropContainer
 {
@@ -95,17 +87,10 @@ public:
     std::function<void(const juce::File &, int rig)> onLoad; // load model into rig
     std::function<void()> onClose;
 
-    AmpBrowser()
-        : mThread("amp-scan"),
-          mFolderList(&mFolderFilter, mThread), mFolders(mFolderList),
-          mZoneA("AMP A"), mZoneB("AMP B")
+    AmpBrowser() : mZoneA("AMP A"), mZoneB("AMP B")
     {
-        mThread.startThread();
-
+        mFolders.onFolderSelected = [this](const juce::File &d) { mFileList.setFolder(d); };
         addAndMakeVisible(mFolders);
-        mFolders.setColour(juce::TreeView::backgroundColourId, juce::Colour(0xff121419));
-        mFolderSel.onSel = [this] { folderSelected(); };
-        mFolders.addListener(&mFolderSel);
 
         mFileList.extensions = juce::StringArray{".nam"};
         mFileList.onSelChange = [this] { fileSelected(); };
@@ -133,12 +118,6 @@ public:
         mZoneB.onFile = [this](const juce::File &f) { if (onLoad) onLoad(f, 1); mZoneB.setModelName(f.getFileNameWithoutExtension()); };
     }
 
-    ~AmpBrowser() override
-    {
-        mFolders.removeListener(&mFolderSel);
-        mThread.stopThread(2000);
-    }
-
     void openFor(int rig, const juce::File &root, const juce::String &ampA, const juce::String &ampB)
     {
         mActiveRig = rig;
@@ -147,8 +126,8 @@ public:
         mNoRoot = !root.isDirectory();
         if (!mNoRoot)
         {
-            mFolderList.setDirectory(root, true, false); // subfolders (left pane)
-            mFileList.setFolder(root);                   // root's models (right pane)
+            mFolders.setRoot(root);    // subfolders (left pane)
+            mFileList.setFolder(root); // root's models (right pane)
         }
         mHaveSel = false;
         mFileList.clearSelection();
@@ -239,18 +218,12 @@ private:
                                   if (dir.isDirectory())
                                   {
                                       if (mSetRoot) mSetRoot(dir);
-                                      mFolderList.setDirectory(dir, true, false);
+                                      mFolders.setRoot(dir);
                                       mFileList.setFolder(dir);
                                       mNoRoot = false;
                                       repaint();
                                   }
                               });
-    }
-
-    void folderSelected()
-    {
-        auto d = mFolders.getSelectedFile(0);
-        if (d.isDirectory()) mFileList.setFolder(d);
     }
 
     // Preview the selected model name in the hint line.
@@ -262,22 +235,8 @@ private:
         repaint();
     }
 
-    // Adapter so the folder tree's selection drives the file pane.
-    struct FolderSel : juce::FileBrowserListener
-    {
-        std::function<void()> onSel;
-        void selectionChanged() override { if (onSel) onSel(); }
-        void fileClicked(const juce::File &, const juce::MouseEvent &) override {}
-        void fileDoubleClicked(const juce::File &) override {}
-        void browserRootChanged(const juce::File &) override {}
-    };
-
-    juce::TimeSliceThread mThread;
-    AmpDirOnlyFilter mFolderFilter;
-    juce::DirectoryContentsList mFolderList;
-    juce::FileTreeComponent mFolders;      // folders-only (left pane)
-    SortableFileList mFileList;            // sortable models (right pane)
-    FolderSel mFolderSel;
+    SortableFolderTree mFolders;          // sortable folder tree (left pane)
+    SortableFileList mFileList;           // sortable models (right pane)
     juce::TextEditor mSearch;
     juce::TextButton mChooseBtn, mCloseBtn;
     AmpDropZone mZoneA, mZoneB;
