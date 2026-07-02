@@ -97,26 +97,35 @@ int main()
     const float T = CompBlock::thresholdForSustain(sustain);   // -27.5 dB
     (void)T;
 
-    // ---- T1: auto-makeup matches output LOUDNESS (RMS) to the input ----
-    // With Level at 0 dB, a steady tone comes out at its input loudness whether
-    // it is below threshold (unity) or being compressed (makeup restores it), so
-    // engaging the comp is level-neutral.
+    // ---- T1a: instant makeup — a full-scale (0 dBFS) peak passes at unity ----
     {
-        bool ok = true;
-        double worst = 0;
-        for (double inDb : {-50.0, -40.0, -30.0, -20.0, -10.0, -5.0})
+        CompBlock c; c.setSustain(sustain); c.setAttackMs(1.0f);
+        c.setRatio(CompBlock::kRatio); c.prepare({SR, BLK});
+        auto x = tone(0.0, 48000); run(c, x);
+        double op = 0; for (size_t i = x.size() - 4800; i < x.size(); ++i) op = std::max(op, (double)std::abs(x[i]));
+        const double outDb = 20.0 * std::log10(op);
+        CHECK(std::abs(outDb) < 0.6, "T1a full-scale peak passes at unity (%.2f dBFS, want ~0)", outDb);
+    }
+
+    // ---- T1b: makeup is INSTANT — a function of the knobs, not program history ----
+    // The steady-state output of a tone is identical whether it was preceded by a
+    // loud burst or by silence: the makeup does not drift with what you played.
+    {
+        auto tailPeak = [&](bool preLoud)
         {
-            CompBlock c; c.setSustain(sustain); c.setAttackMs(1.0f);
+            CompBlock c; c.setSustain(0.5f); c.setAttackMs(5.0f);
             c.setRatio(CompBlock::kRatio); c.prepare({SR, BLK});
-            auto ref = tone(inDb, 96000); auto x = ref; run(c, x); // 2 s: makeup converges
-            double ie = 0, oe = 0;
-            for (size_t i = x.size() - 9600; i < x.size(); ++i)
-            { ie += (double)ref[i] * ref[i]; oe += (double)x[i] * x[i]; }
-            const double errDb = std::abs(10.0 * std::log10(oe / ie));
-            worst = std::max(worst, errDb);
-            if (errDb > 1.0) ok = false;
-        }
-        CHECK(ok, "T1 auto-makeup: output loudness (RMS) matches input (worst %.2f dB, want < 1.0)", worst);
+            auto lead = preLoud ? tone(-3.0, 24000) : std::vector<float>(24000, 0.0f);
+            auto body = tone(-12.0, 72000);
+            std::vector<float> x;
+            x.insert(x.end(), lead.begin(), lead.end());
+            x.insert(x.end(), body.begin(), body.end());
+            run(c, x);
+            double p = 0; for (size_t i = x.size() - 4800; i < x.size(); ++i) p = std::max(p, (double)std::abs(x[i]));
+            return p;
+        };
+        const double dDb = std::abs(20.0 * std::log10(tailPeak(true) / tailPeak(false)));
+        CHECK(dDb < 0.05, "T1b makeup independent of program history (%.3f dB drift, want < 0.05)", dDb);
     }
 
     // ---- T2: soft-knee transfer slope above knee == 1/ratio (pure computer) ----
@@ -202,21 +211,24 @@ int main()
               "T4 sustain lengthens decay: T30 %.2fs (s=0.1) -> %.2fs (s=0.9), want >1.3x", tLow, tHigh);
     }
 
-    // ---- T5: sub-threshold unity at Level 0; Level knob trims exactly ----
+    // ---- T5: sub-threshold gain == computed makeup; Level trims on top ----
     {
         auto ref = tone(-40.0, 96000);
-        // sustain 0 -> threshold -10 dB, so -40 dB is well below: no GR, makeup ~unity
+        // sustain 0 -> threshold -10 dB, so -40 dB is well below: no GR. Output is
+        // just the constant makeup, which is exactly the curve's GR at 0 dBFS.
         CompBlock c0; c0.setSustain(0.0f); c0.setLevelDb(0.0f);
         c0.setRatio(CompBlock::kRatio); c0.prepare({SR, BLK});
         auto x0 = ref; run(c0, x0);
+        const float T0 = CompBlock::thresholdForSustain(0.0f);
+        const double mk = -CompBlock::computeGainDb(0.0f, T0, CompBlock::kRatio, CompBlock::kKneeDb);
         const double u = tailDb(x0) - tailDb(ref);
-        CHECK(std::abs(u) < 0.3, "T5a sub-threshold unity at Level 0 (%.2f dB, want ~0)", u);
+        CHECK(std::abs(u - mk) < 0.3, "T5a sub-threshold gain == computed makeup %.1f dB (got %.2f)", mk, u);
 
         CompBlock c6; c6.setSustain(0.0f); c6.setLevelDb(6.0f);
         c6.setRatio(CompBlock::kRatio); c6.prepare({SR, BLK});
         auto x6 = ref; run(c6, x6);
-        const double d = tailDb(x6) - tailDb(ref);
-        CHECK(std::abs(d - 6.0) < 0.3, "T5b Level +6 dB trims output +6 dB (got %.2f)", d);
+        const double d = tailDb(x6) - tailDb(x0); // relative to Level 0
+        CHECK(std::abs(d - 6.0) < 0.3, "T5b Level +6 dB adds +6 dB (got %.2f)", d);
     }
 
     // ---- T6: no zipper — per-sample output delta bounded on steady tone ----

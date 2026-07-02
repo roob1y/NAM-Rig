@@ -2,8 +2,9 @@
 // CompBlock — pedal-style compressor, mono, DAW rate, pre-amp.
 //
 // Scoped (June 2026) as the "front of amp" tool guitarists actually use:
-// a Sustain knob + AUTO-MAKEUP so the output matches the input loudness (RMS)
-// with the Level knob at 0 dB. Ratio (Clean/FET) and Release (Clean/FET/Opto) knobs are
+// a Sustain knob + INSTANT AUTO-MAKEUP (computed from the knobs, not the signal,
+// so it never drifts): a full-scale peak passes at unity with the Level knob at
+// 0 dB. Ratio (Clean/FET) and Release (Clean/FET/Opto) knobs are
 // exposed on the voicings whose hardware has them; see ratioExposed/releaseExposed.
 //
 // FOUR VOICINGS (compMode), each reinterpreting the same four knobs:
@@ -22,8 +23,8 @@
 // Topology (feedforward, log-domain — Giannoulis/Massberg/Reiss style):
 //   detector(peak|RMS, optional sidechain HPF) -> dB -> soft-knee gain computer
 //   -> attack / program-dependent release smoother on the GR signal
-//   -> apply gain reduction -> AUTO-MAKEUP (matches output loudness (RMS) to the
-//      input, so engaging the comp is level-neutral) -> Level trim -> colour.
+//   -> apply gain reduction -> INSTANT AUTO-MAKEUP (a constant gain from the
+//      curve: adds back the GR at 0 dBFS) -> Level trim -> voicing colour.
 //
 // Latency: zero (chain-bypass via compOn is safe). Verified by tests/comp_test.cpp.
 
@@ -152,9 +153,6 @@ public:
         mScHp = 0.0f;
         mRms2 = 0.0f;
         mIronLpf = 0.0f;
-        mInMs = 0.0f;
-        mPreMs = 0.0f;
-        mAutoMk = 1.0f;
     }
 
     void process(float *mono, int numSamples) override
@@ -179,10 +177,13 @@ public:
         const float relFastMs = v.relFastMs * relScale;
         const float relSlowMs = v.relSlowMs * relScale;
 
-        // No static makeup and no boost: makeup is measured automatically so the
-        // output peaks at the input level (see the auto-makeup followers below).
-        // Level is a manual trim layered on top of that.
-        const float levelLin = std::pow(10.0f, mLevelDb.load() * 0.05f);
+        // Instant auto-makeup: a CONSTANT gain (per block) that adds back exactly
+        // the gain reduction the static curve applies at full scale (0 dBFS), so a
+        // 0 dBFS peak passes at unity and everything below is lifted the same way.
+        // It is a function of the knobs only (threshold + ratio + knee), NOT the
+        // signal, so it never drifts while you play. Level trims on top. No boost.
+        const float makeupDb = -computeGainDb(0.0f, t, ratio, v.kneeDb);
+        const float outLin = std::pow(10.0f, (makeupDb + mLevelDb.load()) * 0.05f);
 
         const float attMs = std::max(v.attackFloorMs, mAttackMs.load() * v.attackScale);
         const float attCoef = coefForMs(attMs, sr);
@@ -190,16 +191,6 @@ public:
         const bool simpleRelease = (v.relFastMs == v.relSlowMs && v.progDepth == 0.0f);
         const float relCoefConst = coefForMs(relSlowMs, sr);
         const float relMemCoef = coefForMs(150.0f, sr); // duration-memory follower
-
-        // Auto-makeup: match output LOUDNESS (RMS) to input loudness. Slow
-        // mean-square followers (~300 ms) on the input and the pre-makeup
-        // (gain-reduced) signal; makeup = sqrt(inMS/preMS), smoothed ~300 ms, so
-        // engaging the comp is loudness-neutral without fighting per-note
-        // dynamics. (RMS, not peak: a compressor raises the average, so peak-
-        // matching would make squashed settings jump in level / hit the amp
-        // harder — RMS keeps the drive into the amp consistent.)
-        const float mkAvgCoef = coefForMs(300.0f, sr);
-        const float mkCoef = coefForMs(300.0f, sr);
 
         const bool scOn = v.scHpfHz > 0.0f;
         const float scCoef = scOn ? coefForHz(v.scHpfHz, sr) : 0.0f;
@@ -210,7 +201,6 @@ public:
         const float ironCoef = coefForHz(400.0, sr);    // transformer low-band corner
 
         float gr = mGrDb, relMem = mRelMem, scHp = mScHp, rms2 = mRms2, ironLpf = mIronLpf;
-        float inMs = mInMs, preMs = mPreMs, autoMk = mAutoMk; // auto-makeup state (RMS)
         float inPk = 0.0f, outPk = 0.0f; // block peaks for the IN/OUT meter modes
 
         for (int i = 0; i < numSamples; ++i)
@@ -261,21 +251,9 @@ public:
             if (!simpleRelease)
                 relMem += relMemCoef * (gr - relMem);
 
-            // ---- apply gain reduction, then auto-makeup + Level ----
+            // ---- gain reduction + instant makeup + Level (one constant gain) ----
             const float grLin = (gr < 1.0e-4f) ? 1.0f : std::pow(10.0f, -gr * 0.05f);
-            const float pre = x * grLin;          // gain-reduced, pre-makeup
-
-            // mean-square followers -> makeup = sqrt(inMS/preMS) (loudness match)
-            inMs += mkAvgCoef * (x * x - inMs);
-            preMs += mkAvgCoef * (pre * pre - preMs);
-            if (preMs > 1.0e-12f)
-            {
-                float target = std::sqrt(inMs / preMs); // makeup that restores loudness
-                target = std::min(100.0f, std::max(0.25f, target)); // clamp -12..+40 dB
-                autoMk += mkCoef * (target - autoMk);
-            }
-
-            float y = pre * autoMk * levelLin;
+            float y = x * grLin * outLin;
 
             // ---- analog colour (scaled by Character; 0 = clean) ----
             if (ch > 0.0f && (v.drive > 0.0f || v.iron > 0.0f))
@@ -313,9 +291,6 @@ public:
         mScHp = flush(scHp);
         mRms2 = flush(rms2);
         mIronLpf = flush(ironLpf);
-        mInMs = flush(inMs);
-        mPreMs = flush(preMs);
-        mAutoMk = autoMk;
         mGrDbPub.store(mGrDb); // published for the editor's GR meter
         // Block peaks in dBFS for the IN/OUT meter modes (UI thread reads these).
         mInPeakDbPub.store(inPk > 1.0e-9f ? 20.0f * std::log10(inPk) : -120.0f);
@@ -356,9 +331,6 @@ private:
     float mScHp = 0.0f;    // sidechain HPF state
     float mRms2 = 0.0f;    // RMS detector state
     float mIronLpf = 0.0f; // transformer low-band state
-    float mInMs = 0.0f;    // auto-makeup: input mean-square follower
-    float mPreMs = 0.0f;   // auto-makeup: gain-reduced mean-square follower
-    float mAutoMk = 1.0f;  // auto-makeup gain (linear)
     double mSampleRate = 48000.0;
     bool mPrepared = false;
 };
