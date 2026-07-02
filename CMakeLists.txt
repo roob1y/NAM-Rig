@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # --- Paths (adjust if your clones are elsewhere) ---
 set(JUCE_DIR         "C:/Dev/JUCE")
 set(NAM_CORE_DIR     "C:/Dev/NeuralAmpModelerCore")
-set(NAM_AA_CORE_DIR  "C:/Dev/NAM-AA-Plugin/core")  # shared engine library
+set(NAM_AA_CORE_DIR  "${CMAKE_CURRENT_SOURCE_DIR}/external/NAM-AA-Plugin/core")  # shared engine (git submodule)
 
 # --- JUCE ---
 add_subdirectory(${JUCE_DIR} "${CMAKE_BINARY_DIR}/JUCE")

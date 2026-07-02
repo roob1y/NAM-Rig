@@ -1,0 +1,4 @@
+[submodule "external/NAM-AA-Plugin"]
+	path = external/NAM-AA-Plugin
+	url = https://github.com/roob1y/roob1y-NAM-Anti-Alias.git
+	branch = feature/oversampling
