@@ -5446,6 +5446,55 @@ private:
     juce::Colour mAccent{colors::accent};
 };
 
+// Compact "LINK" pill for the Mix panel: ties the two rig Level knobs so a drag
+// on one shifts the other by the same dB (offset preserved). Decoupled from the
+// parameter like InvertSwitch — clicks write rigLevelLink, refresh() mirrors it
+// back via setStateQuiet(). Draws a two-ring chain glyph beside the label.
+class LinkToggle : public juce::Component
+{
+public:
+    std::function<void(bool)> onToggle;
+
+    void setStateQuiet(bool on) { if (on != mOn) { mOn = on; repaint(); } }
+    bool state() const { return mOn; }
+    void enablementChanged() override { repaint(); }
+
+    void mouseUp(const juce::MouseEvent &e) override
+    {
+        if (!isEnabled() || !getLocalBounds().contains(e.getPosition())) return;
+        mOn = !mOn;
+        repaint();
+        if (onToggle) onToggle(mOn);
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        const bool en = isEnabled();
+        auto box = getLocalBounds().toFloat().reduced(0.5f);
+        const juce::Colour acc = colors::accent;
+        g.setColour(en && mOn ? acc.withAlpha(0.16f) : colors::tile);
+        g.fillRoundedRectangle(box, 7.0f);
+        g.setColour(en ? (mOn ? acc : colors::outline) : colors::captionDim);
+        g.drawRoundedRectangle(box, 7.0f, mOn ? 1.4f : 1.0f);
+
+        // Two interlocking rings (chain link) at the left.
+        auto ic = box.reduced(9.0f, 0.0f).removeFromLeft(22.0f);
+        const float rw = 12.0f, rh = 9.0f, cy = ic.getCentreY();
+        const juce::Colour ink = en ? (mOn ? acc : colors::text2) : colors::captionDim;
+        g.setColour(ink);
+        g.drawRoundedRectangle(ic.getX(), cy - rh * 0.5f, rw, rh, rh * 0.5f, 1.4f);
+        g.drawRoundedRectangle(ic.getX() + rw - 6.0f, cy - rh * 0.5f, rw, rh, rh * 0.5f, 1.4f);
+
+        g.setColour(ink);
+        g.setFont(fonts::archivo(11.0f, fonts::SemiBold, 0.08f));
+        g.drawText("LINK", box.withTrimmedLeft(30.0f).toNearestInt(),
+                   juce::Justification::centredLeft);
+    }
+
+private:
+    bool mOn = false;
+};
+
 // Per-rig OUT L·R meter: two thin vertical bars (tag-coloured fill over a dark
 // track) with an "OUT L·R" caption beneath. Fed dBFS from the editor timer with
 // a peak-hold fall-back so brief peaks stay readable.
@@ -5499,7 +5548,7 @@ private:
 // MIX — dual-rig routing: mode (Solo A / Solo B / Dual), per-rig level + pan +
 // polarity, the phase-align nudge, and the Auto-align button (probes both
 // voices). The two rigs merge here into the shared stereo section.
-class MixPanel : public BlockPanel
+class MixPanel : public BlockPanel, private juce::Slider::Listener
 {
 public:
     explicit MixPanel(NamRigProcessor &proc) : BlockPanel("MIX"), mProc(proc)
@@ -5555,6 +5604,25 @@ public:
         addAndMakeVisible(mAutoBtn);
         mMatchBtn.onClick = [this] { mProc.matchLevels(); };
         addAndMakeVisible(mMatchBtn);
+
+        // Level A/B link: clicks write the (UI-only) rigLevelLink param; refresh()
+        // mirrors it back. The actual tie-together is done by listening to the two
+        // Level sliders and shifting the partner by the same dB delta.
+        mLinkBtn.onToggle = [this](bool on) {
+            if (auto *p = mProc.apvts.getParameter("rigLevelLink"))
+                p->setValueNotifyingHost(on ? 1.0f : 0.0f);
+        };
+        addAndMakeVisible(mLinkBtn);
+        mLevelA->slider().addListener(this);
+        mLevelB->slider().addListener(this);
+        mLastA = mLevelA->slider().getValue();
+        mLastB = mLevelB->slider().getValue();
+    }
+
+    ~MixPanel() override
+    {
+        mLevelA->slider().removeListener(this);
+        mLevelB->slider().removeListener(this);
     }
 
     void paint(juce::Graphics &g) override
@@ -5626,6 +5694,11 @@ public:
         mAlign->setEnabled(aligning);
         mAutoBtn.setEnabled(aligning && bothLoaded);
         mMatchBtn.setEnabled(aligning && bothLoaded);
+        // Level link only bites when both rigs are actually playing (Dual, both
+        // amps live) — same gate as align/match, since a single live level has
+        // nothing to link to.
+        mLinkBtn.setEnabled(aligning);
+        mLinkBtn.setStateQuiet(mProc.apvts.getRawParameterValue("rigLevelLink")->load() >= 0.5f);
 
         // OUT L·R meters.
         mMeterA.setEnabled(aOn);
@@ -5693,15 +5766,46 @@ public:
         mAutoBtn.setBounds(alignRow.removeFromLeft(122).withSizeKeepingCentre(122, 34));
         alignRow.removeFromLeft(10);
         mMatchBtn.setBounds(alignRow.removeFromLeft(132).withSizeKeepingCentre(132, 34));
+        // Level A/B link pill, pinned to the row's right edge.
+        mLinkBtn.setBounds(alignRow.removeFromRight(92).withSizeKeepingCentre(92, 30));
     }
 
 private:
+    // When linked, a user drag on one Level knob shifts the other by the same dB
+    // (offset preserved), clamped to the -24..+12 dB range. mSyncing guards the
+    // re-entrant setValue on the partner; mLastA/mLastB hold the previous values
+    // the delta is measured from.
+    void sliderValueChanged(juce::Slider *s) override
+    {
+        if (mSyncing) return;
+        auto &sa = mLevelA->slider();
+        auto &sb = mLevelB->slider();
+        const bool linked = mLinkBtn.isEnabled()
+                            && mProc.apvts.getRawParameterValue("rigLevelLink")->load() >= 0.5f;
+        if (linked && (s == &sa || s == &sb))
+        {
+            mSyncing = true;
+            if (s == &sa)
+                sb.setValue(juce::jlimit(-24.0, 12.0, mLastB + (sa.getValue() - mLastA)),
+                            juce::sendNotificationSync);
+            else
+                sa.setValue(juce::jlimit(-24.0, 12.0, mLastA + (sb.getValue() - mLastB)),
+                            juce::sendNotificationSync);
+            mSyncing = false;
+        }
+        mLastA = mLevelA->slider().getValue();
+        mLastB = mLevelB->slider().getValue();
+    }
+
     NamRigProcessor &mProc;
     std::unique_ptr<SegmentedControl> mModes;
     std::unique_ptr<LabeledKnob> mLevelA, mPanA, mLevelB, mPanB, mAlign;
     std::unique_ptr<LabeledKnob> mLowCutA, mHighCutA, mLowCutB, mHighCutB;
     InvertSwitch mPolA, mPolB;
+    LinkToggle mLinkBtn;
     OutMeter mMeterA, mMeterB;
+    double mLastA = 0.0, mLastB = 0.0;
+    bool mSyncing = false;
     juce::TextButton mAutoBtn{"Auto-align"}, mMatchBtn{"Match Levels"};
 
     // Layout rects (set in resized, drawn in paint).

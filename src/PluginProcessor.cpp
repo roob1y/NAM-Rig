@@ -451,6 +451,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::ParameterID("rigPolA", 1), "Rig A Polarity", false));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID("rigPolB", 1), "Rig B Polarity", false));
+    // UI-only: link the two rig Level knobs so a drag on one shifts the other by
+    // the same dB (offset preserved). No DSP reads this — the MixPanel mirrors
+    // the move onto the partner's rigLevel param.
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("rigLevelLink", 1), "Rig Level Link", false));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("rigAlign", 1), "Rig Align",
         juce::NormalisableRange<float>(-256.0f, 256.0f, 0.1f), 0.0f,

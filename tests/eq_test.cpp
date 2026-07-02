@@ -133,8 +133,11 @@ int main()
         cuts.update(20.0, 20000.0); // both at extremes
         CHECK(!cuts.engaged(), "T5 cuts disengage at knob extremes (bit-exact path)");
 
-        // and the filters measurably filter: impulse through HPF, DC must die
-        cuts.update(100.0, 20000.0);
+        // and the filters measurably filter: impulse through HPF, DC must die.
+        // force=true snaps the cut in (no ramp) — the cuts now sweep smoothly to
+        // kill zipper noise, so an un-forced set would still be ramping up from
+        // the 20 Hz edge when the impulse hits and wouldn't fully reject DC yet.
+        cuts.update(100.0, 20000.0, true);
         std::vector<float> h(IRLEN, 0.0f); h[0] = 1.0f;
         for (size_t p = 0; p < h.size(); p += BLK)
             cuts.process(h.data() + p, (int)std::min<size_t>(BLK, h.size() - p));
