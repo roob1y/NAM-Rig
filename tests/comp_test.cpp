@@ -377,6 +377,43 @@ int main()
               "T13 Release knob lengthens recovery: GR@200ms 40ms %.1f -> 600ms %.1f", gFast, gSlow);
     }
 
+    // ---- T14: OTA grit tracks the INPUT level (calibration-aware gain cell) ----
+    // The authenticity fix: the CA3080 tanh sits PRE-gain, so a hotter input
+    // produces more harmonics. The old post-makeup shaper saw the normalised
+    // output, so its THD barely moved with how hard you played.
+    {
+        auto hot = tone(-3.0, 48000);
+        auto soft = tone(-24.0, 48000);
+        auto oHot = runMode(1, 0.6f, 8.0f, 0.9f, hot);
+        auto oSoft = runMode(1, 0.6f, 8.0f, 0.9f, soft);
+        auto thd = [&](const std::vector<float> &y) {
+            const double f1 = goertzel(y, 24000, 24000, 1000.0);
+            const double h2 = goertzel(y, 24000, 24000, 2000.0);
+            const double h3 = goertzel(y, 24000, 24000, 3000.0);
+            return (h2 + h3) / (f1 + 1.0e-12);
+        };
+        const double tHot = thd(oHot), tSoft = thd(oSoft);
+        CHECK(tHot > tSoft * 1.5 && tHot > 0.01,
+              "T14 OTA grit tracks input level: THD hot %.4f > soft %.4f", tHot, tSoft);
+    }
+
+    // ---- T15: OTA gain cell is odd-forward and Character-scaled (0 = clean) ----
+    // The CA3080 tanh + control ripple both generate odd harmonics; at Character 0
+    // the cell is bypassed (clean), and turning it up adds 3rd-harmonic grit.
+    {
+        auto x = tone(-6.0, 48000);
+        auto ota0 = runMode(1, 0.6f, 8.0f, 0.0f, x); // cell off
+        auto ota1 = runMode(1, 0.6f, 8.0f, 0.9f, x); // cell up
+        auto h3rat = [&](const std::vector<float> &y) {
+            const double f1 = goertzel(y, 24000, 24000, 1000.0);
+            const double h3 = goertzel(y, 24000, 24000, 3000.0);
+            return h3 / (f1 + 1.0e-12);
+        };
+        const double r0 = h3rat(ota0), r1 = h3rat(ota1);
+        CHECK(r0 < 0.01 && r1 > r0 * 3.0,
+              "T15 OTA odd grit scales with Character: h3/f1 char0 %.4f -> char0.9 %.4f", r0, r1);
+    }
+
     std::printf("\n%s (%d failure%s)\n", gFails ? "RESULT: FAIL" : "RESULT: ALL PASS", gFails, gFails == 1 ? "" : "s");
     return gFails ? 1 : 0;
 }

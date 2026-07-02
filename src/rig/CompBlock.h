@@ -13,7 +13,11 @@
 //           presets/automation and the SoloA regression are unchanged.
 //   OTA   : Ross/Dyna-style squish. Higher ratio, soft knee, mid-forward
 //           sidechain (bass doesn't trigger -> "pop"), program-dependent
-//           release, gentle OTA warmth.
+//           release, and a circuit-accurate CA3080 gain cell: the grit is a
+//           PRE-gain transconductance tanh driven by the *calibrated input*
+//           level (so it tracks how hard you play, not the makeup output),
+//           plus control-ripple IMD (the signature Dyna Comp odd-harmonic
+//           grit, worse on low notes). See the OTA block in process().
 //   Opto  : optical smoothness. Gentle ratio, RMS detector, slow dual-stage
 //           program-dependent release (relaxes on sustained notes), minimal
 //           pumping/colour.
@@ -82,25 +86,30 @@ public:
         float relFastMs, relSlowMs, progDepth;
         float drive, driveAsym, driveTrack; // gain-cell colour: depth/even/GR-track
         float iron;                          // transformer saturation (0 = none)
+        float ripple; // OTA control-ripple depth (0 = off): detector ripple that
+                      // amplitude-modulates the gain -> odd-harmonic Dyna grit
     };
 
     static Voicing voicingFor(Mode m)
     {
         switch (m)
         {
-        case Mode::OTA: // CA3080 grit: odd-forward, no transformer
+        case Mode::OTA: // CA3080 gain cell: odd-forward, pre-gain, + control ripple.
+                        // drive = tanh input-drive scale (NOT the old post-gain depth);
+                        // driveAsym = small even bias; driveTrack unused (input drives
+                        // the grit now); ripple = detector-ripple IMD depth.
             return {10.0f, 10.0f, 0.50f, false, 120.0f, 0.70f, 1.0f,
-                    80.0f, 400.0f, 0.6f, 0.18f, 0.05f, 0.30f, 0.00f};
+                    80.0f, 400.0f, 0.6f, 1.20f, 0.02f, 0.00f, 0.00f, 0.50f};
         case Mode::Opto: // optical + tube: even-forward warmth, gentle iron
             return {3.5f, 12.0f, 0.60f, true, 0.0f, 1.60f, 8.0f,
-                    120.0f, 900.0f, 1.0f, 0.10f, 0.45f, 0.00f, 0.40f};
+                    120.0f, 900.0f, 1.0f, 0.10f, 0.45f, 0.00f, 0.40f, 0.00f};
         case Mode::FET: // 1176: odd+even grit, strong transformer iron
             return {12.0f, 3.0f, 0.45f, false, 60.0f, 0.25f, 0.2f,
-                    50.0f, 250.0f, 0.4f, 0.22f, 0.15f, 0.60f, 0.70f};
+                    50.0f, 250.0f, 0.4f, 0.22f, 0.15f, 0.60f, 0.70f, 0.00f};
         case Mode::Clean: // transparent VCA: no colour
         default:
             return {kRatio, kKneeDb, 0.60f, false, 0.0f, 1.0f, 1.0f,
-                    kReleaseMs, kReleaseMs, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+                    kReleaseMs, kReleaseMs, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
         }
     }
 
@@ -153,6 +162,8 @@ public:
         mScHp = 0.0f;
         mRms2 = 0.0f;
         mIronLpf = 0.0f;
+        mRipCap = 0.0f;
+        mRipMean = 0.0f;
     }
 
     void process(float *mono, int numSamples) override
@@ -200,7 +211,24 @@ public:
         const float ch = mCharacter.load();             // analog colour amount
         const float ironCoef = coefForHz(400.0, sr);    // transformer low-band corner
 
+        // ---- OTA (CA3080) gain-cell precompute -------------------------------
+        // The OTA voicing distorts on the *pre-gain* signal, which is already the
+        // calibration-referenced level: RigChain applies the global input
+        // calibration (to CalNorm::kReferenceDbu) BEFORE the comp, so shaping the
+        // input here means the grit tracks the player's true, calibrated level and
+        // is consistent across interfaces. The old post-makeup shaper was
+        // calibration-blind (makeup had already normalised the level away).
+        const bool otaMode = (mode == Mode::OTA);
+        const bool otaCell = otaMode && ch > 0.0f && v.drive > 0.0f;
+        const float otaDrv = 1.0f + ch * v.drive;        // tanh input drive
+        const float otaBias = ch * v.driveAsym;          // small even-harmonic bias
+        const float otaTanhBias = std::tanh(otaBias * otaDrv);
+        const float otaInvDrv = 1.0f / otaDrv;           // small-signal gain -> ~unity
+        const float ripCapCoef = coefForMs(2.0f, sr);    // detector cap (leaves 2f ripple)
+        const float ripMeanCoef = coefForMs(40.0f, sr);  // slow mean the ripple rides on
+
         float gr = mGrDb, relMem = mRelMem, scHp = mScHp, rms2 = mRms2, ironLpf = mIronLpf;
+        float ripCap = mRipCap, ripMean = mRipMean; // OTA control-ripple detector state
         float inPk = 0.0f, outPk = 0.0f; // block peaks for the IN/OUT meter modes
 
         for (int i = 0; i < numSamples; ++i)
@@ -253,10 +281,33 @@ public:
 
             // ---- gain reduction + instant makeup + Level (one constant gain) ----
             const float grLin = (gr < 1.0e-4f) ? 1.0f : std::pow(10.0f, -gr * 0.05f);
-            float y = x * grLin * outLin;
 
-            // ---- analog colour (scaled by Character; 0 = clean) ----
-            if (ch > 0.0f && (v.drive > 0.0f || v.iron > 0.0f))
+            // ---- OTA (CA3080) gain cell: pre-gain grit + control-ripple IMD ----
+            // Real hardware: I_out = I_abc * tanh(V_in / 2Vt). Gain is I_abc (grLin);
+            // distortion is the tanh acting on the attenuated INPUT, so harmonics
+            // grow with how hard you actually hit it. The detector's finite
+            // smoothing cap leaves ripple at 2x the signal freq on I_abc, which
+            // amplitude-modulates the gain -> the signature odd-harmonic Dyna grit
+            // (worse on low notes, where the 2f ripple is smoothed less).
+            float src = x;
+            float grLinEff = grLin;
+            if (otaCell)
+            {
+                src = (std::tanh((x + otaBias) * otaDrv) - otaTanhBias) * otaInvDrv;
+
+                ripCap += ripCapCoef * (ax - ripCap);      // rectified follower (the cap)
+                ripMean += ripMeanCoef * (ripCap - ripMean); // slow mean it rides on
+                const float rip = (ripMean > 1.0e-6f) ? (ripCap - ripMean) / ripMean : 0.0f;
+                // ripple bites harder the more the cell is working (low I_abc).
+                const float ripAmt = ch * v.ripple * (0.25f + 0.75f * std::min(1.0f, gr * (1.0f / 8.0f)));
+                grLinEff = grLin * (1.0f + ripAmt * rip);
+            }
+
+            float y = src * grLinEff * outLin;
+
+            // ---- analog colour for the post-gain voicings (Opto/FET) ----
+            // (OTA is handled by the pre-gain cell above; Clean has no colour.)
+            if (!otaMode && ch > 0.0f && (v.drive > 0.0f || v.iron > 0.0f))
             {
                 // gain cell: asymmetric soft saturation. k>1 = odd grit, the
                 // DC bias b = even (tube/transformer) harmonics, both grow with
@@ -291,6 +342,8 @@ public:
         mScHp = flush(scHp);
         mRms2 = flush(rms2);
         mIronLpf = flush(ironLpf);
+        mRipCap = flush(ripCap);
+        mRipMean = flush(ripMean);
         mGrDbPub.store(mGrDb); // published for the editor's GR meter
         // Block peaks in dBFS for the IN/OUT meter modes (UI thread reads these).
         mInPeakDbPub.store(inPk > 1.0e-9f ? 20.0f * std::log10(inPk) : -120.0f);
@@ -331,6 +384,8 @@ private:
     float mScHp = 0.0f;    // sidechain HPF state
     float mRms2 = 0.0f;    // RMS detector state
     float mIronLpf = 0.0f; // transformer low-band state
+    float mRipCap = 0.0f;  // OTA control-ripple: rectified cap follower
+    float mRipMean = 0.0f; // OTA control-ripple: slow mean
     double mSampleRate = 48000.0;
     bool mPrepared = false;
 };
