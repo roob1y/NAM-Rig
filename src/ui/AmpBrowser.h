@@ -1,33 +1,32 @@
 #pragma once
 #include "PluginProcessor.h"
 #include "ui/RigLookAndFeel.h"
-#include "ui/IrTagCache.h"
 #include "ui/SortableFileList.h"
 
 namespace nam_rig::ui
 {
 
 // Folders-only filter for the left pane.
-class DirOnlyFilter : public juce::FileFilter
+class AmpDirOnlyFilter : public juce::FileFilter
 {
 public:
-    DirOnlyFilter() : juce::FileFilter("Folders") {}
+    AmpDirOnlyFilter() : juce::FileFilter("Folders") {}
     bool isFileSuitable(const juce::File &) const override { return false; }
     bool isDirectorySuitable(const juce::File &) const override { return true; }
 };
 
-// A "load into this cab" target. Accepts the browser's internal drag (a file row
-// dragged from the file list) AND files dragged from the OS file manager.
-class IrDropZone : public juce::Component,
-                   public juce::DragAndDropTarget,
-                   public juce::FileDragAndDropTarget
+// A "load into this amp" target. Accepts the browser's internal drag (a model row
+// dragged from the file list) AND .nam files dragged from the OS file manager.
+class AmpDropZone : public juce::Component,
+                    public juce::DragAndDropTarget,
+                    public juce::FileDragAndDropTarget
 {
 public:
     std::function<void(const juce::File &)> onFile;
-    std::function<juce::File()> getFile; // the file list's currently-selected file
-    IrDropZone(juce::String label) : mLabel(std::move(label)) {}
+    std::function<juce::File()> getFile; // the file list's currently-selected model
+    AmpDropZone(juce::String label) : mLabel(std::move(label)) {}
 
-    void setIrName(const juce::String &n) { if (n != mIr) { mIr = n; repaint(); } }
+    void setModelName(const juce::String &n) { if (n != mModel) { mModel = n; repaint(); } }
 
     // --- internal drag (a row dragged out of the file list) ---
     bool isInterestedInDragSource(const SourceDetails &) override
@@ -47,7 +46,7 @@ public:
     // --- external OS file drag ---
     bool isInterestedInFileDrag(const juce::StringArray &files) override
     {
-        for (auto &f : files) if (looksLikeIr(f)) return true;
+        for (auto &f : files) if (looksLikeNam(f)) return true;
         return false;
     }
     void fileDragEnter(const juce::StringArray &, int, int) override { mOver = true; repaint(); }
@@ -56,7 +55,7 @@ public:
     {
         mOver = false; repaint();
         for (auto &f : files)
-            if (looksLikeIr(f)) { if (onFile) onFile(juce::File(f)); break; }
+            if (looksLikeNam(f)) { if (onFile) onFile(juce::File(f)); break; }
     }
 
     void paint(juce::Graphics &g) override
@@ -70,37 +69,36 @@ public:
         g.setColour(colors::caption);
         g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.12f));
         g.drawText(mLabel, r.removeFromTop(14), juce::Justification::centredLeft);
-        g.setColour(mIr.isEmpty() ? colors::captionDim : colors::text);
+        g.setColour(mModel.isEmpty() ? colors::captionDim : colors::text);
         g.setFont(fonts::mono(11.0f));
-        g.drawText(mIr.isEmpty() ? juce::String("drop an IR here") : mIr, r,
+        g.drawText(mModel.isEmpty() ? juce::String("drop a model here") : mModel, r,
                    juce::Justification::centredLeft, true);
     }
 
-    static bool looksLikeIr(const juce::String &path)
+    static bool looksLikeNam(const juce::String &path)
     {
-        const auto l = path.toLowerCase();
-        return l.endsWith(".wav") || l.endsWith(".aif") || l.endsWith(".aiff");
+        return path.toLowerCase().endsWith(".nam");
     }
 
 private:
-    juce::String mLabel, mIr;
+    juce::String mLabel, mModel;
     bool mOver = false;
 };
 
-// IR library overlay: TWO PANES — folders on the left, the selected folder's IRs
-// on the right (name-filtered, tone-tag-filtered and sortable). Drag a file onto
-// Cab A / Cab B (or drop OS files); selecting a file previews its tone tag.
-class IrBrowser : public juce::Component,
-                  public juce::DragAndDropContainer
+// Amp-model library overlay: TWO PANES — folders on the left, the selected
+// folder's .nam models on the right (name-filtered + sortable). Drag a model onto
+// Amp A / Amp B (or drop OS files).
+class AmpBrowser : public juce::Component,
+                   public juce::DragAndDropContainer
 {
 public:
-    std::function<void(const juce::File &, int rig)> onLoad; // load file into rig
+    std::function<void(const juce::File &, int rig)> onLoad; // load model into rig
     std::function<void()> onClose;
 
-    IrBrowser()
-        : mThread("ir-scan"),
+    AmpBrowser()
+        : mThread("amp-scan"),
           mFolderList(&mFolderFilter, mThread), mFolders(mFolderList),
-          mZoneA("CAB A"), mZoneB("CAB B")
+          mZoneA("AMP A"), mZoneB("AMP B")
     {
         mThread.startThread();
 
@@ -109,12 +107,8 @@ public:
         mFolderSel.onSel = [this] { folderSelected(); };
         mFolders.addListener(&mFolderSel);
 
-        mFileList.extensions = juce::StringArray{".wav", ".aif", ".aiff"};
+        mFileList.extensions = juce::StringArray{".nam"};
         mFileList.onSelChange = [this] { fileSelected(); };
-        // Tone-tag chip filter (cached analysis; cheap after the first pass).
-        mFileList.extraFilter = [this](const juce::File &f) {
-            return mTagFilter.isEmpty() || mCache.tagFor(f).containsIgnoreCase(mTagFilter);
-        };
         addAndMakeVisible(mFileList);
 
         mSearch.setTextToShowWhenEmpty(juce::String::fromUTF8("Filter by name\xE2\x80\xA6"), colors::captionDim);
@@ -122,27 +116,6 @@ public:
         mSearch.setColour(juce::TextEditor::outlineColourId, colors::cardBorder);
         mSearch.onTextChange = [this] { mFileList.setSearch(mSearch.getText().trim()); };
         addAndMakeVisible(mSearch);
-
-        // Tone-tag filter chips.
-        mTags = juce::StringArray{"All", "Dark", "Bright", "Scooped", "Thick", "Present", "Fizzy"};
-        for (int i = 0; i < mTags.size(); ++i)
-        {
-            auto *c = new juce::ToggleButton(mTags[i]);
-            c->setButtonText(mTags[i]);
-            c->getProperties().set("pill", true);
-            c->setRadioGroupId(7001);
-            c->setClickingTogglesState(true);
-            c->onClick = [this, i] {
-                if (mTagChips[i]->getToggleState())
-                {
-                    mTagFilter = (i == 0) ? juce::String() : mTags[i];
-                    mFileList.refresh();
-                }
-            };
-            addAndMakeVisible(c);
-            mTagChips.add(c);
-        }
-        mTagChips[0]->setToggleState(true, juce::dontSendNotification); // "All"
 
         mChooseBtn.setButtonText(juce::String::fromUTF8("Change folder\xE2\x80\xA6"));
         mChooseBtn.onClick = [this] { chooseRoot(); };
@@ -156,26 +129,26 @@ public:
         auto selected = [this] { return mFileList.getSelectedFile(); };
         mZoneA.getFile = selected;
         mZoneB.getFile = selected;
-        mZoneA.onFile = [this](const juce::File &f) { if (onLoad) onLoad(f, 0); mZoneA.setIrName(f.getFileNameWithoutExtension()); };
-        mZoneB.onFile = [this](const juce::File &f) { if (onLoad) onLoad(f, 1); mZoneB.setIrName(f.getFileNameWithoutExtension()); };
+        mZoneA.onFile = [this](const juce::File &f) { if (onLoad) onLoad(f, 0); mZoneA.setModelName(f.getFileNameWithoutExtension()); };
+        mZoneB.onFile = [this](const juce::File &f) { if (onLoad) onLoad(f, 1); mZoneB.setModelName(f.getFileNameWithoutExtension()); };
     }
 
-    ~IrBrowser() override
+    ~AmpBrowser() override
     {
         mFolders.removeListener(&mFolderSel);
         mThread.stopThread(2000);
     }
 
-    void openFor(int rig, const juce::File &root, const juce::String &irA, const juce::String &irB)
+    void openFor(int rig, const juce::File &root, const juce::String &ampA, const juce::String &ampB)
     {
         mActiveRig = rig;
-        mZoneA.setIrName(irA);
-        mZoneB.setIrName(irB);
+        mZoneA.setModelName(ampA);
+        mZoneB.setModelName(ampB);
         mNoRoot = !root.isDirectory();
         if (!mNoRoot)
         {
             mFolderList.setDirectory(root, true, false); // subfolders (left pane)
-            mFileList.setFolder(root);                   // root's IRs (right pane)
+            mFileList.setFolder(root);                   // root's models (right pane)
         }
         mHaveSel = false;
         mFileList.clearSelection();
@@ -200,15 +173,6 @@ public:
         r.removeFromTop(8);
 
         mSearch.setBounds(r.removeFromTop(30));
-        r.removeFromTop(8);
-
-        auto chips = r.removeFromTop(24);
-        for (auto *c : mTagChips)
-        {
-            const int w = 22 + c->getButtonText().length() * 7;
-            c->setBounds(chips.removeFromLeft(w));
-            chips.removeFromLeft(6);
-        }
         r.removeFromTop(8);
 
         auto zones = r.removeFromTop(50);
@@ -238,28 +202,27 @@ public:
 
         g.setColour(colors::titleAccent);
         g.setFont(fonts::archivo(13.0f, fonts::Bold, 0.15f));
-        g.drawText("IR LIBRARY", getLocalBounds().reduced(20, 0).removeFromTop(44),
+        g.drawText("AMP LIBRARY", getLocalBounds().reduced(20, 0).removeFromTop(44),
                    juce::Justification::centredLeft);
 
         if (mNoRoot)
         {
             g.setColour(colors::captionDim);
             g.setFont(fonts::mono(12.0f));
-            g.drawText("No IR folder set - click \"Change folder\" to pick your IR library",
+            g.drawText("No amp folder set - click \"Change folder\" to pick your model library",
                        mBodyRect, juce::Justification::centred);
         }
         else if (mHaveSel)
         {
             g.setColour(colors::text2);
             g.setFont(fonts::mono(10.0f, fonts::SemiBold));
-            g.drawText(mSelName + juce::String::fromUTF8("  \xE2\x80\x94  ") + mSelTag, mHintRect,
-                       juce::Justification::centredLeft, true);
+            g.drawText(mSelName, mHintRect, juce::Justification::centredLeft, true);
         }
         else
         {
             g.setColour(colors::captionDim);
             g.setFont(fonts::mono(10.0f));
-            g.drawText("Pick a folder on the left, then drag an IR onto Cab A or Cab B",
+            g.drawText("Pick a folder on the left, then drag a model onto Amp A or Amp B",
                        mHintRect, juce::Justification::centredLeft);
         }
     }
@@ -267,7 +230,7 @@ public:
 private:
     void chooseRoot()
     {
-        mChooser = std::make_unique<juce::FileChooser>("Choose your IR library folder",
+        mChooser = std::make_unique<juce::FileChooser>("Choose your amp-model library folder",
                                                        mGetRoot ? mGetRoot() : juce::File{});
         mChooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
                               [this](const juce::FileChooser &fc)
@@ -290,19 +253,12 @@ private:
         if (d.isDirectory()) mFileList.setFolder(d);
     }
 
-    // Preview the selected IR's tone tag in the hint line.
+    // Preview the selected model name in the hint line.
     void fileSelected()
     {
         auto f = mFileList.getSelectedFile();
-        std::array<float, nam_rig::ir::kResPts> resp{};
-        if (f.existsAsFile() && IrDropZone::looksLikeIr(f.getFullPathName())
-            && nam_rig::ir::analyzeFile(f, resp.data()))
-        {
-            mSelName = f.getFileNameWithoutExtension();
-            mSelTag = nam_rig::ir::classify(resp.data());
-            mHaveSel = true;
-        }
-        else { mHaveSel = false; mSelTag = {}; }
+        if (f.existsAsFile()) { mSelName = f.getFileNameWithoutExtension(); mHaveSel = true; }
+        else mHaveSel = false;
         repaint();
     }
 
@@ -317,20 +273,16 @@ private:
     };
 
     juce::TimeSliceThread mThread;
-    DirOnlyFilter mFolderFilter;
+    AmpDirOnlyFilter mFolderFilter;
     juce::DirectoryContentsList mFolderList;
     juce::FileTreeComponent mFolders;      // folders-only (left pane)
-    SortableFileList mFileList;            // sortable IRs (right pane)
+    SortableFileList mFileList;            // sortable models (right pane)
     FolderSel mFolderSel;
     juce::TextEditor mSearch;
-    IrTagCache mCache;
-    juce::String mTagFilter;               // active tone-tag chip ("" = All)
-    juce::OwnedArray<juce::ToggleButton> mTagChips;
-    juce::StringArray mTags;
     juce::TextButton mChooseBtn, mCloseBtn;
-    IrDropZone mZoneA, mZoneB;
+    AmpDropZone mZoneA, mZoneB;
     juce::Rectangle<int> mHintRect, mBodyRect;
-    juce::String mSelName, mSelTag;
+    juce::String mSelName;
     bool mHaveSel = false;
     std::unique_ptr<juce::FileChooser> mChooser;
     std::function<juce::File()> mGetRoot;
@@ -338,7 +290,7 @@ private:
     int mActiveRig = 0;
     bool mNoRoot = true;
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(IrBrowser)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AmpBrowser)
 };
 
 } // namespace nam_rig::ui

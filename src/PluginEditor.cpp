@@ -11,8 +11,7 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
       mGatePanel(p.apvts),
       mCompPanel(p.apvts),
       mDrivePanel(p.apvts),
-      mAmpPanelA(p, 0),
-      mAmpPanelB(p, 1),
+      mAmpPanel(p),
       mEqPanelA(p.apvts, 0),
       mEqPanelB(p.apvts, 1),
       mCabPanel(p),
@@ -21,8 +20,10 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
       mDelayPanel(p.apvts),
       mReverbPanel(p.apvts),
       mCalPanel(p.apvts),
-      // Single CAB tile/panel (idx 7) fed by both lanes; AMP/EQ stay per-rig.
-      mPanels{&mGatePanel, &mCompPanel, &mDrivePanel, &mAmpPanelA, &mEqPanelA, &mAmpPanelB,
+      // One combined AMP panel fed by both lanes sits at BOTH amp indices (3 = AMP
+      // A, 5 = AMP B), like the single CAB panel — either tile reveals it. EQ stays
+      // per-rig at 4 / 6.
+      mPanels{&mGatePanel, &mCompPanel, &mDrivePanel, &mAmpPanel, &mEqPanelA, &mAmpPanel,
               &mEqPanelB, &mCabPanel, &mMixPanel,
               &mModPanel, &mDelayPanel, &mReverbPanel}
 {
@@ -55,7 +56,7 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
     // --- Strip + panels ---
     mContent.addAndMakeVisible(mStrip);
     for (auto *panel : mPanels)
-        if (panel->getParentComponent() != &mContent) // mCabPanel appears twice
+        if (panel->getParentComponent() != &mContent) // mAmpPanel appears twice (idx 3+5)
             mContent.addChildComponent(*panel);        // visibility driven by selection
 
     // Global input-calibration overlay, toggled from the Settings menu.
@@ -70,11 +71,18 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
                               [this](const juce::File &d) { mProc.setIrLibraryRoot(d); });
     mCabPanel.onBrowse = [this] { openIrBrowser(0); };
 
+    // Amp-model library overlay, opened from the AMP panel's Browse button.
+    mContent.addChildComponent(mAmpBrowser);
+    mAmpBrowser.onClose = [this] { mAmpBrowser.setVisible(false); };
+    mAmpBrowser.onLoad = [this](const juce::File &f, int rig) { mProc.loadModel(f, rig); };
+    mAmpBrowser.setRootChooser([this] { return mProc.ampLibraryRoot(); },
+                               [this](const juce::File &d) { mProc.setAmpLibraryRoot(d); });
+    mAmpPanel.onBrowse = [this] { openAmpBrowser(0); };
+
     mStrip.onSelectionChanged = [this](int i) { showPanel(i); };
     mStrip.select(juce::jlimit(0, (int)mPanels.size() - 1, mProc.uiSelectedBlock));
 
-    mAmpPanelA.refresh();
-    mAmpPanelB.refresh();
+    mAmpPanel.refresh();
     mCabPanel.refresh();
 
     mLastTimerMs = juce::Time::getMillisecondCounterHiRes();
@@ -176,8 +184,9 @@ void NamRigEditor::showPanel(int selectableIndex)
 {
     mCalPanel.setVisible(false);   // selecting a block dismisses the overlays
     mIrBrowser.setVisible(false);
-    // Compare by identity, not index: the combined cab panel sits at two indices
-    // (CAB A and CAB B), so either tile must reveal it.
+    mAmpBrowser.setVisible(false);
+    // Compare by identity, not index: the combined AMP and CAB panels each sit at
+    // two indices (A and B tiles), so either tile must reveal the shared panel.
     auto *sel = mPanels[(size_t)selectableIndex];
     for (auto *panel : mPanels)
         panel->setVisible(panel == sel);
@@ -190,6 +199,14 @@ void NamRigEditor::openIrBrowser(int rig)
         return mProc.isIrLoaded(r) ? mProc.getIrName(r) : juce::String();
     };
     mIrBrowser.openFor(rig, mProc.irLibraryRoot(), nameOrEmpty(0), nameOrEmpty(1));
+}
+
+void NamRigEditor::openAmpBrowser(int rig)
+{
+    const auto nameOrEmpty = [this](int r) {
+        return mProc.isModelLoaded(r) ? mProc.getModelName(r) : juce::String();
+    };
+    mAmpBrowser.openFor(rig, mProc.ampLibraryRoot(), nameOrEmpty(0), nameOrEmpty(1));
 }
 
 void NamRigEditor::showSettingsMenu()
@@ -249,8 +266,7 @@ void NamRigEditor::timerCallback()
     mInMeter.push(mProc.mInputPeakDb.load(), dt);
     mOutMeter.push(mProc.mOutputPeakDb.load(), dt);
 
-    mAmpPanelA.refresh();
-    mAmpPanelB.refresh();
+    mAmpPanel.refresh();
     mCabPanel.refresh();
     mDrivePanel.refresh();
     mMixPanel.refresh(dt);
@@ -275,8 +291,8 @@ void NamRigEditor::timerCallback()
 
     mCompPanel.setBypassed(off("compOn"));
     mDrivePanel.setBypassed(off("driveOn"));
-    mAmpPanelA.setBypassed(aOut || off("ampOnA"));
-    mAmpPanelB.setBypassed(bOut || off("ampOnB"));
+    mAmpPanel.ampA().setBypassed(aOut || off("ampOnA"));
+    mAmpPanel.ampB().setBypassed(bOut || off("ampOnB"));
     mEqPanelA.setBypassed(aOut || off("eqOn"));
     mEqPanelB.setBypassed(bOut || off("eqOnB"));
     // Cab: each side dims independently (keeps its Low/High cuts live), but when
@@ -381,6 +397,7 @@ void NamRigEditor::resized()
         panel->setBounds(content);
     mCalPanel.setBounds(content);   // overlay occupies the block-panel area
     mIrBrowser.setBounds(content);  // IR library overlay shares that area
+    mAmpBrowser.setBounds(content); // amp-model library overlay shares that area
 }
 
 juce::AudioProcessorEditor *NamRigProcessor::createEditor()

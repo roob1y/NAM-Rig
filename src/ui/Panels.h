@@ -2027,16 +2027,17 @@ private:
 };
 
 //==============================================================================
-class AmpPanel : public BlockPanel
+// One amp "lane" inside the combined AMP panel (no box/title of its own — the
+// parent draws the single "AMP" frame). Holds the model loader, status line,
+// input drive and the per-rig anti-alias quality controls. Dims when its rig is
+// bypassed/soloed out. Accepts .nam files dragged straight from the OS.
+class AmpLane : public juce::Component, public juce::FileDragAndDropTarget
 {
 public:
-    AmpPanel(NamRigProcessor &proc, int rig)
-        : BlockPanel(rig == 0 ? "AMP A - NEURAL MODEL" : "AMP B - NEURAL MODEL"),
-          mProc(proc), mRig(rig)
+    AmpLane(NamRigProcessor &proc, int rig)
+        : mProc(proc), mRig(rig)
     {
-        setHeaderRight(rig == 0 ? "RIG A" : "RIG B");
-
-        mModelName.setFont(fonts::archivo(22.0f, fonts::Bold));
+        mModelName.setFont(fonts::archivo(20.0f, fonts::Bold));
         mModelName.setColour(juce::Label::textColourId, colors::textBright);
         mModelName.setInterceptsMouseClicks(false, false);
         addAndMakeVisible(mModelName);
@@ -2061,14 +2062,14 @@ public:
         initCombo(mOfflineAa, {"Same as live", "8x", "16x", "32x"},
                   rig == 0 ? "offlineAA" : "offlineAAB", mOfflineAtt);
 
-        mNorm = std::make_unique<ToggleSwitch>(mProc.apvts, "normalize");
-        addAndMakeVisible(*mNorm);
-
         // Independent per-capture input drive (0 dB = the model's calibrated level).
         mInput = std::make_unique<LabeledKnob>(mProc.apvts,
                                                rig == 0 ? "rigInputA" : "rigInputB", "Input");
         addAndMakeVisible(*mInput);
     }
+
+    // Dim the whole lane when its rig is bypassed or soloed out (matches CabPanel).
+    void setBypassed(bool b) { if (b != mDim) { mDim = b; repaint(); } }
 
     // Called from the editor timer.
     void refresh()
@@ -2089,7 +2090,6 @@ public:
         const bool aaAvailable = !loaded || a2;
         mLiveAa.setEnabled(aaAvailable);
         mOfflineAa.setEnabled(aaAvailable);
-        mNorm->setEnabled(mProc.hasLoudness());
 
         juce::String info;
         if (!loaded)
@@ -2140,18 +2140,26 @@ public:
                               });
     }
 
+    // Drop a .nam model straight from the OS file manager onto the lane to load it.
+    bool isInterestedInFileDrag(const juce::StringArray &files) override
+    {
+        for (auto &f : files) if (f.toLowerCase().endsWith(".nam")) return true;
+        return false;
+    }
+    void filesDropped(const juce::StringArray &files, int, int) override
+    {
+        for (auto &f : files)
+            if (f.toLowerCase().endsWith(".nam")) { mProc.loadModel(juce::File(f), mRig); break; }
+    }
+
     void paint(juce::Graphics &g) override
     {
-        BlockPanel::paint(g);
-        auto sub = [&](juce::Rectangle<int> r, const juce::String &t)
-        {
-            g.setColour(colors::caption);
-            g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.12f));
-            g.drawText(t, r, juce::Justification::topLeft);
-        };
+        // Rig tag (A amber / B lane colour), matching the CAB lanes.
+        g.setColour(mRig == 0 ? colors::titleAccent : colors::laneColour(1));
+        g.setFont(fonts::archivo(11.0f, fonts::Bold, 0.08f));
+        g.drawText(mRig == 0 ? "A" : "B", mTagRect, juce::Justification::centredLeft);
 
-        // Left column: caption + loader pill.
-        sub(mCaptionL, "NEURAL AMP MODEL");
+        // Loader pill (model name shows in the label below; the pill stays a verb).
         auto lp = mLoaderRect.toFloat();
         juce::ColourGradient lg(juce::Colour(0xff23272e), lp.getTopLeft(),
                                 juce::Colour(0xff1b1f25), lp.getBottomLeft(), false);
@@ -2163,7 +2171,7 @@ public:
         g.setColour(mLoaded ? colors::green : colors::caption);
         g.fillEllipse(dot);
         g.setColour(colors::text);
-        g.setFont(fonts::archivo(13.0f, fonts::SemiBold));
+        g.setFont(fonts::archivo(12.5f, fonts::SemiBold));
         g.drawText(juce::String::fromUTF8("Load NAM model\xE2\x80\xA6"), lp.withTrimmedLeft(32).toNearestInt(),
                    juce::Justification::centredLeft);
 
@@ -2181,7 +2189,7 @@ public:
             g.drawLine(x.getX(), x.getBottom(), x.getRight(), x.getY(), 1.6f);
         }
 
-        // Left column: tag pills.
+        // Tag pills (A2 / normalized).
         auto tagPill = [&](juce::Rectangle<int> &row, const juce::String &t)
         {
             const int w = (int)std::ceil(juce::GlyphArrangement::getStringWidth(fonts::mono(11.0f), t)) + 22;
@@ -2199,10 +2207,13 @@ public:
         if (mLoaded) tagPill(tags, mProc.isA2Model(mRig) ? "A2 model" : "standard");
         if (mNormalized) tagPill(tags, "normalized");
 
-        // Right column: divider + caption + AA labels + normalize label.
+        // Anti-alias column: divider + caption + AA labels + optional capped note.
         g.setColour(colors::divider);
-        g.fillRect(mDivX, mCaptionR.getY(), 1, getHeight() - mCaptionR.getY() - 24);
-        sub(mCaptionR, juce::String::fromUTF8("ANTI-ALIAS \xC2\xB7 QUALITY"));
+        g.fillRect(mDivX, mCaptionR.getY(), 1, mOfflineAa.getBottom() - mCaptionR.getY());
+        g.setColour(colors::caption);
+        g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.12f));
+        g.drawText(juce::String::fromUTF8("ANTI-ALIAS \xC2\xB7 QUALITY"), mCaptionR,
+                   juce::Justification::topLeft);
         g.setColour(colors::textDim);
         g.setFont(fonts::archivo(11.0f));
         g.drawText("Live AA Oversampling", mLiveLabel, juce::Justification::centredLeft);
@@ -2210,61 +2221,60 @@ public:
         if (mAaCapped)
         {
             g.setColour(colors::accent);
-            g.setFont(fonts::mono(10.0f, fonts::Medium));
+            g.setFont(fonts::mono(9.5f, fonts::Medium));
             g.drawText(juce::String::fromUTF8("Capped at 4\xC3\x97 \xC2\xB7 Low Latency on"),
-                       juce::Rectangle<int>(mLiveAa.getX(), mLiveAa.getBottom() + 3,
-                                            mLiveAa.getWidth(), 13),
+                       juce::Rectangle<int>(mLiveAa.getX(), mLiveAa.getBottom() + 2,
+                                            mLiveAa.getWidth(), 12),
                        juce::Justification::centredLeft);
         }
-        g.setColour(colors::text);
-        g.setFont(fonts::archivo(12.5f));
-        g.drawText(juce::String::fromUTF8("Normalize output \xC2\xB7 \xE2\x88\x92" "18 LUFS"), mNormLabel,
-                   juce::Justification::centredLeft);
+
+        // Bypass/solo-out scrim over the whole lane (child controls stay drawn on
+        // top, like CabPanel's On pill).
+        if (mDim)
+        {
+            g.setColour(colors::panel.withAlpha(0.62f));
+            g.fillRect(getLocalBounds());
+        }
     }
 
     void resized() override
     {
-        auto area = bodyArea().reduced(26, 26);
-        auto left = area.removeFromLeft((int)(area.getWidth() * 0.52f));
-        area.removeFromLeft(34);
-        mDivX = area.getX() - 17;
-        auto right = area;
+        auto area = getLocalBounds().reduced(14, 12);
 
-        // Left column.
-        mCaptionL = left.removeFromTop(14);
-        left.removeFromTop(12);
-        {
-            auto loaderRow = left.removeFromTop(44);
-            mLoaderRect = loaderRow.removeFromLeft(208);
-            loaderRow.removeFromLeft(10);
-            // Remove (✕) button sits just right of the loader pill; only hit-
-            // tested / drawn when a model is loaded.
-            mRemoveRect = loaderRow.removeFromLeft(40).withSizeKeepingCentre(40, 40);
-        }
-        left.removeFromTop(16);
-        mModelName.setBounds(left.removeFromTop(28));
-        left.removeFromTop(4);
-        mInfo.setBounds(left.removeFromTop(38));
-        mTagsRect = left.removeFromBottom(26);
-        left.removeFromTop(8);
-        // Input drive knob, bottom-left above the tag pills.
-        mInput->setBounds(left.removeFromTop(64).removeFromLeft(84));
+        // Top: rig tag + loader pill + remove.
+        auto top = area.removeFromTop(40);
+        mTagRect = top.removeFromLeft(24);
+        top.removeFromLeft(4);
+        mRemoveRect = top.removeFromRight(38).withSizeKeepingCentre(38, 38);
+        top.removeFromRight(8);
+        mLoaderRect = top.withSizeKeepingCentre(top.getWidth(), 38);
 
-        // Right column.
+        area.removeFromTop(8);
+        mModelName.setBounds(area.removeFromTop(24));
+        area.removeFromTop(2);
+        mInfo.setBounds(area.removeFromTop(34));
+
+        // Tag pills pinned to the bottom.
+        mTagsRect = area.removeFromBottom(24);
+        area.removeFromBottom(6);
+
+        // Middle: input knob (left) | anti-alias quality (right).
+        area.removeFromTop(8);
+        auto mid = area;
+        auto knobCol = mid.removeFromLeft(96);
+        mInput->setBounds(knobCol.removeFromTop(80).withSizeKeepingCentre(84, 76));
+        mid.removeFromLeft(14);
+        mDivX = mid.getX() - 7;
+        auto right = mid;
         mCaptionR = right.removeFromTop(14);
-        right.removeFromTop(16);
-        mLiveLabel = right.removeFromTop(16);
-        right.removeFromTop(6);
-        mLiveAa.setBounds(right.removeFromTop(36));
+        right.removeFromTop(8);
+        mLiveLabel = right.removeFromTop(15);
+        right.removeFromTop(4);
+        mLiveAa.setBounds(right.removeFromTop(32));
         right.removeFromTop(18);
-        mOffLabel = right.removeFromTop(16);
-        right.removeFromTop(6);
-        mOfflineAa.setBounds(right.removeFromTop(36));
-        right.removeFromTop(22);
-        auto normRow = right.removeFromTop(24);
-        mNorm->setBounds(normRow.removeFromLeft(42));
-        normRow.removeFromLeft(12);
-        mNormLabel = normRow;
+        mOffLabel = right.removeFromTop(15);
+        right.removeFromTop(4);
+        mOfflineAa.setBounds(right.removeFromTop(32));
     }
 
 private:
@@ -2273,14 +2283,82 @@ private:
     juce::Label mModelName, mInfo;
     juce::ComboBox mLiveAa, mOfflineAa;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mLiveAtt, mOfflineAtt;
-    std::unique_ptr<ToggleSwitch> mNorm;
     std::unique_ptr<LabeledKnob> mInput;
     std::unique_ptr<juce::FileChooser> mChooser;
-    juce::Rectangle<int> mCaptionL, mLoaderRect, mRemoveRect, mTagsRect, mCaptionR, mLiveLabel, mOffLabel, mNormLabel;
+    juce::Rectangle<int> mTagRect, mLoaderRect, mRemoveRect, mTagsRect, mCaptionR, mLiveLabel, mOffLabel;
     int mDivX = 0;
-    bool mLoaded = false, mNormalized = false, mAaCapped = false;
+    bool mLoaded = false, mNormalized = false, mAaCapped = false, mDim = false;
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AmpPanel)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AmpLane)
+};
+
+//==============================================================================
+// One "AMP" box holding both rigs' neural models side by side (A left, B right)
+// with a divider, a single "Browse models…" button (opens the amp library) and
+// the shared global Normalize toggle. The chain strip's AMP A and AMP B tiles
+// both open it (revealed by identity, like the combined CAB panel).
+class CombinedAmpPanel : public BlockPanel
+{
+public:
+    std::function<void()> onBrowse; // open the amp-model library
+
+    explicit CombinedAmpPanel(NamRigProcessor &proc)
+        : BlockPanel("AMP"), mProc(proc), mA(proc, 0), mB(proc, 1)
+    {
+        addAndMakeVisible(mA);
+        addAndMakeVisible(mB);
+        mBrowseBtn.setButtonText(juce::String::fromUTF8("Browse models\xE2\x80\xA6"));
+        mBrowseBtn.getProperties().set("pill", true);
+        mBrowseBtn.onClick = [this] { if (onBrowse) onBrowse(); };
+        addAndMakeVisible(mBrowseBtn);
+
+        // Output-normalize is a single global setting -> one toggle in the header.
+        mNorm = std::make_unique<ToggleSwitch>(mProc.apvts, "normalize");
+        addAndMakeVisible(*mNorm);
+    }
+
+    void resized() override
+    {
+        auto hr = headerArea();
+        mBrowseBtn.setBounds(hr.removeFromRight(150).withSizeKeepingCentre(150, 28));
+        hr.removeFromRight(14);
+        mNorm->setBounds(hr.removeFromRight(42).withSizeKeepingCentre(42, 22));
+        hr.removeFromRight(8);
+        mNormLabelRect = hr.removeFromRight(150);
+
+        auto body = bodyArea().reduced(12, 8);
+        const int gap = 18;
+        auto left = body.removeFromLeft((body.getWidth() - gap) / 2);
+        auto sep = body.removeFromLeft(gap);
+        mDivX = sep.getCentreX();
+        mA.setBounds(left);
+        mB.setBounds(body);
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        BlockPanel::paint(g);
+        g.setColour(mProc.hasLoudness() ? colors::text : colors::textDim);
+        g.setFont(fonts::archivo(11.5f));
+        g.drawText(juce::String::fromUTF8("Normalize \xC2\xB7 \xE2\x88\x92" "18 LUFS"), mNormLabelRect,
+                   juce::Justification::centredRight);
+        auto body = bodyArea().reduced(12, 14);
+        g.setColour(colors::divider);
+        g.fillRect((float)mDivX, (float)body.getY(), 1.0f, (float)body.getHeight());
+    }
+
+    void refresh() { mA.refresh(); mB.refresh(); mNorm->setEnabled(mProc.hasLoudness()); }
+    AmpLane &ampA() { return mA; }
+    AmpLane &ampB() { return mB; }
+
+private:
+    NamRigProcessor &mProc;
+    AmpLane mA, mB;
+    juce::TextButton mBrowseBtn;
+    std::unique_ptr<ToggleSwitch> mNorm;
+    juce::Rectangle<int> mNormLabelRect;
+    int mDivX = 0;
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(CombinedAmpPanel)
 };
 
 //==============================================================================

@@ -8,6 +8,7 @@
 #include "ui/BlockStrip.h"
 #include "ui/Panels.h"
 #include "ui/IrBrowser.h"
+#include "ui/AmpBrowser.h"
 #include "ui/PresetBar.h"
 
 // Block-strip editor: global header (wordmark + presets + loaded captures + I/O
@@ -65,7 +66,7 @@ private:
     nam_rig::ui::GatePanel mGatePanel;
     nam_rig::ui::CompPanel mCompPanel;
     nam_rig::ui::DrivePanel mDrivePanel;
-    nam_rig::ui::AmpPanel mAmpPanelA, mAmpPanelB;
+    nam_rig::ui::CombinedAmpPanel mAmpPanel; // both amps (A | B) in one panel
     nam_rig::ui::EqPanel mEqPanelA, mEqPanelB;
     nam_rig::ui::CombinedCabPanel mCabPanel; // both cabs (A | B) in one panel
     nam_rig::ui::MixPanel mMixPanel;
@@ -74,9 +75,11 @@ private:
     nam_rig::ui::ReverbPanel mReverbPanel;
     nam_rig::ui::CalPanel mCalPanel;       // global input-cal overlay (settings menu)
     nam_rig::ui::IrBrowser mIrBrowser;     // IR library overlay (opened from a cab)
+    nam_rig::ui::AmpBrowser mAmpBrowser;   // amp-model library overlay (from an amp)
     std::array<juce::Component *, 12> mPanels;
 
     void openIrBrowser(int rig);
+    void openAmpBrowser(int rig);
 
     double mLastTimerMs = 0.0;
     int mPresetRefreshTick = 0;

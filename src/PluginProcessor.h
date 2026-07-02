@@ -83,6 +83,25 @@ public:
         f.getParentDirectory().createDirectory();
         f.replaceWithText(dir.getFullPathName());
     }
+
+    // Persistent amp-model-library root folder (its own settings file next to the
+    // IR one). Empty until the user picks one. Message thread only.
+    juce::File ampLibraryRoot() const
+    {
+        auto f = ampRootSettingsFile();
+        if (f.existsAsFile())
+        {
+            juce::File d(f.loadFileAsString().trim());
+            if (d.isDirectory()) return d;
+        }
+        return {};
+    }
+    void setAmpLibraryRoot(const juce::File &dir)
+    {
+        auto f = ampRootSettingsFile();
+        f.getParentDirectory().createDirectory();
+        f.replaceWithText(dir.getFullPathName());
+    }
     bool isA2Model(int rig = 0) const { return ampFor(rig).engine().isA2(); }
 
     // Engaged amp factor on the last block (0 = passthrough). Editor status.
@@ -197,6 +216,11 @@ private:
     {
         return juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
             .getChildFile("NAM Rig").getChildFile("ir_library_root.txt");
+    }
+    static juce::File ampRootSettingsFile()
+    {
+        return juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
+            .getChildFile("NAM Rig").getChildFile("amp_library_root.txt");
     }
 
     nam_rig::RigChain mChain;
