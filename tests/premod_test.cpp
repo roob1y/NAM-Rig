@@ -131,22 +131,17 @@ int main()
         check(rmsDiff(moving, still) > 1.0e-3, "T3 sweep moves the comb (moving != static)");
     }
 
-    // T4: un-voiced pedal types are exact passthrough (scaffold stubs).
+    // T4: every voiced type produces a finite, non-silent output.
     {
-        const PreModBlock::Type stubs[] = {PreModBlock::kPhaser, PreModBlock::kFlanger,
-                                           PreModBlock::kTremolo, PreModBlock::kUniVibe};
-        bool allPass = true;
-        for (auto ty : stubs)
+        bool ok = true;
+        for (int t = 0; t < (int)PreModBlock::kNumTypes; ++t)
         {
-            auto y = run(x, fs, [ty](PreModBlock &pm) {
-                pm.setType(ty);
-                pm.setDepth(1.0f);
-                pm.setMix(1.0f);
+            auto y = run(x, fs, [t](PreModBlock &pm) {
+                pm.setType(t); pm.setRateHz(2.0f); pm.setDepth(0.6f); pm.setMix(0.5f);
             });
-            for (size_t i = 0; i < x.size(); ++i)
-                if (y[i] != x[i]) { allPass = false; break; }
+            if (!allFinite(y) || maxAbs(y) < 0.02f) ok = false;
         }
-        check(allPass, "T4 un-voiced types are exact passthrough (not silent)");
+        check(ok, "T4 all types finite + non-silent");
     }
 
     // T5: tempo sync resolves rate from BPM x division. At 120 BPM, "1/4" (index 3,
@@ -190,6 +185,131 @@ int main()
         bool same = (a.size() == b.size());
         for (size_t i = 0; same && i < a.size(); ++i) same = (a[i] == b[i]);
         check(same, "T7 deterministic (same setup -> identical output)");
+    }
+
+    // T8: phaser finite/bounded/non-silent + audibly differs from dry.
+    {
+        auto y = run(x, fs, [](PreModBlock &pm) {
+            pm.setType(PreModBlock::kPhaser);
+            pm.setRateHz(0.5f); pm.setDepth(0.7f); pm.setMix(0.5f); pm.setFeedback(0.3f);
+        });
+        check(allFinite(y), "T8 phaser output finite");
+        check(maxAbs(y) > 0.05f && maxAbs(y) < 4.0f, "T8 phaser bounded + non-silent");
+        check(rmsDiff(x, y) > 1.0e-3, "T8 phaser audibly differs from dry");
+    }
+
+    // T9: ZDF phaser stays bounded at max feedback (the zero-delay loop is stable).
+    {
+        auto y = run(x, fs, [](PreModBlock &pm) {
+            pm.setType(PreModBlock::kPhaser);
+            pm.setRateHz(3.0f); pm.setDepth(1.0f); pm.setMix(0.5f); pm.setFeedback(0.95f);
+        });
+        check(allFinite(y) && maxAbs(y) < 8.0f, "T9 phaser bounded at max feedback");
+    }
+
+    // T10: the phaser sweep MOVES (swept notches vs a static filter differ).
+    {
+        auto moving = run(x, fs, [](PreModBlock &pm) {
+            pm.setType(PreModBlock::kPhaser); pm.setRateHz(2.0f); pm.setDepth(0.8f); pm.setMix(0.5f);
+        });
+        auto still = run(x, fs, [](PreModBlock &pm) {
+            pm.setType(PreModBlock::kPhaser); pm.setRateHz(0.0f); pm.setDepth(0.8f); pm.setMix(0.5f);
+        });
+        check(allFinite(moving) && rmsDiff(moving, still) > 1.0e-3, "T10 phaser sweep moves the notches");
+    }
+
+    // T11: flanger finite/bounded/non-silent + differs from dry.
+    {
+        auto y = run(x, fs, [](PreModBlock &pm) {
+            pm.setType(PreModBlock::kFlanger);
+            pm.setRateHz(0.4f); pm.setDepth(0.8f); pm.setMix(0.5f); pm.setFeedback(0.5f);
+        });
+        check(allFinite(y), "T11 flanger output finite");
+        check(maxAbs(y) > 0.05f && maxAbs(y) < 6.0f, "T11 flanger bounded + non-silent");
+        check(rmsDiff(x, y) > 1.0e-3, "T11 flanger audibly differs from dry");
+    }
+
+    // T12: flanger stays bounded at max regen (feedback loop stable below unity).
+    {
+        auto y = run(x, fs, [](PreModBlock &pm) {
+            pm.setType(PreModBlock::kFlanger);
+            pm.setRateHz(2.0f); pm.setDepth(1.0f); pm.setMix(0.5f); pm.setFeedback(0.95f);
+        });
+        check(allFinite(y) && maxAbs(y) < 12.0f, "T12 flanger bounded at max regen");
+    }
+
+    // T13: the flanger sweep MOVES (swept comb vs a static comb differ).
+    {
+        auto moving = run(x, fs, [](PreModBlock &pm) {
+            pm.setType(PreModBlock::kFlanger); pm.setRateHz(1.5f); pm.setDepth(0.8f); pm.setMix(0.5f);
+        });
+        auto still = run(x, fs, [](PreModBlock &pm) {
+            pm.setType(PreModBlock::kFlanger); pm.setRateHz(0.0f); pm.setDepth(0.8f); pm.setMix(0.5f);
+        });
+        check(allFinite(moving) && rmsDiff(moving, still) > 1.0e-3, "T13 flanger sweep moves the comb");
+    }
+
+    // T14: flanger Manual shifts the comb (different base delay -> different tone).
+    {
+        auto a = run(x, fs, [](PreModBlock &pm) {
+            pm.setType(PreModBlock::kFlanger);
+            pm.setRateHz(0.0f); pm.setDepth(0.2f); pm.setMix(0.5f); pm.setManual(0.1f);
+        });
+        auto b = run(x, fs, [](PreModBlock &pm) {
+            pm.setType(PreModBlock::kFlanger);
+            pm.setRateHz(0.0f); pm.setDepth(0.2f); pm.setMix(0.5f); pm.setManual(0.9f);
+        });
+        check(allFinite(a) && allFinite(b) && rmsDiff(a, b) > 1.0e-3,
+              "T14 flanger Manual shifts the comb");
+    }
+
+    // T15-17: tremolo (TR-2) — cut-only gain, modulates, transparent at Depth 0.
+    {
+        auto y = run(x, fs, [](PreModBlock &pm) {
+            pm.setType(PreModBlock::kTremolo);
+            pm.setRateHz(5.0f); pm.setDepth(0.8f); pm.setWave(0.3f);
+        });
+        check(allFinite(y), "T15 tremolo finite");
+        check(maxAbs(y) <= maxAbs(x) + 1.0e-4f, "T15 tremolo cut-only (no boost above input)");
+        check(rmsDiff(x, y) > 1.0e-3, "T16 tremolo modulates (differs from dry)");
+    }
+    {
+        auto y = run(x, fs, [](PreModBlock &pm) {
+            pm.setType(PreModBlock::kTremolo); pm.setRateHz(5.0f); pm.setDepth(0.0f);
+        });
+        const size_t half = x.size() / 2;
+        float dev = 0.0f;
+        for (size_t i = half; i < x.size(); ++i) dev = std::max(dev, std::fabs(y[i] - x[i]));
+        check(dev < 1.0e-4f, "T17 tremolo Depth 0 is transparent");
+    }
+
+    // T19-21: Uni-Vibe — finite/bounded, swept staggered notches move, and
+    // Vibrato (wet-only) differs from Chorus (dry+wet).
+    {
+        auto y = run(x, fs, [](PreModBlock &pm) {
+            pm.setType(PreModBlock::kUniVibe);
+            pm.setRateHz(1.0f); pm.setDepth(0.8f); pm.setMix(0.5f); pm.setFeedback(0.3f);
+        });
+        check(allFinite(y) && maxAbs(y) < 4.0f, "T19 uni-vibe finite + bounded");
+        check(rmsDiff(x, y) > 1.0e-3, "T19 uni-vibe differs from dry");
+    }
+    {
+        auto moving = run(x, fs, [](PreModBlock &pm) {
+            pm.setType(PreModBlock::kUniVibe); pm.setRateHz(2.0f); pm.setDepth(0.8f); pm.setMix(0.5f);
+        });
+        auto still = run(x, fs, [](PreModBlock &pm) {
+            pm.setType(PreModBlock::kUniVibe); pm.setRateHz(0.0f); pm.setDepth(0.8f); pm.setMix(0.5f);
+        });
+        check(allFinite(moving) && rmsDiff(moving, still) > 1.0e-3, "T20 uni-vibe sweep moves the notches");
+    }
+    {
+        auto chorus = run(x, fs, [](PreModBlock &pm) {
+            pm.setType(PreModBlock::kUniVibe); pm.setRateHz(1.0f); pm.setDepth(0.8f); pm.setMix(0.5f);
+        });
+        auto vibrato = run(x, fs, [](PreModBlock &pm) {
+            pm.setType(PreModBlock::kUniVibe); pm.setRateHz(1.0f); pm.setDepth(0.8f); pm.setMix(1.0f);
+        });
+        check(allFinite(vibrato) && rmsDiff(chorus, vibrato) > 1.0e-3, "T21 uni-vibe Chorus vs Vibrato mode differ");
     }
 
     std::printf("%s (%d failures)\n", g_fail == 0 ? "ALL PASS" : "FAILURES", g_fail);

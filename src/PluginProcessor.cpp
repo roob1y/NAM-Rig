@@ -243,9 +243,20 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("premodFeedback", 1), "Pre Mod Feedback",
-        juce::NormalisableRange<float>(0.0f, 0.95f, 0.01f), 0.0f)); // reserved (phaser/flanger, voiced later)
+        juce::NormalisableRange<float>(0.0f, 0.95f, 0.01f), 0.0f)); // phaser resonance (Script->Small Stone) / flanger regen
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("premodManual", 1), "Pre Mod Manual",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.15f)); // flanger base/centre delay
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("premodWave", 1), "Pre Mod Wave",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.3f)); // tremolo shape (triangle->trapezoid)
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID("premodOn", 1), "Pre Mod Enable", false)); // off by default (new block)
+    // Position of the pre-amp mod relative to the drive rack: After = modulate the
+    // driven signal (default); Before = feed a clean modulated signal into the drive.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("premodPos", 1), "Pre Mod Position",
+        juce::StringArray{"After Drive", "Before Drive"}, 0));
 
     // --- Modulation: 3-slot series section (rig/ModBlock.h; mod_test.cpp).
     // Per-slot bank (superset; the panel shows only each effect's real
@@ -971,15 +982,35 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
                              || !mChain.drive.anyActive());
 
     // Pre-amp modulation pedal (mono, front-of-amp). Sits between the drive rack
-    // and the amp split (see RigChain). BPM for tempo sync is set with the mod/
-    // delay blocks further down.
-    mChain.premod.setType((int)apvts.getRawParameterValue("premodType")->load());
-    mChain.premod.setSyncIndex((int)apvts.getRawParameterValue("premodSync")->load());
-    mChain.premod.setRateHz(apvts.getRawParameterValue("premodRate")->load());
-    mChain.premod.setDepth(apvts.getRawParameterValue("premodDepth")->load());
-    mChain.premod.setMix(apvts.getRawParameterValue("premodMix")->load());
-    mChain.premod.setFeedback(apvts.getRawParameterValue("premodFeedback")->load());
-    mChain.premod.setBypassed(apvts.getRawParameterValue("premodOn")->load() < 0.5f);
+    // and the amp split (see RigChain). FOOL-PROOF voicing: each pedal exposes only
+    // the controls the real one has; every hidden control is pinned to its voiced
+    // sweet spot here so you can't dial a bad sound. (Type 0 Chorus, 1 Phaser,
+    // 2 Flanger, 3 Tremolo, 4 Uni-Vibe.)
+    //   Chorus   : Rate, Depth            (Mix fixed 50/50 = CE-2)
+    //   Phaser   : Rate                   (Depth + Feedback fixed sweet spots)
+    //   Flanger  : Rate, Depth, Feedback  (Manual + Mix fixed = deepest comb)
+    //   Tremolo  : Rate, Depth, Wave
+    //   Uni-Vibe : Rate, Depth, Mix       (Mix = Chorus<->Vibrato; no feedback = stock)
+    {
+        const int pt = (int)apvts.getRawParameterValue("premodType")->load();
+        const float depth = apvts.getRawParameterValue("premodDepth")->load();
+        const float mix = apvts.getRawParameterValue("premodMix")->load();
+        const float feedback = apvts.getRawParameterValue("premodFeedback")->load();
+        mChain.premod.setType(pt);
+        mChain.premod.setSyncIndex((int)apvts.getRawParameterValue("premodSync")->load());
+        mChain.premod.setRateHz(apvts.getRawParameterValue("premodRate")->load());
+        mChain.premod.setWave(apvts.getRawParameterValue("premodWave")->load()); // tremolo only
+        mChain.premod.setManual(0.15f);                                          // flanger base delay (fixed sweet spot)
+        // Depth: exposed on all but the phaser (fixed musical sweep there).
+        mChain.premod.setDepth(pt == 1 ? 0.60f : depth);
+        // Feedback: flanger Regen (knob), phaser fixed gentle resonance, else none.
+        mChain.premod.setFeedback(pt == 2 ? feedback : (pt == 1 ? 0.35f : 0.0f));
+        // Mix: Uni-Vibe = Chorus/Vibrato knob; flanger = deepest (DSP halves it);
+        // chorus/phaser = fixed 50/50.
+        mChain.premod.setMix(pt == 4 ? mix : (pt == 2 ? 1.0f : 0.5f));
+        mChain.premod.setBypassed(apvts.getRawParameterValue("premodOn")->load() < 0.5f);
+        mChain.setPremodPreDrive((int)apvts.getRawParameterValue("premodPos")->load() == 1);
+    }
 
     // Graphic EQ band gains (Rig A; zero latency; chain bypass via eqOn is safe).
     {

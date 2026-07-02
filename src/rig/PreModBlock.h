@@ -1,31 +1,40 @@
 #pragma once
 // PreModBlock — a MONO modulation pedal that sits IN FRONT OF THE AMP, in the
 // shared pre section (after the drive rack, before the A/B split). This is the
-// "pedalboard modulation" position: a real chorus/phaser/flanger/tremolo/uni-vibe
-// stompbox feeding the amp, so the modulated signal is coloured by the amp's
-// nonlinearity — deliberately DISTINCT from the post-cab STEREO ModBlock, which
-// only ever sees the finished, cabinet-filtered tone.
+// "pedalboard modulation" position: a modulation stompbox feeding the amp, so the
+// modulated signal is coloured by the amp's nonlinearity — deliberately DISTINCT
+// from the post-cab STEREO ModBlock, which only ever sees the finished, cabinet-
+// filtered tone.
 //
-// Because it feeds one amp it is strictly MONO (one channel). No Width / stereo
-// spread lives here — width belongs after the cab. Voicing follows the same
-// house rule as ModBlock: each effect is modelled on the real pedal, and only the
-// controls that pedal actually has are exposed; everything else is hardwired to
-// that pedal's sweet spot.
+// This is its OWN engine, built from how real BBD choruses actually behave
+// (research: ElectroSmash CE-2 teardown, Electric Druid's BBD-chorus study,
+// Raffel & Smith DAFx-2010 "Practical Modeling of BBD Circuits", Dattorro):
 //
-// SCAFFOLD STATE (2026-07-02): the full type/param FRAME is in place for all five
-// pedals, but only CHORUS is voiced so far (a single-voice CE-2-style BBD chorus).
-// Phaser / Flanger / Tremolo / Uni-Vibe are clean passthrough stubs — see the
-// switch in processSample; they are the next pedals to voice (per-pedal circuit
-// analysis + ear method). Selecting an un-voiced type is transparent, not silent.
+//   * MULTI-TAP, DECORRELATED voices — kVoices taps read one delay line at
+//     DIFFERENT fixed delay offsets, each swept at its own LFO phase. Several
+//     detuned voices at different comb positions summed with the dry is what reads
+//     as a chorus; a single voice is just a vibrato. Voiced to the BOSS CE-2: the
+//     taps sit tightly around its ~9.5 ms delay centre with a small triangle-LFO
+//     swing (classic/subtle, not a wide studio ensemble).
+//   * BBD NONLINEARITY as a gentle, LEVEL-INDEPENDENT 3rd-order polynomial
+//     (x - a·x² - b·x³, a=1/8 b=1/18), NOT a tanh soft-clip. The x² term gives the
+//     2nd-harmonic, x³ the 3rd; the point is a fixed subtle colour, not a clipper
+//     that distorts more as you push it (the common emulation mistake). Applied
+//     with exact first-order ADAA (polynomial antiderivative) so it never aliases.
+//   * DARK WET path — a 2-pole ~6.6 kHz low-pass (the CE-2's Sallen-Key
+//     reconstruction) so the wet FUSES with the bright dry instead of phasing
+//     against it. A bright wet is the classic "digital chorus doesn't gel" fault.
+//   * FIR fractional reads (6-point Lagrange) so swept taps never click; a subsonic
+//     trim removes the polynomial's even-harmonic DC; de-zippered params.
 //
-// Zero reported latency (the chorus base delay is part of the effect, not PDC —
-// same convention as ModBlock). JUCE-free core DSP: verified offline by
-// tests/premod_test.cpp with the juce_audio_basics stub.
+// STATE: all five are voiced — CHORUS (CE-2), PHASER (Phase 90 / Small Stone),
+// FLANGER (BBD, M117 / Electric Mistress), TREMOLO (Boss TR-2) and UNI-VIBE
+// (Shin-ei). Mono; zero reported latency. JUCE-free core DSP, verified by
+// tests/premod_test.cpp.
 
 #include "Blocks.h"
 #include "Lfo.h"
 #include <algorithm>
-#include <array>
 #include <cmath>
 
 namespace nam_rig
@@ -36,20 +45,81 @@ class PreModBlock : public MonoBlock
 public:
     enum Type { kChorus = 0, kPhaser, kFlanger, kTremolo, kUniVibe, kNumTypes };
 
-    // ---- voicing constants (fixed; the knobs scale within these) ----
-    // Mono CE-2-style chorus: one BBD-delayed voice mixed with dry. The nominal
-    // bucket-brigade delay is ~5 ms; the LFO sweeps it up by kChorusSpreadMs. A
-    // single voice (not the post-cab section's 3) is the authentic MONO output of
-    // a real analog chorus — the doubling/shimmer, not an artificial stereo spread.
-    static constexpr double kChorusBaseMs = 5.0;
-    static constexpr double kChorusSpreadMs = 4.0;
-    static constexpr float kChorusMaxRateHz = 5.0f;  // keep it a chorus (faster -> vibrato/warble)
-    static constexpr double kChorusBbdHz = 2800.0;   // BBD/clock HF rolloff corner on the wet path
-    static constexpr float kChorusBbdDrive = 1.15f;  // gentle bucket-brigade soft-clip
+    // ---- chorus voicing (front-of-amp, analog BBD) ----
+    // Voiced to the Boss CE-2: a SINGLE BBD voice at the CE-2's ~9.5 ms delay
+    // centre with its small modulation swing — the authentic mono CE-2. (kVoices is
+    // kept as a knob: >1 clusters extra taps around the same centre for a fuller,
+    // less strictly-authentic chorus; 1 = the real CE-2.)
+    static constexpr int kVoices = 1;
+    static constexpr double kDelayMinMs = 8.0;   // (with kVoices==1 the tap sits at the mean)
+    static constexpr double kDelayMaxMs = 11.0;  // ~9.5 ms mean = CE-2 delay centre
+    static constexpr double kModDepthMs = 1.4;   // max +/- sweep at depth 1 (CE-2 is ~±1.1 ms)
+    static constexpr float kChorusMaxRateHz = 3.5f; // real chorus lives <~4 Hz (faster -> vibrato/warble)
+    static constexpr double kWetLpHz = 6600.0;   // CE-2 reconstruction ceiling -> dark wet that fuses
+    static constexpr double kWetHpHz = 40.0;     // subsonic trim (kills the x^2 DC + tightens lows)
+    // BBD 3rd-order polynomial colour (Raffel & Smith): f(x)=x - a·x² - b·x³.
+    static constexpr double kBbdA = 1.0 / 8.0;
+    static constexpr double kBbdB = 1.0 / 18.0;
 
-    // LFO period in beats for each sync choice (index 0 = Off = free rate). Same
-    // 10-entry division table the ModBlock / DelayBlock use, so tempo-sync feels
-    // identical across the rig.
+    // ---- phaser voicing (Phase 90 / Small Stone family) ----
+    // 4 first-order all-pass stages (2 swept notches), EQUAL stage frequencies,
+    // mixed 50/50 with dry (Mix sets notch depth). The all-pass corner sweeps
+    // EXPONENTIALLY (log/octave) about kPhaserCenterHz by ±kPhaserOctaves·Depth,
+    // driven by the triangle LFO. Feedback around the chain is the character knob:
+    // 0 = smooth (Script Phase 90); up = resonant/"vocal" (Block / Small Stone
+    // Color) with the mid-hump "throb". Built as ZERO-DELAY-FEEDBACK / TPT all-passes
+    // (closed-form feedback) so the resonance stays tuned and stable even on a fast
+    // sweep — a plain unit-delay loop mistunes the notches and blows up (per DAFx).
+    static constexpr int kPhaserStages = 4;
+    static constexpr double kPhaserCenterHz = 500.0; // sweep centre of the all-pass corner
+    static constexpr double kPhaserOctaves = 2.2;    // ± sweep width (octaves) at Depth 1
+    static constexpr float kPhaserFbMax = 0.70f;     // musical feedback ceiling; kept modest so the swept
+                                                     // resonance peak doesn't spike the level as it crosses a note
+
+    // ---- flanger voicing (BBD flanger: MXR M117 / Electric Mistress family) ----
+    // A SHORT swept delay makes a harmonically-spaced comb (notches at odd multiples
+    // of 1/2t, peaks at n/t); as the delay sweeps, the whole comb sweeps = the "jet".
+    // Feedback (regen) reinforces the peaks into the resonant metallic sweep; it's
+    // taken around the delay itself (naturally delayed by the tap, so a plain loop is
+    // correct + stable below unity), tone-shaped to tame fizz. Mix 50/50 = deepest
+    // notches. Reuses the BBD polynomial colour + dark wet for the analog character.
+    // Manual (base/centre delay, like the M117 / Mistress / A/DA) sets where the
+    // comb sits; Depth sweeps the delay UP from there. Manual 0 = shortest (comb
+    // highest), 1 = longest (comb lowest); the swept delay is clamped to kFlMaxMs.
+    static constexpr double kFlManualMinMs = 0.5;  // Manual 0 -> shortest base delay
+    static constexpr double kFlManualMaxMs = 8.0;  // Manual 1 -> longest base delay
+    static constexpr double kFlSweepMs = 6.0;      // sweep excursion above the base at Depth 1
+    static constexpr double kFlMaxMs = 14.0;       // hard clamp on the swept delay
+    static constexpr float kFlFbMax = 0.78f;    // regen ceiling; the feedback state is also soft-clipped
+                                                // so high regen self-limits (like an analog flanger) instead of spiking
+    static constexpr double kFlFbLpHz = 6500.0; // one-pole low-pass in the feedback path (tames fizz)
+
+    // ---- tremolo voicing (Boss TR-2: VCA amplitude modulation) ----
+    // Wave morphs the triangle LFO toward a TRAPEZOID (steeper sides, flat top) by
+    // amplifying + clamping it — soft "pulsey" at Wave 0, choppy at Wave 1 (not a
+    // hard square; the slew keeps it click-free, like the TR-2's anti-tick edges).
+    // Gain is CUT-ONLY (g in [1-depth, 1], peak at unity) — the authentic TR-2 law,
+    // including its signature perceived volume drop as Depth rises. Clean AM (no EQ).
+    static constexpr float kTremWaveK = 8.0f;  // max triangle->trapezoid sharpening gain
+    static constexpr float kTremSlewMs = 1.5f; // de-click slew on the gain envelope
+
+    // ---- uni-vibe voicing (Shin-ei Uni-Vibe: 4 STAGGERED opto all-pass stages) ----
+    // Unlike the phaser's equal stages, the four stages have DIFFERENT centre freqs
+    // (from the real staggered caps 0.015/0.22µF/470pF/0.0047µF) -> uneven, non-
+    // harmonic notches (~2 audible, the "double beat"). One lamp sweeps all four via
+    // photocells with an ASYMMETRIC thermal lag (heats fast, cools slow) -> the
+    // lopsided throb. Mix = Chorus (dry+wet, ~0.5) .. Vibrato (wet only, 1.0). Stock
+    // has no feedback; the Feedback knob is the classic hot-rod (adds resonance).
+    static constexpr double kUniCenterHz = 430.0; // geometric centre of the staggered stages
+    static constexpr double kUniMult[4] = {0.616, 0.042, 19.6, 1.97}; // staggered ratios (from the caps)
+    static constexpr double kUniOctaves = 1.2;    // sweep width (octaves) at Depth 1
+    static constexpr float kUniLampHeatMs = 8.0f; // lamp heats fast
+    static constexpr float kUniLampCoolMs = 55.0f;// ...cools slow (the lopsided sweep)
+    static constexpr float kUniGamma = 1.5f;      // LDR power-law transfer (fc ~ light^gamma)
+    static constexpr float kUniAmDepth = 0.08f;   // subtle photocell amplitude throb
+    static constexpr float kUniFbMax = 0.5f;      // hot-rod feedback ceiling (stock = 0)
+
+    // Tempo-sync division table (index 0 = Off = free), shared convention with the rig.
     static constexpr int kNumSync = 10;
     static double syncBeats(int i)
     {
@@ -58,11 +128,13 @@ public:
         return (i > 0 && i < kNumSync) ? beats[i] : 0.0;
     }
 
-    // Free-rate ceiling per pedal (sync ignores this and honours the host division).
     static float maxRateHz(Type t)
     {
-        if (t == kChorus) return kChorusMaxRateHz;
-        return 10.0f; // phaser / flanger / tremolo / uni-vibe (voiced later)
+        if (t == kChorus) return kChorusMaxRateHz; // 3.5 Hz (CE-2 ceiling)
+        if (t == kPhaser) return 5.0f;             // Phase 90 tops ~5 Hz
+        if (t == kTremolo) return 12.0f;           // TR-2 tops ~11 Hz
+        if (t == kUniVibe) return 8.0f;            // Uni-Vibe tops ~7.6 Hz
+        return 10.0f;                              // flanger (A/DA to 10 Hz)
     }
 
     const char *name() const override { return "Pre Mod"; }
@@ -70,13 +142,16 @@ public:
     void prepare(const BlockContext &ctx) override
     {
         mFs = ctx.sampleRate;
-        // Size the delay line for the deepest chorus tap plus a little guard.
-        const int maxDelay =
-            (int)std::ceil((kChorusBaseMs + kChorusSpreadMs + 2.0) * 0.001 * mFs);
-        mLine.prepare(maxDelay);
+        const double maxDelayMs = std::max(kDelayMaxMs + kModDepthMs, kFlMaxMs) + 2.0;
+        mLine.prepare((int)std::ceil(maxDelayMs * 0.001 * mFs));
         mLfo.prepare(mFs);
         mSmoothK = 1.0f - std::exp((float)(-1.0 / (0.010 * mFs))); // 10 ms de-zip
-        mBbdCoef = coefForHz(kChorusBbdHz, mFs);
+        rbjLowpass(kWetLpHz, 0.70710678, mFs, mLpB0, mLpB1, mLpB2, mLpA1, mLpA2);
+        mHpCoef = coefForHz(kWetHpHz, mFs);
+        mFlFbCoef = coefForHz(kFlFbLpHz, mFs);
+        mTremCoef = coefForMs(kTremSlewMs, mFs);
+        mUniHeatCoef = coefForMs(kUniLampHeatMs, mFs);
+        mUniCoolCoef = coefForMs(kUniLampCoolMs, mFs);
         reset();
         mPrepared = true;
     }
@@ -85,48 +160,56 @@ public:
     {
         mLine.reset();
         mLfo.reset();
-        mBbdLp = 0.0f;
+        mLpZ1 = mLpZ2 = 0.0f;
+        mHpLp = 0.0f;
+        mNlX1 = 0.0;
+        mNlF1 = 0.0;
+        for (float &s : mAp) s = 0.0f;
+        mFlFbState = 0.0f;
+        mFlFbLp = 0.0f;
+        mTremG = 1.0f; // start at unity (no chop on the first sample)
+        mUniLamp = 0.5f; // lamp at mid brightness (no startup snap)
         mDepthZ = mDepth;
         mMixZ = mMix;
+        mFeedbackZ = mFeedback;
+        mManualZ = mManual;
+        mWaveZ = mWave;
     }
 
     // ---- parameters (audio thread) ----
     void setType(int t)
     {
         const Type ty = (Type)std::min(std::max(t, 0), (int)kNumTypes - 1);
-        if (ty != mType)
-        {
-            mType = ty;
-            if (mPrepared)
-                reset(); // state from another algorithm is meaningless
-        }
+        if (ty != mType) { mType = ty; if (mPrepared) reset(); }
     }
     void setRateHz(float hz) { mFreeRateHz = hz; }
     void setSyncIndex(int i) { mSyncIndex = i; } // 0 = Off (free)
     void setBpm(double bpm) { if (bpm > 0.0) mBpm = bpm; }
     void setDepth(float d) { mDepth = d; }
     void setMix(float m) { mMix = m; }
-    void setFeedback(float f) { mFeedback = f; } // reserved for phaser/flanger (voiced later)
+    void setFeedback(float f) { mFeedback = f; } // phaser resonance / flanger regen
+    void setManual(float m) { mManual = m; }     // flanger base/centre delay (0..1)
+    void setWave(float w) { mWave = w; }         // tremolo shape morph: triangle (0) -> trapezoid (1)
 
-    // Resolved LFO rate: honour the host division when synced, else the free knob
-    // capped to keep each pedal in character.
     float effectiveRateHz() const
     {
         const double beats = syncBeats(mSyncIndex);
-        if (beats > 0.0)
-            return (float)((mBpm / 60.0) / beats);
+        if (beats > 0.0) return (float)((mBpm / 60.0) / beats);
         return std::min(mFreeRateHz, maxRateHz(mType));
     }
 
     void process(float *mono, int numSamples) override
     {
         mLfo.setRateHz(effectiveRateHz());
-        mLfo.setWaveform(Lfo::Sine); // chorus is sinusoidal; other pedals set their own later
-
+        // Uni-Vibe's LFO is a sine (then the lamp lag skews it); the others use triangle.
+        mLfo.setWaveform(mType == kUniVibe ? Lfo::Sine : Lfo::Triangle);
         for (int i = 0; i < numSamples; ++i)
         {
             mDepthZ += mSmoothK * (mDepth - mDepthZ);
             mMixZ += mSmoothK * (mMix - mMixZ);
+            mFeedbackZ += mSmoothK * (mFeedback - mFeedbackZ);
+            mManualZ += mSmoothK * (mManual - mManualZ);
+            mWaveZ += mSmoothK * (mWave - mWaveZ);
             mono[i] = processSample(mono[i]);
             mLfo.advance();
         }
@@ -138,48 +221,195 @@ public:
 private:
     float processSample(float x)
     {
-        const float lfo = mLfo.value();
         switch (mType)
         {
         case kChorus:
         {
-            // Single-voice mono BBD chorus (CE-2). Write dry, read one LFO-swept
-            // tap with the 6-point Lagrange interpolator (FIR -> no click at the
-            // integer-sample crossings a swept delay walks through), colour it with
-            // the bucket-brigade voice (HF rolloff + gentle soft clip), then blend
-            // against dry. Mix default 0.5 = the classic analog-chorus depth.
+            // Multi-tap chorus: kVoices taps at DIFFERENT fixed delay centres, each
+            // swept a little at its own LFO phase (decorrelated), summed. The taps
+            // sit at different comb positions -> ensemble shimmer, not one vibrato.
             mLine.write(x);
-            const double sweepMs =
-                kChorusBaseMs + (double)mDepthZ * kChorusSpreadMs * (0.5 + 0.5 * (double)lfo);
-            float wet = mLine.readFrac6(sweepMs * 0.001 * mFs);
+            float wet = 0.0f;
+            for (int v = 0; v < kVoices; ++v)
+            {
+                const double frac = (kVoices > 1) ? (double)v / (double)(kVoices - 1) : 0.5;
+                const double baseMs = kDelayMinMs + (kDelayMaxMs - kDelayMinMs) * frac;
+                const float lv = mLfo.value((double)v / (double)kVoices); // spread phases (incl. anti-phase)
+                const double sweepMs = baseMs + (double)mDepthZ * kModDepthMs * (double)lv;
+                wet += mLine.readFrac6(std::max(3.0, sweepMs * 0.001 * mFs));
+            }
+            wet *= 1.0f / (float)kVoices;
             wet = bbdColor(wet);
             return (1.0f - mMixZ) * x + mMixZ * wet;
         }
         case kPhaser:
+        {
+            // 4-stage ZDF/TPT all-pass phaser. All stages share one swept corner
+            // (equal frequencies = Phase 90 / Small Stone). Each TPT all-pass is
+            // affine in its input: ap = alpha·in + beta, alpha = 2G-1 (depends only
+            // on the corner), beta = 2(1-G)·s (depends only on stored state). The
+            // chain collapses to y = A·u + B, so the NEGATIVE feedback loop (the
+            // Phase-90 notch structure) resolves in closed form with no unit delay:
+            //   u = (x - k·B)/(1 + k·A);  denom > 0 for all k >= 0 -> always stable.
+            const float lfo = mLfo.value(); // triangle [-1, 1]
+            const double fc = std::min(
+                0.45 * mFs,
+                std::max(20.0, kPhaserCenterHz * std::pow(2.0, (double)lfo * kPhaserOctaves
+                                                                    * (double)mDepthZ)));
+            const double g = std::tan(3.14159265358979323846 * fc / mFs);
+            const float G = (float)(g / (1.0 + g));
+            const float alpha = 2.0f * G - 1.0f;
+
+            float beta[kPhaserStages];
+            float B = 0.0f;
+            for (int s = 0; s < kPhaserStages; ++s)
+            {
+                beta[s] = 2.0f * (1.0f - G) * mAp[s];
+                B = alpha * B + beta[s]; // Horner: B = alpha^3·b0 + ... + b3
+            }
+            const float a2 = alpha * alpha;
+            const float A = a2 * a2; // alpha^4
+
+            const float k = kPhaserFbMax * mFeedbackZ;    // negative feedback (resonance)
+            const float u = (x - k * B) / (1.0f + k * A); // zero-delay resolved chain input
+
+            float in = u;
+            for (int s = 0; s < kPhaserStages; ++s)
+            {
+                const float out = alpha * in + beta[s]; // true stage output
+                const float v = (in - mAp[s]) * G;      // TPT integrator update
+                mAp[s] += 2.0f * v;
+                in = out;
+            }
+            // Real Phase 90 / Small Stone mix dry + phased at a FIXED 50/50 (that's
+            // what makes the deepest notch); no mix control on the pedal, so it's
+            // hardwired (the Mix knob is greyed for the phaser in the panel).
+            return 0.5f * x + 0.5f * in;
+        }
         case kFlanger:
+        {
+            // BBD flanger: one short delay tap swept by the triangle LFO, with a
+            // tone-shaped regeneration loop. The tap sweeps UP from kFlBaseMs (comb
+            // high) by Depth·kFlSweepMs, so the harmonic comb sweeps down/up = jet.
+            // Positive feedback reinforces the peaks (resonant); the feedback is
+            // added at the delay INPUT so its loop delay is the tap itself (correct
+            // + stable for fb < 1). Wet gets the BBD colour; feedback is low-passed
+            // to keep high regen from turning to fizz.
+            const float lfo = mLfo.value(); // triangle [-1, 1]
+            // Manual sets the base/centre delay; Depth sweeps UP from there; clamp.
+            const double base = kFlManualMinMs + (double)mManualZ * (kFlManualMaxMs - kFlManualMinMs);
+            const double sweep = (double)mDepthZ * kFlSweepMs * (0.5 + 0.5 * (double)lfo);
+            const double delayMs = std::min(kFlMaxMs, std::max(kFlManualMinMs, base + sweep));
+            const float fb = kFlFbMax * mFeedbackZ;
+            mLine.write(x + fb * mFlFbState);
+            float wet = mLine.readFrac6(std::max(3.0, delayMs * 0.001 * mFs));
+            wet = bbdColor(wet);
+            mFlFbLp += mFlFbCoef * (wet - mFlFbLp);   // tone-shape the regen (tame fizz)
+            mFlFbState = std::tanh(mFlFbLp);          // soft-clip the loop -> self-limits at high regen
+                                                      // (near-linear at normal levels, so low regen is unchanged)
+            // Classic flangers sit at a fixed ~50/50 for the deepest comb; expose Mix
+            // as dry..50/50 so the knob spans dry -> deepest flange (can't over-wet
+            // past the sweet spot, where the notches would start filling back in).
+            const float m = mMixZ * 0.5f;
+            return (1.0f - m) * x + m * wet;
+        }
         case kTremolo:
+        {
+            // Boss TR-2: VCA amplitude modulation. Wave morphs the triangle LFO to a
+            // trapezoid (amplify + clamp -> steeper sides, flat top); the gain is
+            // cut-only (peak unity, dips by Depth) and de-clicked with a short slew.
+            const float tri = mLfo.value();                       // triangle [-1, 1]
+            const float sharpen = 1.0f + mWaveZ * kTremWaveK;     // Wave -> trapezoid gain
+            const float shaped = std::max(-1.0f, std::min(1.0f, tri * sharpen));
+            const float sn = 0.5f * (shaped + 1.0f);              // -> [0, 1] (1 = loud)
+            const float target = (1.0f - mDepthZ) + mDepthZ * sn; // cut-only: [1-depth, 1]
+            mTremG += mTremCoef * (target - mTremG);              // slew de-click
+            return x * mTremG;
+        }
         case kUniVibe:
+        {
+            // Shin-ei Uni-Vibe: 4 STAGGERED opto all-pass stages swept by one lamp.
+            // The lamp has an asymmetric thermal lag (heats fast, cools slow) and the
+            // LDR a power-law transfer -> the lopsided "throb". Stages use the real
+            // staggered ratios (kUniMult) so the notches are uneven / non-harmonic.
+            const float lfo = mLfo.value(); // sine [-1, 1]
+            const float drive = 0.5f + 0.5f * lfo; // -> lamp drive [0, 1]
+            mUniLamp += (drive > mUniLamp ? mUniHeatCoef : mUniCoolCoef) * (drive - mUniLamp);
+            const float cell = std::pow(std::max(0.0f, mUniLamp), kUniGamma); // LDR light [0,1]
+            const float warp = cell * 2.0f - 1.0f;                            // sweep control [-1,1]
+
+            // per-stage ZDF/TPT all-pass: gather G_i / alpha_i / beta_i, build the
+            // chain collapse y = A·u + B (A = prod alpha_i, B = nested), then resolve
+            // the POSITIVE feedback loop with zero delay: u = (x + k·B)/(1 - k·A).
+            float G[4], alpha[4], beta[4];
+            float A = 1.0f, B = 0.0f;
+            for (int s = 0; s < 4; ++s)
+            {
+                const double fc = std::min(0.45 * mFs, std::max(20.0,
+                    kUniCenterHz * kUniMult[s]
+                        * std::pow(2.0, (double)warp * kUniOctaves * (double)mDepthZ)));
+                const double g = std::tan(3.14159265358979323846 * fc / mFs);
+                G[s] = (float)(g / (1.0 + g));
+                alpha[s] = 2.0f * G[s] - 1.0f;
+                beta[s] = 2.0f * (1.0f - G[s]) * mAp[s];
+                A *= alpha[s];
+                B = alpha[s] * B + beta[s];
+            }
+            const float k = kUniFbMax * mFeedbackZ;         // positive feedback (hot-rod; 0 = stock)
+            const float u = (x + k * B) / (1.0f - k * A);   // zero-delay resolved chain input
+            float in = u;
+            for (int s = 0; s < 4; ++s)
+            {
+                const float out = alpha[s] * in + beta[s];
+                const float v = (in - mAp[s]) * G[s];
+                mAp[s] += 2.0f * v;
+                in = out;
+            }
+            in *= 1.0f - kUniAmDepth * mDepthZ * cell;      // subtle photocell amplitude throb
+            // Mix: Chorus (dry+wet, ~0.5) .. Vibrato (wet only, 1.0).
+            return (1.0f - mMixZ) * x + mMixZ * in;
+        }
         default:
-            // TODO(premod): voice these front-of-amp pedals next (per-pedal circuit
-            // analysis + ear method). Passthrough until then so an un-voiced
-            // selection is transparent rather than silent.
             return x;
         }
     }
 
-    // Bucket-brigade colour for the chorus wet path: a one-pole HF rolloff (the
-    // BBD clock/anti-alias filtering) followed by a gentle soft-clip (the analog
-    // compander/BBD saturation warmth). No-op-ish at unity drive on quiet signals.
+    // Bucket-brigade colour: the gentle level-independent BBD polynomial (ADAA'd),
+    // then the dark reconstruction low-pass, then a subsonic trim. Order mirrors the
+    // circuit (BBD distorts, reconstruction filter darkens, DC/subsonics removed).
     float bbdColor(float wet)
     {
-        mBbdLp += mBbdCoef * (wet - mBbdLp); // HF rolloff
-        const float u = mBbdLp * kChorusBbdDrive;
-        return std::tanh(u) / kChorusBbdDrive; // makeup keeps the level ~constant
+        // --- BBD 3rd-order polynomial via exact first-order ADAA ---
+        double u = (double)wet;
+        u = std::min(1.5, std::max(-1.5, u)); // keep the cubic well-behaved
+        const double Fc = bbdAntideriv(u);
+        const double du = u - mNlX1;
+        const double shaped = (std::abs(du) > 1.0e-7) ? (Fc - mNlF1) / du : bbdShape(mNlX1);
+        mNlX1 = u;
+        mNlF1 = Fc;
+        // --- dark reconstruction low-pass (2-pole ~6.6 kHz) ---
+        float y = biquadTDF2((float)shaped, mLpB0, mLpB1, mLpB2, mLpA1, mLpA2, mLpZ1, mLpZ2);
+        // --- subsonic trim (also removes the polynomial's even-harmonic DC) ---
+        mHpLp += mHpCoef * (y - mHpLp);
+        return y - mHpLp;
+    }
+    // f(x) = x - a·x² - b·x³   (gentle, level-independent BBD colour)
+    static double bbdShape(double x) { return x - kBbdA * x * x - kBbdB * x * x * x; }
+    // Antiderivative F(x) = x²/2 - a·x³/3 - b·x⁴/4 (exact; makes the ADAA aliasing-free).
+    static double bbdAntideriv(double x)
+    {
+        const double x2 = x * x;
+        return 0.5 * x2 - (kBbdA / 3.0) * x2 * x - (kBbdB / 4.0) * x2 * x2;
     }
 
     void flushDenormals()
     {
-        if (std::abs(mBbdLp) < 1.0e-30f) mBbdLp = 0.0f;
+        for (float *p : {&mLpZ1, &mLpZ2, &mHpLp})
+            if (std::abs(*p) < 1.0e-30f) *p = 0.0f;
+        for (float &s : mAp)
+            if (std::abs(s) < 1.0e-30f) s = 0.0f;
+        if (std::abs(mFlFbState) < 1.0e-30f) mFlFbState = 0.0f;
+        if (std::abs(mFlFbLp) < 1.0e-30f) mFlFbLp = 0.0f;
     }
 
     static float coefForHz(double hz, double fs)
@@ -187,16 +417,47 @@ private:
         const double fc = std::min(std::max(hz, 1.0), 0.45 * fs);
         return (float)(1.0 - std::exp(-2.0 * 3.14159265358979323846 * fc / fs));
     }
+    static float coefForMs(float ms, double fs)
+    {
+        return 1.0f - (float)std::exp(-1.0 / ((double)std::max(0.05f, ms) * 0.001 * fs));
+    }
+    static void rbjLowpass(double fc, double Q, double fs,
+                           float &b0, float &b1, float &b2, float &a1, float &a2)
+    {
+        const double w0 = 2.0 * 3.14159265358979323846 * fc / fs;
+        const double cw = std::cos(w0), sw = std::sin(w0), al = sw / (2.0 * Q);
+        const double a0 = 1.0 + al;
+        b0 = (float)(((1.0 - cw) * 0.5) / a0);
+        b1 = (float)((1.0 - cw) / a0);
+        b2 = b0;
+        a1 = (float)((-2.0 * cw) / a0);
+        a2 = (float)((1.0 - al) / a0);
+    }
+    static float biquadTDF2(float x, float b0, float b1, float b2, float a1, float a2,
+                            float &z1, float &z2)
+    {
+        const float y = b0 * x + z1;
+        z1 = b1 * x - a1 * y + z2;
+        z2 = b2 * x - a2 * y;
+        return y;
+    }
 
     double mFs = 48000.0;
     Type mType = kChorus;
     Lfo mLfo;
     FracDelayLine mLine;
-    float mBbdLp = 0.0f;
-    float mBbdCoef = 1.0f;
+    // dark wet: 2-pole reconstruction low-pass + subsonic high-pass
+    float mLpB0 = 1.0f, mLpB1 = 0.0f, mLpB2 = 0.0f, mLpA1 = 0.0f, mLpA2 = 0.0f;
+    float mLpZ1 = 0.0f, mLpZ2 = 0.0f;
+    float mHpCoef = 1.0f, mHpLp = 0.0f;
+    double mNlX1 = 0.0, mNlF1 = 0.0; // BBD polynomial ADAA state (double: no float-cancellation noise)
+    float mAp[kPhaserStages] = {0.0f, 0.0f, 0.0f, 0.0f}; // phaser all-pass TPT integrator states
+    float mFlFbState = 0.0f, mFlFbLp = 0.0f, mFlFbCoef = 1.0f; // flanger regen state + tone-shape
+    float mTremG = 1.0f, mTremCoef = 1.0f;                     // tremolo smoothed gain + de-click coef
+    float mUniLamp = 0.5f, mUniHeatCoef = 1.0f, mUniCoolCoef = 1.0f; // uni-vibe lamp thermal state + coeffs
 
-    float mDepth = 0.5f, mMix = 0.5f, mFeedback = 0.0f;
-    float mDepthZ = 0.5f, mMixZ = 0.5f, mSmoothK = 0.01f;
+    float mDepth = 0.5f, mMix = 0.5f, mFeedback = 0.0f, mManual = 0.15f, mWave = 0.3f;
+    float mDepthZ = 0.5f, mMixZ = 0.5f, mFeedbackZ = 0.0f, mManualZ = 0.15f, mWaveZ = 0.3f, mSmoothK = 0.01f;
     float mFreeRateHz = 1.0f;
     int mSyncIndex = 0;
     double mBpm = 120.0;

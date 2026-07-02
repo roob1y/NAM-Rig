@@ -6181,8 +6181,16 @@ public:
             apvts, "premodSync", mSync);
         mSync.onChange = [this] { refresh(); };
 
+        // Position relative to the drive rack (mod before or after the overdrive).
+        mPos.addItemList({"After Drive", "Before Drive"}, 1);
+        addAndMakeVisible(mPos);
+        mPosAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, "premodPos", mPos);
+
         const std::pair<const char *, const char *> defs[] = {
-            {"premodRate", "Rate"}, {"premodDepth", "Depth"}, {"premodMix", "Mix"}};
+            {"premodRate", "Rate"}, {"premodDepth", "Depth"},
+            {"premodMix", "Mix"}, {"premodFeedback", "Feedback"},
+            {"premodManual", "Manual"}, {"premodWave", "Wave"}};
         for (const auto &[id, caption] : defs)
         {
             mKnobs.push_back(std::make_unique<LabeledKnob>(apvts, id, caption));
@@ -6191,47 +6199,65 @@ public:
         refresh();
     }
 
-    // Rate is owned by the sync division when synced -> grey the Rate knob out then;
-    // header-right shows the type + a note for the not-yet-voiced pedals.
+    // FOOL-PROOF control set: each pedal SHOWS only the knobs the real one has
+    // (the rest are pinned to their sweet spot in the processor). Rate is owned by
+    // the sync division when synced -> greyed then. Knobs: 0 Rate, 1 Depth, 2 Mix,
+    // 3 Feedback, 4 Manual, 5 Wave. (Type 0 Chorus, 1 Phaser, 2 Flanger, 3 Tremolo,
+    // 4 Uni-Vibe.)
     void refresh()
     {
         const bool synced = (int)mApvts.getRawParameterValue("premodSync")->load() > 0;
-        if (!mKnobs.empty()) mKnobs[0]->setEnabled(!synced); // Rate follows the host when synced
+        if (mKnobs.size() > 0) mKnobs[0]->setEnabled(!synced); // Rate follows the host when synced
         const int t = (int)mApvts.getRawParameterValue("premodType")->load();
         static const char *const kNames[] = {"Chorus", "Phaser", "Flanger", "Tremolo", "Uni-Vibe"};
-        const bool voiced = (t == 0); // only Chorus so far
-        setHeaderRight(voiced ? juce::String(kNames[juce::jlimit(0, 4, t)])
-                              : juce::String(kNames[juce::jlimit(0, 4, t)]) + "  \xc2\xb7  voicing soon");
+        setHeaderRight(kNames[juce::jlimit(0, 4, t)]);
+        if (t == mLastType)
+            return; // control set only changes with the pedal type
+        mLastType = t;
+        auto show = [&](int i, bool v) { if ((int)mKnobs.size() > i) mKnobs[(size_t)i]->setVisible(v); };
+        show(0, true);          // Rate  : all pedals
+        show(1, t != 1);        // Depth : all except the phaser (fixed sweep)
+        show(2, t == 4);        // Mix   : Uni-Vibe only (Chorus <-> Vibrato)
+        show(3, t == 2);        // Feedback/Regen : flanger only
+        show(4, false);         // Manual: never (fixed sweet spot)
+        show(5, t == 3);        // Wave  : tremolo only
+        resized();              // re-centre the now-visible knobs
     }
 
     void resized() override
     {
         auto area = bodyArea().reduced(24, 14);
 
-        // Top row: Type + Sync pickers side by side.
+        // Top row: Type + Sync + Position pickers side by side.
         auto pickers = area.removeFromTop(30);
         const int gap = 12;
-        const int w = (pickers.getWidth() - gap) / 2;
+        const int w = (pickers.getWidth() - 2 * gap) / 3;
         mType.setBounds(pickers.removeFromLeft(w));
         pickers.removeFromLeft(gap);
         mSync.setBounds(pickers.removeFromLeft(w));
+        pickers.removeFromLeft(gap);
+        mPos.setBounds(pickers.removeFromLeft(w));
 
         area.removeFromTop(16);
 
-        // Knob row (Rate / Depth / Mix), centred like the other panels.
-        auto row = area.withSizeKeepingCentre(
-            juce::jmin(area.getWidth(), 104 * (int)mKnobs.size()),
-            juce::jmin(area.getHeight(), 130));
-        const int kw = row.getWidth() / (int)mKnobs.size();
+        // Lay out only the VISIBLE knobs, centred (count varies 1..3 per pedal).
+        std::vector<LabeledKnob *> vis;
         for (auto &k : mKnobs)
+            if (k->isVisible()) vis.push_back(k.get());
+        const int nk = juce::jmax(1, (int)vis.size());
+        auto row = area.withSizeKeepingCentre(
+            juce::jmin(area.getWidth(), 104 * nk), juce::jmin(area.getHeight(), 130));
+        const int kw = row.getWidth() / nk;
+        for (auto *k : vis)
             k->setBounds(row.removeFromLeft(kw).reduced(5, 0));
     }
 
 private:
     juce::AudioProcessorValueTreeState &mApvts;
-    juce::ComboBox mType, mSync;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt, mSyncAtt;
+    juce::ComboBox mType, mSync, mPos;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt, mSyncAtt, mPosAtt;
     std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
+    int mLastType = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PremodPanel)
 };

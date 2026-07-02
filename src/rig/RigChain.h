@@ -102,6 +102,8 @@ public:
     double alignB() const { return mAlignB; }
 
     void setInputCal(float g) { mInputCal = g; } // global, pre-everything
+    // Pre-amp mod pedal position: true = BEFORE the drive rack, false = AFTER it (default).
+    void setPremodPreDrive(bool b) { mPremodPreDrive = b; }
     void setInTrimA(float g) { mInTrimA = g; }
     void setInTrimB(float g) { mInTrimB = g; }
     void setOutTrimA(float g) { mOutTrimA = g; }
@@ -231,14 +233,16 @@ public:
             { gate.process(ch0, numSamples);  heal(gate, ch0, numSamples); }
         if (!comp.isBypassed())
             { comp.process(ch0, numSamples);  heal(comp, ch0, numSamples); }
+        // Mono front-of-amp modulation pedal. Its position relative to the drive
+        // rack is switchable (mPremodPreDrive): PRE-drive feeds a clean modulated
+        // signal into the overdrive; POST-drive (default) modulates the already-
+        // driven signal before it hits the amp. Either way it's before the amp
+        // split, so it interacts with the amp — unlike the post-cab stereo ModBlock.
+        if (mPremodPreDrive && !premod.isBypassed())
+            { premod.process(ch0, numSamples); heal(premod, ch0, numSamples); }
         if (!drive.isBypassed())
             { drive.process(ch0, numSamples); heal(drive, ch0, numSamples); }
-        // Mono front-of-amp modulation pedal: sits after the drive rack and before
-        // the amp split, so the modulated signal is shaped by the amp nonlinearity
-        // (unlike the post-cab stereo ModBlock). Placement is intentionally here
-        // ("real mod pedals before the amp"); to run mod BEFORE the drive instead,
-        // move this call above the drive.process() above — Robbie to confirm by ear.
-        if (!premod.isBypassed())
+        if (!mPremodPreDrive && !premod.isBypassed())
             { premod.process(ch0, numSamples); heal(premod, ch0, numSamples); }
 
         // ---- split into the two voice buffers ----
@@ -591,6 +595,7 @@ private:
     float mPanA = -1.0f, mPanB = 1.0f; // default hard L / hard R for Dual
     float mPolA = 1.0f, mPolB = 1.0f;  // polarity (+1 / -1)
     float mInputCal = 1.0f; // global input calibration (pre-split)
+    bool mPremodPreDrive = false; // pre-amp mod pedal: before (true) / after (false) the drive rack
     float mInTrimA = 1.0f, mInTrimB = 1.0f;
     float mOutTrimA = 1.0f, mOutTrimB = 1.0f;
     double mAlignA = 0.0, mAlignB = 0.0; // fractional align delay (samples)
