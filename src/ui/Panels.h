@@ -4546,10 +4546,17 @@ public:
         addAndMakeVisible(mPresetBtn);
         mPresetBtn.onClick = [this] {
             juce::PopupMenu m;
-            m.addCustomItem(-1, std::make_unique<MenuSectionHeader>("Delay Presets"), nullptr, {});
             const auto &ps = delayPresets();
+            int lastChar = -1;
             for (int i = 0; i < (int)ps.size(); ++i)
+            {
+                if (ps[(size_t)i].character != lastChar) // new character -> section header
+                {
+                    lastChar = ps[(size_t)i].character;
+                    m.addCustomItem(-1, std::make_unique<MenuSectionHeader>(kCharName(lastChar)), nullptr, {});
+                }
                 m.addItem(i + 1, ps[(size_t)i].name);
+            }
             m.setLookAndFeel(&getLookAndFeel());
             m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&mPresetBtn),
                             [this](int r) { if (r > 0) applyDelayPreset(r - 1); });
@@ -4704,17 +4711,31 @@ public:
         }
     }
 
-    // Guitar delay presets — full snapshots of the delay block only.
-    struct DPreset { const char *name; std::vector<std::pair<const char *, double>> kv; };
+    // Guitar delay presets — full snapshots of the delay block only. Each preset
+    // belongs to ONE character (Clean / Tape Echo / Space Tape) and selects it, so
+    // the menu is grouped by character and picking a preset switches the voicing.
+    // Presets are stored grouped in character order (0,1,2) so the menu can insert
+    // a section header whenever the character changes. Space Tape presets also set
+    // delayHeadMode (the multi-head echo mode; 5-11 auto-engage the rig Spring).
+    struct DPreset { const char *name; int character; std::vector<std::pair<const char *, double>> kv; };
     static const std::vector<DPreset> &delayPresets()
     {
         static const std::vector<DPreset> p = {
-            {"Slapback",       {{"delayOn",1},{"delaySync",0},{"delaySyncR",0},{"delayTime",100},{"delayFeedback",0.00},{"delayTone",8000},{"delayLowCut",200},{"delayWidth",1.00},{"delayMix",0.25},{"delayPingPong",0}}},
-            {"Quarter",        {{"delayOn",1},{"delaySync",6},{"delaySyncR",0},{"delayTime",500},{"delayFeedback",0.30},{"delayTone",8000},{"delayLowCut",200},{"delayWidth",1.00},{"delayMix",0.28},{"delayPingPong",0}}},
-            {"Dotted Lead",    {{"delayOn",1},{"delaySync",8},{"delaySyncR",0},{"delayTime",375},{"delayFeedback",0.40},{"delayTone",6000},{"delayLowCut",270},{"delayWidth",1.00},{"delayMix",0.40},{"delayPingPong",0}}},
-            {"Gallop",         {{"delayOn",1},{"delaySync",8},{"delaySyncR",6},{"delayTime",375},{"delayFeedback",0.30},{"delayTone",5000},{"delayLowCut",250},{"delayWidth",1.00},{"delayMix",0.38},{"delayPingPong",0}}},
-            {"Ambient Wash",   {{"delayOn",1},{"delaySync",6},{"delaySyncR",0},{"delayTime",500},{"delayFeedback",0.62},{"delayTone",5000},{"delayLowCut",220},{"delayWidth",1.00},{"delayMix",0.40},{"delayPingPong",0}}},
-            {"Dub Echo",       {{"delayOn",1},{"delaySync",6},{"delaySyncR",0},{"delayTime",500},{"delayFeedback",0.21},{"delayTone",1500},{"delayLowCut",250},{"delayWidth",1.00},{"delayMix",0.50},{"delayPingPong",1}}},
+            // --- Clean (transparent digital repeats) ---
+            {"Slapback",       0, {{"delayOn",1},{"delaySync",0},{"delaySyncR",0},{"delayTime",100},{"delayFeedback",0.00},{"delayTone",9000},{"delayLowCut",200},{"delayWidth",1.00},{"delayMix",0.25},{"delayMod",0.00},{"delayPingPong",0}}},
+            {"Quarter Note",   0, {{"delayOn",1},{"delaySync",6},{"delaySyncR",0},{"delayTime",500},{"delayFeedback",0.32},{"delayTone",9000},{"delayLowCut",180},{"delayWidth",1.00},{"delayMix",0.28},{"delayMod",0.00},{"delayPingPong",0}}},
+            {"Dotted Eighth",  0, {{"delayOn",1},{"delaySync",8},{"delaySyncR",0},{"delayTime",375},{"delayFeedback",0.40},{"delayTone",8000},{"delayLowCut",250},{"delayWidth",1.00},{"delayMix",0.38},{"delayMod",0.00},{"delayPingPong",0}}},
+            {"Ping-Pong",      0, {{"delayOn",1},{"delaySync",6},{"delaySyncR",0},{"delayTime",500},{"delayFeedback",0.42},{"delayTone",8000},{"delayLowCut",200},{"delayWidth",1.00},{"delayMix",0.35},{"delayMod",0.00},{"delayPingPong",1}}},
+            // --- Tape Echo (warm, wow/flutter, darker, can self-oscillate) ---
+            {"Vintage Slap",   1, {{"delayOn",1},{"delaySync",0},{"delaySyncR",0},{"delayTime",120},{"delayFeedback",0.12},{"delayTone",4500},{"delayLowCut",220},{"delayWidth",1.00},{"delayMix",0.28},{"delayMod",0.25},{"delayPingPong",0}}},
+            {"Warm Quarter",   1, {{"delayOn",1},{"delaySync",6},{"delaySyncR",0},{"delayTime",500},{"delayFeedback",0.38},{"delayTone",4000},{"delayLowCut",200},{"delayWidth",1.00},{"delayMix",0.32},{"delayMod",0.30},{"delayPingPong",0}}},
+            {"Dub Echo",       1, {{"delayOn",1},{"delaySync",6},{"delaySyncR",0},{"delayTime",500},{"delayFeedback",0.55},{"delayTone",1800},{"delayLowCut",250},{"delayWidth",1.00},{"delayMix",0.45},{"delayMod",0.35},{"delayPingPong",1}}},
+            {"Runaway",        1, {{"delayOn",1},{"delaySync",6},{"delaySyncR",0},{"delayTime",500},{"delayFeedback",0.95},{"delayTone",3500},{"delayLowCut",260},{"delayWidth",1.00},{"delayMix",0.40},{"delayMod",0.50},{"delayPingPong",0}}},
+            // --- Space Tape (multi-head echo + spring on the +Rev modes) ---
+            {"Multi-Head",     2, {{"delayOn",1},{"delayHeadMode",3},{"delaySync",8},{"delaySyncR",0},{"delayTime",375},{"delayFeedback",0.35},{"delayTone",5000},{"delayLowCut",200},{"delayWidth",1.00},{"delayMix",0.35},{"delayMod",0.30},{"delayPingPong",0}}},
+            {"Ambient Heads",  2, {{"delayOn",1},{"delayHeadMode",8},{"delaySync",6},{"delaySyncR",0},{"delayTime",500},{"delayFeedback",0.55},{"delayTone",4500},{"delayLowCut",200},{"delayWidth",1.00},{"delayMix",0.42},{"delayMod",0.35},{"delayPingPong",0}}},
+            {"Cosmic Cascade", 2, {{"delayOn",1},{"delayHeadMode",10},{"delaySync",6},{"delaySyncR",0},{"delayTime",500},{"delayFeedback",0.62},{"delayTone",5000},{"delayLowCut",220},{"delayWidth",1.00},{"delayMix",0.45},{"delayMod",0.40},{"delayPingPong",0}}},
+            {"Reverb Only",    2, {{"delayOn",1},{"delayHeadMode",11},{"delaySync",6},{"delaySyncR",0},{"delayTime",500},{"delayFeedback",0.40},{"delayTone",6000},{"delayLowCut",200},{"delayWidth",1.00},{"delayMix",0.50},{"delayMod",0.30},{"delayPingPong",0}}},
         };
         return p;
     }
@@ -4722,9 +4743,12 @@ public:
     {
         const auto &ps = delayPresets();
         if (idx < 0 || idx >= (int)ps.size()) return;
+        setParamReal("delayCharacter", ps[(size_t)idx].character); // select the character
         for (const auto &kv : ps[(size_t)idx].kv)
             setParamReal(kv.first, kv.second);
         refresh();
+        resized();
+        repaint(); // character switch relayouts the panel + re-highlights the card
     }
 
     // Character display names (index = delayCharacter choice value).
