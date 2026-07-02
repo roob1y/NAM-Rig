@@ -117,10 +117,18 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::ParameterID("compLevel", 1), "Comp Level",
         juce::NormalisableRange<float>(-12.0f, 12.0f, 0.1f), 0.0f,
         juce::AudioParameterFloatAttributes().withLabel("dB")));
+    // Ratio: shown on Clean/FET only (CompBlock::ratioExposed); other voicings
+    // use their fixed character ratio. Release (ms): shown on Clean/FET/Opto
+    // (CompBlock::releaseExposed); it scales the voicing's release (150 ms == the
+    // tuned default). Output makeup is automatic, so there is no Boost knob.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("compBoost", 1), "Boost",
-        juce::NormalisableRange<float>(0.0f, 20.0f, 0.1f), 0.0f,
-        juce::AudioParameterFloatAttributes().withLabel("dB")));
+        juce::ParameterID("compRatio", 1), "Comp Ratio",
+        juce::NormalisableRange<float>(1.5f, 20.0f, 0.1f, 0.5f), 4.0f,
+        juce::AudioParameterFloatAttributes().withLabel(":1")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("compRelease", 1), "Comp Release",
+        juce::NormalisableRange<float>(20.0f, 800.0f, 1.0f, 0.4f), 150.0f,
+        juce::AudioParameterFloatAttributes().withLabel("ms")));
 
     // --- Drive rack: 3 series slots, shared/pre-split (rig/DriveBlock.h;
     //     verified by tests/drive_test.cpp). Type "Off" leaves a slot out of
@@ -859,7 +867,8 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.comp.setSustain(apvts.getRawParameterValue("compSustain")->load());
     mChain.comp.setAttackMs(apvts.getRawParameterValue("compAttack")->load());
     mChain.comp.setLevelDb(apvts.getRawParameterValue("compLevel")->load());
-    mChain.comp.setBoostDb(apvts.getRawParameterValue("compBoost")->load());
+    mChain.comp.setRatio(apvts.getRawParameterValue("compRatio")->load());
+    mChain.comp.setReleaseMs(apvts.getRawParameterValue("compRelease")->load());
     mChain.comp.setMode((int)apvts.getRawParameterValue("compMode")->load());
     mChain.comp.setCharacter(apvts.getRawParameterValue("compCharacter")->load());
     mChain.comp.setBypassed(apvts.getRawParameterValue("compOn")->load() < 0.5f);

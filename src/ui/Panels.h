@@ -866,12 +866,14 @@ class CompPanel : public BlockPanel
 {
 public:
     explicit CompPanel(juce::AudioProcessorValueTreeState &apvts)
-        : BlockPanel("COMPRESSOR / BOOST")
+        : BlockPanel("COMPRESSOR")
     {
+        // Ratio (idx 2) and Release (idx 3) are shown per voicing (see
+        // refreshForMode); Sustain must stay idx 0 (drives the curve threshold).
         const std::pair<const char *, const char *> defs[] = {
             {"compSustain", "Sustain"}, {"compAttack", "Attack"},
-            {"compLevel", "Level"},     {"compBoost", "Boost"},
-            {"compCharacter", "Character"}};
+            {"compRatio", "Ratio"},     {"compRelease", "Release"},
+            {"compLevel", "Level"},     {"compCharacter", "Character"}};
         for (const auto &[id, caption] : defs)
         {
             mKnobs.push_back(std::make_unique<LabeledKnob>(apvts, id, caption));
@@ -889,14 +891,17 @@ public:
         };
         mCurve.setSustain((float)mKnobs[0]->slider().getValue());
 
+        // Ratio knob (idx 2) redraws the transfer curve on the voicings that expose it.
+        mKnobs[2]->slider().onValueChange = [this] { updateCurveShape(); };
+
         // Voicing selector (Clean / OTA / Opto / FET) -> compMode param. A dropdown
         // (the box stays visible; the menu opens below it via the global combo options).
         mModeBox.addItemList({"Clean", "OTA", "Opto", "FET"}, 1);
         mModeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
             apvts, "compMode", mModeBox);
-        mModeBox.onChange = [this] { updateCurveShape(); };
+        mModeBox.onChange = [this] { refreshForMode(); };
         addAndMakeVisible(mModeBox);
-        updateCurveShape();
+        refreshForMode();
 
         mDetail.setButtonText("DETAIL");
         mDetail.getProperties().set("pill", true);
@@ -951,11 +956,18 @@ public:
         mOut.setBounds(ioCol.withSizeKeepingCentre(9, 74).translated(0, -1));
 
         // Knob cell matches the Reverb panel (the size "foundation"): 116-tall row.
-        auto row = bottom.withSizeKeepingCentre(
-            juce::jmin(bottom.getWidth(), 104 * (int)mKnobs.size()),
-            juce::jmin(bottom.getHeight(), 116));
-        const int w = row.getWidth() / (int)mKnobs.size();
+        // Only the knobs visible for the current voicing are laid out (Ratio and
+        // Release appear per voicing; see refreshForMode).
+        std::vector<LabeledKnob *> vis;
         for (auto &k : mKnobs)
+            if (k->isVisible())
+                vis.push_back(k.get());
+        const int nvis = juce::jmax(1, (int)vis.size());
+        auto row = bottom.withSizeKeepingCentre(
+            juce::jmin(bottom.getWidth(), 104 * nvis),
+            juce::jmin(bottom.getHeight(), 116));
+        const int w = row.getWidth() / nvis;
+        for (auto *k : vis)
             k->setBounds(row.removeFromLeft(w).reduced(5, 0));
 
         area.removeFromBottom(12);
@@ -979,8 +991,24 @@ private:
     void updateCurveShape()
     {
         const int idx = juce::jmax(0, mModeBox.getSelectedItemIndex());
-        const auto v = nam_rig::CompBlock::voicingFor((nam_rig::CompBlock::Mode)idx);
-        mCurve.setShape(v.ratio, v.kneeDb);
+        const auto mode = (nam_rig::CompBlock::Mode)idx;
+        const auto v = nam_rig::CompBlock::voicingFor(mode);
+        const float ratio = nam_rig::CompBlock::ratioExposed(mode)
+                                ? (float)mKnobs[2]->slider().getValue()
+                                : v.ratio;
+        mCurve.setShape(ratio, v.kneeDb);
+    }
+
+    // Show Ratio (Clean/FET) and Release (Clean/FET/Opto) only on the voicings
+    // whose hardware has them; single source of truth is CompBlock.
+    void refreshForMode()
+    {
+        const int idx = juce::jmax(0, mModeBox.getSelectedItemIndex());
+        const auto mode = (nam_rig::CompBlock::Mode)idx;
+        mKnobs[2]->setVisible(nam_rig::CompBlock::ratioExposed(mode));   // Ratio
+        mKnobs[3]->setVisible(nam_rig::CompBlock::releaseExposed(mode)); // Release
+        updateCurveShape();
+        resized();
     }
 
     std::vector<std::unique_ptr<LabeledKnob>> mKnobs;

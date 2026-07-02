@@ -42,7 +42,7 @@ struct FactoryPresets
         add("Tight Dual Stack",
             mk({{"rigMode", 2}, {"rigPanA", -0.45}, {"rigPanB", 0.45},
                 {"gateOn", 1}, {"gateThresh", -46.0}, {"gateRelease", 110.0},
-                {"compOn", 1}, {"compSustain", 0.55}, {"compBoost", 3.0},
+                {"compOn", 1}, {"compSustain", 0.55}, {"compLevel", 3.0},
                 {"eq500", -3.0}, {"eq1k", -1.5}, {"eq2k", 1.5}, {"eq4k", 2.0},
                 {"rigBeq500", -3.0}, {"rigBeq1k", -1.5}, {"rigBeq2k", 1.5}, {"rigBeq4k", 2.0},
                 {"reverbOn", 0}}));
@@ -54,7 +54,7 @@ struct FactoryPresets
                 {"delayMix", 0.32}, {"delayFeedback", 0.5}, {"delayPingPong", 1}}));
 
         add("Solo Crunch Boost",
-            mk({{"rigMode", 0}, {"compOn", 1}, {"compSustain", 0.4}, {"compBoost", 6.0},
+            mk({{"rigMode", 0}, {"compOn", 1}, {"compSustain", 0.4}, {"compLevel", 6.0},
                 {"eq500", 2.0}, {"eq1k", 3.0}, {"eq2k", 1.0},
                 {"reverbOn", 1}, {"revMix", 0.12}}));
 

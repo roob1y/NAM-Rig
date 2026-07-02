@@ -1,6 +1,15 @@
 // comp_test — offline verification harness for CompBlock (measurement-first).
-// Exits nonzero on any FAIL. First run expected on Windows (sandbox was down
-// when this block was written) — alongside gate_test.
+// Exits nonzero on any FAIL.
+//
+// Model as of July 2026:
+//  - AUTO-MAKEUP: the compressor sets its own output gain so the output peaks at
+//    the input level with Level at 0 dB (no static makeup, no Boost knob). The
+//    makeup follows peaks slowly, so it sets the overall level without fighting
+//    per-note dynamics — dynamic tests therefore probe gain reduction via grDb()
+//    rather than the (makeup-flattened) output level.
+//  - RATIO knob on Clean/FET (ratioExposed); Opto/OTA use their fixed character.
+//  - RELEASE knob on Clean/FET/Opto (releaseExposed); scales the voicing release
+//    (150 ms == the tuned default), OTA keeps its built-in timing.
 #include "rig/CompBlock.h"
 #include <cstdio>
 #include <cmath>
@@ -33,7 +42,7 @@ static std::vector<float> tone(double ampDb, int n)
     return v;
 }
 
-// steady-state RMS dB over the last 100 ms of a buffer
+// steady-state peak dB over the last 100 ms of a buffer (sine RMS -> peak)
 static double tailDb(const std::vector<float> &x)
 {
     const size_t n = 4800;
@@ -42,7 +51,7 @@ static double tailDb(const std::vector<float> &x)
     return 10.0 * std::log10(e / (double)n) + 3.0103; // RMS->peak of sine
 }
 
-// run a buffer through a chosen voicing
+// run a buffer through a chosen voicing (ratio/release at their defaults)
 static std::vector<float> runMode(int mode, float sustain, float attackMs,
                                   float character, const std::vector<float> &in)
 {
@@ -86,74 +95,87 @@ int main()
 {
     const float sustain = 0.5f;
     const float T = CompBlock::thresholdForSustain(sustain);   // -27.5 dB
-    const float M = CompBlock::makeupForThreshold(T);
+    (void)T;
 
-    // ---- T1: static transfer curve matches the analytic single source of truth ----
+    // ---- T1: auto-makeup matches output LOUDNESS (RMS) to the input ----
+    // With Level at 0 dB, a steady tone comes out at its input loudness whether
+    // it is below threshold (unity) or being compressed (makeup restores it), so
+    // engaging the comp is level-neutral.
     {
         bool ok = true;
         double worst = 0;
-        for (double inDb : {-50.0, -40.0, -30.0, -25.0, -20.0, -10.0, -5.0})
+        for (double inDb : {-50.0, -40.0, -30.0, -20.0, -10.0, -5.0})
         {
-            CompBlock c; c.setSustain(sustain); c.setAttackMs(1.0f); c.prepare({SR, BLK});
-            auto x = tone(inDb, 48000);
-            run(c, x);
-            const double outDb = tailDb(x);
-            const double want = inDb + CompBlock::computeGainDb((float)inDb, T) + M;
-            const double err = std::abs(outDb - want);
-            if (err > worst) worst = err;
-            // ~0.27 dB systematic is expected: the detector sees instantaneous
-            // |sine| (log-domain ripple), the analytic curve assumes peak level.
-            if (err > 0.4) ok = false;
+            CompBlock c; c.setSustain(sustain); c.setAttackMs(1.0f);
+            c.setRatio(CompBlock::kRatio); c.prepare({SR, BLK});
+            auto ref = tone(inDb, 96000); auto x = ref; run(c, x); // 2 s: makeup converges
+            double ie = 0, oe = 0;
+            for (size_t i = x.size() - 9600; i < x.size(); ++i)
+            { ie += (double)ref[i] * ref[i]; oe += (double)x[i] * x[i]; }
+            const double errDb = std::abs(10.0 * std::log10(oe / ie));
+            worst = std::max(worst, errDb);
+            if (errDb > 1.0) ok = false;
         }
-        CHECK(ok, "T1 static curve matches analytic (worst err %.2f dB, want < 0.4)", worst);
+        CHECK(ok, "T1 auto-makeup: output loudness (RMS) matches input (worst %.2f dB, want < 1.0)", worst);
     }
 
-    // ---- T2: slope above knee == 1/ratio ----
+    // ---- T2: soft-knee transfer slope above knee == 1/ratio (pure computer) ----
     {
-        auto level = [&](double inDb)
+        bool ok = true; double worst = 0;
+        const float Tt = -20.0f;
+        for (float ratio : {3.0f, CompBlock::kRatio, 12.0f})
         {
-            CompBlock c; c.setSustain(sustain); c.setAttackMs(1.0f); c.prepare({SR, BLK});
-            auto x = tone(inDb, 48000);
-            run(c, x);
-            return tailDb(x);
-        };
-        const double slope = (level(-5.0) - level(-15.0)) / 10.0;
-        CHECK(std::abs(slope - 1.0 / CompBlock::kRatio) < 0.05,
-              "T2 slope above knee %.3f (want %.3f +/- 0.05)", slope, 1.0 / CompBlock::kRatio);
+            const double o1 = -2.0 + CompBlock::computeGainDb(-2.0f, Tt, ratio, CompBlock::kKneeDb);
+            const double o2 = -10.0 + CompBlock::computeGainDb(-10.0f, Tt, ratio, CompBlock::kKneeDb);
+            const double slope = (o1 - o2) / 8.0;
+            worst = std::max(worst, std::abs(slope - 1.0 / ratio));
+            if (std::abs(slope - 1.0 / ratio) > 0.02) ok = false;
+        }
+        CHECK(ok, "T2 transfer slope above knee == 1/ratio (worst %.3f, want < 0.02)", worst);
     }
 
-    // ---- T3: attack and release timing ----
+    // ---- T3: attack blooms before clamping; release recovers the GR ----
     {
-        CompBlock c; c.setSustain(sustain); c.setAttackMs(10.0f); c.prepare({SR, BLK});
-        // -40 dB (below T) for 1 s, then -5 dB for 1 s, then -40 dB again
         std::vector<float> x(144000);
         for (size_t i = 0; i < x.size(); ++i)
         {
-            const double amp = (i < 48000 || i >= 96000) ? 0.01 : 0.5623; // -40 / -5 dB
+            const double amp = (i < 48000 || i >= 96000) ? 0.01 : 0.5623; // -40 / -5 / -40 dB
             x[i] = (float)(amp * std::sin(2.0 * M_PI * 1000.0 * (double)i / SR));
         }
-        run(c, x);
+        // attack: makeup is slow, so the pick transient still overshoots the clamp.
+        CompBlock c; c.setSustain(sustain); c.setAttackMs(10.0f);
+        c.setRatio(CompBlock::kRatio); c.prepare({SR, BLK});
+        auto y = x; run(c, y);
         auto envDbAt = [&](size_t center)
         {
-            double e = 0; for (size_t i = center - 480; i < center + 480; ++i) e += (double)x[i] * x[i];
+            double e = 0; for (size_t i = center - 480; i < center + 480; ++i) e += (double)y[i] * y[i];
             return 10.0 * std::log10(e / 960.0);
         };
-        // attack: GR settled by 5x attack (50 ms) into the loud section
-        const double early = envDbAt(48000 + 240);            // ~5 ms in: barely compressed yet
-        const double settled = envDbAt(48000 + 4800);         // 100 ms in: fully compressed
+        const double early = envDbAt(48000 + 240);   // ~5 ms in: barely compressed
+        const double settled = envDbAt(48000 + 4800); // 100 ms in: clamped
         CHECK(early - settled > 2.0,
-              "T3 pick transient passes before compression clamps (%.1f dB bloom)", early - settled);
-        // release: ~5x release (750 ms) after the loud section, GR ~ recovered
-        const double tail1 = envDbAt(96000 + 4800);           // 100 ms after drop: still compressed-ish
-        const double tail2 = envDbAt(96000 + 43200);          // 900 ms after: recovered
-        CHECK(tail2 - tail1 > 1.0, "T3 release recovers gain after loud passage (%.1f dB)", tail2 - tail1);
+              "T3a transient blooms before compression clamps (%.1f dB)", early - settled);
+
+        // release: GR (unconfounded by makeup) recovers after the loud passage.
+        auto grAt = [&](size_t target)
+        {
+            CompBlock cc; cc.setSustain(sustain); cc.setAttackMs(10.0f);
+            cc.setRatio(CompBlock::kRatio); cc.prepare({SR, BLK});
+            auto xx = x; size_t p = 0; float g = 0;
+            while (p < target) { int n = (int)std::min<size_t>(64, target - p); cc.process(xx.data() + p, n); p += (size_t)n; g = cc.grDb(); }
+            return (double)g;
+        };
+        const double gr100 = grAt(96000 + 4800);  // 100 ms after the drop
+        const double gr900 = grAt(96000 + 43200); // 900 ms after the drop
+        CHECK(gr100 - gr900 > 1.0 && gr900 < 1.0,
+              "T3b release recovers GR: %.1f dB (100ms) -> %.1f dB (900ms)", gr100, gr900);
     }
 
     // ---- T4: sustain does what it says on a decaying note ----
     {
         auto t30 = [&](float s)
         {
-            CompBlock c; c.setSustain(s); c.prepare({SR, BLK});
+            CompBlock c; c.setSustain(s); c.setRatio(CompBlock::kRatio); c.prepare({SR, BLK});
             // exp-decaying 220 Hz tone: -10 dB start, -40 dB/s decay
             std::vector<float> x(144000);
             for (size_t i = 0; i < x.size(); ++i)
@@ -162,10 +184,8 @@ int main()
                 x[i] = (float)(std::pow(10.0, (-10.0 - 40.0 * t) / 20.0) * std::sin(2.0 * M_PI * 220.0 * t));
             }
             run(c, x);
-            // time for output env to fall 30 dB below its level at t = 100 ms.
-            // (Reference must be AFTER the attack settles: measuring from t=0
-            // catches the uncompressed pick bloom, which inflates the start
-            // level for high sustain and falsely shortens T30.)
+            // time for output env to fall 30 dB below its level at t = 100 ms
+            // (reference AFTER the attack settles, to skip the uncompressed bloom).
             const size_t refStart = 4800;
             double e0 = 0; for (size_t i = refStart; i < refStart + 960; ++i) e0 += (double)x[i] * x[i];
             const double refDb = 10.0 * std::log10(e0 / 960.0);
@@ -182,23 +202,21 @@ int main()
               "T4 sustain lengthens decay: T30 %.2fs (s=0.1) -> %.2fs (s=0.9), want >1.3x", tLow, tHigh);
     }
 
-    // ---- T5: boost is exact clean gain below threshold ----
+    // ---- T5: sub-threshold unity at Level 0; Level knob trims exactly ----
     {
-        CompBlock c; c.setSustain(0.0f); c.setLevelDb(0.0f); c.setBoostDb(12.0f); c.prepare({SR, BLK});
-        auto x = tone(-40.0, 48000); // well below T(s=0) = -10 dB
-        auto ref = x;
-        run(c, x);
-        // expected constant gain: makeup(T=-10) + 12 dB
-        const float gDb = CompBlock::makeupForThreshold(CompBlock::thresholdForSustain(0.0f)) + 12.0f;
-        const float g = std::pow(10.0f, gDb / 20.0f);
-        double worst = 0;
-        for (size_t i = 4800; i < x.size(); ++i)
-        {
-            const double want = (double)ref[i] * g;
-            const double err = std::abs((double)x[i] - want);
-            if (err > worst) worst = err;
-        }
-        CHECK(worst < 1.0e-6, "T5 sub-threshold boost is constant clean gain (worst err %.2e)", worst);
+        auto ref = tone(-40.0, 96000);
+        // sustain 0 -> threshold -10 dB, so -40 dB is well below: no GR, makeup ~unity
+        CompBlock c0; c0.setSustain(0.0f); c0.setLevelDb(0.0f);
+        c0.setRatio(CompBlock::kRatio); c0.prepare({SR, BLK});
+        auto x0 = ref; run(c0, x0);
+        const double u = tailDb(x0) - tailDb(ref);
+        CHECK(std::abs(u) < 0.3, "T5a sub-threshold unity at Level 0 (%.2f dB, want ~0)", u);
+
+        CompBlock c6; c6.setSustain(0.0f); c6.setLevelDb(6.0f);
+        c6.setRatio(CompBlock::kRatio); c6.prepare({SR, BLK});
+        auto x6 = ref; run(c6, x6);
+        const double d = tailDb(x6) - tailDb(ref);
+        CHECK(std::abs(d - 6.0) < 0.3, "T5b Level +6 dB trims output +6 dB (got %.2f)", d);
     }
 
     // ---- T6: no zipper — per-sample output delta bounded on steady tone ----
@@ -217,8 +235,6 @@ int main()
     }
 
     // ======================= VOICINGS (compMode) =======================
-    // Bounds below are first-run estimates (sandbox down when written); tune
-    // on the clang-cl run if a margin is too tight, like the earlier suites.
 
     // ---- T7: per-mode transfer slope == 1/ratio; ratios FET > Clean > Opto ----
     {
@@ -257,7 +273,7 @@ int main()
               "T8 FET clamps transient faster (bloom FET %.1f < Clean %.1f dB)", fetBloom, cleanBloom);
     }
 
-    // ---- T9: Opto's program-dependent release recovers slower than Clean ----
+    // ---- T9: Opto's program-dependent release recovers slower than Clean (via GR) ----
     {
         std::vector<float> x(144000);
         for (size_t i = 0; i < x.size(); ++i)
@@ -265,17 +281,18 @@ int main()
             const double amp = (i < 48000) ? 0.5623 : 0.01; // -5 dB for 1 s, then -40 dB
             x[i] = (float)(amp * std::sin(2.0 * M_PI * 1000.0 * (double)i / SR));
         }
-        auto clean = runMode(0, 0.5f, 10.0f, 0.0f, x);
-        auto opto = runMode(2, 0.5f, 10.0f, 0.0f, x);
-        auto recoveredBy150 = [&](const std::vector<float> &y) {
-            const double atDrop = envWin(y, 48000 + 480, 240); // ~10 ms after drop
-            const double at150 = envWin(y, 48000 + 7200, 480); // 150 ms after drop
-            const double finalL = envWin(y, 138000, 2400);     // recovered
-            return (at150 - atDrop) / (finalL - atDrop + 1.0e-9);
+        auto grAt = [&](int mode, size_t target)
+        {
+            CompBlock c; c.setSustain(0.5f); c.setAttackMs(10.0f); c.setMode(mode); c.prepare({SR, BLK});
+            auto xx = x; size_t p = 0; float g = 0;
+            while (p < target) { int n = (int)std::min<size_t>(64, target - p); c.process(xx.data() + p, n); p += (size_t)n; g = c.grDb(); }
+            return (double)g;
         };
-        const double cleanR = recoveredBy150(clean), optoR = recoveredBy150(opto);
-        CHECK(optoR < cleanR - 0.15,
-              "T9 Opto releases slower: recovered-by-150ms Opto %.2f < Clean %.2f", optoR, cleanR);
+        // fraction of GR still held 150 ms after the drop (normalised by GR pre-drop)
+        const double cRem = grAt(0, 48000 + 7200) / (grAt(0, 47000) + 1.0e-9);
+        const double oRem = grAt(2, 48000 + 7200) / (grAt(2, 47000) + 1.0e-9);
+        CHECK(oRem > cRem + 0.1,
+              "T9 Opto releases slower: GR held @150ms Opto %.2f > Clean %.2f", oRem, cRem);
     }
 
     // ---- T10: FET adds harmonic grit a clean VCA does not ----
@@ -323,6 +340,29 @@ int main()
         const double rOpto = h2over3(opto), rOta = h2over3(ota);
         CHECK(rOpto > rOta,
               "T12 Opto more 2nd-harmonic (even) than OTA: h2/h3 Opto %.2f > OTA %.2f", rOpto, rOta);
+    }
+
+    // ---- T13: Release knob scales GR recovery on an exposed voicing (Clean) ----
+    {
+        std::vector<float> x(144000);
+        for (size_t i = 0; i < x.size(); ++i)
+        {
+            const double amp = (i < 48000) ? 0.5623 : 0.01; // -5 dB for 1 s, then -40 dB
+            x[i] = (float)(amp * std::sin(2.0 * M_PI * 1000.0 * (double)i / SR));
+        }
+        auto grAt = [&](float relMs, size_t target)
+        {
+            CompBlock c; c.setSustain(0.5f); c.setAttackMs(10.0f);
+            c.setMode(0); c.setRatio(CompBlock::kRatio); c.setReleaseMs(relMs); c.prepare({SR, BLK});
+            auto xx = x; size_t p = 0; float g = 0;
+            while (p < target) { int n = (int)std::min<size_t>(64, target - p); c.process(xx.data() + p, n); p += (size_t)n; g = c.grDb(); }
+            return (double)g;
+        };
+        // 200 ms after the drop: a long release still holds more GR than a short one
+        const double gFast = grAt(40.0f, 48000 + 9600);
+        const double gSlow = grAt(600.0f, 48000 + 9600);
+        CHECK(gSlow > gFast + 1.0,
+              "T13 Release knob lengthens recovery: GR@200ms 40ms %.1f -> 600ms %.1f", gFast, gSlow);
     }
 
     std::printf("\n%s (%d failure%s)\n", gFails ? "RESULT: FAIL" : "RESULT: ALL PASS", gFails, gFails == 1 ? "" : "s");

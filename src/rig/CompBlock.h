@@ -1,8 +1,10 @@
 #pragma once
-// CompBlock — pedal-style compressor + clean boost, mono, DAW rate, pre-amp.
+// CompBlock — pedal-style compressor, mono, DAW rate, pre-amp.
 //
 // Scoped (June 2026) as the "front of amp" tool guitarists actually use:
-// one Sustain knob (not threshold/ratio) + a clean Boost to push the amp model.
+// a Sustain knob + AUTO-MAKEUP so the output matches the input loudness (RMS)
+// with the Level knob at 0 dB. Ratio (Clean/FET) and Release (Clean/FET/Opto) knobs are
+// exposed on the voicings whose hardware has them; see ratioExposed/releaseExposed.
 //
 // FOUR VOICINGS (compMode), each reinterpreting the same four knobs:
 //   Clean : transparent VCA leveling. The original voicing — DEFAULT, and the
@@ -20,7 +22,8 @@
 // Topology (feedforward, log-domain — Giannoulis/Massberg/Reiss style):
 //   detector(peak|RMS, optional sidechain HPF) -> dB -> soft-knee gain computer
 //   -> attack / program-dependent release smoother on the GR signal
-//   -> gain = makeup + level - GR -> voicing colour -> boost.
+//   -> apply gain reduction -> AUTO-MAKEUP (matches output loudness (RMS) to the
+//      input, so engaging the comp is level-neutral) -> Level trim -> colour.
 //
 // Latency: zero (chain-bypass via compOn is safe). Verified by tests/comp_test.cpp.
 
@@ -38,11 +41,23 @@ public:
 
     enum class Mode { Clean = 0, OTA = 1, Opto = 2, FET = 3 };
 
+    // Which voicings expose the user Ratio / Release knobs (single source of
+    // truth, shared with the editor). Modelled on the real hardware: the 1176
+    // (FET) and a clean VCA have both; the LA-2A-style Opto keeps its program-
+    // dependent release adjustable but stays fixed-ratio; the Dyna/Ross OTA is a
+    // fixed one-knob squish (neither).
+    static bool ratioExposed(Mode m) { return m == Mode::Clean || m == Mode::FET; }
+    static bool releaseExposed(Mode m)
+    {
+        return m == Mode::Clean || m == Mode::FET || m == Mode::Opto;
+    }
+
     // ---- parameters (thread-safe) ----
     void setSustain(float v01) { mSustain.store(v01); } // 0..1
     void setAttackMs(float v) { mAttackMs.store(v); }   // 1..50 ms (knob)
-    void setLevelDb(float v) { mLevelDb.store(v); }     // -12..+12 dB trim
-    void setBoostDb(float v) { mBoostDb.store(v); }     // 0..+20 dB clean boost
+    void setReleaseMs(float v) { mReleaseMs.store(v); } // scales exposed voicings (releaseExposed)
+    void setRatio(float v) { mRatio.store(v); }         // ratio knob (ratioExposed)
+    void setLevelDb(float v) { mLevelDb.store(v); }     // -12..+12 dB trim on top of auto-makeup
     void setMode(int m) { mMode.store(m); }                // 0..3 (see Mode)
     void setCharacter(float v01) { mCharacter.store(v01); } // 0..1 analog colour amount
 
@@ -137,6 +152,9 @@ public:
         mScHp = 0.0f;
         mRms2 = 0.0f;
         mIronLpf = 0.0f;
+        mInMs = 0.0f;
+        mPreMs = 0.0f;
+        mAutoMk = 1.0f;
     }
 
     void process(float *mono, int numSamples) override
@@ -145,19 +163,43 @@ public:
             return;
 
         const double sr = mSampleRate;
-        const Voicing v = voicingFor((Mode)mMode.load());
+        const Mode mode = (Mode)mMode.load();
+        const Voicing v = voicingFor(mode);
 
         const float t = thresholdForSustain(mSustain.load());
-        const float makeup = makeupForThreshold(t, v.ratio, v.makeupScale);
-        const float outDb = makeup + mLevelDb.load() + mBoostDb.load();
-        const float outLin = std::pow(10.0f, outDb * 0.05f);
+
+        // Ratio: user knob on the voicings that expose it, else the fixed voicing
+        // character. Release: a ms knob that scales the voicing's release times
+        // (relScale == 1 reproduces the tuned default at kReleaseMs) on the
+        // exposed voicings; untouched voicings keep their built-in timing.
+        const float ratio = ratioExposed(mode) ? std::max(1.0f, mRatio.load()) : v.ratio;
+        const float relScale = releaseExposed(mode)
+                                   ? std::max(0.05f, mReleaseMs.load() / kReleaseMs)
+                                   : 1.0f;
+        const float relFastMs = v.relFastMs * relScale;
+        const float relSlowMs = v.relSlowMs * relScale;
+
+        // No static makeup and no boost: makeup is measured automatically so the
+        // output peaks at the input level (see the auto-makeup followers below).
+        // Level is a manual trim layered on top of that.
+        const float levelLin = std::pow(10.0f, mLevelDb.load() * 0.05f);
 
         const float attMs = std::max(v.attackFloorMs, mAttackMs.load() * v.attackScale);
         const float attCoef = coefForMs(attMs, sr);
 
         const bool simpleRelease = (v.relFastMs == v.relSlowMs && v.progDepth == 0.0f);
-        const float relCoefConst = coefForMs(v.relSlowMs, sr);
+        const float relCoefConst = coefForMs(relSlowMs, sr);
         const float relMemCoef = coefForMs(150.0f, sr); // duration-memory follower
+
+        // Auto-makeup: match output LOUDNESS (RMS) to input loudness. Slow
+        // mean-square followers (~300 ms) on the input and the pre-makeup
+        // (gain-reduced) signal; makeup = sqrt(inMS/preMS), smoothed ~300 ms, so
+        // engaging the comp is loudness-neutral without fighting per-note
+        // dynamics. (RMS, not peak: a compressor raises the average, so peak-
+        // matching would make squashed settings jump in level / hit the amp
+        // harder — RMS keeps the drive into the amp consistent.)
+        const float mkAvgCoef = coefForMs(300.0f, sr);
+        const float mkCoef = coefForMs(300.0f, sr);
 
         const bool scOn = v.scHpfHz > 0.0f;
         const float scCoef = scOn ? coefForHz(v.scHpfHz, sr) : 0.0f;
@@ -168,6 +210,7 @@ public:
         const float ironCoef = coefForHz(400.0, sr);    // transformer low-band corner
 
         float gr = mGrDb, relMem = mRelMem, scHp = mScHp, rms2 = mRms2, ironLpf = mIronLpf;
+        float inMs = mInMs, preMs = mPreMs, autoMk = mAutoMk; // auto-makeup state (RMS)
         float inPk = 0.0f, outPk = 0.0f; // block peaks for the IN/OUT meter modes
 
         for (int i = 0; i < numSamples; ++i)
@@ -194,7 +237,7 @@ public:
                 level = std::abs(xdet);
             const float aDb = 20.0f * std::log10(std::max(level, 1.0e-9f));
 
-            const float grTarget = -computeGainDb(aDb, t, v.ratio, v.kneeDb); // >= 0
+            const float grTarget = -computeGainDb(aDb, t, ratio, v.kneeDb); // >= 0
 
             // ---- attack / program-dependent release smoother ----
             if (grTarget > gr)
@@ -208,7 +251,7 @@ public:
                 {
                     // high GR -> fast recovery; low GR -> slow tail (optical feel)
                     const float b = std::min(1.0f, std::max(0.0f, gr / kRelRefDb));
-                    float relMs = v.relSlowMs + (v.relFastMs - v.relSlowMs) * b;
+                    float relMs = relSlowMs + (relFastMs - relSlowMs) * b;
                     // the longer it's been compressing, the longer the release
                     relMs *= (1.0f + v.progDepth * (relMem / kProgRefDb));
                     relCoef = coefForMs(relMs, sr);
@@ -218,10 +261,21 @@ public:
             if (!simpleRelease)
                 relMem += relMemCoef * (gr - relMem);
 
-            // ---- apply gain ----
-            const float g = (gr < 1.0e-4f) ? outLin
-                                           : outLin * std::pow(10.0f, -gr * 0.05f);
-            float y = x * g;
+            // ---- apply gain reduction, then auto-makeup + Level ----
+            const float grLin = (gr < 1.0e-4f) ? 1.0f : std::pow(10.0f, -gr * 0.05f);
+            const float pre = x * grLin;          // gain-reduced, pre-makeup
+
+            // mean-square followers -> makeup = sqrt(inMS/preMS) (loudness match)
+            inMs += mkAvgCoef * (x * x - inMs);
+            preMs += mkAvgCoef * (pre * pre - preMs);
+            if (preMs > 1.0e-12f)
+            {
+                float target = std::sqrt(inMs / preMs); // makeup that restores loudness
+                target = std::min(100.0f, std::max(0.25f, target)); // clamp -12..+40 dB
+                autoMk += mkCoef * (target - autoMk);
+            }
+
+            float y = pre * autoMk * levelLin;
 
             // ---- analog colour (scaled by Character; 0 = clean) ----
             if (ch > 0.0f && (v.drive > 0.0f || v.iron > 0.0f))
@@ -259,6 +313,9 @@ public:
         mScHp = flush(scHp);
         mRms2 = flush(rms2);
         mIronLpf = flush(ironLpf);
+        mInMs = flush(inMs);
+        mPreMs = flush(preMs);
+        mAutoMk = autoMk;
         mGrDbPub.store(mGrDb); // published for the editor's GR meter
         // Block peaks in dBFS for the IN/OUT meter modes (UI thread reads these).
         mInPeakDbPub.store(inPk > 1.0e-9f ? 20.0f * std::log10(inPk) : -120.0f);
@@ -288,8 +345,9 @@ private:
 
     std::atomic<float> mSustain{0.5f};
     std::atomic<float> mAttackMs{15.0f};
+    std::atomic<float> mReleaseMs{150.0f}; // release knob (ms); scales exposed voicings
+    std::atomic<float> mRatio{4.0f};       // ratio knob (Clean/FET)
     std::atomic<float> mLevelDb{0.0f};
-    std::atomic<float> mBoostDb{0.0f};
     std::atomic<int> mMode{0};          // Clean
     std::atomic<float> mCharacter{0.0f}; // analog colour amount (param-driven)
 
@@ -298,6 +356,9 @@ private:
     float mScHp = 0.0f;    // sidechain HPF state
     float mRms2 = 0.0f;    // RMS detector state
     float mIronLpf = 0.0f; // transformer low-band state
+    float mInMs = 0.0f;    // auto-makeup: input mean-square follower
+    float mPreMs = 0.0f;   // auto-makeup: gain-reduced mean-square follower
+    float mAutoMk = 1.0f;  // auto-makeup gain (linear)
     double mSampleRate = 48000.0;
     bool mPrepared = false;
 };
