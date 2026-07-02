@@ -45,6 +45,7 @@ public:
 
     // --- model / IR loading (message thread). rig 0 = Rig A, 1 = Rig B. ---
     void loadModel(const juce::File &namFile, int rig = 0);
+    void unloadModel(int rig = 0); // remove the loaded model -> amp passthrough
     void loadIr(const juce::File &irFile, int rig = 0);
 
     // Source content cached at load time (embedded into .namrig presets).

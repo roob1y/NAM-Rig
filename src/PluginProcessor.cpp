@@ -29,6 +29,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::NormalisableRange<float>(-24.0f, 24.0f, 0.1f), 0.0f,
         juce::AudioParameterFloatAttributes().withLabel("dB")));
 
+    // Per-amp input drive: an independent trim into each capture, applied on top
+    // of the model's dBu calibration just before the amp (0 dB = calibrated
+    // level, so the default is bit-exact). Lets each capture be pushed harder or
+    // backed off on its own. See RigChain in-trim wiring in updateAmpParams().
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("rigInputA", 1), "Amp A Input",
+        juce::NormalisableRange<float>(-24.0f, 24.0f, 0.1f), 0.0f,
+        juce::AudioParameterFloatAttributes().withLabel("dB")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("rigInputB", 1), "Amp B Input",
+        juce::NormalisableRange<float>(-24.0f, 24.0f, 0.1f), 0.0f,
+        juce::AudioParameterFloatAttributes().withLabel("dB")));
+
     // Rig A amp AA oversampling (NAM-AA semantics). Rig B has its own
     // oversampleB / offlineAAB; the chain delay-compensates differing factors.
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
@@ -940,8 +953,12 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         apvts.getRawParameterValue("calEnable")->load() >= 0.5f,
         apvts.getRawParameterValue("calDbu")->load());
     mChain.setInputCal(juce::Decibels::decibelsToGain(globalCalDb));
-    mChain.setInTrimA(juce::Decibels::decibelsToGain(calibrationGainDb(0) - globalCalDb));
-    mChain.setInTrimB(juce::Decibels::decibelsToGain(calibrationGainDb(1) - globalCalDb));
+    // Per-amp Input drive rides on top of the residual calibration (0 dB default
+    // => bit-exact, keeps SoloA the regression baseline).
+    const float rigInDbA = apvts.getRawParameterValue("rigInputA")->load();
+    const float rigInDbB = apvts.getRawParameterValue("rigInputB")->load();
+    mChain.setInTrimA(juce::Decibels::decibelsToGain(calibrationGainDb(0) - globalCalDb + rigInDbA));
+    mChain.setInTrimB(juce::Decibels::decibelsToGain(calibrationGainDb(1) - globalCalDb + rigInDbB));
     mChain.setOutTrimA(juce::Decibels::decibelsToGain(normalizationGainDb(0)));
     mChain.setOutTrimB(juce::Decibels::decibelsToGain(normalizationGainDb(1)));
     const int rigMode = (int)apvts.getRawParameterValue("rigMode")->load();
@@ -1155,6 +1172,18 @@ void NamRigProcessor::loadModel(const juce::File &namFile, int rig)
     mModelLoaded[rig].store(true);
 
     updateLatency(); // available factors may have changed
+}
+
+void NamRigProcessor::unloadModel(int rig)
+{
+    rig = juce::jlimit(0, 1, rig);
+    ampFor(rig).engine().unloadModel();
+    mModelName[rig].clear();
+    mModelText[rig].clear();
+    mModelBaseName[rig].clear();
+    mModelPath[rig].clear();
+    mModelLoaded[rig].store(false);
+    updateLatency(); // amp is now passthrough -> PDC may drop
 }
 
 void NamRigProcessor::loadIr(const juce::File &irFile, int rig)

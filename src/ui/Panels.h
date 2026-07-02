@@ -2035,6 +2035,11 @@ public:
 
         mNorm = std::make_unique<ToggleSwitch>(mProc.apvts, "normalize");
         addAndMakeVisible(*mNorm);
+
+        // Independent per-capture input drive (0 dB = the model's calibrated level).
+        mInput = std::make_unique<LabeledKnob>(mProc.apvts,
+                                               rig == 0 ? "rigInputA" : "rigInputB", "Input");
+        addAndMakeVisible(*mInput);
     }
 
     // Called from the editor timer.
@@ -2089,6 +2094,12 @@ public:
 
     void mouseUp(const juce::MouseEvent &e) override
     {
+        // Remove the loaded model (only when one is loaded and the ✕ is hit).
+        if (mLoaded && mRemoveRect.contains(e.getPosition()))
+        {
+            mProc.unloadModel(mRig);
+            return;
+        }
         if (!mLoaderRect.contains(e.getPosition()))
             return;
         mChooser = std::make_unique<juce::FileChooser>("Select a NAM model", juce::File{}, "*.nam");
@@ -2127,6 +2138,20 @@ public:
         g.setFont(fonts::archivo(13.0f, fonts::SemiBold));
         g.drawText(juce::String::fromUTF8("Load NAM model\xE2\x80\xA6"), lp.withTrimmedLeft(32).toNearestInt(),
                    juce::Justification::centredLeft);
+
+        // Remove (✕) button — shown only when a model is loaded.
+        if (mLoaded)
+        {
+            auto rp = mRemoveRect.toFloat();
+            g.setColour(juce::Colour(0xff23272e));
+            g.fillRoundedRectangle(rp, 9.0f);
+            g.setColour(juce::Colour(0xff3a414c));
+            g.drawRoundedRectangle(rp, 9.0f, 1.0f);
+            auto x = rp.reduced(rp.getWidth() * 0.34f);
+            g.setColour(colors::textDim);
+            g.drawLine(x.getX(), x.getY(), x.getRight(), x.getBottom(), 1.6f);
+            g.drawLine(x.getX(), x.getBottom(), x.getRight(), x.getY(), 1.6f);
+        }
 
         // Left column: tag pills.
         auto tagPill = [&](juce::Rectangle<int> &row, const juce::String &t)
@@ -2180,12 +2205,22 @@ public:
         // Left column.
         mCaptionL = left.removeFromTop(14);
         left.removeFromTop(12);
-        mLoaderRect = left.removeFromTop(44).removeFromLeft(208);
-        left.removeFromTop(18);
-        mModelName.setBounds(left.removeFromTop(30));
-        left.removeFromTop(6);
-        mInfo.setBounds(left.removeFromTop(40));
+        {
+            auto loaderRow = left.removeFromTop(44);
+            mLoaderRect = loaderRow.removeFromLeft(208);
+            loaderRow.removeFromLeft(10);
+            // Remove (✕) button sits just right of the loader pill; only hit-
+            // tested / drawn when a model is loaded.
+            mRemoveRect = loaderRow.removeFromLeft(40).withSizeKeepingCentre(40, 40);
+        }
+        left.removeFromTop(16);
+        mModelName.setBounds(left.removeFromTop(28));
+        left.removeFromTop(4);
+        mInfo.setBounds(left.removeFromTop(38));
         mTagsRect = left.removeFromBottom(26);
+        left.removeFromTop(8);
+        // Input drive knob, bottom-left above the tag pills.
+        mInput->setBounds(left.removeFromTop(64).removeFromLeft(84));
 
         // Right column.
         mCaptionR = right.removeFromTop(14);
@@ -2211,8 +2246,9 @@ private:
     juce::ComboBox mLiveAa, mOfflineAa;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mLiveAtt, mOfflineAtt;
     std::unique_ptr<ToggleSwitch> mNorm;
+    std::unique_ptr<LabeledKnob> mInput;
     std::unique_ptr<juce::FileChooser> mChooser;
-    juce::Rectangle<int> mCaptionL, mLoaderRect, mTagsRect, mCaptionR, mLiveLabel, mOffLabel, mNormLabel;
+    juce::Rectangle<int> mCaptionL, mLoaderRect, mRemoveRect, mTagsRect, mCaptionR, mLiveLabel, mOffLabel, mNormLabel;
     int mDivX = 0;
     bool mLoaded = false, mNormalized = false, mAaCapped = false;
 
