@@ -1964,6 +1964,153 @@ private:
 };
 
 //==============================================================================
+// TunerOverlay — the header TUNER button opens this over the block-panel area. A
+// chromatic tuner: big note name, a ±50-cent needle bar (green in tune), the
+// measured Hz and the target note. setPitch() is fed from the processor's pitch
+// detector by the editor timer; it smooths the reading and holds the last note
+// briefly when the string decays so the display doesn't flicker to blank. A "Mute
+// while tuning" toggle (on by default) mirrors the processor's pedal-style mute.
+class TunerOverlay : public BlockPanel
+{
+public:
+    std::function<void()> onClose;
+    std::function<void(bool)> onMuteChanged;
+
+    TunerOverlay() : BlockPanel("TUNER")
+    {
+        mMute.setButtonText("Mute while tuning");
+        mMute.getProperties().set("pill", true);
+        mMute.setClickingTogglesState(true);
+        mMute.setToggleState(true, juce::dontSendNotification);
+        mMute.onClick = [this] { if (onMuteChanged) onMuteChanged(mMute.getToggleState()); };
+        addAndMakeVisible(mMute);
+
+        mClose.setButtonText("Close");
+        mClose.onClick = [this] { if (onClose) onClose(); };
+        addAndMakeVisible(mClose);
+    }
+
+    // Reflect the processor's mute state into the toggle (no callback).
+    void setMute(bool m) { mMute.setToggleState(m, juce::dontSendNotification); }
+
+    // Feed a fresh pitch estimate (Hz; 0 = none) + clarity (0..1). Only trust
+    // confident readings; hold the last note for ~0.7 s after the note stops.
+    void setPitch(float freqHz, float clarity)
+    {
+        if (freqHz > 0.0f && clarity > 0.90f)
+        {
+            mFreq = (mHasPitch && mFreq > 0.0f) ? 0.75f * mFreq + 0.25f * freqHz : freqHz;
+            mHasPitch = true;
+            mSilent = 0;
+        }
+        else if (mHasPitch && ++mSilent > 20) // ~0.7 s at 30 Hz
+        {
+            mHasPitch = false;
+        }
+        repaint();
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        BlockPanel::paint(g);
+        auto area = bodyArea().reduced(28, 10);
+
+        if (!mHasPitch || mFreq <= 0.0f)
+        {
+            g.setColour(colors::textDim);
+            g.setFont(fonts::archivo(15.0f, fonts::SemiBold, 0.04f));
+            g.drawText("Play a single note to tune", area, juce::Justification::centred);
+            return;
+        }
+
+        // note maths
+        const double midi = 69.0 + 12.0 * std::log2((double)mFreq / 440.0);
+        const int note = (int)std::lround(midi);
+        const double cents = (midi - (double)note) * 100.0;
+        const int pc = ((note % 12) + 12) % 12;
+        const int octave = note / 12 - 1;
+        static const char *kNames[12] =
+            {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+        const bool inTune = std::abs(cents) <= 3.0;
+        const juce::Colour good = colors::accent;
+
+        // --- big note name (centre, upper block) ---
+        auto noteRow = area.removeFromTop(juce::jmin(120, area.getHeight() / 2));
+        g.setColour(inTune ? good : colors::textBright);
+        g.setFont(fonts::archivo(76.0f, fonts::ExtraBold, 0.0f));
+        juce::String nm(kNames[pc]);
+        g.drawText(nm, noteRow, juce::Justification::centred);
+        // octave, small, to the lower-right of the letter
+        g.setColour(colors::textDim);
+        g.setFont(fonts::mono(16.0f, fonts::Medium));
+        auto octBox = noteRow.withTrimmedLeft(noteRow.getWidth() / 2 + 44).removeFromBottom(46);
+        g.drawText(juce::String(octave), octBox, juce::Justification::centredLeft);
+
+        // --- cents needle bar ---
+        area.removeFromTop(6);
+        auto bar = area.removeFromTop(46);
+        const float bx = (float)bar.getX(), bw = (float)bar.getWidth();
+        const float cyc = bar.getCentreY();
+        // track
+        g.setColour(colors::tile);
+        g.fillRoundedRectangle(bx, cyc - 3.0f, bw, 6.0f, 3.0f);
+        // tick marks at -50 -25 0 +25 +50
+        g.setColour(colors::outline);
+        for (int k = -2; k <= 2; ++k)
+        {
+            const float tx = bx + bw * (0.5f + (float)k * 0.25f);
+            const float th = (k == 0) ? 16.0f : 10.0f;
+            g.fillRect(tx - 0.75f, cyc - th * 0.5f, 1.5f, th);
+        }
+        // centre "in tune" zone highlight
+        g.setColour(good.withAlpha(inTune ? 0.9f : 0.25f));
+        g.fillRoundedRectangle(bx + bw * 0.5f - 3.0f, cyc - 9.0f, 6.0f, 18.0f, 2.0f);
+        // moving pointer (clamped to +/-50 cents)
+        const float cc = (float)juce::jlimit(-50.0, 50.0, cents);
+        const float px = bx + bw * (0.5f + cc / 100.0f);
+        g.setColour(inTune ? good : (cents < 0 ? colors::laneColour(1) : colors::titleAccent));
+        juce::Path tri; // downward triangle above the bar
+        tri.addTriangle(px - 7.0f, cyc - 20.0f, px + 7.0f, cyc - 20.0f, px, cyc - 8.0f);
+        g.fillPath(tri);
+        // flat/sharp labels
+        g.setColour(colors::caption);
+        g.setFont(fonts::archivo(12.0f, fonts::SemiBold));
+        g.drawText(juce::String::fromUTF8("\xE2\x99\xADFLAT"), bar.withTrimmedTop(24),
+                   juce::Justification::centredLeft);
+        g.drawText(juce::String::fromUTF8("SHARP\xE2\x99\xAF"), bar.withTrimmedTop(24),
+                   juce::Justification::centredRight);
+
+        // --- readouts: measured Hz + cents, and the target ---
+        area.removeFromTop(8);
+        auto info = area.removeFromTop(24);
+        g.setColour(inTune ? good : colors::text2);
+        g.setFont(fonts::mono(15.0f, fonts::Medium));
+        g.drawText(juce::String(mFreq, 1) + " Hz   " +
+                       (cents >= 0 ? "+" : "") + juce::String((int)std::lround(cents)) + " cents",
+                   info, juce::Justification::centred);
+        g.setColour(colors::textDim);
+        g.setFont(fonts::mono(12.0f, fonts::Medium));
+        const double targetHz = 440.0 * std::pow(2.0, (note - 69) / 12.0);
+        g.drawText(juce::String::fromUTF8("target ") + nm + juce::String(octave) + "  " +
+                       juce::String(targetHz, 1) + " Hz",
+                   area.removeFromTop(18), juce::Justification::centred);
+    }
+
+    void resized() override
+    {
+        auto bottom = bodyArea().reduced(24, 10).removeFromBottom(30);
+        mClose.setBounds(bottom.removeFromRight(96).reduced(0, 3));
+        mMute.setBounds(bottom.removeFromLeft(150).reduced(0, 3));
+    }
+
+private:
+    juce::TextButton mMute, mClose;
+    bool mHasPitch = false;
+    int mSilent = 0;
+    float mFreq = 0.0f;
+};
+
+//==============================================================================
 // CalPanel - global INPUT calibration, opened from the header INPUT button.
 // Sets the level of the incoming signal (your interface's dBu at 0 dBFS) so the
 // shared pre-amp section (drive rack, gate, comp) is driven consistently; each

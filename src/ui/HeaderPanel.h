@@ -39,6 +39,48 @@ private:
     bool mHot = false;
 };
 
+// Header tuner toggle: a tuning-fork glyph in a rounded tile. Highlights on hover
+// and glows amber when the tuner overlay is engaged (active).
+class TunerButton : public juce::Component
+{
+public:
+    std::function<void()> onClick;
+    bool active = false;
+
+    void mouseEnter(const juce::MouseEvent &) override { mHot = true; repaint(); }
+    void mouseExit(const juce::MouseEvent &) override { mHot = false; repaint(); }
+    void mouseUp(const juce::MouseEvent &e) override
+    {
+        if (onClick && getLocalBounds().contains(e.getPosition()))
+            onClick();
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        auto b = getLocalBounds().toFloat().reduced(0.5f);
+        g.setColour(active ? colors::accent.withAlpha(0.20f) : (mHot ? colors::tileSel : colors::tile));
+        g.fillRoundedRectangle(b, 8.0f);
+        g.setColour(active ? colors::accent : (mHot ? colors::accent.withAlpha(0.6f) : colors::outline));
+        g.drawRoundedRectangle(b, 8.0f, 1.0f);
+
+        // Tuning fork: two prongs joined by a yoke, with a short stem.
+        const float cx = b.getCentreX(), cy = b.getCentreY();
+        const float prongH = 9.0f, gap = 3.5f, stemH = 5.0f, thick = 2.0f;
+        const float top = cy - (prongH + stemH) * 0.5f;
+        juce::Path fork;
+        fork.addRoundedRectangle(cx - gap - thick * 0.5f, top, thick, prongH, 1.0f);       // left prong
+        fork.addRoundedRectangle(cx + gap - thick * 0.5f, top, thick, prongH, 1.0f);       // right prong
+        fork.addRoundedRectangle(cx - gap - thick * 0.5f, top + prongH - thick,
+                                 gap * 2.0f + thick, thick, 1.0f);                          // yoke
+        fork.addRoundedRectangle(cx - thick * 0.5f, top + prongH, thick, stemH, 1.0f);     // stem
+        g.setColour(active ? colors::accent : juce::Colour(0xffc2c7cf));
+        g.fillPath(fork);
+    }
+
+private:
+    bool mHot = false;
+};
+
 // The header band: gradient background, wordmark (logo + "NAM RIG"), and the
 // loaded-capture rows (Rig A/B amp model names with coloured tags). Interactive
 // widgets (preset bar, I/O knobs, hamburger) are positioned over it by the

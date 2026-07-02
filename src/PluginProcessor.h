@@ -3,8 +3,10 @@
 #include <juce_dsp/juce_dsp.h>
 #include <atomic>
 #include <memory>
+#include <vector>
 
 #include "rig/RigChain.h"
+#include "rig/Tuner.h"
 
 namespace nam_rig
 {
@@ -156,6 +158,15 @@ public:
     float rigOutLDb(int rig) const { return mChain.rigOutLDb(rig); }
     float rigOutRDb(int rig) const { return mChain.rigOutRDb(rig); }
 
+    // --- Tuner (header overlay). The detector only runs while the overlay is open
+    // (setTunerActive). Mute-while-tuning is on by default (pedal-style) but the
+    // overlay exposes a toggle so you can tune while still hearing yourself. ---
+    void setTunerActive(bool b) { mTunerActive.store(b); }
+    void setTunerMute(bool b) { mTunerMute.store(b); }
+    bool tunerMute() const { return mTunerMute.load(); }
+    float tunerFreq() const { return mTuner.frequency(); }  // Hz, 0 = no pitch found
+    float tunerClarity() const { return mTuner.clarity(); } // 0..1 confidence
+
     // --- Parameters ---
     juce::AudioProcessorValueTreeState apvts;
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
@@ -224,6 +235,13 @@ private:
     }
 
     nam_rig::RigChain mChain;
+
+    // Tuner detector + mono-sum scratch (prepared to the block size). Active/mute
+    // are set by the editor's tuner overlay (message thread), read on the audio thread.
+    nam_rig::Tuner mTuner;
+    std::vector<float> mTunerMono;
+    std::atomic<bool> mTunerActive{false};
+    std::atomic<bool> mTunerMute{true};
 
     // Per-rig model/IR state (index 0 = Rig A, 1 = Rig B).
     juce::String mModelName[2]{"No model loaded", "No model loaded"};

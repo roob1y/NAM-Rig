@@ -57,6 +57,7 @@ private:
     nam_rig::ui::PresetBar mPresetBar;
     nam_rig::ui::LabeledKnob mInKnob, mOutKnob;
     nam_rig::ui::PeakMeter mInMeter, mOutMeter;
+    nam_rig::ui::TunerButton mTunerBtn;
     nam_rig::ui::HamburgerButton mMenuBtn;
 
     // --- Chain strip + per-block panels ---
@@ -76,10 +77,12 @@ private:
     nam_rig::ui::CalPanel mCalPanel;       // global input-cal overlay (settings menu)
     nam_rig::ui::IrBrowser mIrBrowser;     // IR library overlay (opened from a cab)
     nam_rig::ui::AmpBrowser mAmpBrowser;   // amp-model library overlay (from an amp)
+    nam_rig::ui::TunerOverlay mTunerPanel; // header tuner overlay
     std::array<juce::Component *, 12> mPanels;
 
     void openIrBrowser(int rig);
     void openAmpBrowser(int rig);
+    void setTuner(bool open); // show/hide the tuner overlay + engage the detector
 
     double mLastTimerMs = 0.0;
     int mPresetRefreshTick = 0;

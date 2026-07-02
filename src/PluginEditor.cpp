@@ -50,6 +50,8 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
     mContent.addAndMakeVisible(mOutKnob);
     mContent.addAndMakeVisible(mInMeter);
     mContent.addAndMakeVisible(mOutMeter);
+    mContent.addAndMakeVisible(mTunerBtn);
+    mTunerBtn.onClick = [this] { setTuner(!mTunerPanel.isVisible()); };
     mContent.addAndMakeVisible(mMenuBtn);
     mMenuBtn.onClick = [this] { showSettingsMenu(); };
 
@@ -78,6 +80,12 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
     mAmpBrowser.setRootChooser([this] { return mProc.ampLibraryRoot(); },
                                [this](const juce::File &d) { mProc.setAmpLibraryRoot(d); });
     mAmpPanel.onBrowse = [this] { openAmpBrowser(0); };
+
+    // Tuner overlay, opened from the header tuning-fork button.
+    mContent.addChildComponent(mTunerPanel);
+    mTunerPanel.onClose = [this] { setTuner(false); };
+    mTunerPanel.setMute(mProc.tunerMute());
+    mTunerPanel.onMuteChanged = [this](bool m) { mProc.setTunerMute(m); };
 
     mStrip.onSelectionChanged = [this](int i) { showPanel(i); };
     mStrip.select(juce::jlimit(0, (int)mPanels.size() - 1, mProc.uiSelectedBlock));
@@ -174,10 +182,34 @@ void NamRigEditor::clampSizeToScreen()
 
 NamRigEditor::~NamRigEditor()
 {
+    // Disengage the tuner so the processor doesn't keep the detector running (and
+    // the output muted) after the editor closes with the tuner still open.
+    mProc.setTunerActive(false);
     // Detach from the shared LnF before it (potentially) goes away. The process
     // default-LnF pointer is cleared by RigLookAndFeel's dtor when the last shared
     // reference drops, so there's nothing to unwind here.
     setLookAndFeel(nullptr);
+}
+
+// Open/close the tuner overlay and engage/disengage the detector. Opening it
+// dismisses the other overlays; the amber fork button tracks the state.
+void NamRigEditor::setTuner(bool open)
+{
+    if (open)
+    {
+        mCalPanel.setVisible(false);
+        mIrBrowser.setVisible(false);
+        mAmpBrowser.setVisible(false);
+        mTunerPanel.setVisible(true);
+        mTunerPanel.toFront(true);
+    }
+    else
+    {
+        mTunerPanel.setVisible(false);
+    }
+    mTunerBtn.active = open;
+    mTunerBtn.repaint();
+    mProc.setTunerActive(open);
 }
 
 void NamRigEditor::showPanel(int selectableIndex)
@@ -185,6 +217,7 @@ void NamRigEditor::showPanel(int selectableIndex)
     mCalPanel.setVisible(false);   // selecting a block dismisses the overlays
     mIrBrowser.setVisible(false);
     mAmpBrowser.setVisible(false);
+    if (mTunerBtn.active) setTuner(false);
     // Compare by identity, not index: the combined AMP and CAB panels each sit at
     // two indices (A and B tiles), so either tile must reveal the shared panel.
     auto *sel = mPanels[(size_t)selectableIndex];
@@ -195,6 +228,7 @@ void NamRigEditor::showPanel(int selectableIndex)
 
 void NamRigEditor::openIrBrowser(int rig)
 {
+    if (mTunerBtn.active) setTuner(false);
     const auto nameOrEmpty = [this](int r) {
         return mProc.isIrLoaded(r) ? mProc.getIrName(r) : juce::String();
     };
@@ -203,6 +237,7 @@ void NamRigEditor::openIrBrowser(int rig)
 
 void NamRigEditor::openAmpBrowser(int rig)
 {
+    if (mTunerBtn.active) setTuner(false);
     const auto nameOrEmpty = [this](int r) {
         return mProc.isModelLoaded(r) ? mProc.getModelName(r) : juce::String();
     };
@@ -229,6 +264,7 @@ void NamRigEditor::showSettingsMenu()
                         if (r == 1)
                         {
                             const bool show = !mCalPanel.isVisible();
+                            if (show && mTunerBtn.active) setTuner(false);
                             mCalPanel.setVisible(show);
                             if (show) mCalPanel.toFront(true);
                         }
@@ -265,6 +301,9 @@ void NamRigEditor::timerCallback()
 
     mInMeter.push(mProc.mInputPeakDb.load(), dt);
     mOutMeter.push(mProc.mOutputPeakDb.load(), dt);
+
+    if (mTunerPanel.isVisible())
+        mTunerPanel.setPitch(mProc.tunerFreq(), mProc.tunerClarity());
 
     mAmpPanel.refresh();
     mCabPanel.refresh();
@@ -365,6 +404,8 @@ void NamRigEditor::resized()
     h.removeFromLeft(16);
 
     mMenuBtn.setBounds(h.removeFromRight(34).withSizeKeepingCentre(34, 34));
+    h.removeFromRight(10);
+    mTunerBtn.setBounds(h.removeFromRight(34).withSizeKeepingCentre(34, 34));
     h.removeFromRight(16);
 
     auto ioCluster = h.removeFromRight(210);
@@ -398,6 +439,7 @@ void NamRigEditor::resized()
     mCalPanel.setBounds(content);   // overlay occupies the block-panel area
     mIrBrowser.setBounds(content);  // IR library overlay shares that area
     mAmpBrowser.setBounds(content); // amp-model library overlay shares that area
+    mTunerPanel.setBounds(content); // tuner overlay shares that area
 }
 
 juce::AudioProcessorEditor *NamRigProcessor::createEditor()

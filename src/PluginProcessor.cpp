@@ -805,6 +805,8 @@ void NamRigProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     mSampleRate = sampleRate;
     mChain.prepare(sampleRate, samplesPerBlock);
+    mTuner.prepare(sampleRate);
+    mTunerMono.assign((size_t)juce::jmax(1, samplesPerBlock), 0.0f);
     updateLatency();
 }
 
@@ -830,6 +832,22 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     for (int ch = 0; ch < numChannels; ++ch)
         inPeak = juce::jmax(inPeak, buffer.getMagnitude(ch, 0, numSamples));
     mInputPeakDb.store(juce::Decibels::gainToDecibels(inPeak, -100.0f));
+
+    // Tuner tap: feed the DRY input (mono-summed) to the pitch detector while the
+    // tuner overlay is open. Runs before the chain so tuning reads the raw string.
+    if (mTunerActive.load())
+    {
+        const int nMono = juce::jmin(numSamples, (int)mTunerMono.size());
+        const float inv = 1.0f / (float)juce::jmax(1, numChannels);
+        for (int i = 0; i < nMono; ++i)
+        {
+            float s = 0.0f;
+            for (int ch = 0; ch < numChannels; ++ch)
+                s += buffer.getSample(ch, i);
+            mTunerMono[(size_t)i] = s * inv;
+        }
+        mTuner.push(mTunerMono.data(), nMono);
+    }
 
     const int fA = requestedFactorNow(0);
     const int fB = requestedFactorNow(1);
@@ -1134,6 +1152,11 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.process(buffer);
 
     buffer.applyGain(outGain);
+
+    // Pedal-style tuner mute: silence the output while tuning (default; the overlay
+    // can turn it off to tune while still hearing the signal).
+    if (mTunerActive.load() && mTunerMute.load())
+        buffer.clear();
 
     float outPeak = 0.0f;
     for (int ch = 0; ch < numChannels; ++ch)
