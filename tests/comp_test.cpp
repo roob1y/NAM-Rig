@@ -8,7 +8,7 @@
 //    per-note dynamics — dynamic tests therefore probe gain reduction via grDb()
 //    rather than the (makeup-flattened) output level.
 //  - RATIO knob on Clean/FET (ratioExposed); Opto/OTA use their fixed character.
-//  - RELEASE knob on Clean/FET/Opto (releaseExposed); scales the voicing release
+//  - RELEASE knob on Clean/FET (releaseExposed); Opto/OTA are fixed
 //    (150 ms == the tuned default), OTA keeps its built-in timing.
 #include "rig/CompBlock.h"
 #include <cstdio>
@@ -303,11 +303,13 @@ int main()
             while (p < target) { int n = (int)std::min<size_t>(64, target - p); c.process(xx.data() + p, n); p += (size_t)n; g = c.grDb(); }
             return (double)g;
         };
-        // fraction of GR still held 150 ms after the drop (normalised by GR pre-drop)
-        const double cRem = grAt(0, 48000 + 7200) / (grAt(0, 47000) + 1.0e-9);
-        const double oRem = grAt(2, 48000 + 7200) / (grAt(2, 47000) + 1.0e-9);
+        // The LA-2A's signature is the long TAIL: Clean is fully released well before
+        // the opto's slow stage lets go. Probe 700 ms after the drop (past the opto's
+        // fast initial stage) where the two-stage release clearly holds more GR.
+        const double cRem = grAt(0, 48000 + 33600) / (grAt(0, 47000) + 1.0e-9);
+        const double oRem = grAt(2, 48000 + 33600) / (grAt(2, 47000) + 1.0e-9);
         CHECK(oRem > cRem + 0.1,
-              "T9 Opto releases slower: GR held @150ms Opto %.2f > Clean %.2f", oRem, cRem);
+              "T9 Opto tail holds longer: GR held @700ms Opto %.2f > Clean %.2f", oRem, cRem);
     }
 
     // ---- T10: FET adds harmonic grit a clean VCA does not ----
@@ -322,8 +324,11 @@ int main()
             return (h2 + h3) / (f1 + 1.0e-12);
         };
         const double cThd = thd(clean), fThd = thd(fet);
-        CHECK(fThd > cThd * 2.0 && fThd > 0.01,
-              "T10 FET adds harmonics: THD FET %.4f vs Clean %.4f", fThd, cThd);
+        // The FET is now voiced as the CLEAN Cali76 guitar pedal (transformerless),
+        // so it is much cleaner than a slammed rack 1176 - but it still adds clear
+        // harmonic character vs the transparent Clean VCA when driven (driveTrack).
+        CHECK(fThd > cThd * 3.0 && fThd > 0.002,
+              "T10 FET (Cali76) adds harmonic character vs Clean: THD FET %.4f vs Clean %.4f", fThd, cThd);
     }
 
     // ---- T12: voicing harmonic signature (Opto even-forward vs OTA odd-forward) ----
@@ -399,6 +404,92 @@ int main()
         const double rOta = h3rat(ota), rClean = h3rat(clean);
         CHECK(rOta > 0.01 && rOta > rClean * 5.0,
               "T15 OTA baked cell adds odd grit: h3/f1 OTA %.4f vs Clean %.4f", rOta, rClean);
+    }
+
+    // ---- T16: FET Dry blend (Cali76 parallel compression) restores the transient ----
+    // With the Dry knob up, the uncompressed input is summed back over the compressed
+    // signal, so the pick transient pokes through louder than pure-compressed. The dry
+    // path is FET-only, so it is a no-op on the other voicings.
+    {
+        std::vector<float> x(48000);
+        for (size_t i = 0; i < x.size(); ++i)
+        {
+            const double amp = (i < 24000) ? 0.01 : 0.4; // quiet -> loud "pick" step
+            x[i] = (float)(amp * std::sin(2.0 * M_PI * 1000.0 * (double)i / SR));
+        }
+        auto peakAfterStep = [&](float dry)
+        {
+            CompBlock c; c.setMode(3); c.setSustain(0.7f); c.setAttackMs(5.0f);
+            c.setDryBlend(dry); c.prepare({SR, BLK});
+            auto y = x; run(c, y);
+            double pk = 0;
+            for (size_t i = 24000; i < 24000 + 1200; ++i) pk = std::max(pk, (double)std::abs(y[i]));
+            return pk;
+        };
+        const double d0 = peakAfterStep(0.0f), d1 = peakAfterStep(1.0f);
+        CHECK(d1 > d0 * 1.1,
+              "T16 FET Dry blend restores the transient: peak dry=1 %.3f > dry=0 %.3f", d1, d0);
+
+        auto cleanPeak = [&](float dry)
+        {
+            CompBlock c; c.setMode(0); c.setSustain(0.7f); c.setAttackMs(5.0f);
+            c.setDryBlend(dry); c.prepare({SR, BLK});
+            auto y = x; run(c, y);
+            double pk = 0; for (size_t i = 24000; i < 24000 + 1200; ++i) pk = std::max(pk, (double)std::abs(y[i]));
+            return pk;
+        };
+        CHECK(std::abs(cleanPeak(1.0f) - cleanPeak(0.0f)) < 1.0e-6,
+              "T16b Dry blend is a no-op on Clean (%.4f vs %.4f)", cleanPeak(1.0f), cleanPeak(0.0f));
+    }
+
+    // ---- T16c: FET Dry blend is OUTPUT-level-compensated (blending dry doesn't raise level) ----
+    {
+        auto rmsFet = [&](float dry)
+        {
+            CompBlock c; c.setMode(3); c.setSustain(0.5f); c.setAttackMs(5.0f);
+            c.setDryBlend(dry); c.prepare({SR, BLK});
+            auto y = tone(-30.0, 48000); run(c, y); // sub-threshold -> uncompressed
+            double e = 0; for (size_t i = y.size() - 4800; i < y.size(); ++i) e += (double)y[i] * y[i];
+            return 10.0 * std::log10(e / 4800.0);
+        };
+        const double d = std::abs(rmsFet(1.0f) - rmsFet(0.0f));
+        CHECK(d < 1.0, "T16c Dry blend output level-compensated (%.2f dB change dry 0->1, want < 1)", d);
+    }
+
+    // ---- T17: per-character ranges (Attack fixed on OTA/Opto; FET release 1176 spec) ----
+    {
+        using M = CompBlock::Mode;
+        CHECK(std::abs(CompBlock::effectiveAttackMs(M::OTA, 1.0f) - CompBlock::effectiveAttackMs(M::OTA, 50.0f)) < 1.0e-6f
+              && std::abs(CompBlock::effectiveAttackMs(M::Opto, 1.0f) - CompBlock::effectiveAttackMs(M::Opto, 50.0f)) < 1.0e-6f,
+              "T17a Attack fixed on OTA/Opto (OTA %.2f ms, Opto %.2f ms)",
+              CompBlock::effectiveAttackMs(M::OTA, 30.0f), CompBlock::effectiveAttackMs(M::Opto, 30.0f));
+        CHECK(CompBlock::effectiveAttackMs(M::FET, 50.0f) > CompBlock::effectiveAttackMs(M::FET, 1.0f) * 4.0f
+              && !CompBlock::attackExposed(M::OTA) && !CompBlock::attackExposed(M::Opto)
+              && CompBlock::attackExposed(M::FET) && CompBlock::attackExposed(M::Clean),
+              "T17b FET attack varies with knob (%.3f..%.3f ms) + attackExposed correct",
+              CompBlock::effectiveAttackMs(M::FET, 1.0f), CompBlock::effectiveAttackMs(M::FET, 50.0f));
+        const double rmin = CompBlock::effectiveReleaseMs(M::FET, 20.0f);
+        const double rmax = CompBlock::effectiveReleaseMs(M::FET, 800.0f);
+        CHECK(std::abs(rmin - 50.0) < 1.0 && std::abs(rmax - 1100.0) < 1.0 && rmax > rmin,
+              "T17c FET release in 1176 spec: %.0f ms .. %.0f ms (want 50..1100)", rmin, rmax);
+    }
+
+    // ---- T18: FET Ratio snaps to the authentic 1176 detents (4/8/12/20) ----
+    {
+        CHECK(CompBlock::snapRatioFet(5.0f) == 4.0f && CompBlock::snapRatioFet(7.0f) == 8.0f
+              && CompBlock::snapRatioFet(11.0f) == 12.0f && CompBlock::snapRatioFet(18.0f) == 20.0f,
+              "T18 FET ratio snaps to detents (5->4, 7->8, 11->12, 18->20)");
+    }
+
+    // ---- T19: Opto (LA-2A) authenticity: ~10 ms attack, no release knob, long tail ----
+    {
+        using M = CompBlock::Mode;
+        CHECK(std::abs(CompBlock::effectiveAttackMs(M::Opto, 15.0f) - 10.0f) < 1.5f,
+              "T19a Opto attack ~10 ms (got %.1f)", CompBlock::effectiveAttackMs(M::Opto, 15.0f));
+        CHECK(!CompBlock::releaseExposed(M::Opto),
+              "T19b Opto has no release knob (fixed program-dependent LA-2A)");
+        CHECK(CompBlock::effectiveReleaseMs(M::Opto, 150.0f) > 1200.0f,
+              "T19c Opto release tail is long (%.0f ms)", CompBlock::effectiveReleaseMs(M::Opto, 150.0f));
     }
 
     std::printf("\n%s (%d failure%s)\n", gFails ? "RESULT: FAIL" : "RESULT: ALL PASS", gFails, gFails == 1 ? "" : "s");

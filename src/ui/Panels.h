@@ -868,12 +868,12 @@ public:
     explicit CompPanel(juce::AudioProcessorValueTreeState &apvts)
         : BlockPanel("COMPRESSOR")
     {
-        // Ratio (idx 2) and Release (idx 3) are shown per voicing (see
+        // Ratio (idx 2), Release (idx 3) and Dry (idx 5) are shown per voicing (see
         // refreshForMode); Sustain must stay idx 0 (drives the curve threshold).
         const std::pair<const char *, const char *> defs[] = {
             {"compSustain", "Sustain"}, {"compAttack", "Attack"},
             {"compRatio", "Ratio"},     {"compRelease", "Release"},
-            {"compLevel", "Level"}};
+            {"compLevel", "Level"},     {"compDry", "Dry"}};
         for (const auto &[id, caption] : defs)
         {
             mKnobs.push_back(std::make_unique<LabeledKnob>(apvts, id, caption));
@@ -993,9 +993,11 @@ private:
         const int idx = juce::jmax(0, mModeBox.getSelectedItemIndex());
         const auto mode = (nam_rig::CompBlock::Mode)idx;
         const auto v = nam_rig::CompBlock::voicingFor(mode);
-        const float ratio = nam_rig::CompBlock::ratioExposed(mode)
-                                ? (float)mKnobs[2]->slider().getValue()
-                                : v.ratio;
+        float ratio = nam_rig::CompBlock::ratioExposed(mode)
+                          ? (float)mKnobs[2]->slider().getValue()
+                          : v.ratio;
+        if (mode == nam_rig::CompBlock::Mode::FET)
+            ratio = nam_rig::CompBlock::snapRatioFet(ratio);
         mCurve.setShape(ratio, v.kneeDb);
     }
 
@@ -1005,8 +1007,31 @@ private:
     {
         const int idx = juce::jmax(0, mModeBox.getSelectedItemIndex());
         const auto mode = (nam_rig::CompBlock::Mode)idx;
+        mKnobs[1]->setVisible(nam_rig::CompBlock::attackExposed(mode));  // Attack
         mKnobs[2]->setVisible(nam_rig::CompBlock::ratioExposed(mode));   // Ratio
         mKnobs[3]->setVisible(nam_rig::CompBlock::releaseExposed(mode)); // Release
+        mKnobs[5]->setVisible(nam_rig::CompBlock::dryBlendExposed(mode)); // Dry (FET)
+
+        // Per-character readouts: show each knob's TRUE effective value for this
+        // voicing (single source of truth = CompBlock), not the raw shared-knob units.
+        mKnobs[1]->setReadoutFn([mode](double v) {
+            const float ms = nam_rig::CompBlock::effectiveAttackMs(mode, (float)v);
+            return ms < 1.0f
+                       ? juce::String(ms * 1000.0f, 0) + juce::String::fromUTF8(" \xC2\xB5s")
+                       : juce::String(ms, ms < 10.0f ? 2 : 1) + " ms";
+        });
+        mKnobs[3]->setReadoutFn([mode](double v) {
+            const float ms = nam_rig::CompBlock::effectiveReleaseMs(mode, (float)v);
+            return ms >= 1000.0f ? juce::String(ms / 1000.0f, 2) + " s"
+                                 : juce::String(ms, 0) + " ms";
+        });
+        mKnobs[2]->setReadoutFn([mode](double v) {
+            const float r = (mode == nam_rig::CompBlock::Mode::FET)
+                                ? nam_rig::CompBlock::snapRatioFet((float)v)
+                                : (float)v;
+            return juce::String(r, (r == (float)(int)r) ? 0 : 1) + ":1";
+        });
+
         updateCurveShape();
         resized();
     }
@@ -6127,6 +6152,88 @@ private:
     bool mLiveA = false, mLiveB = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MixPanel)
+};
+
+//==============================================================================
+// PremodPanel — the MONO front-of-amp modulation pedal (rig/PreModBlock.h). Sits
+// between DRIVE and the amp split. Scaffold UI: a Type picker + Sync picker and
+// the Rate / Depth / Mix knobs. Chorus is voiced; the other types are transparent
+// stubs (a "voicing soon" note shows for them). Feedback exists as a param but is
+// hidden until the phaser/flanger are voiced.
+class PremodPanel : public BlockPanel
+{
+public:
+    explicit PremodPanel(juce::AudioProcessorValueTreeState &apvts)
+        : BlockPanel("PRE MOD"), mApvts(apvts)
+    {
+        // Type picker — order MUST match PreModBlock::Type / the premodType StringArray.
+        mType.addItemList({"Chorus", "Phaser", "Flanger", "Tremolo", "Uni-Vibe"}, 1);
+        addAndMakeVisible(mType);
+        mTypeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, "premodType", mType);
+        mType.onChange = [this] { refresh(); };
+
+        // Tempo-sync division (Off = free rate). Matches the premodSync StringArray.
+        mSync.addItemList({"Off", "1/1", "1/2", "1/4", "1/4.", "1/4T",
+                           "1/8", "1/8.", "1/8T", "1/16"}, 1);
+        addAndMakeVisible(mSync);
+        mSyncAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, "premodSync", mSync);
+        mSync.onChange = [this] { refresh(); };
+
+        const std::pair<const char *, const char *> defs[] = {
+            {"premodRate", "Rate"}, {"premodDepth", "Depth"}, {"premodMix", "Mix"}};
+        for (const auto &[id, caption] : defs)
+        {
+            mKnobs.push_back(std::make_unique<LabeledKnob>(apvts, id, caption));
+            addAndMakeVisible(*mKnobs.back());
+        }
+        refresh();
+    }
+
+    // Rate is owned by the sync division when synced -> grey the Rate knob out then;
+    // header-right shows the type + a note for the not-yet-voiced pedals.
+    void refresh()
+    {
+        const bool synced = (int)mApvts.getRawParameterValue("premodSync")->load() > 0;
+        if (!mKnobs.empty()) mKnobs[0]->setEnabled(!synced); // Rate follows the host when synced
+        const int t = (int)mApvts.getRawParameterValue("premodType")->load();
+        static const char *const kNames[] = {"Chorus", "Phaser", "Flanger", "Tremolo", "Uni-Vibe"};
+        const bool voiced = (t == 0); // only Chorus so far
+        setHeaderRight(voiced ? juce::String(kNames[juce::jlimit(0, 4, t)])
+                              : juce::String(kNames[juce::jlimit(0, 4, t)]) + "  \xc2\xb7  voicing soon");
+    }
+
+    void resized() override
+    {
+        auto area = bodyArea().reduced(24, 14);
+
+        // Top row: Type + Sync pickers side by side.
+        auto pickers = area.removeFromTop(30);
+        const int gap = 12;
+        const int w = (pickers.getWidth() - gap) / 2;
+        mType.setBounds(pickers.removeFromLeft(w));
+        pickers.removeFromLeft(gap);
+        mSync.setBounds(pickers.removeFromLeft(w));
+
+        area.removeFromTop(16);
+
+        // Knob row (Rate / Depth / Mix), centred like the other panels.
+        auto row = area.withSizeKeepingCentre(
+            juce::jmin(area.getWidth(), 104 * (int)mKnobs.size()),
+            juce::jmin(area.getHeight(), 130));
+        const int kw = row.getWidth() / (int)mKnobs.size();
+        for (auto &k : mKnobs)
+            k->setBounds(row.removeFromLeft(kw).reduced(5, 0));
+    }
+
+private:
+    juce::AudioProcessorValueTreeState &mApvts;
+    juce::ComboBox mType, mSync;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt, mSyncAtt;
+    std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PremodPanel)
 };
 
 } // namespace nam_rig::ui

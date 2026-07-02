@@ -19,11 +19,14 @@
 //           level (so it tracks how hard you play, not the makeup output),
 //           plus control-ripple IMD (the signature Dyna Comp odd-harmonic
 //           grit, worse on low notes). See the OTA block in process().
-//   Opto  : optical smoothness. Gentle ratio, RMS detector, slow dual-stage
-//           program-dependent release (relaxes on sustained notes), minimal
-//           pumping/colour.
-//   FET   : 1176-style punch. Ultra-fast attack, aggressive ratio, harder knee,
-//           odd-harmonic grit that bites harder when slammed.
+//   Opto  : LA-2A optical. Gentle ~3:1, RMS detector, ~10 ms fixed attack, and NO
+//           release knob -- a fixed two-stage program-dependent T4 release (fast
+//           initial recovery then a long tail that lengthens the longer/harder it
+//           compresses, the photocell "memory"), smooth tube warmth, minimal pump.
+//   FET   : 1176-style punch. FET-fast attack (~20 us-0.8 ms), aggressive ratio,
+//           harder knee, program-dependent ratio (creeps up after the transient)
+//           + program-dependent release, bright Class-A/transformer sheen, and
+//           odd+even grit that bites harder when slammed.
 //
 // Topology (feedforward, log-domain — Giannoulis/Massberg/Reiss style):
 //   detector(peak|RMS, optional sidechain HPF) -> dB -> soft-knee gain computer
@@ -55,8 +58,17 @@ public:
     static bool ratioExposed(Mode m) { return m == Mode::Clean || m == Mode::FET; }
     static bool releaseExposed(Mode m)
     {
-        return m == Mode::Clean || m == Mode::FET || m == Mode::Opto;
+        // LA-2A has no release control (fixed program-dependent), so Opto is out.
+        return m == Mode::Clean || m == Mode::FET;
     }
+    // The Cali76-style Dry / parallel-compression blend is a FET-only control (for
+    // now). Single source of truth, shared with the editor so the knob only shows
+    // on the FET voicing.
+    static bool dryBlendExposed(Mode m) { return m == Mode::FET; }
+
+    // OTA (Dyna Comp) and Opto (LA-2A) have no hardware attack control (fixed
+    // timing), so the Attack knob is shown only on Clean/FET, like ratio/release.
+    static bool attackExposed(Mode m) { return m == Mode::Clean || m == Mode::FET; }
 
     // ---- parameters (thread-safe) ----
     void setSustain(float v01) { mSustain.store(v01); } // 0..1
@@ -65,6 +77,7 @@ public:
     void setRatio(float v) { mRatio.store(v); }         // ratio knob (ratioExposed)
     void setLevelDb(float v) { mLevelDb.store(v); }     // -12..+12 dB trim on top of auto-makeup
     void setMode(int m) { mMode.store(m); }                // 0..3 (see Mode)
+    void setDryBlend(float v01) { mDryBlend.store(v01); }   // 0..1 FET parallel dry mix
 
     // Clean ("pedal") character constants — also the back-compat curve defaults.
     static constexpr float kRatio = 6.0f;
@@ -73,9 +86,13 @@ public:
 
     // Auto-makeup is referenced to this nominal playing peak (calibrated dBFS):
     // a signal at this level passes at unity, so normal playing stays ~unity and
-    // only sustain lifts the quieter tails. (Was 0 dBFS, which over-boosted every
-    // realistic level since guitar peaks sit well below full scale.)
-    static constexpr float kMakeupRefDb = -15.0f;
+    // only sustain lifts the quieter tails. Set this to where you actually play
+    // (read the IN meter): a hotter reference over-boosts everything below it,
+    // since the full gain reduction is added back at this point. (Was 0 dBFS,
+    // then -15 dBFS — both still sat above real playing level, so normal playing
+    // came out well above input at Level 0; -22 dBFS puts the unity pivot at the
+    // calibrated guitar peak. Tune by ear against the IN meter.)
+    static constexpr float kMakeupRefDb = -22.0f;
 
     // Release model references.
     static constexpr float kRelRefDb = 6.0f;   // GR at which release hits relFast
@@ -108,17 +125,63 @@ public:
                         // the grit now); ripple = detector-ripple IMD depth.
             return {10.0f, 10.0f, 0.50f, false, 120.0f, 0.70f, 1.0f,
                     80.0f, 400.0f, 0.6f, 1.20f, 0.02f, 0.00f, 0.00f, 0.50f, 0.85f};
-        case Mode::Opto: // optical + tube: even-forward warmth, gentle iron
-            return {3.5f, 12.0f, 0.60f, true, 0.0f, 1.60f, 8.0f,
-                    120.0f, 900.0f, 1.0f, 0.10f, 0.45f, 0.00f, 0.40f, 0.00f, 0.35f};
-        case Mode::FET: // 1176: odd+even grit, strong transformer iron
-            return {12.0f, 3.0f, 0.45f, false, 60.0f, 0.25f, 0.2f,
-                    50.0f, 250.0f, 0.4f, 0.22f, 0.15f, 0.60f, 0.70f, 0.00f, 0.35f};
+        case Mode::Opto: // LA-2A T4 opto+tube: ~10 ms fixed attack, two-stage program-
+                         // dependent release (fast ~60 ms initial -> long 1.5 s+ tail
+                         // that lengthens the longer/harder it compresses, the T4
+                         // "memory"); no release knob (releaseExposed excludes Opto);
+                         // even-forward tube warmth + gentle output-transformer iron.
+            return {3.5f, 12.0f, 0.60f, true, 0.0f, 0.6f, 10.0f,
+                    80.0f, 1500.0f, 1.0f, 0.10f, 0.45f, 0.00f, 0.40f, 0.00f, 0.35f};
+        case Mode::FET: // Cali76-style guitar 1176: FET-fast attack, clean/transparent,
+                        // bright Class-A presence, program-dependent ratio + release.
+                        // attackScale 0.016 + floor 0.02 ms maps the Attack knob to the
+                        // real 20 us-0.8 ms FET range; release reaches toward the 1.1 s
+                        // max. The Cali76 is a TRANSFORMERLESS discrete Class-A pedal, so
+                        // iron + grit are pulled right back (clean, presence-forward, not
+                        // the slammed-transformer rack sound); the top-end sheen is added
+                        // in process(). driveTrack keeps a hint of bite only when slammed.
+            return {12.0f, 3.0f, 0.45f, false, 60.0f, 0.016f, 0.02f,
+                    50.0f, 380.0f, 0.55f, 0.12f, 0.10f, 0.45f, 0.12f, 0.00f, 0.35f};
         case Mode::Clean: // transparent VCA: no colour
         default:
             return {kRatio, kKneeDb, 0.60f, false, 0.0f, 1.0f, 1.0f,
                     kReleaseMs, kReleaseMs, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
         }
+    }
+
+    // 1176 authentic ratio detents; the FET Ratio knob snaps to the nearest.
+    static float snapRatioFet(float r)
+    {
+        const float d[4] = {4.0f, 8.0f, 12.0f, 20.0f};
+        float best = d[0], bd = std::abs(r - d[0]);
+        for (int i = 1; i < 4; ++i) { const float e = std::abs(r - d[i]); if (e < bd) { bd = e; best = d[i]; } }
+        return best;
+    }
+
+    // Effective attack time (ms) for a voicing + Attack-knob value. OTA/Opto have no
+    // hardware attack knob, so they use a fixed reference position (their timing is
+    // baked into attackScale/floor). Shared by process() and the UI readout so the
+    // number shown is always the real one.
+    static float effectiveAttackMs(Mode m, float knobMs)
+    {
+        const Voicing v = voicingFor(m);
+        const float k = attackExposed(m) ? knobMs : 15.0f;
+        return std::max(v.attackFloorMs, k * v.attackScale);
+    }
+
+    // Effective (nominal, low-GR) release time (ms). FET is remapped onto the real
+    // 1176 window (50 ms..1.1 s) across the whole knob travel; the others scale the
+    // voicing release by the knob. Shared by process() and the UI readout.
+    static float effectiveReleaseMs(Mode m, float knobMs)
+    {
+        if (m == Mode::FET)
+        {
+            const float rn = std::min(1.0f, std::max(0.0f, (knobMs - 20.0f) / 780.0f));
+            return 50.0f + rn * (1100.0f - 50.0f);
+        }
+        const Voicing v = voicingFor(m);
+        const float relScale = releaseExposed(m) ? std::max(0.05f, knobMs / kReleaseMs) : 1.0f;
+        return v.relSlowMs * relScale;
     }
 
     // Soft-knee transfer (input dB -> gain dB, <= 0), generalised over ratio/knee.
@@ -172,6 +235,7 @@ public:
         mIronLpf = 0.0f;
         mRipCap = 0.0f;
         mRipMean = 0.0f;
+        mFetHf = 0.0f;
     }
 
     void process(float *mono, int numSamples) override
@@ -189,12 +253,20 @@ public:
         // character. Release: a ms knob that scales the voicing's release times
         // (relScale == 1 reproduces the tuned default at kReleaseMs) on the
         // exposed voicings; untouched voicings keep their built-in timing.
-        const float ratio = ratioExposed(mode) ? std::max(1.0f, mRatio.load()) : v.ratio;
+        float ratio = ratioExposed(mode) ? std::max(1.0f, mRatio.load()) : v.ratio;
+        if (mode == Mode::FET) ratio = snapRatioFet(ratio); // 1176 detents 4/8/12/20
         const float relScale = releaseExposed(mode)
                                    ? std::max(0.05f, mReleaseMs.load() / kReleaseMs)
                                    : 1.0f;
-        const float relFastMs = v.relFastMs * relScale;
-        const float relSlowMs = v.relSlowMs * relScale;
+        float relFastMs = v.relFastMs * relScale;
+        float relSlowMs = v.relSlowMs * relScale;
+        if (mode == Mode::FET)
+        {
+            // Remap the shared Release knob onto the real 1176 window (50 ms..1.1 s)
+            // across the whole travel, keeping the voicing's fast:slow proportion.
+            relSlowMs = effectiveReleaseMs(Mode::FET, mReleaseMs.load());
+            relFastMs = relSlowMs * (v.relFastMs / v.relSlowMs);
+        }
 
         // Instant auto-makeup: a CONSTANT gain (per block) that adds back the gain
         // reduction the static curve applies at the nominal playing level
@@ -205,7 +277,7 @@ public:
         const float makeupDb = -computeGainDb(kMakeupRefDb, t, ratio, v.kneeDb);
         const float outLin = std::pow(10.0f, (makeupDb + mLevelDb.load()) * 0.05f);
 
-        const float attMs = std::max(v.attackFloorMs, mAttackMs.load() * v.attackScale);
+        const float attMs = effectiveAttackMs(mode, mAttackMs.load());
         const float attCoef = coefForMs(attMs, sr);
 
         const bool simpleRelease = (v.relFastMs == v.relSlowMs && v.progDepth == 0.0f);
@@ -236,8 +308,29 @@ public:
         const float ripCapCoef = coefForMs(2.0f, sr);    // detector cap (leaves 2f ripple)
         const float ripMeanCoef = coefForMs(40.0f, sr);  // slow mean the ripple rides on
 
+        // ---- FET (1176) authenticity: program-dependent ratio + transformer sheen ----
+        // The 1176 is a feedback limiter whose ratio "always increases a bit after the
+        // transient" at every setting (UA/Wikipedia) — approximated here by creeping the
+        // effective ratio up as compression sustains (driven by relMem, the slow GR
+        // follower). Its Class-A amp + input/output transformers are the source of the
+        // bright, clear top end every engineer describes: a gentle fixed HF shelf baked
+        // into the path. (A true feedback detector + all-buttons mode are larger,
+        // separate structural changes — see notes.)
+        const bool fetMode = (mode == Mode::FET);
+        const float fetRatioProg = fetMode ? 0.5f : 0.0f; // ratio creep after transient
+        const float fetBright = fetMode ? 0.12f : 0.0f;   // HF-sheen depth (0 = off)
+        const float fetHfCoef = coefForHz(3500.0, sr);    // sheen shelf corner
+
+        // Cali76 Dry / parallel-compression blend (FET only): sum an uncompressed copy
+        // of the input back over the compressed signal so pick transients and natural
+        // dynamics poke through (0 = pure compressed). The dry copy shares the wet's
+        // output gain (outLin = auto-makeup + Level) so the makeup lifts BOTH paths
+        // equally -- otherwise the made-up wet buries an unboosted dry.
+        const float dryBlend = fetMode ? std::min(1.0f, std::max(0.0f, mDryBlend.load())) : 0.0f;
+
         float gr = mGrDb, relMem = mRelMem, scHp = mScHp, rms2 = mRms2, ironLpf = mIronLpf;
         float ripCap = mRipCap, ripMean = mRipMean; // OTA control-ripple detector state
+        float fetHf = mFetHf;                       // FET HF-sheen shelf state
         float inPk = 0.0f, outPk = 0.0f; // block peaks for the IN/OUT meter modes
 
         for (int i = 0; i < numSamples; ++i)
@@ -264,7 +357,11 @@ public:
                 level = std::abs(xdet);
             const float aDb = 20.0f * std::log10(std::max(level, 1.0e-9f));
 
-            const float grTarget = -computeGainDb(aDb, t, ratio, v.kneeDb); // >= 0
+            // FET: program-dependent ratio — creeps up as compression sustains (relMem).
+            const float ratEff = fetMode
+                ? ratio * (1.0f + fetRatioProg * std::min(1.0f, relMem * (1.0f / kProgRefDb)))
+                : ratio;
+            const float grTarget = -computeGainDb(aDb, t, ratEff, v.kneeDb); // >= 0
 
             // ---- attack / program-dependent release smoother ----
             if (grTarget > gr)
@@ -281,6 +378,7 @@ public:
                     float relMs = relSlowMs + (relFastMs - relSlowMs) * b;
                     // the longer it's been compressing, the longer the release
                     relMs *= (1.0f + v.progDepth * (relMem / kProgRefDb));
+                    if (fetMode) relMs = std::min(relMs, 1100.0f); // 1176 max release
                     relCoef = coefForMs(relMs, sr);
                 }
                 gr += relCoef * (grTarget - gr);
@@ -338,10 +436,25 @@ public:
                     const float flux = ironLpf * 2.0f;
                     y += (ch * v.iron) * (std::tanh(flux) - flux) * 0.5f;
                 }
+                // FET transformer/Class-A sheen: a gentle fixed HF shelf (the "bright,
+                // clear top end"). fetHf low-passes y; adding back (y - fetHf) lifts the
+                // highs above ~3.5 kHz.
+                if (fetBright > 0.0f)
+                {
+                    fetHf += fetHfCoef * (y - fetHf);
+                    y += fetBright * (y - fetHf);
+                }
             }
 
-            mono[i] = y;
-            const float ay = std::abs(y);
+            // FET parallel dry blend: add the uncompressed input at the SAME output gain
+            // as the wet (outLin = makeup + Level), so the dry sits level with the
+            // compressed signal instead of buried under the makeup. The /(1 + dryBlend)
+            // keeps the OUTPUT level ~constant as you blend (wet+dry are correlated, so
+            // linear normalisation holds loudness) -- the dry restores dynamics without
+            // getting louder. dryBlend == 0 elsewhere (no-op, /1).
+            const float out = (y + dryBlend * outLin * x) / (1.0f + dryBlend);
+            mono[i] = out;
+            const float ay = std::abs(out);
             if (ay > outPk)
                 outPk = ay;
         }
@@ -353,6 +466,7 @@ public:
         mIronLpf = flush(ironLpf);
         mRipCap = flush(ripCap);
         mRipMean = flush(ripMean);
+        mFetHf = flush(fetHf);
         mGrDbPub.store(mGrDb); // published for the editor's GR meter
         // Block peaks in dBFS for the IN/OUT meter modes (UI thread reads these).
         mInPeakDbPub.store(inPk > 1.0e-9f ? 20.0f * std::log10(inPk) : -120.0f);
@@ -385,6 +499,7 @@ private:
     std::atomic<float> mReleaseMs{150.0f}; // release knob (ms); scales exposed voicings
     std::atomic<float> mRatio{4.0f};       // ratio knob (Clean/FET)
     std::atomic<float> mLevelDb{0.0f};
+    std::atomic<float> mDryBlend{0.0f}; // FET parallel dry-blend (0..1)
     std::atomic<int> mMode{0};          // Clean
 
     float mGrDb = 0.0f;
@@ -394,6 +509,7 @@ private:
     float mIronLpf = 0.0f; // transformer low-band state
     float mRipCap = 0.0f;  // OTA control-ripple: rectified cap follower
     float mRipMean = 0.0f; // OTA control-ripple: slow mean
+    float mFetHf = 0.0f;   // FET HF-sheen shelf state
     double mSampleRate = 48000.0;
     bool mPrepared = false;
 };

@@ -1,7 +1,7 @@
 #pragma once
 // RigChain — the fixed serial chain host, now with a DUAL-RIG core.
 //
-//   [mono shared pre]  gate -> comp -> drive (3-slot rack)
+//   [mono shared pre]  gate -> comp -> drive (3-slot rack) -> premod (mono mod pedal)
 //                          |
 //          split ----------+----------
 //          |                          |
@@ -30,6 +30,7 @@
 #include "GateBlock.h"
 #include "CompBlock.h"
 #include "DriveBlock.h"
+#include "PreModBlock.h"
 #include "AmpBlock.h"
 #include "EqBlock.h"
 #include "CabBlock.h"
@@ -232,6 +233,13 @@ public:
             { comp.process(ch0, numSamples);  heal(comp, ch0, numSamples); }
         if (!drive.isBypassed())
             { drive.process(ch0, numSamples); heal(drive, ch0, numSamples); }
+        // Mono front-of-amp modulation pedal: sits after the drive rack and before
+        // the amp split, so the modulated signal is shaped by the amp nonlinearity
+        // (unlike the post-cab stereo ModBlock). Placement is intentionally here
+        // ("real mod pedals before the amp"); to run mod BEFORE the drive instead,
+        // move this call above the drive.process() above — Robbie to confirm by ear.
+        if (!premod.isBypassed())
+            { premod.process(ch0, numSamples); heal(premod, ch0, numSamples); }
 
         // ---- split into the two voice buffers ----
         float *vA = mVoiceA.data();
@@ -289,7 +297,8 @@ public:
     // (max of the two voices, INCLUDING their align delays) + shared post.
     double latencySamples() const
     {
-        const double pre = gate.latencySamples() + comp.latencySamples() + drive.latencySamples();
+        const double pre = gate.latencySamples() + comp.latencySamples() + drive.latencySamples()
+                         + premod.latencySamples();
         const double LA = amp.latencySamples() + eq.latencySamples() + cab.latencySamples();
         const double LB = ampB.latencySamples() + eqB.latencySamples() + cabB.latencySamples();
         double voice = LA + mAlignA;
@@ -335,6 +344,7 @@ public:
     GateBlock gate; // shared pre
     CompBlock comp;
     DriveBlock drive; // 3-slot drive rack (shared, before split)
+    PreModBlock premod; // mono front-of-amp modulation pedal (after drive, before split)
     AmpBlock amp;   // Rig A
     EqBlock eq;
     CabBlock cab;
@@ -568,9 +578,9 @@ private:
         }
     }
 
-    std::array<MonoBlock *, 9> allMonoBlocks()
+    std::array<MonoBlock *, 10> allMonoBlocks()
     {
-        return {&gate, &comp, &drive, &amp, &eq, &cab, &ampB, &eqB, &cabB};
+        return {&gate, &comp, &drive, &premod, &amp, &eq, &cab, &ampB, &eqB, &cabB};
     }
 
     std::array<StereoBlock *, 3> stereoBlocks() { return {&mod, &delay, &reverb}; }

@@ -11,6 +11,7 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
       mGatePanel(p.apvts),
       mCompPanel(p.apvts),
       mDrivePanel(p.apvts),
+      mPremodPanel(p.apvts),
       mAmpPanel(p),
       mEqPanelA(p.apvts, 0),
       mEqPanelB(p.apvts, 1),
@@ -20,11 +21,11 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
       mDelayPanel(p.apvts),
       mReverbPanel(p.apvts),
       mCalPanel(p.apvts),
-      // One combined AMP panel fed by both lanes sits at BOTH amp indices (3 = AMP
-      // A, 5 = AMP B), like the single CAB panel — either tile reveals it. EQ stays
-      // per-rig at 4 / 6.
-      mPanels{&mGatePanel, &mCompPanel, &mDrivePanel, &mAmpPanel, &mEqPanelA, &mAmpPanel,
-              &mEqPanelB, &mCabPanel, &mMixPanel,
+      // PREMOD sits at index 3 (after DRIVE). One combined AMP panel fed by both
+      // lanes sits at BOTH amp indices (4 = AMP A, 6 = AMP B), like the single CAB
+      // panel — either tile reveals it. EQ stays per-rig at 5 / 7.
+      mPanels{&mGatePanel, &mCompPanel, &mDrivePanel, &mPremodPanel, &mAmpPanel, &mEqPanelA,
+              &mAmpPanel, &mEqPanelB, &mCabPanel, &mMixPanel,
               &mModPanel, &mDelayPanel, &mReverbPanel}
 {
     setLookAndFeel(&mLnf.get());
@@ -58,7 +59,7 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
     // --- Strip + panels ---
     mContent.addAndMakeVisible(mStrip);
     for (auto *panel : mPanels)
-        if (panel->getParentComponent() != &mContent) // mAmpPanel appears twice (idx 3+5)
+        if (panel->getParentComponent() != &mContent) // mAmpPanel appears twice (idx 4+6)
             mContent.addChildComponent(*panel);        // visibility driven by selection
 
     // Global input-calibration overlay, toggled from the Settings menu.
@@ -311,6 +312,7 @@ void NamRigEditor::timerCallback()
     mAmpPanel.refresh();
     mCabPanel.refresh();
     mDrivePanel.refresh();
+    mPremodPanel.refresh();
     mMixPanel.refresh(dt);
     mModPanel.refresh();
     mDelayPanel.refresh();
@@ -333,6 +335,7 @@ void NamRigEditor::timerCallback()
 
     mCompPanel.setBypassed(off("compOn"));
     mDrivePanel.setBypassed(off("driveOn"));
+    mPremodPanel.setBypassed(off("premodOn"));
     mAmpPanel.ampA().setBypassed(aOut || off("ampOnA"));
     mAmpPanel.ampB().setBypassed(bOut || off("ampOnB"));
     mEqPanelA.setBypassed(aOut || off("eqOn"));

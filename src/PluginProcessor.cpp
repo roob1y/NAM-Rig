@@ -218,6 +218,35 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::NormalisableRange<float>(2000.0f, 20000.0f, 10.0f, 0.5f), 20000.0f,
         juce::AudioParameterFloatAttributes().withLabel("Hz")));
 
+    // --- Pre-amp modulation pedal (mono, front-of-amp): rig/PreModBlock.h,
+    // premod_test.cpp. Sits after the drive rack and before the amp split, so it
+    // feeds the amp like a real stompbox — distinct from the post-cab stereo mod
+    // section below. Scaffold: Chorus voiced; other types voiced later. Type order
+    // must match PreModBlock::Type (Chorus, Phaser, Flanger, Tremolo, Uni-Vibe).
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("premodType", 1), "Pre Mod Type",
+        juce::StringArray{"Chorus", "Phaser", "Flanger", "Tremolo", "Uni-Vibe"}, 0));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("premodSync", 1), "Pre Mod Sync",
+        juce::StringArray{"Off", "1/1", "1/2", "1/4", "1/4.", "1/4T",
+                          "1/8", "1/8.", "1/8T", "1/16"},
+        0));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("premodRate", 1), "Pre Mod Rate",
+        juce::NormalisableRange<float>(0.03f, 20.0f, 0.01f, 0.35f), 0.8f, // capped per pedal in PreModBlock
+        juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("premodDepth", 1), "Pre Mod Depth",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("premodMix", 1), "Pre Mod Mix",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("premodFeedback", 1), "Pre Mod Feedback",
+        juce::NormalisableRange<float>(0.0f, 0.95f, 0.01f), 0.0f)); // reserved (phaser/flanger, voiced later)
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("premodOn", 1), "Pre Mod Enable", false)); // off by default (new block)
+
     // --- Modulation: 3-slot series section (rig/ModBlock.h; mod_test.cpp).
     // Per-slot bank (superset; the panel shows only each effect's real
     // controls). Slot 1 on by default = the old single-chorus default.
@@ -517,6 +546,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::StringArray{"Clean", "OTA", "Opto", "FET"}, 0));
     // Comp Character removed: the analog colour is now baked into each voicing
     // (CompBlock::Voicing::charAmt), so there is no user knob.
+    // Cali76-style Dry / parallel-compression blend: shown on the FET voicing only
+    // (CompBlock::dryBlendExposed). Appended last for automation stability; the
+    // default 0 (pure compressed) reproduces the original comp behaviour.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("compDry", 1), "Comp Dry",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
 
     // Reverb character + per-character voicing knobs (see rig/ReverbBlock.h).
     // Appended last for automation stability; default Hall + mod 0 reproduces the
@@ -887,6 +922,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.comp.setRatio(apvts.getRawParameterValue("compRatio")->load());
     mChain.comp.setReleaseMs(apvts.getRawParameterValue("compRelease")->load());
     mChain.comp.setMode((int)apvts.getRawParameterValue("compMode")->load());
+    mChain.comp.setDryBlend(apvts.getRawParameterValue("compDry")->load());
     mChain.comp.setBypassed(apvts.getRawParameterValue("compOn")->load() < 0.5f);
 
     // Drive rack (shared, before the split). Block is bypassed -> skipped
@@ -933,6 +969,18 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     }
     mChain.drive.setBypassed(apvts.getRawParameterValue("driveOn")->load() < 0.5f
                              || !mChain.drive.anyActive());
+
+    // Pre-amp modulation pedal (mono, front-of-amp). Sits between the drive rack
+    // and the amp split (see RigChain). BPM for tempo sync is set with the mod/
+    // delay blocks further down.
+    mChain.premod.setType((int)apvts.getRawParameterValue("premodType")->load());
+    mChain.premod.setSyncIndex((int)apvts.getRawParameterValue("premodSync")->load());
+    mChain.premod.setRateHz(apvts.getRawParameterValue("premodRate")->load());
+    mChain.premod.setDepth(apvts.getRawParameterValue("premodDepth")->load());
+    mChain.premod.setMix(apvts.getRawParameterValue("premodMix")->load());
+    mChain.premod.setFeedback(apvts.getRawParameterValue("premodFeedback")->load());
+    mChain.premod.setBypassed(apvts.getRawParameterValue("premodOn")->load() < 0.5f);
+
     // Graphic EQ band gains (Rig A; zero latency; chain bypass via eqOn is safe).
     {
         static const char *ids[] = {"eq62", "eq125", "eq250", "eq500",
@@ -1072,6 +1120,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
             {
                 mChain.delay.setBpm(*bpm);
                 mChain.mod.setBpm(*bpm);
+                mChain.premod.setBpm(*bpm);
             }
     const int delayChar = (int)apvts.getRawParameterValue("delayCharacter")->load();
     // Ping-pong + dual (independent L/R, via Sync R unlinked) are STEREO digital-delay

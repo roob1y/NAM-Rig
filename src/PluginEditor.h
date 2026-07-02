@@ -61,12 +61,13 @@ private:
     nam_rig::ui::HamburgerButton mMenuBtn;
 
     // --- Chain strip + per-block panels ---
-    // selectable: 0 gate, 1 comp, 2 drive, 3 ampA, 4 eqA, 5 ampB, 6 eqB,
-    //             7 cab (both), 8 mix, 9 mod, 10 delay, 11 reverb
+    // selectable: 0 gate, 1 comp, 2 drive, 3 premod, 4 ampA, 5 eqA, 6 ampB, 7 eqB,
+    //             8 cab (both), 9 mix, 10 mod, 11 delay, 12 reverb
     nam_rig::ui::BlockStrip mStrip;
     nam_rig::ui::GatePanel mGatePanel;
     nam_rig::ui::CompPanel mCompPanel;
     nam_rig::ui::DrivePanel mDrivePanel;
+    nam_rig::ui::PremodPanel mPremodPanel; // mono front-of-amp mod pedal
     nam_rig::ui::CombinedAmpPanel mAmpPanel; // both amps (A | B) in one panel
     nam_rig::ui::EqPanel mEqPanelA, mEqPanelB;
     nam_rig::ui::CombinedCabPanel mCabPanel; // both cabs (A | B) in one panel
@@ -78,7 +79,7 @@ private:
     nam_rig::ui::IrBrowser mIrBrowser;     // IR library overlay (opened from a cab)
     nam_rig::ui::AmpBrowser mAmpBrowser;   // amp-model library overlay (from an amp)
     nam_rig::ui::TunerOverlay mTunerPanel; // header tuner overlay
-    std::array<juce::Component *, 12> mPanels;
+    std::array<juce::Component *, 13> mPanels;
 
     void openIrBrowser(int rig);
     void openAmpBrowser(int rig);
