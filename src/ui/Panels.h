@@ -873,7 +873,7 @@ public:
         const std::pair<const char *, const char *> defs[] = {
             {"compSustain", "Sustain"}, {"compAttack", "Attack"},
             {"compRatio", "Ratio"},     {"compRelease", "Release"},
-            {"compLevel", "Level"},     {"compCharacter", "Character"}};
+            {"compLevel", "Level"}};
         for (const auto &[id, caption] : defs)
         {
             mKnobs.push_back(std::make_unique<LabeledKnob>(apvts, id, caption));

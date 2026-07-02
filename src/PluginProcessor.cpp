@@ -515,9 +515,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("compMode", 1), "Comp Mode",
         juce::StringArray{"Clean", "OTA", "Opto", "FET"}, 0));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("compCharacter", 1), "Comp Character",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.35f));
+    // Comp Character removed: the analog colour is now baked into each voicing
+    // (CompBlock::Voicing::charAmt), so there is no user knob.
 
     // Reverb character + per-character voicing knobs (see rig/ReverbBlock.h).
     // Appended last for automation stability; default Hall + mod 0 reproduces the
@@ -888,7 +887,6 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.comp.setRatio(apvts.getRawParameterValue("compRatio")->load());
     mChain.comp.setReleaseMs(apvts.getRawParameterValue("compRelease")->load());
     mChain.comp.setMode((int)apvts.getRawParameterValue("compMode")->load());
-    mChain.comp.setCharacter(apvts.getRawParameterValue("compCharacter")->load());
     mChain.comp.setBypassed(apvts.getRawParameterValue("compOn")->load() < 0.5f);
 
     // Drive rack (shared, before the split). Block is bypassed -> skipped

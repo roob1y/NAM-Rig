@@ -51,15 +51,15 @@ static double tailDb(const std::vector<float> &x)
     return 10.0 * std::log10(e / (double)n) + 3.0103; // RMS->peak of sine
 }
 
-// run a buffer through a chosen voicing (ratio/release at their defaults)
+// run a buffer through a chosen voicing (ratio/release at their defaults; the
+// analog colour is baked into each voicing now, there is no Character knob)
 static std::vector<float> runMode(int mode, float sustain, float attackMs,
-                                  float character, const std::vector<float> &in)
+                                  const std::vector<float> &in)
 {
     CompBlock c;
     c.setSustain(sustain);
     c.setAttackMs(attackMs);
     c.setMode(mode);
-    c.setCharacter(character);
     c.prepare({SR, BLK});
     auto x = in;
     run(c, x);
@@ -97,14 +97,17 @@ int main()
     const float T = CompBlock::thresholdForSustain(sustain);   // -27.5 dB
     (void)T;
 
-    // ---- T1a: instant makeup — a full-scale (0 dBFS) peak passes at unity ----
+    // ---- T1a: instant makeup — a nominal-level peak passes at unity ----
+    // Makeup is referenced to kMakeupRefDb (the nominal playing peak), so a signal
+    // at that level passes at unity (was 0 dBFS, which over-boosted real levels).
     {
         CompBlock c; c.setSustain(sustain); c.setAttackMs(1.0f);
         c.setRatio(CompBlock::kRatio); c.prepare({SR, BLK});
-        auto x = tone(0.0, 48000); run(c, x);
+        auto x = tone(CompBlock::kMakeupRefDb, 48000); run(c, x);
         double op = 0; for (size_t i = x.size() - 4800; i < x.size(); ++i) op = std::max(op, (double)std::abs(x[i]));
         const double outDb = 20.0 * std::log10(op);
-        CHECK(std::abs(outDb) < 0.6, "T1a full-scale peak passes at unity (%.2f dBFS, want ~0)", outDb);
+        CHECK(std::abs(outDb - CompBlock::kMakeupRefDb) < 0.6,
+              "T1a nominal-level peak passes at unity (%.2f dBFS, want ~%.1f)", outDb, CompBlock::kMakeupRefDb);
     }
 
     // ---- T1b: makeup is INSTANT — a function of the knobs, not program history ----
@@ -214,17 +217,17 @@ int main()
     // ---- T5: sub-threshold gain == computed makeup; Level trims on top ----
     {
         auto ref = tone(-40.0, 96000);
-        // sustain 0 -> threshold -10 dB, so -40 dB is well below: no GR. Output is
-        // just the constant makeup, which is exactly the curve's GR at 0 dBFS.
-        CompBlock c0; c0.setSustain(0.0f); c0.setLevelDb(0.0f);
+        // sustain 0.5 -> threshold -27.5 dB, so -40 dB is well below: no GR. Output
+        // is just the constant makeup = the curve's GR at the nominal level.
+        CompBlock c0; c0.setSustain(0.5f); c0.setLevelDb(0.0f);
         c0.setRatio(CompBlock::kRatio); c0.prepare({SR, BLK});
         auto x0 = ref; run(c0, x0);
-        const float T0 = CompBlock::thresholdForSustain(0.0f);
-        const double mk = -CompBlock::computeGainDb(0.0f, T0, CompBlock::kRatio, CompBlock::kKneeDb);
+        const float T0 = CompBlock::thresholdForSustain(0.5f);
+        const double mk = -CompBlock::computeGainDb(CompBlock::kMakeupRefDb, T0, CompBlock::kRatio, CompBlock::kKneeDb);
         const double u = tailDb(x0) - tailDb(ref);
         CHECK(std::abs(u - mk) < 0.3, "T5a sub-threshold gain == computed makeup %.1f dB (got %.2f)", mk, u);
 
-        CompBlock c6; c6.setSustain(0.0f); c6.setLevelDb(6.0f);
+        CompBlock c6; c6.setSustain(0.5f); c6.setLevelDb(6.0f);
         c6.setRatio(CompBlock::kRatio); c6.prepare({SR, BLK});
         auto x6 = ref; run(c6, x6);
         const double d = tailDb(x6) - tailDb(x0); // relative to Level 0
@@ -276,8 +279,8 @@ int main()
             const double amp = (i < 24000) ? 0.01 : 0.5623; // -40 -> -5 dB step
             x[i] = (float)(amp * std::sin(2.0 * M_PI * 1000.0 * (double)i / SR));
         }
-        auto clean = runMode(0, 0.5f, 10.0f, 0.0f, x);
-        auto fet = runMode(3, 0.5f, 10.0f, 0.0f, x);
+        auto clean = runMode(0, 0.5f, 10.0f, x);
+        auto fet = runMode(3, 0.5f, 10.0f, x);
         // bloom = early overshoot (~6 ms in) minus settled (200 ms in)
         const double cleanBloom = envWin(clean, 24000 + 300, 120) - envWin(clean, 24000 + 9600, 480);
         const double fetBloom = envWin(fet, 24000 + 300, 120) - envWin(fet, 24000 + 9600, 480);
@@ -310,8 +313,8 @@ int main()
     // ---- T10: FET adds harmonic grit a clean VCA does not ----
     {
         auto x = tone(-5.0, 48000); // above threshold -> compressing + driven
-        auto clean = runMode(0, 0.7f, 5.0f, 0.8f, x);
-        auto fet = runMode(3, 0.7f, 5.0f, 0.8f, x);
+        auto clean = runMode(0, 0.7f, 5.0f, x);
+        auto fet = runMode(3, 0.7f, 5.0f, x);
         auto thd = [&](const std::vector<float> &y) {
             const double f1 = goertzel(y, 24000, 24000, 1000.0);
             const double h2 = goertzel(y, 24000, 24000, 2000.0);
@@ -323,27 +326,11 @@ int main()
               "T10 FET adds harmonics: THD FET %.4f vs Clean %.4f", fThd, cThd);
     }
 
-    // ---- T11: Character knob scales the analog colour (0 = clean) ----
-    {
-        auto x = tone(-5.0, 48000);
-        auto fet0 = runMode(3, 0.7f, 5.0f, 0.0f, x); // colour off
-        auto fet1 = runMode(3, 0.7f, 5.0f, 0.8f, x); // colour up
-        auto thd = [&](const std::vector<float> &y) {
-            const double f1 = goertzel(y, 24000, 24000, 1000.0);
-            const double h2 = goertzel(y, 24000, 24000, 2000.0);
-            const double h3 = goertzel(y, 24000, 24000, 3000.0);
-            return (h2 + h3) / (f1 + 1.0e-12);
-        };
-        const double t0 = thd(fet0), t1 = thd(fet1);
-        CHECK(t0 < 0.01 && t1 > t0 * 3.0,
-              "T11 Character scales colour: THD char0 %.4f -> char0.8 %.4f", t0, t1);
-    }
-
     // ---- T12: voicing harmonic signature (Opto even-forward vs OTA odd-forward) ----
     {
         auto x = tone(-8.0, 48000);
-        auto ota = runMode(1, 0.7f, 8.0f, 0.9f, x);
-        auto opto = runMode(2, 0.7f, 8.0f, 0.9f, x);
+        auto ota = runMode(1, 0.7f, 8.0f, x);
+        auto opto = runMode(2, 0.7f, 8.0f, x);
         auto h2over3 = [&](const std::vector<float> &y) {
             const double h2 = goertzel(y, 24000, 24000, 2000.0);
             const double h3 = goertzel(y, 24000, 24000, 3000.0);
@@ -384,8 +371,8 @@ int main()
     {
         auto hot = tone(-3.0, 48000);
         auto soft = tone(-24.0, 48000);
-        auto oHot = runMode(1, 0.6f, 8.0f, 0.9f, hot);
-        auto oSoft = runMode(1, 0.6f, 8.0f, 0.9f, soft);
+        auto oHot = runMode(1, 0.6f, 8.0f, hot);
+        auto oSoft = runMode(1, 0.6f, 8.0f, soft);
         auto thd = [&](const std::vector<float> &y) {
             const double f1 = goertzel(y, 24000, 24000, 1000.0);
             const double h2 = goertzel(y, 24000, 24000, 2000.0);
@@ -397,21 +384,21 @@ int main()
               "T14 OTA grit tracks input level: THD hot %.4f > soft %.4f", tHot, tSoft);
     }
 
-    // ---- T15: OTA gain cell is odd-forward and Character-scaled (0 = clean) ----
-    // The CA3080 tanh + control ripple both generate odd harmonics; at Character 0
-    // the cell is bypassed (clean), and turning it up adds 3rd-harmonic grit.
+    // ---- T15: OTA's baked gain cell adds odd grit a clean VCA does not ----
+    // Character is baked in now (no knob): the OTA cell is always on and generates
+    // 3rd-harmonic grit; Clean stays transparent.
     {
         auto x = tone(-6.0, 48000);
-        auto ota0 = runMode(1, 0.6f, 8.0f, 0.0f, x); // cell off
-        auto ota1 = runMode(1, 0.6f, 8.0f, 0.9f, x); // cell up
+        auto ota = runMode(1, 0.6f, 8.0f, x);
+        auto clean = runMode(0, 0.6f, 8.0f, x);
         auto h3rat = [&](const std::vector<float> &y) {
             const double f1 = goertzel(y, 24000, 24000, 1000.0);
             const double h3 = goertzel(y, 24000, 24000, 3000.0);
             return h3 / (f1 + 1.0e-12);
         };
-        const double r0 = h3rat(ota0), r1 = h3rat(ota1);
-        CHECK(r0 < 0.01 && r1 > r0 * 3.0,
-              "T15 OTA odd grit scales with Character: h3/f1 char0 %.4f -> char0.9 %.4f", r0, r1);
+        const double rOta = h3rat(ota), rClean = h3rat(clean);
+        CHECK(rOta > 0.01 && rOta > rClean * 5.0,
+              "T15 OTA baked cell adds odd grit: h3/f1 OTA %.4f vs Clean %.4f", rOta, rClean);
     }
 
     std::printf("\n%s (%d failure%s)\n", gFails ? "RESULT: FAIL" : "RESULT: ALL PASS", gFails, gFails == 1 ? "" : "s");

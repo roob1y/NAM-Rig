@@ -3,8 +3,9 @@
 //
 // Scoped (June 2026) as the "front of amp" tool guitarists actually use:
 // a Sustain knob + INSTANT AUTO-MAKEUP (computed from the knobs, not the signal,
-// so it never drifts): a full-scale peak passes at unity with the Level knob at
-// 0 dB. Ratio (Clean/FET) and Release (Clean/FET/Opto) knobs are
+// so it never drifts): a signal at the nominal playing level (kMakeupRefDb) passes
+// at unity with the Level knob at 0 dB. Analog colour is baked in per voicing (no
+// Character knob). Ratio (Clean/FET) and Release (Clean/FET/Opto) knobs are
 // exposed on the voicings whose hardware has them; see ratioExposed/releaseExposed.
 //
 // FOUR VOICINGS (compMode), each reinterpreting the same four knobs:
@@ -28,7 +29,7 @@
 //   detector(peak|RMS, optional sidechain HPF) -> dB -> soft-knee gain computer
 //   -> attack / program-dependent release smoother on the GR signal
 //   -> apply gain reduction -> INSTANT AUTO-MAKEUP (a constant gain from the
-//      curve: adds back the GR at 0 dBFS) -> Level trim -> voicing colour.
+//      curve: adds back the GR at kMakeupRefDb) -> Level trim -> voicing colour.
 //
 // Latency: zero (chain-bypass via compOn is safe). Verified by tests/comp_test.cpp.
 
@@ -64,12 +65,17 @@ public:
     void setRatio(float v) { mRatio.store(v); }         // ratio knob (ratioExposed)
     void setLevelDb(float v) { mLevelDb.store(v); }     // -12..+12 dB trim on top of auto-makeup
     void setMode(int m) { mMode.store(m); }                // 0..3 (see Mode)
-    void setCharacter(float v01) { mCharacter.store(v01); } // 0..1 analog colour amount
 
     // Clean ("pedal") character constants — also the back-compat curve defaults.
     static constexpr float kRatio = 6.0f;
     static constexpr float kKneeDb = 6.0f;
     static constexpr float kReleaseMs = 150.0f;
+
+    // Auto-makeup is referenced to this nominal playing peak (calibrated dBFS):
+    // a signal at this level passes at unity, so normal playing stays ~unity and
+    // only sustain lifts the quieter tails. (Was 0 dBFS, which over-boosted every
+    // realistic level since guitar peaks sit well below full scale.)
+    static constexpr float kMakeupRefDb = -15.0f;
 
     // Release model references.
     static constexpr float kRelRefDb = 6.0f;   // GR at which release hits relFast
@@ -88,6 +94,8 @@ public:
         float iron;                          // transformer saturation (0 = none)
         float ripple; // OTA control-ripple depth (0 = off): detector ripple that
                       // amplitude-modulates the gain -> odd-harmonic Dyna grit
+        float charAmt; // baked-in analog colour amount (replaces the old Character
+                       // knob): each voicing's authentic, always-on colour depth
     };
 
     static Voicing voicingFor(Mode m)
@@ -99,17 +107,17 @@ public:
                         // driveAsym = small even bias; driveTrack unused (input drives
                         // the grit now); ripple = detector-ripple IMD depth.
             return {10.0f, 10.0f, 0.50f, false, 120.0f, 0.70f, 1.0f,
-                    80.0f, 400.0f, 0.6f, 1.20f, 0.02f, 0.00f, 0.00f, 0.50f};
+                    80.0f, 400.0f, 0.6f, 1.20f, 0.02f, 0.00f, 0.00f, 0.50f, 0.85f};
         case Mode::Opto: // optical + tube: even-forward warmth, gentle iron
             return {3.5f, 12.0f, 0.60f, true, 0.0f, 1.60f, 8.0f,
-                    120.0f, 900.0f, 1.0f, 0.10f, 0.45f, 0.00f, 0.40f, 0.00f};
+                    120.0f, 900.0f, 1.0f, 0.10f, 0.45f, 0.00f, 0.40f, 0.00f, 0.35f};
         case Mode::FET: // 1176: odd+even grit, strong transformer iron
             return {12.0f, 3.0f, 0.45f, false, 60.0f, 0.25f, 0.2f,
-                    50.0f, 250.0f, 0.4f, 0.22f, 0.15f, 0.60f, 0.70f, 0.00f};
+                    50.0f, 250.0f, 0.4f, 0.22f, 0.15f, 0.60f, 0.70f, 0.00f, 0.35f};
         case Mode::Clean: // transparent VCA: no colour
         default:
             return {kRatio, kKneeDb, 0.60f, false, 0.0f, 1.0f, 1.0f,
-                    kReleaseMs, kReleaseMs, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+                    kReleaseMs, kReleaseMs, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
         }
     }
 
@@ -188,12 +196,13 @@ public:
         const float relFastMs = v.relFastMs * relScale;
         const float relSlowMs = v.relSlowMs * relScale;
 
-        // Instant auto-makeup: a CONSTANT gain (per block) that adds back exactly
-        // the gain reduction the static curve applies at full scale (0 dBFS), so a
-        // 0 dBFS peak passes at unity and everything below is lifted the same way.
-        // It is a function of the knobs only (threshold + ratio + knee), NOT the
-        // signal, so it never drifts while you play. Level trims on top. No boost.
-        const float makeupDb = -computeGainDb(0.0f, t, ratio, v.kneeDb);
+        // Instant auto-makeup: a CONSTANT gain (per block) that adds back the gain
+        // reduction the static curve applies at the nominal playing level
+        // (kMakeupRefDb), so a signal at that level passes at unity and only the
+        // quieter tails are lifted. It is a function of the knobs only (threshold +
+        // ratio + knee), NOT the signal, so it never drifts while you play. Level
+        // trims on top.
+        const float makeupDb = -computeGainDb(kMakeupRefDb, t, ratio, v.kneeDb);
         const float outLin = std::pow(10.0f, (makeupDb + mLevelDb.load()) * 0.05f);
 
         const float attMs = std::max(v.attackFloorMs, mAttackMs.load() * v.attackScale);
@@ -208,7 +217,7 @@ public:
         const bool useRms = v.useRms;
         const float rmsCoef = coefForMs(5.0f, sr);
 
-        const float ch = mCharacter.load();             // analog colour amount
+        const float ch = v.charAmt;                     // baked-in colour (knob removed)
         const float ironCoef = coefForHz(400.0, sr);    // transformer low-band corner
 
         // ---- OTA (CA3080) gain-cell precompute -------------------------------
@@ -377,7 +386,6 @@ private:
     std::atomic<float> mRatio{4.0f};       // ratio knob (Clean/FET)
     std::atomic<float> mLevelDb{0.0f};
     std::atomic<int> mMode{0};          // Clean
-    std::atomic<float> mCharacter{0.0f}; // analog colour amount (param-driven)
 
     float mGrDb = 0.0f;
     float mRelMem = 0.0f;  // slow follower of GR (duration memory)
