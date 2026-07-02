@@ -79,7 +79,7 @@ private:
         mFiles.clearQuick();
         if (mFolder.isDirectory())
         {
-            for (auto &f : mFolder.findChildFiles(juce::File::findFiles, false))
+            for (auto &f : mFolder.findChildFiles(juce::File::findFiles | juce::File::ignoreHiddenFiles, false))
             {
                 if (!extensions.contains(f.getFileExtension().toLowerCase())) continue;
                 if (mSearch.isNotEmpty() && !f.getFileName().containsIgnoreCase(mSearch)) continue;

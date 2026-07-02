@@ -97,10 +97,26 @@ private:
         bool isRoot;
         FolderItem(juce::File d, SortableFolderTree &o, bool root) : dir(std::move(d)), owner(o), isRoot(root) {}
 
+        // A real folder we want to show: a directory, not hidden, and not an
+        // archive "compressed folder" (.zip/.rar/... which the OS presents like a
+        // folder but we can't browse into).
+        static bool isArchive(const juce::File &f)
+        {
+            const auto e = f.getFileExtension().toLowerCase();
+            return e == ".zip" || e == ".rar" || e == ".7z" || e == ".tar"
+                || e == ".gz" || e == ".tgz" || e == ".bz2" || e == ".xz";
+        }
+        static bool showable(const juce::File &f)
+        {
+            return f.isDirectory() && !f.isHidden() && !isArchive(f);
+        }
+
         bool mightContainSubItems() override
         {
             if (isRoot) return true;
-            return dir.getNumberOfChildFiles(juce::File::findDirectories) > 0;
+            for (auto &s : dir.findChildFiles(juce::File::findDirectories | juce::File::ignoreHiddenFiles, false))
+                if (showable(s)) return true;
+            return false;
         }
         juce::String getUniqueName() const override { return dir.getFullPathName(); }
 
@@ -108,7 +124,9 @@ private:
         {
             if (nowOpen && getNumSubItems() == 0)
             {
-                auto subs = dir.findChildFiles(juce::File::findDirectories, false);
+                juce::Array<juce::File> subs;
+                for (auto &s : dir.findChildFiles(juce::File::findDirectories | juce::File::ignoreHiddenFiles, false))
+                    if (showable(s)) subs.add(s);
                 owner.sortFolders(subs);
                 for (auto &s : subs) addSubItem(new FolderItem(s, owner, false));
             }
