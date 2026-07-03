@@ -475,7 +475,7 @@ private:
     float mWhammyRatio = 1.0f;         // slewed shift ratio
     float mWhammyWet = 0.0f;           // smoothed dry/wet blend (anti-crackle)
     IoStage mIoGrain;
-    static constexpr double kGritG = 2.5, kGritB = 0.15; // germanium grit (curvature/bias)
+    static constexpr double kGritG = 1.2, kGritB = 0.06; // gentle germanium warmth (was too nasty at 2.5)
     double mGritX1 = 0.0;
     // Octavia octave-up fuzz
     Biquad mPreRectLp, mAcHp;

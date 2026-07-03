@@ -1045,7 +1045,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         mChain.pitch.setDirect(pp("pitchDirect"));  // Direct
         mChain.pitch.setOct1(pp("pitchOct1"));      // Oct 1 (x0.5)
         mChain.pitch.setOct2(pp("pitchOct2"));      // Oct 2 (x0.25)
-        mChain.pitch.setTightness(0.6f);            // sub tone: pinned (OC-2 has no tone knob)
+        mChain.pitch.setTightness(0.45f);           // sub tone: pinned darker/rounder (OC-2 has no tone knob)
     }
     else if (pitchModel == 1) // Micro POG: clean poly Dry/Sub/Octave
     {
