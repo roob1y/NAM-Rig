@@ -72,6 +72,8 @@ public:
         mPolyUp2.prepare(mSampleRate); mPolyUp2.setRatio(4.0f);
         mPolyLatency = mPolyD1.latency();
         mDry.assign((size_t)std::max(1, mPolyLatency), 0.0f);
+        mChorusBuf.assign((size_t)kChorusSize, 0.0f);
+        mChorusBase = (float)(mSampleRate * 0.008); // ~8 ms base delay
         // Grain (tracked granular)
         mTracker.prepare(mSampleRate);
         mGrD1.prepare(mSampleRate); mGrD2.prepare(mSampleRate); mGrUp.prepare(mSampleRate);
@@ -92,10 +94,11 @@ public:
         mPogFilter.prepare(mSampleRate);
         // Octavia octave-up fuzz: band-limit before the rectifier + AC-couple after,
         // wrapped in a low-Z fuzz input (pickup loading, delta vs the ~1 MΩ capture).
-        mPreRectLp = Biquad::lowpass(mSampleRate, 4000.0);
+        // Kept BRIGHT + not over-loaded so it screams rather than sounding starved.
+        mPreRectLp = Biquad::lowpass(mSampleRate, 6000.0);
         mAcHp = Biquad::highpass1(mSampleRate, 25.0);
         mIoFuzz.prepare(mSampleRate);
-        mIoFuzz.setLoaded(14.0f, 2500.0f, -6.0f, -1.0f, 20.0f, 0.0f);
+        mIoFuzz.setLoaded(14.0f, 2800.0f, -3.0f, 0.0f, 20.0f, 0.0f);
         reset();
         mPrepared = true;
     }
@@ -103,7 +106,8 @@ public:
     void reset() override
     {
         mPolyD1.reset(); mPolyD2.reset(); mPolyUp.reset(); mPolyUp2.reset();
-        mDetPhase = 0.0f;
+        std::fill(mChorusBuf.begin(), mChorusBuf.end(), 0.0f);
+        mChorusPos = 0; mChorusPhase = 0.0f;
         mTracker.reset(); mGrD1.reset(); mGrD2.reset(); mGrUp.reset();
         mToneLpDn.reset(); mToneLpUp.reset();
         mIoGrain.reset(); mGritX1 = 0.0;
@@ -194,15 +198,16 @@ private:
         const float lU2 = mUp2.load();    // +2 (x4)
         const bool rD2 = lD2 > 1.0e-4f, rU2 = lU2 > 1.0e-4f;
 
-        // Upper-octave detune: one slow LFO whose depth AND rate rise together (POG2).
+        // Exact clean octaves; DETUNE is a modulated-delay CHORUS on the upper
+        // voices (a phase vocoder can't cleanly do a sub-semitone shift — its
+        // integer-bin mapping quantizes it away — so the beating/thickening is done
+        // with a chorus, which is what POG detune sounds like). Depth+rate couple.
+        mPolyUp.setRatio(2.0f);
+        mPolyUp2.setRatio(4.0f);
         const float det = mDetune.load();
-        const float depth = det * 0.012f;              // up to ~+/-20 cents
-        const float rate = 0.3f + det * 4.0f;          // ~0.3 .. 4.3 Hz
-        mDetPhase += rate * (float)numSamples / (float)mSampleRate;
-        mDetPhase -= std::floor(mDetPhase);
-        const float mod = std::sin(6.28318530718f * mDetPhase) * depth;
-        mPolyUp.setRatio(2.0f * (1.0f + mod));
-        mPolyUp2.setRatio(4.0f * (1.0f + mod));
+        const bool detOn = det > 1.0e-4f;
+        const float chDepth = det * (float)(mSampleRate * 0.004); // up to ~4 ms sweep
+        const float chRate = 0.3f + det * 3.0f;                   // ~0.3 .. 3.3 Hz
 
         float *w1 = mWork1.data(), *w2 = mWork2.data(), *w3 = mWork3.data(), *w4 = mWork4.data();
         std::copy(mono, mono + numSamples, w1); mPolyD1.process(w1, numSamples);   // x0.5
@@ -223,9 +228,11 @@ private:
             const float dry = pushDry(mono[i]);
             const float pres = (std::abs(dry) > 1.0e-3f) ? 1.0f : 0.0f;
             att += (pres > att ? attCoef : relCoef) * (pres - att);
-            float voices = lD1 * w1[i] + lU1 * w2[i];
+            float up = lU1 * w2[i];
+            if (rU2) up += lU2 * w4[i];
+            if (detOn) up = detuneChorus(up, chDepth, chRate);
+            float voices = lD1 * w1[i] + up;
             if (rD2) voices += lD2 * w3[i];
-            if (rU2) voices += lU2 * w4[i];
             const float wet = mPogFilter.tick(voices).lp;
             mono[i] = dryLvl * dry + wet * att;
         }
@@ -339,6 +346,23 @@ private:
         if (++mDryPos >= (int)mDry.size()) mDryPos = 0;
         return d;
     }
+
+    // POG2 detune: mix the up-octave with a slowly-modulated delayed copy of itself
+    // (a chorus) -> beating/thickening. depth (samples) + rate (Hz) couple off Detune.
+    inline float detuneChorus(float x, float depth, float rate)
+    {
+        mChorusBuf[(size_t)mChorusPos] = x;
+        mChorusPhase += rate / (float)mSampleRate;
+        mChorusPhase -= std::floor(mChorusPhase);
+        const float lfo = 0.5f * (1.0f - std::cos(6.28318530718f * mChorusPhase)); // 0..1
+        const float rp = (float)mChorusPos - (mChorusBase + depth * lfo);
+        const int i0 = (int)std::floor(rp);
+        const float f = rp - (float)i0;
+        const float a = mChorusBuf[(size_t)(i0 & kChorusMask)];
+        const float b = mChorusBuf[(size_t)((i0 + 1) & kChorusMask)];
+        mChorusPos = (mChorusPos + 1) & kChorusMask;
+        return 0.5f * x + 0.5f * (a + f * (b - a));
+    }
     void updateTone(Biquad &f, float &last, float hz)
     {
         if (std::abs(hz - last) > 1.0f) { f.copyCoeffsFrom(Biquad::lowpass(mSampleRate, hz)); last = hz; }
@@ -376,7 +400,11 @@ private:
     // Poly engine
     SpectralShifter mPolyD1, mPolyD2, mPolyUp, mPolyUp2;
     Svf mPogFilter;
-    float mPogAtt = 0.0f, mDetPhase = 0.0f;
+    float mPogAtt = 0.0f;
+    static constexpr int kChorusSize = 2048, kChorusMask = kChorusSize - 1;
+    std::vector<float> mChorusBuf;
+    int mChorusPos = 0;
+    float mChorusPhase = 0.0f, mChorusBase = 384.0f; // ~8 ms base delay @48k
     std::vector<float> mDry;
     int mDryPos = 0, mPolyLatency = 768;
     // Grain engine

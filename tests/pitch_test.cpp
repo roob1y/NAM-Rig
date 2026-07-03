@@ -291,6 +291,29 @@ int main()
         CHECK(fin && pk <= 1.02f, "T16 output limiter bounds stacked voices (pk=%.3f)", pk);
     }
 
+    { // T17: POG2 detune (chorus) audibly changes the up voice vs detune=0 (a real
+      // thickening, not the no-op the ratio-LFO was), and stays finite/bounded.
+        auto render = [](float detune){
+            PitchBlock b; b.prepare({SR, BLK});
+            b.setType(PitchBlock::kPog);
+            b.setDirect(0.0f); b.setOct1(0.0f); b.setOct2(0.0f); b.setUp2(0.0f);
+            b.setOctave(1.0f); b.setFilter(1.0f); b.setDetune(detune);
+            std::vector<float> x = tone(220.0, 0.3, (int)(SR * 1.0));
+            run(b, x);
+            return x;
+        };
+        std::vector<float> a = render(0.0f), c = render(1.0f);
+        double num = 0, den = 0; bool fin = true; float pk = 0;
+        for (size_t i = a.size() / 2; i < a.size(); ++i)
+        {
+            const double d = (double)c[i] - a[i]; num += d * d; den += (double)a[i] * a[i];
+            pk = std::max(pk, std::abs(c[i])); if (!std::isfinite(c[i])) fin = false;
+        }
+        const double rel = std::sqrt(num / std::max(1e-12, den));
+        CHECK(fin && pk < 20.0f, "T17 detune finite/bounded (pk=%.2f)", pk);
+        CHECK(rel > 0.1, "T17 detune changes the up voice (rel diff %.2f)", rel);
+    }
+
     std::printf("=== %s (%d fail) ===\n", gFails ? "FAILURES" : "ALL PASS", gFails);
     return gFails ? 1 : 0;
 }

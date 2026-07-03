@@ -1063,8 +1063,8 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         mChain.pitch.setType(nam_rig::PitchBlock::kOctavia);
         mChain.pitch.setFuzz(pp("pitchFuzz"));     // Boost (drive)
         mChain.pitch.setVolume(pp("pitchVol"));    // Volume
-        mChain.pitch.setTone(0.6f);                // tone: pinned (original Octavia has no tone)
-        mChain.pitch.setOctave(1.0f);              // full octave (defeat blend pinned)
+        mChain.pitch.setTone(0.7f);                // tone: pinned (original Octavia has no tone)
+        mChain.pitch.setOctave(0.65f);             // mostly octave + some fuzz body (not thin/starved)
     }
     const bool pitchOn = pp("pitchOn") >= 0.5f;
     mChain.pitch.setBypassed(!pitchOn);
