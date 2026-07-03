@@ -87,6 +87,11 @@ public:
         // (coupling HPs + gentle top smoothing). POLY stays transparent.
         mIoGrain.prepare(mSampleRate);
         mIoGrain.setBuffered(7.0f, 1.6f, 12000.0f, 0.0f);
+        // OC-2 classic divider filters: detection band-limit + sub output smoothing.
+        mDetLp1 = Biquad::lowpass(mSampleRate, kDetLpHz);
+        mDetLp2 = Biquad::lowpass(mSampleRate, kDetLpHz);
+        mOctLp1 = Biquad::lowpass(mSampleRate, kOctLpHz);
+        mOctLp2 = Biquad::lowpass(mSampleRate, kOctLpHz);
         // shared
         const int mb = std::max(1, ctx.maxBlockSize);
         mWork1.assign((size_t)mb, 0.0f);
@@ -116,7 +121,10 @@ public:
         mTracker.reset(); mGrD1.reset(); mGrD2.reset(); mGrUp.reset();
         mWhammy.reset(); mWhammyPoly.reset(); mWhammyRatio = 1.0f; mWhammyWet = 0.0f;
         mToneLpDn.reset(); mToneLpUp.reset();
-        mIoGrain.reset(); mGritX1 = 0.0;
+        mIoGrain.reset();
+        mDetLp1.reset(); mDetLp2.reset(); mOctLp1.reset(); mOctLp2.reset();
+        mDetPeak = 0.0f; mGate = 0.0f; mDPrev = 0.0f; mArmed = false;
+        mFf1 = false; mFf2 = false; mEdgeSamples = 0; mLastPeriod = 0;
         mPogFilter.reset(); mPogAtt = 0.0f;
         mPreRectLp.reset(); mAcHp.reset(); mIoFuzz.reset();
         mFuzzU1 = mFuzzU2 = mRectR1 = mRectR2 = 0.0;
@@ -132,7 +140,8 @@ public:
         const int type = mType.load();
         if (type == kOctavia) return 0.0;                        // fuzz = zero latency
         if (type == kWhammy) return mWhammyPolyMode.load() ? (double)mPolyLatency : 0.0; // Chords vs Classic
-        // OC-2 (down) and the POGs now use the phase-vocoder subs -> STFT latency.
+        if (type == kOctDown && mEngine.load() == kGrain) return 0.0; // OC-2 classic divider = 0 latency
+        // POGs (and the clean phase-vocoder down/up) use the STFT subs -> STFT latency.
         return (double)mPolyLatency;
     }
 
@@ -143,12 +152,9 @@ public:
         if (type == kWhammy)   whammy(mono, numSamples);        // continuous pitch bend
         else if (type == kOctavia)  octavia(mono, numSamples);  // octave-up fuzz
         else if (type == kPog) polyPog(mono, numSamples);       // full octaver, poly only
-        else
-        {
-            const bool up = (type == kOctUp);
-            if (mEngine.load() == kPoly) { up ? polyUp(mono, numSamples)  : polyDown(mono, numSamples); }
-            else                         { up ? grainUp(mono, numSamples) : grainDown(mono, numSamples); }
-        }
+        else if (type == kOctUp)   polyUp(mono, numSamples);   // clean +1 octave (phase vocoder)
+        else if (mEngine.load() == kGrain) grainDown(mono, numSamples); // OC-2 classic divider (0 latency)
+        else                       polyDown(mono, numSamples); // clean sub (phase vocoder)
         // Foolproof output guard: transparent below ~0.9, soft-limits peaks so
         // stacking Direct + several octave voices can never hard-clip the amp input.
         for (int i = 0; i < numSamples; ++i) mono[i] = softLimit(mono[i]);
@@ -339,61 +345,61 @@ private:
         mTrackedHz.store(0.0f);
     }
 
-    // ---------- GRAIN (tracked granular) : character, mono, zero latency ----------
-    // OC-2 sub: CLEAN phase-vocoder shift (no granular warble) + a subtle SILICON
-    // edge (OC-2 uses silicon, not germanium) + Boss buffered I/O. The granular
-    // engine only added warble, so the sub is now the phase vocoder (like the POGs).
-    // Trades OC-2's zero latency for the STFT latency, but tracks cleanly.
+    // ---------- OC-2 : the CLASSIC analog divider (frequency division), 0 latency ----------
+    // The real OC-2 is NOT a pitch shifter — it low-passes the note to a near-sine,
+    // squares it (peak-hold comparator, stable as the note decays), divides with
+    // flip-flops (÷2 = OCT1, ÷4 = OCT2), and reconstructs the sub-octave by
+    // sign-flipping a SILICON half-wave-rectified copy of the note every cycle -> a
+    // smooth sub that carries the note's own timbre, zero latency, phase-locked
+    // (no warble on single notes; glitches on chords by nature, like the real one).
+    // The MPM tracker only DEBOUNCES the comparator (rejects harmonic double-triggers);
+    // it never delays the audio. Flip at the carrier's zero-crossing = declick.
     void grainDown(float *mono, int numSamples)
     {
         const float direct = mDirect.load(), l1 = mOct1.load(), l2 = mOct2.load();
-        const bool run2 = l2 > 1.0e-4f;
-        mIoGrain.processIn(mono, numSamples); // Boss buffered front-end
-        float *w1 = mWork1.data(), *w2 = mWork2.data();
-        std::copy(mono, mono + numSamples, w1); mPolyD1.process(w1, numSamples);              // x0.5
-        if (run2) { std::copy(mono, mono + numSamples, w2); mPolyD2.process(w2, numSamples); } // x0.25
-        updateTone(mToneLpDn, mLastToneDnHz, 500.0f * std::pow(2.0f, mToneDn.load() * 4.0f));
-        double gx1 = mGritX1;
-        for (int i = 0; i < numSamples; ++i)
-        {
-            const float dry = pushDry(mono[i]); // delayed to match the STFT subs
-            const double raw = (double)(l1 * w1[i] + (run2 ? l2 * w2[i] : 0.0f));
-            const float grit = (float)sat::tanhADAA1(raw, gx1, kGritG, kGritB); // subtle silicon edge
-            gx1 = raw;
-            const float sub = mToneLpDn.processSample(grit);
-            mono[i] = direct * dry + sub;
-        }
-        mGritX1 = gx1;
-        mIoGrain.processOut(mono, numSamples); // Boss buffered back-end
-        mTrackedHz.store(0.0f);
-    }
-
-    void grainUp(float *mono, int numSamples)
-    {
-        const float dryLvl = mDryUp.load(), upLvl = mOctUp.load(), vol = mVolume.load();
-        mIoGrain.processIn(mono, numSamples);
-        mTracker.process(mono, numSamples);
+        mIoGrain.processIn(mono, numSamples);                 // Boss buffered front-end
+        mTracker.process(mono, numSamples);                   // debounce reference (no audio delay)
         const bool voiced = mTracker.voiced();
         const float t0 = mTracker.periodSamples();
-        if (voiced && t0 > 4.0f) mLastW = 2.0f * t0;
-        const float wT = mLastW, ws = mWSmooth;
+        const long trackerGap = (voiced && t0 > 1.0f) ? (long)(0.6f * t0) : 0;
         const float clarTarget = voiced ? 1.0f : 0.0f;
+        const float peakDecay = coefForMs(180.0f, mSampleRate);
+        const float gAtt = coefForMs(3.0f, mSampleRate), gRel = coefForMs(120.0f, mSampleRate);
         const float clarCoef = coefForMs(35.0f, mSampleRate);
-        updateTone(mToneLpUp, mLastToneUpHz, 800.0f * std::pow(2.0f, mToneUp.load() * 3.3f));
-        float clarG = mClarityGate; double gx1 = mGritX1;
+
+        float peak = mDetPeak, gate = mGate, dPrev = mDPrev, clarG = mClarityGate;
+        bool armed = mArmed, f1 = mFf1, f2 = mFf2;
+        long edge = mEdgeSamples, lastPeriod = mLastPeriod;
         for (int i = 0; i < numSamples; ++i)
         {
             const float x = mono[i];
+            const float d = mDetLp2.processSample(mDetLp1.processSample(x)); // near-sine carrier
+            const float ad = std::abs(d);
+            peak = (ad > peak) ? ad : peak - (peak - ad) * peakDecay;        // peak-hold "AGC" ref
+            const bool live = peak > kGateFloor;
+            const float gTgt = live ? 1.0f : 0.0f;
+            gate += (gTgt > gate ? gAtt : gRel) * (gTgt - gate);
             clarG += clarCoef * (clarTarget - clarG);
-            const double raw = (double)mGrUp.process(x, wT, 2.0f, ws);
-            const float grit = (float)sat::tanhADAA1(raw, gx1, kGritG, kGritB);
-            gx1 = raw;
-            const float u = mToneLpUp.processSample(grit);
-            mono[i] = vol * (dryLvl * x + upLvl * u * clarG);
+            const long refractory = std::max(trackerGap, (long)(0.5f * (float)lastPeriod));
+            const float hyst = 0.05f * peak;
+            if (d < -hyst) armed = true;
+            ++edge;
+            if (live && armed && dPrev <= 0.0f && d > 0.0f && edge >= refractory)
+            {
+                const bool prev1 = f1; f1 = !f1; if (f1 && !prev1) f2 = !f2;
+                if (edge > 1 && edge < (long)mSampleRate) lastPeriod = edge;
+                edge = 0; armed = false;
+            }
+            dPrev = d;
+            const float hw = (d > 0.0f) ? d : kSiLeak * d;    // silicon half-wave (small leak)
+            const float s1 = mOctLp1.processSample(hw * (f1 ? 1.0f : -1.0f));
+            const float s2 = mOctLp2.processSample(hw * (f2 ? 1.0f : -1.0f));
+            const float g = gate * clarG;
+            mono[i] = direct * x + (l1 * s1 + l2 * s2) * g;
         }
-        mGritX1 = gx1;
-        mClarityGate = clarG;
-        mIoGrain.processOut(mono, numSamples);
+        mDetPeak = flush(peak); mGate = flush(gate); mDPrev = flush(dPrev); mClarityGate = flush(clarG);
+        mArmed = armed; mFf1 = f1; mFf2 = f2; mEdgeSamples = edge; mLastPeriod = lastPeriod;
+        mIoGrain.processOut(mono, numSamples); // Boss buffered back-end
         mTrackedHz.store(voiced ? mTracker.hz() : 0.0f);
     }
 
@@ -426,6 +432,11 @@ private:
         if (std::abs(hz - last) > 1.0f) { f.copyCoeffsFrom(Biquad::lowpass(mSampleRate, hz)); last = hz; }
     }
     static float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
+    static float flush(float v) { return std::abs(v) < 1.0e-30f ? 0.0f : v; }
+    static constexpr float kDetLpHz = 650.0f;    // OC-2 detection band-limit (near-sine)
+    static constexpr float kOctLpHz = 2200.0f;   // OC-2 sub output smoothing
+    static constexpr float kGateFloor = 5.0e-4f; // OC-2 silence gate (post input-cal)
+    static constexpr float kSiLeak = 0.05f;      // silicon half-wave negative leak
     // Identity below 0.9, then a soft knee ceilinged at ~1.0 (safety only).
     static float softLimit(float x)
     {
@@ -475,8 +486,11 @@ private:
     float mWhammyRatio = 1.0f;         // slewed shift ratio
     float mWhammyWet = 0.0f;           // smoothed dry/wet blend (anti-crackle)
     IoStage mIoGrain;
-    static constexpr double kGritG = 1.1, kGritB = 0.04; // subtle SILICON edge (OC-2 is silicon, not germanium; cleaner/tighter)
-    double mGritX1 = 0.0;
+    // OC-2 classic divider state
+    Biquad mDetLp1, mDetLp2, mOctLp1, mOctLp2;
+    float mDetPeak = 0.0f, mGate = 0.0f, mDPrev = 0.0f;
+    bool mArmed = false, mFf1 = false, mFf2 = false;
+    long mEdgeSamples = 0, mLastPeriod = 0;
     // Octavia octave-up fuzz
     Biquad mPreRectLp, mAcHp;
     IoStage mIoFuzz;

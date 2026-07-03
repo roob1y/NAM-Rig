@@ -179,12 +179,13 @@ int main()
         const double half = binPow(x, f / 2.0), fund = binPow(x, f);
         CHECK(half > fund * 10.0, "T8 GRAIN octave-down f/2 (%.3e >> f %.3e)", half, fund);
     }
-    { // T9: OC-2 & POG (phase-vocoder subs) report the STFT latency; the analog-style
-      // Octavia and Whammy Classic are zero-latency.
-        PitchBlock bd; bd.prepare({SR, BLK}); bd.setBypassed(false); bd.setType(PitchBlock::kOctDown);
-        PitchBlock bo; bo.prepare({SR, BLK}); bo.setBypassed(false); bo.setType(PitchBlock::kOctavia);
-        CHECK(bd.latencySamples() > 0.0 && bo.latencySamples() == 0.0,
-              "T9 OC-2 latency %.0f > 0, Octavia %.0f == 0", bd.latencySamples(), bo.latencySamples());
+    { // T9: OC-2 is the CLASSIC analog divider (kOctDown + Grain) -> ZERO latency;
+      // the POG / clean phase-vocoder paths carry the STFT latency.
+        PitchBlock boc; boc.prepare({SR, BLK}); boc.setBypassed(false);
+        boc.setType(PitchBlock::kOctDown); boc.setEngine(PitchBlock::kGrain);
+        PitchBlock bpog; bpog.prepare({SR, BLK}); bpog.setBypassed(false); bpog.setType(PitchBlock::kPog);
+        CHECK(boc.latencySamples() == 0.0 && bpog.latencySamples() > 0.0,
+              "T9 OC-2 divider %.0f == 0, POG %.0f > 0", boc.latencySamples(), bpog.latencySamples());
     }
 
     { // T10: IoStage — transparent = identity; buffered = low-freq (coupling HP) cut;
