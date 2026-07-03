@@ -228,6 +228,29 @@ int main()
         CHECK(b.latencySamples() > 0.0, "T12 POG uses poly latency (%.0f)", b.latencySamples());
     }
 
+    { // T13: Octavia (Type=Octavia) octave-up fuzz -> 2f present; finite; ADAA keeps
+      // the aliasing of a high input tone low (no loud in-band alias products).
+        const double f = 250.0;
+        PitchBlock b; b.prepare({SR, BLK});
+        b.setType(PitchBlock::kOctavia);
+        b.setFuzz(0.6f); b.setTone(1.0f); b.setOctave(1.0f); b.setVolume(0.6f);
+        std::vector<float> x = tone(f, 0.3, (int)(SR * 0.5));
+        run(b, x);
+        const double up = binPow(x, 2 * f), fund = binPow(x, f);
+        CHECK(up > fund, "T13 Octavia octave-up 2f (%.2e) > f (%.2e)", up, fund);
+        CHECK(b.latencySamples() == 0.0, "T13 Octavia zero latency");
+        PitchBlock b2; b2.prepare({SR, BLK});
+        b2.setType(PitchBlock::kOctavia);
+        b2.setFuzz(0.8f); b2.setTone(1.0f); b2.setOctave(1.0f); b2.setVolume(0.6f);
+        std::vector<float> hx = tone(4000.0, 0.4, (int)(SR * 0.5));
+        run(b2, hx);
+        bool finite = true; float pk = 0; for (float s2 : hx) { if (!std::isfinite(s2)) finite = false; pk = std::max(pk, std::abs(s2)); }
+        double alias = binPow(hx, 137.0) + binPow(hx, 553.0) + binPow(hx, 971.0); // non-harmonic low bins
+        double sig = binPow(hx, 8000.0) + binPow(hx, 4000.0);
+        CHECK(finite && pk < 20.0f, "T13 Octavia finite+bounded on 4k (pk=%.2f)", pk);
+        CHECK(alias < sig * 0.05 + 1e-9, "T13 ADAA keeps low-band alias small (alias %.2e vs sig %.2e)", alias, sig);
+    }
+
     std::printf("=== %s (%d fail) ===\n", gFails ? "FAILURES" : "ALL PASS", gFails);
     return gFails ? 1 : 0;
 }

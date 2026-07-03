@@ -103,5 +103,39 @@ inline double tanhADAA1(double x, double x1, double g, double b)
     return (tanhAnti(x, g, b) - tanhAnti(x1, g, b)) / (x - x1);
 }
 
+// ---- asymmetric FULL-WAVE RECTIFIER (Octavia octave-up) + 2nd-order ADAA ----
+// r(x) = x (x>=0), -kNeg*x (x<0)  -- folds the negative half up, scaled by kNeg for
+// the germanium asymmetry, so the output repeats twice per cycle = one octave up.
+// This corner at x=0 is a HARD nonlinearity and the single worst aliaser in the
+// octave-up path, so it gets full 2nd-order ADAA (F2/Parker-Bilbao), same scheme as
+// the cubic clip. Antiderivatives (piecewise, continuous at 0):
+//   F1(x) = x^2/2 (x>=0), -kNeg*x^2/2 (x<0)      [F1' = r]
+//   F2(x) = x^3/6 (x>=0), -kNeg*x^3/6 (x<0)      [F2' = F1]
+constexpr double kRectNeg = 0.85; // negative-half gain (germanium asymmetry)
+inline double rectF(double x)  { return x >= 0.0 ? x : -kRectNeg * x; }
+inline double rectF1(double x) { return (x >= 0.0 ? 0.5 : -0.5 * kRectNeg) * x * x; }
+inline double rectF2(double x) { return (x >= 0.0 ? 1.0 / 6.0 : -kRectNeg / 6.0) * x * x * x; }
+inline double rectD(double a, double b)
+{
+    const double d = a - b;
+    if (std::abs(d) < 1.0e-5) return rectF1(0.5 * (a + b));
+    return (rectF2(a) - rectF2(b)) / d;
+}
+// 2nd-order ADAA of the asymmetric rectifier. x newest, x1=x[n-1], x2=x[n-2].
+inline double rectADAA2(double x, double x1, double x2)
+{
+    const double TOL = 1.0e-5;
+    if (std::abs(x - x1) < TOL)
+    {
+        const double xBar = 0.5 * (x + x2);
+        const double delta = xBar - x1;
+        if (std::abs(delta) < TOL) return rectF(0.5 * (xBar + x1));
+        return (2.0 / delta) * (rectF1(xBar) + (rectF2(x1) - rectF2(xBar)) / delta);
+    }
+    if (std::abs(x - x2) < TOL)
+        return (rectF1(x) - rectF1(x1)) / (x - x1);
+    return (2.0 / (x - x2)) * (rectD(x, x1) - rectD(x1, x2));
+}
+
 } // namespace sat
 } // namespace nam_rig

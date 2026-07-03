@@ -268,7 +268,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     // Tightness -> sub Tone, Fuzz -> up-octave Dry blend.
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("pitchType", 1), "Pitch Type",
-        juce::StringArray{"Octave Down", "Octave Up", "POG (Full)"}, 0));
+        juce::StringArray{"Octave Down", "Octave Up", "POG (Full)", "Octavia (Fuzz)"}, 0));
     // Engine: Poly = clean phase vocoder (chords, ~16ms latency); Grain = mono
     // granular character voice (gritty, zero latency, glitches on chords by design).
     // Order MUST match PitchBlock::Engine (Poly=0, Grain=1).
@@ -1038,20 +1038,20 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         mChain.pitch.setOct2(apvts.getRawParameterValue("pitchOct2")->load());
         mChain.pitch.setTightness(apvts.getRawParameterValue("pitchTight")->load());
     }
-    else if (pitchType == 1) // octave up
-    {
-        mChain.pitch.setFuzz(apvts.getRawParameterValue("pitchFuzz")->load());
-        mChain.pitch.setTone(apvts.getRawParameterValue("pitchTone")->load());
-        mChain.pitch.setOctave(apvts.getRawParameterValue("pitchOctave")->load());
-        mChain.pitch.setVolume(apvts.getRawParameterValue("pitchVol")->load());
-    }
-    else // POG (Full): dry + sub + up + resonant filter + attack swell (poly only)
+    else if (pitchType == 2) // POG (Full): dry + sub + up + resonant filter + attack (poly)
     {
         mChain.pitch.setDirect(apvts.getRawParameterValue("pitchDirect")->load());  // Dry
         mChain.pitch.setOct1(apvts.getRawParameterValue("pitchOct1")->load());      // Sub x0.5
         mChain.pitch.setOctave(apvts.getRawParameterValue("pitchOctave")->load());  // Up x2
         mChain.pitch.setFilter(apvts.getRawParameterValue("pitchFilter")->load());
         mChain.pitch.setAttack(apvts.getRawParameterValue("pitchAttack")->load());
+    }
+    else // Octave Up (1) or Octavia fuzz (3) — same 4 controls (Fuzz/Tone/Octave/Volume)
+    {
+        mChain.pitch.setFuzz(apvts.getRawParameterValue("pitchFuzz")->load());
+        mChain.pitch.setTone(apvts.getRawParameterValue("pitchTone")->load());
+        mChain.pitch.setOctave(apvts.getRawParameterValue("pitchOctave")->load());
+        mChain.pitch.setVolume(apvts.getRawParameterValue("pitchVol")->load());
     }
     const bool pitchOn = apvts.getRawParameterValue("pitchOn")->load() >= 0.5f;
     mChain.pitch.setBypassed(!pitchOn);

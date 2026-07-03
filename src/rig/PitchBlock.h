@@ -39,14 +39,14 @@ namespace nam_rig
 class PitchBlock : public MonoBlock
 {
 public:
-    enum Type   { kOctDown = 0, kOctUp = 1, kPog = 2 };
+    enum Type   { kOctDown = 0, kOctUp = 1, kPog = 2, kOctavia = 3 };
     enum Engine { kPoly = 0, kGrain = 1 };
 
     PitchBlock() { setBypassed(true); }
 
     const char *name() const override { return "Pitch"; }
 
-    void setType(int t)         { mType.store(t < 0 ? 0 : (t > kPog ? kPog : t)); }
+    void setType(int t)         { mType.store(t < 0 ? 0 : (t > kOctavia ? kOctavia : t)); }
     void setEngine(int e)       { mEngine.store(e == kGrain ? kGrain : kPoly); }
     void setFilter(float v)     { mFilter.store(clamp01(v)); }  // POG resonant LPF cutoff
     void setAttack(float v)     { mAttack.store(clamp01(v)); }  // POG swell attack
@@ -84,6 +84,12 @@ public:
         mToneLpUp = Biquad::lowpass(mSampleRate, 4000.0);
         mLastToneDnHz = mLastToneUpHz = -1.0f;
         mPogFilter.prepare(mSampleRate);
+        // Octavia octave-up fuzz: band-limit before the rectifier + AC-couple after,
+        // wrapped in a low-Z fuzz input (pickup loading, delta vs the ~1 MΩ capture).
+        mPreRectLp = Biquad::lowpass(mSampleRate, 4000.0);
+        mAcHp = Biquad::highpass1(mSampleRate, 25.0);
+        mIoFuzz.prepare(mSampleRate);
+        mIoFuzz.setLoaded(14.0f, 2500.0f, -6.0f, -1.0f, 20.0f, 0.0f);
         reset();
         mPrepared = true;
     }
@@ -95,6 +101,8 @@ public:
         mToneLpDn.reset(); mToneLpUp.reset();
         mIoGrain.reset(); mGritX1 = 0.0;
         mPogFilter.reset(); mPogAtt = 0.0f;
+        mPreRectLp.reset(); mAcHp.reset(); mIoFuzz.reset();
+        mFuzzU1 = mFuzzU2 = mRectR1 = mRectR2 = 0.0;
         std::fill(mDry.begin(), mDry.end(), 0.0f); mDryPos = 0;
         mClarityGate = 0.0f;
         mLastW = (float)(2.0 * mSampleRate / 120.0);
@@ -104,8 +112,10 @@ public:
     double latencySamples() const override
     {
         if (isBypassed()) return 0.0;
+        const int type = mType.load();
+        if (type == kOctavia) return 0.0;                 // analog-style fuzz, zero latency
         // POG is always the poly (STFT) engine; Down/Up are poly OR grain(=0).
-        const bool poly = (mType.load() == kPog) || (mEngine.load() == kPoly);
+        const bool poly = (type == kPog) || (mEngine.load() == kPoly);
         return poly ? (double)mPolyLatency : 0.0;
     }
 
@@ -113,7 +123,8 @@ public:
     {
         if (!mPrepared || numSamples > (int)mWork1.size()) return;
         const int type = mType.load();
-        if (type == kPog) { polyPog(mono, numSamples); return; } // full octaver, poly only
+        if (type == kOctavia) { octavia(mono, numSamples); return; } // octave-up fuzz
+        if (type == kPog)     { polyPog(mono, numSamples); return; } // full octaver, poly only
         const bool up = (type == kOctUp);
         if (mEngine.load() == kPoly) { up ? polyUp(mono, numSamples)  : polyDown(mono, numSamples); }
         else                         { up ? grainUp(mono, numSamples) : grainDown(mono, numSamples); }
@@ -185,6 +196,41 @@ private:
         }
         mPogFilter.flushDenorms();
         mPogAtt = att;
+        mTrackedHz.store(0.0f);
+    }
+
+    // ---------- OCTAVIA (octave-up fuzz) : fuzz -> full-wave rectify, mono, 0 latency ----------
+    void octavia(float *mono, int numSamples)
+    {
+        const float drive = std::pow(2.0f, mDryUp.load() * 6.0f); // Fuzz knob -> up to ~64x
+        const float octAmt = mOctUp.load();  // octave-defeat blend (0 = fuzz, 1 = octave)
+        const float vol = mVolume.load();
+        updateTone(mToneLpUp, mLastToneUpHz, 800.0f * std::pow(2.0f, mToneUp.load() * 3.3f));
+
+        // Low-Z fuzz input: pickup loading + coupling (IoStage, setLoaded).
+        mIoFuzz.processIn(mono, numSamples);
+
+        double u1 = mFuzzU1, u2 = mFuzzU2, r1 = mRectR1, r2 = mRectR2;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            // Fuzz: cubic soft-clip, 2nd-order ADAA (band-limited hard clip).
+            const double u = (double)mono[i] * drive;
+            const float f = (float)sat::cubicADAA2(u, u1, u2);
+            u2 = u1; u1 = u;
+            // Band-limit BEFORE the rectifier so its doubled spectrum stays under Nyquist.
+            const float fl = mPreRectLp.processSample(f);
+            // Full-wave rectify (asymmetric), 2nd-order ADAA — the octave-up. The
+            // rectifier is the worst aliaser, so ADAA matters most here.
+            const float r = (float)sat::rectADAA2((double)fl, r1, r2);
+            r2 = r1; r1 = (double)fl;
+            // Octave-defeat: blend rectified octave vs the (band-limited) pure fuzz.
+            const float wet = octAmt * r + (1.0f - octAmt) * fl;
+            float y = mAcHp.processSample(wet); // remove the f-f DC term
+            y = mToneLpUp.processSample(y);
+            mono[i] = kOctaviaMakeup * vol * y;
+        }
+        mFuzzU1 = u1; mFuzzU2 = u2; mRectR1 = r1; mRectR2 = r2;
+        mIoFuzz.processOut(mono, numSamples);
         mTrackedHz.store(0.0f);
     }
 
@@ -294,6 +340,11 @@ private:
     IoStage mIoGrain;
     static constexpr double kGritG = 2.5, kGritB = 0.15; // germanium grit (curvature/bias)
     double mGritX1 = 0.0;
+    // Octavia octave-up fuzz
+    Biquad mPreRectLp, mAcHp;
+    IoStage mIoFuzz;
+    double mFuzzU1 = 0.0, mFuzzU2 = 0.0, mRectR1 = 0.0, mRectR2 = 0.0;
+    static constexpr float kOctaviaMakeup = 1.6f;
     float mClarityGate = 0.0f, mLastW = 800.0f, mWSmooth = 0.0014f;
     // shared
     Biquad mToneLpDn, mToneLpUp;
