@@ -32,6 +32,7 @@
 #include "CompBlock.h"
 #include "DriveBlock.h"
 #include "PreModBlock.h"
+#include "PreDelayBlock.h"
 #include "AmpBlock.h"
 #include "EqBlock.h"
 #include "CabBlock.h"
@@ -105,6 +106,8 @@ public:
     void setInputCal(float g) { mInputCal = g; } // global, pre-everything
     // Pre-amp mod pedal position: true = BEFORE the drive rack, false = AFTER it (default).
     void setPremodPreDrive(bool b) { mPremodPreDrive = b; }
+    // Pre-amp delay pedal position: true = BEFORE the drive rack, false = AFTER it (default).
+    void setPredelayPreDrive(bool b) { mPredelayPreDrive = b; }
     // Envelope filter position: false = BEFORE the drive rack (default, classic
     // auto-wah-into-drive), true = AFTER the drive rack (wah on the driven signal).
     void setEnvFilterPostDrive(bool b) { mEnvFilterPostDrive = b; }
@@ -254,10 +257,20 @@ public:
         // split, so it interacts with the amp — unlike the post-cab stereo ModBlock.
         if (mPremodPreDrive && !premod.isBypassed())
             { premod.process(ch0, numSamples); heal(premod, ch0, numSamples); }
+        // Mono front-of-amp DELAY pedal (voiced after real delay pedals). Like the
+        // premod, its position relative to the drive rack is switchable
+        // (mPredelayPreDrive): PRE-drive feeds the echoes into the overdrive; POST-
+        // drive (default) delays the already-driven signal before the amp. Either way
+        // it's before the split, so the repeats are coloured by the amp — distinct
+        // from the post-cab stereo DelayBlock. Default chain: drive -> premod -> predelay.
+        if (mPredelayPreDrive && !predelay.isBypassed())
+            { predelay.process(ch0, numSamples); heal(predelay, ch0, numSamples); }
         if (!drive.isBypassed())
             { drive.process(ch0, numSamples); heal(drive, ch0, numSamples); }
         if (!mPremodPreDrive && !premod.isBypassed())
             { premod.process(ch0, numSamples); heal(premod, ch0, numSamples); }
+        if (!mPredelayPreDrive && !predelay.isBypassed())
+            { predelay.process(ch0, numSamples); heal(predelay, ch0, numSamples); }
         // Env filter POST-drive branch: sweep the already-driven signal (fatter,
         // cocked-wah/synthy). Still mono, still before the amp split. Zero latency.
         if (mEnvFilterPostDrive && !envfilter.isBypassed())
@@ -321,7 +334,8 @@ public:
     {
         const double pre = gate.latencySamples()
                          + envfilter.latencySamples() + comp.latencySamples()
-                         + drive.latencySamples() + premod.latencySamples();
+                         + drive.latencySamples() + premod.latencySamples()
+                         + predelay.latencySamples();
         const double LA = amp.latencySamples() + eq.latencySamples() + cab.latencySamples();
         const double LB = ampB.latencySamples() + eqB.latencySamples() + cabB.latencySamples();
         double voice = LA + mAlignA;
@@ -369,6 +383,7 @@ public:
     CompBlock comp;
     DriveBlock drive; // 3-slot drive rack (shared, before split)
     PreModBlock premod; // mono front-of-amp modulation pedal (after drive, before split)
+    PreDelayBlock predelay; // mono front-of-amp delay pedal (after premod, before split)
     AmpBlock amp;   // Rig A
     EqBlock eq;
     CabBlock cab;
@@ -602,9 +617,10 @@ private:
         }
     }
 
-    std::array<MonoBlock *, 11> allMonoBlocks()
+    std::array<MonoBlock *, 12> allMonoBlocks()
     {
-        return {&gate, &envfilter, &comp, &drive, &premod, &amp, &eq, &cab, &ampB, &eqB, &cabB};
+        return {&gate, &envfilter, &comp, &drive, &premod, &predelay,
+                &amp, &eq, &cab, &ampB, &eqB, &cabB};
     }
 
     std::array<StereoBlock *, 3> stereoBlocks() { return {&mod, &delay, &reverb}; }
@@ -616,6 +632,7 @@ private:
     float mPolA = 1.0f, mPolB = 1.0f;  // polarity (+1 / -1)
     float mInputCal = 1.0f; // global input calibration (pre-split)
     bool mPremodPreDrive = false; // pre-amp mod pedal: before (true) / after (false) the drive rack
+    bool mPredelayPreDrive = false; // pre-amp delay pedal: before (true) / after (false) the drive rack
     bool mEnvFilterPostDrive = false; // env filter: before (false, default) / after (true) the drive rack
     float mInTrimA = 1.0f, mInTrimB = 1.0f;
     float mOutTrimA = 1.0f, mOutTrimB = 1.0f;

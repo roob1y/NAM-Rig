@@ -258,6 +258,49 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::ParameterID("premodPos", 1), "Pre Mod Position",
         juce::StringArray{"After Drive", "Before Drive"}, 0));
 
+    // --- Pre-amp delay pedal (mono, front-of-amp): rig/PreDelayBlock.h,
+    // predelay_test.cpp. Sits after the premod and before the amp split, so the
+    // echoes feed the amp like a real delay stompbox — distinct from the post-cab
+    // stereo DelayBlock. Four per-model voicings (order MUST match
+    // PreDelayBlock::Model): Boss DD-7 (clean digital), MXR Carbon Copy (dark BBD),
+    // Memory Man (lush BBD), Korg SDD-3000 (bright colored digital). Off by default
+    // (new block). Time is shared free/sync (the Sync choice mirrors PreMod).
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("predelayModel", 1), "Pre Delay Model",
+        juce::StringArray{"Boss DD-7", "Carbon Copy", "Memory Man", "Korg SDD-3000"}, 0));
+    // DD-7 MODE rotary (only the DD-7 uses it): four normal-delay time ranges, then the
+    // special modes. Order MUST match PreDelayBlock::Dd7Mode.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("predelayMode", 1), "Pre Delay Mode",
+        juce::StringArray{"50 ms", "200 ms", "800 ms", "3200 ms", "Hold", "Modulate", "Analog", "Reverse"}, 3));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("predelayTime", 1), "Pre Delay Time",
+        juce::NormalisableRange<float>(20.0f, 2000.0f, 1.0f, 0.35f), 350.0f,
+        juce::AudioParameterFloatAttributes().withLabel("ms")));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("predelaySync", 1), "Pre Delay Sync",
+        juce::StringArray{"Off", "1/1", "1/2", "1/4", "1/4.", "1/4T",
+                          "1/8", "1/8.", "1/8T", "1/16"},
+        0));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("predelayFeedback", 1), "Pre Delay Feedback",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.35f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("predelayMix", 1), "Pre Delay Mix",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.28f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("predelayMod", 1), "Pre Delay Mod",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f)); // 0 = clean (DD-7 standard); up = the model's warble/Modulate
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("predelayTone", 1), "Pre Delay Tone",
+        juce::NormalisableRange<float>(1000.0f, 20000.0f, 10.0f, 0.5f), 20000.0f, // 20k = open (model voice)
+        juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("predelayOn", 1), "Pre Delay Enable", false)); // off by default (new block)
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("predelayPos", 1), "Pre Delay Position",
+        juce::StringArray{"After Drive", "Before Drive"}, 0));
+
     // --- Envelope filter / auto-wah (mono, pre-amp): rig/EnvFilterBlock.h,
     // env_filter_test.cpp. Sits BEFORE the compressor so it tracks the raw guitar
     // dynamics. Two voices, each faithful to a real unit's control complement
@@ -1094,6 +1137,20 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         mChain.setPremodPreDrive((int)apvts.getRawParameterValue("premodPos")->load() == 1);
     }
 
+    // Pre-amp delay pedal (mono, front-of-amp). Per-model voice; free/sync time.
+    {
+        mChain.predelay.setModel((int)apvts.getRawParameterValue("predelayModel")->load());
+        mChain.predelay.setDd7Mode((int)apvts.getRawParameterValue("predelayMode")->load());
+        mChain.predelay.setTimeMs(apvts.getRawParameterValue("predelayTime")->load());
+        mChain.predelay.setSyncIndex((int)apvts.getRawParameterValue("predelaySync")->load());
+        mChain.predelay.setFeedback(apvts.getRawParameterValue("predelayFeedback")->load());
+        mChain.predelay.setMix(apvts.getRawParameterValue("predelayMix")->load());
+        mChain.predelay.setMod(apvts.getRawParameterValue("predelayMod")->load());
+        mChain.predelay.setToneHz(apvts.getRawParameterValue("predelayTone")->load());
+        mChain.predelay.setBypassed(apvts.getRawParameterValue("predelayOn")->load() < 0.5f);
+        mChain.setPredelayPreDrive((int)apvts.getRawParameterValue("predelayPos")->load() == 1);
+    }
+
     // Graphic EQ band gains (Rig A; zero latency; chain bypass via eqOn is safe).
     {
         static const char *ids[] = {"eq62", "eq125", "eq250", "eq500",
@@ -1234,6 +1291,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
                 mChain.delay.setBpm(*bpm);
                 mChain.mod.setBpm(*bpm);
                 mChain.premod.setBpm(*bpm);
+                mChain.predelay.setBpm(*bpm);
             }
     const int delayChar = (int)apvts.getRawParameterValue("delayCharacter")->load();
     // Ping-pong + dual (independent L/R, via Sync R unlinked) are STEREO digital-delay
