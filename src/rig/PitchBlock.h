@@ -114,7 +114,7 @@ public:
         std::fill(mChorusBuf.begin(), mChorusBuf.end(), 0.0f);
         mChorusPos = 0; mChorusPhase = 0.0f;
         mTracker.reset(); mGrD1.reset(); mGrD2.reset(); mGrUp.reset();
-        mWhammy.reset(); mWhammyPoly.reset(); mWhammyRatio = 1.0f;
+        mWhammy.reset(); mWhammyPoly.reset(); mWhammyRatio = 1.0f; mWhammyWet = 0.0f;
         mToneLpDn.reset(); mToneLpUp.reset();
         mIoGrain.reset(); mGritX1 = 0.0;
         mPogFilter.reset(); mPogAtt = 0.0f;
@@ -132,9 +132,8 @@ public:
         const int type = mType.load();
         if (type == kOctavia) return 0.0;                        // fuzz = zero latency
         if (type == kWhammy) return mWhammyPolyMode.load() ? (double)mPolyLatency : 0.0; // Chords vs Classic
-        // POG is always the poly (STFT) engine; Down/Up are poly OR grain(=0).
-        const bool poly = (type == kPog) || (mEngine.load() == kPoly);
-        return poly ? (double)mPolyLatency : 0.0;
+        // OC-2 (down) and the POGs now use the phase-vocoder subs -> STFT latency.
+        return (double)mPolyLatency;
     }
 
     void process(float *mono, int numSamples) override
@@ -260,13 +259,16 @@ private:
         const float targetRatio = std::pow(2.0f, treadle * targetCents / 1200.0f);
         // Blend to PURE DRY at the heel so "no whammy" is clean — the shifter itself
         // colours/warbles even at unison, so we crossfade it in as the treadle moves.
-        const float wet = clamp01(treadle * 10.0f); // fully wet by ~0.1 treadle
+        // The wet blend is SMOOTHED per-sample: the knob is control-rate, so a raw
+        // per-block wet stepped audibly (crackle in the bottom range of the knob).
+        const float wetTarget = clamp01(treadle * 10.0f); // fully wet by ~0.1 treadle
+        const float wetCoef = coefForMs(6.0f, mSampleRate);
+        float wetS = mWhammyWet;
 
         float *w1 = mWork1.data();
         if (mWhammyPolyMode.load())
         {
-            // CHORDS: phase vocoder — clean on chords, STFT latency. Ratio glides
-            // per block (the treadle moves at human speed). Dry delayed to match.
+            // CHORDS: phase vocoder — clean on chords, STFT latency. Dry delayed to match.
             mWhammyRatio += 0.5f * (targetRatio - mWhammyRatio);
             mWhammyPoly.setRatio(mWhammyRatio);
             std::copy(mono, mono + numSamples, w1);
@@ -274,8 +276,10 @@ private:
             for (int i = 0; i < numSamples; ++i)
             {
                 const float dry = pushDry(mono[i]);
-                mono[i] = (1.0f - wet) * dry + wet * w1[i];
+                wetS += wetCoef * (wetTarget - wetS);
+                mono[i] = (1.0f - wetS) * dry + wetS * w1[i];
             }
+            mWhammyWet = wetS;
             mTrackedHz.store(0.0f);
             return;
         }
@@ -292,9 +296,11 @@ private:
             const float dry = mono[i];
             ratio += rSlew * (targetRatio - ratio);
             const float sh = mWhammy.process(mono[i], wT, ratio, ws);
-            mono[i] = (1.0f - wet) * dry + wet * sh; // heel = dry, no shifter warble
+            wetS += wetCoef * (wetTarget - wetS);
+            mono[i] = (1.0f - wetS) * dry + wetS * sh; // heel = dry, no shifter warble
         }
         mWhammyRatio = ratio;
+        mWhammyWet = wetS;
         mTrackedHz.store(voiced ? mTracker.hz() : 0.0f);
     }
 
@@ -334,37 +340,32 @@ private:
     }
 
     // ---------- GRAIN (tracked granular) : character, mono, zero latency ----------
+    // OC-2 sub: CLEAN phase-vocoder shift (no granular warble) + germanium grit +
+    // Boss buffered I/O. The grit is what gives the OC-2 character; the granular
+    // engine only added warble, so the sub is now the phase vocoder (like the POGs).
+    // Trades OC-2's zero latency for the STFT latency, but tracks cleanly.
     void grainDown(float *mono, int numSamples)
     {
         const float direct = mDirect.load(), l1 = mOct1.load(), l2 = mOct2.load();
-        mIoGrain.processIn(mono, numSamples); // Boss buffered front-end (tracker + dry see this)
-        mTracker.process(mono, numSamples);
-        const bool voiced = mTracker.voiced();
-        const float t0 = mTracker.periodSamples();
-        if (voiced && t0 > 4.0f) mLastW = 2.0f * t0;
-        const float wT = mLastW, ws = mWSmooth;
-        const float clarTarget = voiced ? 1.0f : 0.0f;
-        const float clarCoef = coefForMs(35.0f, mSampleRate);
+        const bool run2 = l2 > 1.0e-4f;
+        mIoGrain.processIn(mono, numSamples); // Boss buffered front-end
+        float *w1 = mWork1.data(), *w2 = mWork2.data();
+        std::copy(mono, mono + numSamples, w1); mPolyD1.process(w1, numSamples);              // x0.5
+        if (run2) { std::copy(mono, mono + numSamples, w2); mPolyD2.process(w2, numSamples); } // x0.25
         updateTone(mToneLpDn, mLastToneDnHz, 500.0f * std::pow(2.0f, mToneDn.load() * 4.0f));
-        float clarG = mClarityGate; double gx1 = mGritX1;
+        double gx1 = mGritX1;
         for (int i = 0; i < numSamples; ++i)
         {
-            const float x = mono[i];
-            clarG += clarCoef * (clarTarget - clarG);
-            const float s1 = mGrD1.process(x, wT, 0.5f, ws);
-            const float s2 = mGrD2.process(x, wT, 0.25f, ws);
-            // OC-2 germanium grit on the sub (asymmetric ADAA soft-clip -> even+odd
-            // harmonics, level-dependent) — the vintage character vs the clean Poly.
-            const double raw = (double)(l1 * s1 + l2 * s2);
-            const float grit = (float)sat::tanhADAA1(raw, gx1, kGritG, kGritB);
+            const float dry = pushDry(mono[i]); // delayed to match the STFT subs
+            const double raw = (double)(l1 * w1[i] + (run2 ? l2 * w2[i] : 0.0f));
+            const float grit = (float)sat::tanhADAA1(raw, gx1, kGritG, kGritB); // germanium character
             gx1 = raw;
             const float sub = mToneLpDn.processSample(grit);
-            mono[i] = direct * x + sub * clarG;
+            mono[i] = direct * dry + sub;
         }
         mGritX1 = gx1;
-        mClarityGate = clarG;
         mIoGrain.processOut(mono, numSamples); // Boss buffered back-end
-        mTrackedHz.store(voiced ? mTracker.hz() : 0.0f);
+        mTrackedHz.store(0.0f);
     }
 
     void grainUp(float *mono, int numSamples)
@@ -472,6 +473,7 @@ private:
     std::atomic<float> mWhammyPos{0.0f}; // treadle
     std::atomic<bool>  mWhammyPolyMode{false}; // Chords (poly) vs Classic (mono)
     float mWhammyRatio = 1.0f;         // slewed shift ratio
+    float mWhammyWet = 0.0f;           // smoothed dry/wet blend (anti-crackle)
     IoStage mIoGrain;
     static constexpr double kGritG = 2.5, kGritB = 0.15; // germanium grit (curvature/bias)
     double mGritX1 = 0.0;

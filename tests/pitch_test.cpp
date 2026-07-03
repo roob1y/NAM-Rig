@@ -179,11 +179,12 @@ int main()
         const double half = binPow(x, f / 2.0), fund = binPow(x, f);
         CHECK(half > fund * 10.0, "T8 GRAIN octave-down f/2 (%.3e >> f %.3e)", half, fund);
     }
-    { // T9: latency is engine-dependent — Poly adds STFT latency, Grain is zero.
-        PitchBlock bp; bp.prepare({SR, BLK}); bp.setBypassed(false); bp.setEngine(PitchBlock::kPoly);
-        PitchBlock bg; bg.prepare({SR, BLK}); bg.setBypassed(false); bg.setEngine(PitchBlock::kGrain);
-        CHECK(bp.latencySamples() > 0.0 && bg.latencySamples() == 0.0,
-              "T9 Poly latency %.0f > 0, Grain %.0f == 0", bp.latencySamples(), bg.latencySamples());
+    { // T9: OC-2 & POG (phase-vocoder subs) report the STFT latency; the analog-style
+      // Octavia and Whammy Classic are zero-latency.
+        PitchBlock bd; bd.prepare({SR, BLK}); bd.setBypassed(false); bd.setType(PitchBlock::kOctDown);
+        PitchBlock bo; bo.prepare({SR, BLK}); bo.setBypassed(false); bo.setType(PitchBlock::kOctavia);
+        CHECK(bd.latencySamples() > 0.0 && bo.latencySamples() == 0.0,
+              "T9 OC-2 latency %.0f > 0, Octavia %.0f == 0", bd.latencySamples(), bo.latencySamples());
     }
 
     { // T10: IoStage — transparent = identity; buffered = low-freq (coupling HP) cut;
