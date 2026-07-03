@@ -340,8 +340,8 @@ private:
     }
 
     // ---------- GRAIN (tracked granular) : character, mono, zero latency ----------
-    // OC-2 sub: CLEAN phase-vocoder shift (no granular warble) + germanium grit +
-    // Boss buffered I/O. The grit is what gives the OC-2 character; the granular
+    // OC-2 sub: CLEAN phase-vocoder shift (no granular warble) + a subtle SILICON
+    // edge (OC-2 uses silicon, not germanium) + Boss buffered I/O. The granular
     // engine only added warble, so the sub is now the phase vocoder (like the POGs).
     // Trades OC-2's zero latency for the STFT latency, but tracks cleanly.
     void grainDown(float *mono, int numSamples)
@@ -358,7 +358,7 @@ private:
         {
             const float dry = pushDry(mono[i]); // delayed to match the STFT subs
             const double raw = (double)(l1 * w1[i] + (run2 ? l2 * w2[i] : 0.0f));
-            const float grit = (float)sat::tanhADAA1(raw, gx1, kGritG, kGritB); // germanium character
+            const float grit = (float)sat::tanhADAA1(raw, gx1, kGritG, kGritB); // subtle silicon edge
             gx1 = raw;
             const float sub = mToneLpDn.processSample(grit);
             mono[i] = direct * dry + sub;
@@ -475,7 +475,7 @@ private:
     float mWhammyRatio = 1.0f;         // slewed shift ratio
     float mWhammyWet = 0.0f;           // smoothed dry/wet blend (anti-crackle)
     IoStage mIoGrain;
-    static constexpr double kGritG = 1.2, kGritB = 0.06; // gentle germanium warmth (was too nasty at 2.5)
+    static constexpr double kGritG = 1.1, kGritB = 0.04; // subtle SILICON edge (OC-2 is silicon, not germanium; cleaner/tighter)
     double mGritX1 = 0.0;
     // Octavia octave-up fuzz
     Biquad mPreRectLp, mAcHp;

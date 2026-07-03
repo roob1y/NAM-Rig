@@ -94,7 +94,8 @@ most emulation-relevant detail — our first cut used a fixed-fraction threshold
 needs the schematic image. (Doesn't affect our DSP: two cascaded toggles regardless.)
 
 **The synthesis trick — CONFIRMED (2+ sources incl. scope traces).** The OC-2 does **not** output the
-bare divider square. It **half-wave rectifies the original tone through germanium diodes** (D10/D11,
+bare divider square. It **half-wave rectifies the original tone through SILICON diodes** (D10/D11,
+1S1588-class — CORRECTED 2026-07-03: the OC-2 is silicon; germanium 1N34A is the *Octavia*, not the OC-2)
 1S-188FM) and, driven by the divider, **inverts (flips the op-amp gain sign) every other cycle**,
 stitching a slice of the *real waveform* into a wave of twice the wavelength = one octave down, so the
 sub-octave inherits the note's timbre and dynamics ([toshi.life, with oscilloscope traces](https://toshi.life.coocan.jp/review/en_diy_analog_octaver.html):
@@ -106,7 +107,7 @@ selects either the in-phase or out-of-phase audio… chops up the audio and stit
 smoothest"* vs zero-crossing/raw-square = more harmonics, easier to build.
 
 > **Modelling correction vs our current block:** we multiply the *full band-limited carrier* × ±sign.
-> The OC-2 multiplies a **half-wave-rectified** copy × ±sign through a **germanium** (soft-knee,
+> The OC-2 multiplies a **half-wave-rectified** copy × ±sign through **silicon** (harder-knee,
 > slightly asymmetric) rectifier. Half-wave-rectify-then-sign-flip is what gives the characteristic
 > growl and is worth adopting. Our zero-crossing phase-alignment (declick) is correct and matches the
 > OC-2's phase-locked switching in spirit; the missing piece is the *peak-referenced* threshold and
@@ -298,7 +299,7 @@ Sources: [Puckette §Pitch shifting](http://msp.ucsd.edu/techniques/v0.11/book-h
    proven), but (a) make the comparator threshold **peak-referenced** (float just below the held peak,
    decaying) like the OC-2, (b) **debounce edges against the tracked `T0`** (reject edges arriving <
    ~0.6·T0 after the last), (c) **crossfade the octave out when clarity < gate** (kills chord/mute
-   gargle), (d) switch the carrier to a **half-wave-rectified** (soft, slightly asymmetric — germanium)
+   gargle), (d) switch the carrier to a **half-wave-rectified** (slightly asymmetric — silicon)
    copy × ±sign for the authentic OC-2 growl, (e) keep the output LPF + envelope follower.
    Latency stays ~0 (the tracker only *validates* edges; it doesn't delay the audio path).
 3. Offline tests: divider holds `f/2` on strong-2nd/3rd-harmonic tones AND on a pitch glide; no
