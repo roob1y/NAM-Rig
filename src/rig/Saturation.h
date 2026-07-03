@@ -52,6 +52,14 @@ inline double cubD(double a, double b)
     if (std::abs(d) < 1.0e-5) return cubF1(0.5 * (a + b));
     return (cubF2(a) - cubF2(b)) / d;
 }
+// 1st-order ADAA of the cubic. x newest, x1 = x[n-1]. Degenerate x~=x[n-1]
+// (division by ~0) falls back to the plain clip at the midpoint.
+inline double cubicADAA1(double x, double x1)
+{
+    const double TOL = 1.0e-5;
+    if (std::abs(x - x1) < TOL) return cubF(0.5 * (x + x1));
+    return (cubF1(x) - cubF1(x1)) / (x - x1);
+}
 // 2nd-order ADAA of the cubic. x newest, x1 = x[n-1], x2 = x[n-2]. Same guards as
 // the DriveBlock copy: degenerate x~=x[n-1] expands via F1/f; the x~=x[n-2] peak
 // alternation falls back to well-conditioned 1st-order ADAA over the step (F1,

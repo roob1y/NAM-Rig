@@ -9,6 +9,7 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
       mOutKnob(p.apvts, "outputGain", "OUT"),
       mStrip(p.apvts),
       mGatePanel(p.apvts),
+      mEnvFilterPanel(p.apvts),
       mCompPanel(p.apvts),
       mDrivePanel(p.apvts),
       mPremodPanel(p.apvts),
@@ -21,11 +22,12 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
       mDelayPanel(p.apvts),
       mReverbPanel(p.apvts),
       mCalPanel(p.apvts),
-      // PREMOD sits at index 3 (after DRIVE). One combined AMP panel fed by both
-      // lanes sits at BOTH amp indices (4 = AMP A, 6 = AMP B), like the single CAB
-      // panel — either tile reveals it. EQ stays per-rig at 5 / 7.
-      mPanels{&mGatePanel, &mCompPanel, &mDrivePanel, &mPremodPanel, &mAmpPanel, &mEqPanelA,
-              &mAmpPanel, &mEqPanelB, &mCabPanel, &mMixPanel,
+      // ENV FILTER sits at index 1 (after GATE, before COMP). PREMOD at index 4.
+      // One combined AMP panel fed by both lanes sits at BOTH amp indices
+      // (5 = AMP A, 7 = AMP B), like the single CAB panel — either tile reveals it.
+      // EQ stays per-rig at 6 / 8.
+      mPanels{&mGatePanel, &mEnvFilterPanel, &mCompPanel, &mDrivePanel, &mPremodPanel,
+              &mAmpPanel, &mEqPanelA, &mAmpPanel, &mEqPanelB, &mCabPanel, &mMixPanel,
               &mModPanel, &mDelayPanel, &mReverbPanel}
 {
     setLookAndFeel(&mLnf.get());
@@ -59,8 +61,11 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
     // --- Strip + panels ---
     mContent.addAndMakeVisible(mStrip);
     for (auto *panel : mPanels)
-        if (panel->getParentComponent() != &mContent) // mAmpPanel appears twice (idx 4+6)
+        if (panel->getParentComponent() != &mContent) // mAmpPanel appears twice (idx 5+7)
             mContent.addChildComponent(*panel);        // visibility driven by selection
+
+    // Live filter cutoff readout in the ENV FILTER header.
+    mEnvFilterPanel.cutoffHzProvider = [this] { return mProc.envFilterCutoffHz(); };
 
     // Global input-calibration overlay, toggled from the Settings menu.
     mContent.addChildComponent(mCalPanel);
@@ -313,6 +318,7 @@ void NamRigEditor::timerCallback()
     mCabPanel.refresh();
     mDrivePanel.refresh();
     mPremodPanel.refresh();
+    mEnvFilterPanel.refresh();
     mMixPanel.refresh(dt);
     mModPanel.refresh();
     mDelayPanel.refresh();
@@ -333,6 +339,7 @@ void NamRigEditor::timerCallback()
     const bool aOut = (rigMode == 1); // Solo B -> Rig A is bypassed
     const bool bOut = (rigMode == 0); // Solo A -> Rig B is bypassed
 
+    mEnvFilterPanel.setBypassed(off("envfilterOn"));
     mCompPanel.setBypassed(off("compOn"));
     mDrivePanel.setBypassed(off("driveOn"));
     mPremodPanel.setBypassed(off("premodOn"));

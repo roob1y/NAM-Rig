@@ -147,6 +147,7 @@ public:
     // Live gain-reduction telemetry for the editor meters.
     float gateGainDb() const { return mChain.gate.currentGainDb(); }
     float gateInDb() const { return mChain.gate.currentInDb(); }
+    float envFilterCutoffHz() const { return mChain.envfilter.currentCutoffHz(); }
     float compGrDb() const { return mChain.comp.grDb(); }
     float compInDb() const { return mChain.comp.inPeakDb(); }
     float compOutDb() const { return mChain.comp.outPeakDb(); }
@@ -179,7 +180,7 @@ public:
     std::atomic<float> mOutputPeakDb{-100.0f};
 
     // --- Editor session state (not persisted; survives editor close/reopen) ---
-    int uiSelectedBlock = 2; // strip selection, default AMP
+    int uiSelectedBlock = 5; // strip selection, default AMP A (index shifted +1 by ENV FILTER at 1)
     int uiWidth = 0;         // last editor width, 0 = use default
 
     // Momentary mod-slot solo (dial-in tool; not a parameter -> not saved, not

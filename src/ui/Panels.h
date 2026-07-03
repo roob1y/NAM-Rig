@@ -6262,4 +6262,135 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PremodPanel)
 };
 
+//==============================================================================
+// EnvFilterPanel — envelope filter, faithful to each unit's real control set.
+// The Voice picker swaps the WHOLE control complement. Switches are rendered as
+// segmented toggle pills (like the real pedal's physical toggles), not dropdowns:
+//   FX25  (DOD FX25B):  knobs SENSITIVITY, RANGE, BLEND.
+//   Q-Tron (EHX Q-Tron+): knobs GAIN, PEAK + switches MODE [LP|BP|HP|MIX],
+//     DRIVE [Up|Down], RANGE [Hi|Lo], BOOST [Normal|Boost], RESPONSE [Fast|Slow].
+// Header-right shows the voice + live cutoff.
+class EnvFilterPanel : public BlockPanel, private juce::Timer
+{
+public:
+    explicit EnvFilterPanel(juce::AudioProcessorValueTreeState &apvts)
+        : BlockPanel("ENV FILTER"), mApvts(apvts),
+          mVoice(apvts, "envfilterVoice", juce::StringArray{"FX25", "Q-Tron"}),
+          mMode(apvts, "envfilterMode", juce::StringArray{"LP", "BP", "HP", "MIX"}),
+          mDrive(apvts, "envfilterDir", juce::StringArray{"Up", "Down"}),
+          mQRange(apvts, "envfilterQRange", juce::StringArray{"Lo", "Hi"}),
+          mBoost(apvts, "envfilterBoost", juce::StringArray{"Normal", "Boost"}),
+          mResponse(apvts, "envfilterResponse", juce::StringArray{"Fast", "Slow"}),
+          mSens(apvts, "envfilterSens", "Gain"),
+          mRange(apvts, "envfilterRange", "Range"),
+          mReso(apvts, "envfilterReso", "Peak"),
+          mBlend(apvts, "envfilterMix", "Blend")
+    {
+        addAndMakeVisible(mVoice);
+        mVoice.onChange = [this](int) { refresh(); };
+        for (auto *c : {&mMode, &mDrive, &mQRange, &mBoost, &mResponse})
+            addChildComponent(*c);
+        addChildComponent(mSens);
+        addChildComponent(mRange);
+        addChildComponent(mReso);
+        addChildComponent(mBlend);
+        refresh();
+        startTimerHz(20); // live cutoff readout in the header
+    }
+
+    // Provider for the live filter cutoff (Hz), set by the editor from the block.
+    std::function<float()> cutoffHzProvider;
+
+    void refresh()
+    {
+        const int v = (int)mApvts.getRawParameterValue("envfilterVoice")->load();
+        mVoiceName = (v == 1) ? "Q-Tron" : "FX25";
+        if (v != mVoiceIdx)
+        {
+            mVoiceIdx = v;
+            const bool q = (v == 1);
+            mSens.setCaption(q ? "Gain" : "Sensitivity"); // shared detector-drive knob, per-unit label
+            mSens.setVisible(true);
+            mRange.setVisible(!q);   // FX25 only
+            mBlend.setVisible(!q);   // FX25 only
+            mReso.setVisible(q);     // Q-Tron "Peak"
+            mMode.setVisible(q); mDrive.setVisible(q); mQRange.setVisible(q);
+            mBoost.setVisible(q); mResponse.setVisible(q);
+            resized();
+            repaint();
+        }
+        updateHeader();
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        BlockPanel::paint(g); // panel bg + title + header-right
+        g.setColour(colors::caption);
+        g.setFont(fonts::archivo(9.5f, fonts::SemiBold, 0.6f));
+        auto cap = [&](juce::Component &c, const char *t) {
+            g.drawText(t, c.getX(), c.getY() - 13, juce::jmax(46, c.getWidth()), 11,
+                       juce::Justification::centredLeft);
+        };
+        cap(mVoice, "VOICE");
+        if (mVoiceIdx == 1)
+        {
+            cap(mMode, "MODE"); cap(mDrive, "DRIVE"); cap(mQRange, "RANGE");
+            cap(mBoost, "BOOST"); cap(mResponse, "RESPONSE");
+        }
+    }
+
+    void resized() override
+    {
+        auto area = bodyArea().reduced(24, 16);
+
+        auto top = area.removeFromTop(26);
+        mVoice.setBounds(top.getX(), top.getY(), mVoice.idealWidth(), 26);
+        area.removeFromTop(20);
+
+        auto layKnobs = [](juce::Rectangle<int> r, std::vector<LabeledKnob *> ks) {
+            const int nk = juce::jmax(1, (int)ks.size());
+            auto row = r.withSizeKeepingCentre(juce::jmin(r.getWidth(), 104 * nk),
+                                               juce::jmin(r.getHeight(), 130));
+            const int kw = row.getWidth() / nk;
+            for (auto *k : ks) k->setBounds(row.removeFromLeft(kw).reduced(5, 0));
+        };
+
+        if (mVoiceIdx == 1) // Q-Tron: a row of toggle-pill switches, then Gain + Peak
+        {
+            auto sw = area.removeFromTop(26);
+            int x = sw.getX();
+            auto place = [&](SegmentedControl &c) {
+                const int w = c.idealWidth();
+                c.setBounds(x, sw.getY(), w, 26);
+                x += w + 22;
+            };
+            place(mMode); place(mDrive); place(mQRange); place(mBoost); place(mResponse);
+            area.removeFromTop(24);
+            layKnobs(area, {&mSens, &mReso});
+        }
+        else // FX25: Sensitivity, Range, Blend
+        {
+            layKnobs(area, {&mSens, &mRange, &mBlend});
+        }
+    }
+
+private:
+    void timerCallback() override { updateHeader(); }
+    void updateHeader()
+    {
+        juce::String r = mVoiceName;
+        if (cutoffHzProvider)
+            r << juce::String::fromUTF8(" \xC2\xB7 ") << juce::String((int)cutoffHzProvider()) << " Hz";
+        setHeaderRight(r);
+    }
+
+    juce::AudioProcessorValueTreeState &mApvts;
+    SegmentedControl mVoice, mMode, mDrive, mQRange, mBoost, mResponse;
+    LabeledKnob mSens, mRange, mReso, mBlend;
+    juce::String mVoiceName{"FX25"};
+    int mVoiceIdx = -1;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(EnvFilterPanel)
+};
+
 } // namespace nam_rig::ui

@@ -28,6 +28,7 @@
 
 #include "Blocks.h"
 #include "GateBlock.h"
+#include "EnvFilterBlock.h"
 #include "CompBlock.h"
 #include "DriveBlock.h"
 #include "PreModBlock.h"
@@ -231,6 +232,13 @@ public:
         // ---- shared mono pre ----
         if (!gate.isBypassed())
             { gate.process(ch0, numSamples);  heal(gate, ch0, numSamples); }
+        // Envelope filter / auto-wah: runs on the globally-CALIBRATED signal (the
+        // input-cal scale above already trimmed the input to the pre-amp reference,
+        // so the level-dependent sweep is anchored to the user's dBu calibration,
+        // exactly like the gate/comp/drive), and BEFORE the compressor so it tracks
+        // the un-squashed dynamics the real pedal senses. Zero latency.
+        if (!envfilter.isBypassed())
+            { envfilter.process(ch0, numSamples); heal(envfilter, ch0, numSamples); }
         if (!comp.isBypassed())
             { comp.process(ch0, numSamples);  heal(comp, ch0, numSamples); }
         // Mono front-of-amp modulation pedal. Its position relative to the drive
@@ -301,8 +309,8 @@ public:
     // (max of the two voices, INCLUDING their align delays) + shared post.
     double latencySamples() const
     {
-        const double pre = gate.latencySamples() + comp.latencySamples() + drive.latencySamples()
-                         + premod.latencySamples();
+        const double pre = gate.latencySamples() + envfilter.latencySamples() + comp.latencySamples()
+                         + drive.latencySamples() + premod.latencySamples();
         const double LA = amp.latencySamples() + eq.latencySamples() + cab.latencySamples();
         const double LB = ampB.latencySamples() + eqB.latencySamples() + cabB.latencySamples();
         double voice = LA + mAlignA;
@@ -346,6 +354,7 @@ public:
 
     // ---- the blocks ----
     GateBlock gate; // shared pre
+    EnvFilterBlock envfilter; // auto-wah, before comp (tracks raw dynamics)
     CompBlock comp;
     DriveBlock drive; // 3-slot drive rack (shared, before split)
     PreModBlock premod; // mono front-of-amp modulation pedal (after drive, before split)
@@ -582,9 +591,9 @@ private:
         }
     }
 
-    std::array<MonoBlock *, 10> allMonoBlocks()
+    std::array<MonoBlock *, 11> allMonoBlocks()
     {
-        return {&gate, &comp, &drive, &premod, &amp, &eq, &cab, &ampB, &eqB, &cabB};
+        return {&gate, &envfilter, &comp, &drive, &premod, &amp, &eq, &cab, &ampB, &eqB, &cabB};
     }
 
     std::array<StereoBlock *, 3> stereoBlocks() { return {&mod, &delay, &reverb}; }

@@ -258,6 +258,50 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::ParameterID("premodPos", 1), "Pre Mod Position",
         juce::StringArray{"After Drive", "Before Drive"}, 0));
 
+    // --- Envelope filter / auto-wah (mono, pre-amp): rig/EnvFilterBlock.h,
+    // env_filter_test.cpp. Sits BEFORE the compressor so it tracks the raw guitar
+    // dynamics. Two voices, each faithful to a real unit's control complement
+    // (the panel shows only the controls that unit has):
+    //   FX25  = DOD FX25B — Sensitivity, Range, Blend (knobs). Fixed BP/Up/Q.
+    //   Q-Tron = EHX Q-Tron+ — Gain, Peak (knobs) + Mode/Drive/Range/Boost/Response
+    //            (switches). Choice orders MUST match EnvFilterBlock::Mode etc.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("envfilterVoice", 1), "Env Filter Voice",
+        juce::StringArray{"FX25", "Q-Tron"}, 0));
+    // shared knob (FX25 "Sensitivity" / Q-Tron "Gain") — drives the detector.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("envfilterSens", 1), "Env Filter Gain",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+    // FX25 knobs.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("envfilterRange", 1), "Env Filter Range",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("envfilterMix", 1), "Env Filter Blend",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+    // Q-Tron knob (Peak = resonance).
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("envfilterReso", 1), "Env Filter Peak",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.6f));
+    // Q-Tron switches.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("envfilterMode", 1), "Env Filter Mode",
+        juce::StringArray{"LP", "BP", "HP", "MIX"}, 1)); // matches Mode enum; BP default
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("envfilterDir", 1), "Env Filter Drive",
+        juce::StringArray{"Up", "Down"}, 0));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("envfilterQRange", 1), "Env Filter Q-Range",
+        juce::StringArray{"Lo", "Hi"}, 0));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("envfilterBoost", 1), "Env Filter Boost",
+        juce::StringArray{"Normal", "Boost"}, 0));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("envfilterResponse", 1), "Env Filter Response",
+        juce::StringArray{"Fast", "Slow"}, 0));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("envfilterOn", 1), "Env Filter Enable", false)); // off by default (new block)
+
     // --- Modulation: 3-slot series section (rig/ModBlock.h; mod_test.cpp).
     // Per-slot bank (superset; the panel shows only each effect's real
     // controls). Slot 1 on by default = the old single-chorus default.
@@ -926,6 +970,37 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     // gateOn does NOT chain-bypass: the lookahead delay must keep running or
     // PDC breaks. Disabled gate = forced open (passthrough + constant delay).
     mChain.gate.setEnabled(apvts.getRawParameterValue("gateOn")->load() >= 0.5f);
+
+    // Envelope filter / auto-wah (zero latency; before comp). Per-voice faithful
+    // control mapping: the panel exposes only each unit's real controls; the rest
+    // are pinned to that unit's fixed voicing here.
+    const int efVoice = (int)apvts.getRawParameterValue("envfilterVoice")->load();
+    mChain.envfilter.setVoice(efVoice);
+    // Boost soft-clip anti-aliasing is baked in at 2nd order (block default) — no user control.
+    mChain.envfilter.setSensitivity(apvts.getRawParameterValue("envfilterSens")->load()); // Sensitivity/Gain
+    mChain.envfilter.setDepth(0.7f); // sweep width — fixed voicing (neither pedal exposes it)
+    if (efVoice == 0) // FX25B: fixed band-pass, Up sweep, fixed Q; Range + Blend knobs
+    {
+        mChain.envfilter.setMode(1);          // BP
+        mChain.envfilter.setDirectionUp(true);
+        mChain.envfilter.setBoost(false);
+        mChain.envfilter.setResonance(0.45f); // fixed FX25 Q
+        mChain.envfilter.setRange(apvts.getRawParameterValue("envfilterRange")->load());
+        mChain.envfilter.setMix(apvts.getRawParameterValue("envfilterMix")->load()); // Blend
+        mChain.envfilter.setAttackMs(8.0f);
+    }
+    else // Q-Tron+: Mode/Drive/Boost/Response switches, Peak knob, Hi/Lo range; MIX mode blends
+    {
+        mChain.envfilter.setMode((int)apvts.getRawParameterValue("envfilterMode")->load());
+        mChain.envfilter.setDirectionUp((int)apvts.getRawParameterValue("envfilterDir")->load() == 0);
+        mChain.envfilter.setBoost((int)apvts.getRawParameterValue("envfilterBoost")->load() == 1);
+        mChain.envfilter.setResonance(apvts.getRawParameterValue("envfilterReso")->load()); // Peak
+        mChain.envfilter.setRange((int)apvts.getRawParameterValue("envfilterQRange")->load() == 1 ? 0.6f : 0.25f); // Hi/Lo
+        mChain.envfilter.setMix(1.0f); // fully wet; MIX mode does the BP+dry blend
+        mChain.envfilter.setAttackMs((int)apvts.getRawParameterValue("envfilterResponse")->load() == 1 ? 35.0f : 8.0f); // Slow/Fast
+    }
+    mChain.envfilter.setBypassed(apvts.getRawParameterValue("envfilterOn")->load() < 0.5f);
+
     // Comp/Boost parameters (zero latency, so plain chain bypass is safe).
     mChain.comp.setSustain(apvts.getRawParameterValue("compSustain")->load());
     mChain.comp.setAttackMs(apvts.getRawParameterValue("compAttack")->load());
