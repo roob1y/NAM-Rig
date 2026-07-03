@@ -11,6 +11,9 @@
 // T7  mix law: Mix 0 = dry, Mix 1 = wet only; output always finite
 // T8  self-oscillation is bounded (analog feedback at max stays finite/limited)
 // T9  determinism: same input + params -> identical output
+// T10 DD-7 max feedback self-oscillation sustains + bounded
+// T11 all 8 DD-7 MODE positions run clean; T12 REVERSE produces output
+// T13 Carbon Copy circuit-grounded voicing (600 ms / 8192 stages / dark / self-osc)
 #include "rig/PreDelayBlock.h"
 #include <cstdio>
 #include <cmath>
@@ -198,29 +201,29 @@ int main()
         CHECK(modPos != staticPos, "T6 mod shifts echo timing (mod=%zu static=%zu)", modPos, staticPos);
     }
 
-    // ---- T7: mix law + finite output ----
+    // ---- T7: mix law -> Mix 0 adds NO wet/echo (dry-through-the-analog-IO only) ----
+    // The Carbon Copy I/O is now circuit-grounded as BUFFERED analog coupling (1 MΩ in /
+    // 1 kΩ out, subsonic coupling caps), so the dry is no longer bit-identical to the raw
+    // input (a tiny inaudible subsonic phase shift). So we test the real mix-law intent --
+    // "at Mix 0 there is no echo" -- via an impulse, not bit-equality of the dry.
     {
         PreDelayBlock d;
         d.setModel(PreDelayBlock::kCarbonCopy);
         d.setTimeMs(180.0f);
-        d.setFeedback(0.4f);
+        d.setFeedback(0.5f);
         d.setMod(0.3f);
         d.setMix(0.0f); // before prepare so the mix smoother seeds at 0 (no ramp)
         d.prepare({SR, BLK});
-
-        // Mix 0 -> output == dry
-        std::vector<float> a((size_t)SR, 0.0f);
-        for (size_t i = 0; i < a.size(); ++i) a[i] = 0.2f * std::sin(2.0 * 3.14159265 * 220.0 * i / SR);
-        std::vector<float> dry = a;
-        run(d, a);
-        double maxDiff = 0.0;
+        std::vector<float> m((size_t)SR, 0.0f);
+        m[0] = 1.0f; // impulse
+        run(d, m);
+        const size_t T = (size_t)(0.180 * SR);
+        const double dryPk = peakAmpNear(m, 0, 64);    // the dry impulse passes through
+        const double echoPk = peakAmpNear(m, T, 400);  // there must be no echo at Mix 0
         bool finite = true;
-        for (size_t i = 0; i < a.size(); ++i)
-        {
-            maxDiff = std::max(maxDiff, std::abs((double)a[i] - (double)dry[i]));
-            if (!std::isfinite(a[i])) finite = false;
-        }
-        CHECK(maxDiff < 1.0e-5, "T7 Mix 0 = dry (max diff %.2e)", maxDiff);
+        for (float v : m) if (!std::isfinite(v)) finite = false;
+        CHECK(dryPk > 0.5, "T7 Mix 0 passes dry (impulse peak %.3f)", dryPk);
+        CHECK(echoPk < 1.0e-4, "T7 Mix 0 adds no echo (delay-time peak %.2e)", echoPk);
         CHECK(finite, "T7 output finite");
     }
 
@@ -355,6 +358,42 @@ int main()
         };
         const double rev = wetRms(PreDelayBlock::kReverse);
         CHECK(rev > 0.05, "T12 REVERSE produces output (wet RMS %.3f > 0.05)", rev);
+    }
+
+    // ---- T13: Carbon Copy circuit-grounded voicing (docs/predelay/carbon_copy.md) ----
+    // Verified specs it must honour: max delay 600 ms, dark BBD (in-loop corner well below
+    // the DD-7's), and self-oscillation past ~2 o'clock Regen that SUSTAINS but stays bounded.
+    {
+        PreDelayBlock cc;
+        cc.setModel(PreDelayBlock::kCarbonCopy);
+        cc.prepare({SR, BLK});
+        const auto v = cc.currentVoicing();
+        CHECK(v.bbd && std::abs(v.maxTimeMs - 600.0f) < 0.5f && std::abs(v.bbdStages - 8192.0f) < 0.5f,
+              "T13 Carbon Copy = BBD, 600 ms, 8192 stages (%.0f ms, %.0f stages)", v.maxTimeMs, v.bbdStages);
+        // dark in-loop bandwidth at a mid setting (below ~3.2 kHz)
+        cc.setTimeMs(400.0f);
+        settle(cc, 0.3);
+        CHECK(cc.currentLoopLpHz() < 3200.0f, "T13 Carbon Copy is dark (in-loop %.0f Hz < 3200)", cc.currentLoopLpHz());
+        // self-oscillation: max Regen sustains and stays bounded
+        PreDelayBlock osc;
+        osc.setModel(PreDelayBlock::kCarbonCopy);
+        osc.setTimeMs(180.0f);
+        osc.setFeedback(1.0f); // ceiling 1.05
+        osc.setMix(1.0f);
+        osc.setMod(0.3f);
+        osc.prepare({SR, BLK});
+        std::vector<float> m((size_t)(SR * 4.0), 0.0f);
+        for (int k = 0; k < 300; ++k) m[(size_t)k] = 0.4f; // a burst to excite the loop
+        run(osc, m);
+        double pk = 0.0; bool finite = true;
+        for (size_t i = m.size() * 3 / 4; i < m.size(); ++i) // far tail
+        {
+            pk = std::max(pk, std::abs((double)m[i]));
+            if (!std::isfinite(m[i])) finite = false;
+        }
+        CHECK(finite, "T13 Carbon Copy self-osc finite");
+        CHECK(pk > 0.25, "T13 Carbon Copy self-osc SUSTAINS (tail peak %.2f)", pk);
+        CHECK(pk < 4.0, "T13 Carbon Copy self-osc bounded (tail peak %.2f)", pk);
     }
 
     std::printf("\n%s (%d failures)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);

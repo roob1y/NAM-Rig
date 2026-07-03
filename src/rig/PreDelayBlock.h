@@ -20,13 +20,24 @@
 //                         chorus; here the base voice is the pristine digital delay and
 //                         the Mod knob covers the Modulate behaviour.)
 //
-//   1  MXR CARBON COPY  — dark ANALOG BBD (bucket-brigade + NE570-style companding).
-//                         A BBD's bandwidth is its clock's Nyquist: t = N/(2·fclk),
-//                         so bandwidth ≈ N/(4·t) — repeats band-limit and DARKEN as
-//                         the delay lengthens. The Carbon Copy is famously dark: a
-//                         LOW fixed reconstruction/anti-alias filter dominates at all
-//                         times (~2.6 kHz), companding compresses the repeats, and
-//                         two internal trimmers add a subtle chorus warble. Max 600 ms.
+//   1  MXR CARBON COPY  — dark ANALOG BBD. VERIFIED from real-board repair traces +
+//                         the official Dunlop M169 manual (docs/predelay/carbon_copy.md):
+//                         4× BL3208 BBDs (2048 stages each = 8192 total, two series
+//                         pairs), an SA571 compander (2:1 noise reduction, compress→BBD→
+//                         expand), TL062 op-amps, 1 MΩ buffered input, 1 kΩ output, a
+//                         clean analog dry through-path blended with the wet. A BBD's
+//                         bandwidth is its clock's Nyquist (t = N/(2·fclk) → Nyquist =
+//                         N/(4·t)), so the repeats band-limit and DARKEN as the delay
+//                         lengthens (~3.4 kHz at 600 ms). The Carbon Copy is famously
+//                         dark because a steep fixed Sallen-Key reconstruction filter
+//                         dominates at all settings — the exact −3 dB corner is NOT
+//                         circuit-verified (schematic images are bot-blocked); ~2.6 kHz
+//                         here is an ear-tunable perceptual match for our single 2-pole
+//                         in-loop LP (the real filter is ~3 kHz but 30–36 dB/oct). Mod =
+//                         a subtle 0.2–2.2 Hz LFO on the BBD clock (pitch warble). No
+//                         tone control on the M169. Max 600 ms; self-oscillates. FLAGGED
+//                         items (corner, coupling caps, clock chip) offer a controlled-
+//                         probe measurement against Robbie's real pedal.
 //
 //   2  MEMORY MAN       — EHX Deluxe Memory Man: lush ANALOG BBD (MN3005). Documented
 //                         voice: "high end heavily attenuated, LITTLE bass cut, a
@@ -103,6 +114,10 @@ public:
     }
     static constexpr float kModulateRateHz = 1.0f;  // DD-7 Modulate: fixed, "just enough warble"
     static constexpr float kModulateDepth  = 0.4f;
+    // Carbon Copy: the real M169 has NO mod knob — its modulation is set by two INTERNAL
+    // trimmers (WIDTH/RATE), always on and subtle. So the Carbon Copy uses a FIXED internal
+    // mod depth and ignores the user Mod param (its panel shows only Delay/Regen/Mix).
+    static constexpr float kCarbonCopyMod  = 0.35f;
     static constexpr double kAnalogLpHz    = 2800.0; // DM-2 model: in-loop darkening of the repeats
     static constexpr float kAnalogSatDrive = 0.4f, kAnalogSatAsym = 0.05f;
 
@@ -143,12 +158,23 @@ public:
         switch (m)
         {
         case kCarbonCopy:
-            // Dark analog BBD. Two 4096-stage lines (~8192) for 600 ms; a LOW fixed
-            // reconstruction filter (~2.6 kHz) keeps it dark at every setting (the
-            // clock Nyquist only bites below it at the very longest times). Companding
-            // + BBD headroom -> a gentle compressed knee (satDrive). Subtle chorus from
-            // the internal width/rate trimmers.        stages  aa     hp    midHz midDb midQ  sat   asym  presHz presDb modHz modMs glide fbC
-            return { true,  600.0f,  8192.0f, 2600.0f, 100.0f, 0.0f, 0.0f, 0.7f, 0.50f, 0.05f, 0.0f,  0.0f,  1.20f, 1.3f, 70.0f, 1.03f };
+            // Dark analog BBD — VERIFIED parts (docs/predelay/carbon_copy.md): 4× BL3208
+            // = 8192 stages for 600 ms; SA571 compander (gentle program-dependent knee ->
+            // satDrive 0.50/asym 0.06, subtle, not distortion); self-oscillates past ~2
+            // o'clock (fbCeiling 1.18 -- higher than the DD-7's 1.05 because the dark
+            // in-loop LP + compander eat more loop gain per pass, so the ceiling has to
+            // overcome those lumped losses to reproduce the hardware self-oscillation;
+            // bounded by the in-loop compander sat + loopLimit); mod
+            // = a subtle 0.2-2.2 Hz clock warble (modRateHz 1.2 within range, depth 1.3 ms);
+            // BBD repitch swoop on a time change (glideMs 70). antiAliasHz ~2.6 kHz is an
+            // ear-tunable perceptual match for our single 2-pole in-loop LP standing in for
+            // the real steep (~30-36 dB/oct, ~3 kHz) Sallen-Key reconstruction filter -- the
+            // exact corner is NOT circuit-verified (schematic bot-blocked); offer the
+            // controlled-probe measurement. loopHpHz 100 = a gentle bass-runaway floor (the
+            // M169 is warm/keeps lows). No mid bump, no presence, no tone control on the
+            // M169. Input 1 MOhm / output 1 kOhm buffered stage in applyIo().
+            //       bbd    maxMs    stages   aa       hp      midHz midDb midQ  sat    asym   presHz presDb modHz  modMs glide fbC
+            return { true,  600.0f,  8192.0f, 2600.0f, 100.0f, 0.0f, 0.0f, 0.7f, 0.50f, 0.06f, 0.0f,  0.0f,  1.20f, 1.3f, 70.0f, 1.18f };
         case kMemoryMan:
             // Lush analog BBD (single 4096-stage MN3005 path -> Nyquist drops to
             // ~1.8 kHz at 550 ms, so it goes very dark long). Its documented voice is a
@@ -272,7 +298,10 @@ public:
         // Analog models push past unity (self-oscillation) — the in-loop companding
         // soft-clip + loopLimit bound the level so it never runs away.
         const float fb = hold ? 1.0f : (mFeedback * mVoicing.fbCeiling);
-        const float modAmt = modulate ? kModulateDepth : mModAmt; // MODULATE = fixed chorus depth
+        // MODULATE mode = fixed chorus depth; the Carbon Copy's mod is an INTERNAL always-on
+        // trimmer warble (no mod knob) = a fixed subtle amount; other models use the Mod knob.
+        const float modAmt = modulate ? kModulateDepth
+                           : (mModel == kCarbonCopy ? kCarbonCopyMod : mModAmt);
         // BBD bandwidth tracks the clock: recompute the in-loop LP corner for this
         // block from the target time (cheap — once per block, not per sample). Digital
         // models keep their fixed converter bandwidth.
@@ -437,8 +466,16 @@ private:
         case kDD7:
             mIo.setBuffered(2.0f, 1.6f, 0.0f, 0.0f); // subsonic in/out coupling HPs; else transparent
             break;
+        case kCarbonCopy:
+            // VERIFIED from the Dunlop M169 manual (docs/predelay/carbon_copy.md): 1 MΩ
+            // buffered input (= the DI reference -> NO loading shelf) and 1 kΩ output.
+            // Coupling-cap values are schematic-gated/unverified -> modeled as subsonic
+            // high-passes like the DD-7. No output HF smoothing: the darkness is the
+            // in-loop reconstruction LP, not the output buffer.
+            mIo.setBuffered(2.0f, 1.6f, 0.0f, 0.0f);
+            break;
         default:
-            mIo.setTransparent(); // pending per-pedal circuit research
+            mIo.setTransparent(); // pending per-pedal circuit research (Memory Man / SDD-3000)
             break;
         }
     }

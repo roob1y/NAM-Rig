@@ -6349,6 +6349,13 @@ public:
             set(0, true, "D.Time"); set(1, true, "F.Back"); set(2, true, "E.Level");
             set(3, false, ""); set(4, false, "");
             break;
+        case 1: // MXR Carbon Copy: its REAL three knobs only — Delay, Regen, Mix. The M169
+                // has NO mod knob (modulation is internal WIDTH/RATE trimmers, baked in as a
+                // fixed subtle warble) and NO tone control (its wet path is fixed-dark). See
+                // carbon_copy.md.
+            set(0, true, "Delay"); set(1, true, "Regen"); set(2, true, "Mix");
+            set(3, false, ""); set(4, false, "");
+            break;
         default: // provisional generic set (pending per-pedal circuit research)
             set(0, true, "Time"); set(1, true, "Feedback"); set(2, true, "Mix");
             set(3, true, "Mod"); set(4, true, "Tone");
