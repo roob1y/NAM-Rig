@@ -52,11 +52,17 @@
 //                         (~100 kΩ inverting) loading input. Sings and washes where the
 //                         Carbon Copy stays dry and dark; self-oscillates readily.
 //
-//   3  KORG SDD-3000    — early DIGITAL rack delay (the U2/"present digital" sound).
-//                         "12-bit-plus-one" (~13-bit) companded conversion → a gritty,
-//                         organic digital texture; 17 kHz bandwidth (so BRIGHT, and
-//                         fixed — a converter, not a clock-swept BBD); and a defining
-//                         analog INPUT PREAMP that adds presence/sheen. Max 1023 ms.
+//   3  KORG SDD-3000    — early DIGITAL rack delay (The Edge/U2 preamp-delay). Researched
+//                         (docs/predelay/sdd3000.md): "12-bit + 1" (~13-bit) companded
+//                         conversion → a gritty/organic digital texture; ~17 kHz FIXED
+//                         bandwidth (a converter, not a clock-swept BBD); 1023 ms max; and
+//                         its defining analog JRC-op-amp INPUT PREAMP (drive it hard for the
+//                         signature "crunch"). Models the real front panel's control set:
+//                         Input (preamp) + Attenuator (−30/−10/+4), Regeneration Feedback +
+//                         INV + LOW (Flat/125/250/500 low-cut) + HIGH (Flat/8k/4k/2k
+//                         high-cut) in the loop, Modulation Waveform (Tri/Square/Random/Env)
+//                         + Intensity + Frequency (0.1–15 Hz; mod shortens the delay, scaled
+//                         by the time), and a crossfade Level Balance. Max 1023 ms.
 //
 // Signal per sample (mono):
 //   dry = x
@@ -235,7 +241,7 @@ public:
         const int maxDelay = (int)std::ceil((2.0f * kMaxTimeMs + 20.0f) * 0.001f * (float)mFs);
         mLine.prepare(maxDelay);
         mLfo.prepare(mFs);
-        mLfo.setWaveform(mModel == kMemoryMan ? Lfo::Triangle : Lfo::Sine); // DMM uses a triangle LFO
+        mLfo.setWaveform(lfoWaveFor()); // per-model LFO waveform (DMM triangle, SDD switch, else sine)
         mSmoothK = 1.0f - std::exp((float)(-1.0 / (0.010 * mFs))); // 10 ms de-zip on mix
         updateGlide();
         mIo.prepare(mFs);
@@ -264,6 +270,7 @@ public:
         mBaseZ = (double)currentTimeMs();
         mMixZ = mMix;
         mLevelZ = mLevel;
+        mEnv = 0.0;
     }
 
     // ---- parameters (audio thread) ----
@@ -275,7 +282,7 @@ public:
             mModel = mm;
             mVoicing = voicingFor(mm);
             if (mPrepared) { updateGlide(); applyIo(); rebuildFixed(true); mLfo.setRateHz(mVoicing.modRateHz);
-                             mLfo.setWaveform(mModel == kMemoryMan ? Lfo::Triangle : Lfo::Sine); }
+                             mLfo.setWaveform(lfoWaveFor()); }
         }
     }
     void setDd7Mode(int m) { mMode = std::clamp(m, 0, (int)kNumDd7Modes - 1); }
@@ -287,6 +294,14 @@ public:
     void setMod(float m) { mModAmt = std::clamp(m, 0.0f, 1.0f); }        // scales the built-in mod depth
     void setLevel(float l) { mLevel = std::clamp(l, 0.0f, 1.0f); }       // Memory Man master Volume/Level (unity at 1)
     void setChorusVib(int m) { mChorusVib = std::clamp(m, 0, 1); }       // Memory Man 0=Chorus (slow) 1=Vibrato (fast)
+    // Korg SDD-3000 controls (shown only for that model — see docs/predelay/sdd3000.md).
+    void setSddInput(float v) { mSddInput = std::clamp(v, 0.0f, 1.0f); }  // input preamp drive
+    void setSddFreq(float hz) { mSddFreqHz = std::clamp(hz, 0.1f, 15.0f); } // mod Frequency (0.1-15 Hz)
+    void setSddAtten(int a) { mSddAtten = std::clamp(a, 0, 2); }          // 0=-30 (most gain) 1=-10 2=+4 dB
+    void setSddInvert(bool b) { mSddInvert = b; }                         // feedback INV (polarity)
+    void setSddWave(int w) { mSddWave = std::clamp(w, 0, 3); if (mPrepared) mLfo.setWaveform(lfoWaveFor()); } // Tri/Sq/Rnd/Env
+    void setSddLoCut(int c) { mSddLoCut = std::clamp(c, 0, 3); if (mPrepared && mModel == kSDD3000) rebuildFixed(true); } // LOW
+    void setSddHiCut(int c) { mSddHiCut = std::clamp(c, 0, 3); if (mPrepared && mModel == kSDD3000) rebuildFixed(true); } // HIGH
     void setToneHz(float hz)
     {
         if (hz != mToneHz) { mToneHz = hz; if (mPrepared) rebuildTone(); }
@@ -316,6 +331,7 @@ public:
         float lfoRate = mVoicing.modRateHz;
         if (mModel == kDD7 && modulate)  lfoRate = kModulateRateHz;
         else if (mModel == kMemoryMan)   lfoRate = mChorusVib ? kDmmVibratoRateHz : kDmmChorusRateHz;
+        else if (mModel == kSDD3000)     lfoRate = mSddFreqHz; // SDD Frequency knob (0.1-15 Hz)
         mLfo.setRateHz(lfoRate);
         const float baseTarget = currentTimeMs();
         // Feedback: knob (0..1) scaled by the model ceiling; HOLD locks it to 1 (freeze).
@@ -331,6 +347,12 @@ public:
         // models keep their fixed converter bandwidth.
         updateBandwidth(baseTarget);
         const double fsK = 0.001 * mFs;
+        // SDD ENV-mode envelope-follower coefficients (fast attack, release from the Frequency
+        // knob) and the feedback-invert sign — computed once per block.
+        const double envAtk = 1.0 - std::exp(-1.0 / (0.005 * mFs));
+        const double relSec = std::clamp(0.5 / std::max(0.1, (double)mSddFreqHz), 0.02, 2.0);
+        const double envRel = 1.0 - std::exp(-1.0 / (relSec * mFs));
+        const float fbSign = (mModel == kSDD3000 && mSddInvert) ? -1.0f : 1.0f;
 
         for (int i = 0; i < numSamples; ++i)
         {
@@ -341,11 +363,21 @@ public:
             mBaseZ += (double)mGlideK * ((double)baseTarget - mBaseZ);
             if (std::abs((double)baseTarget - mBaseZ) < 1.0e-4) mBaseZ = baseTarget;
 
+            const float dry = (mModel == kSDD3000) ? sddPreamp(mono[i]) : mono[i]; // SDD preamp colours dry+wet
             const double lfo = (double)mLfo.value();
-            const double modMs = (double)modAmt * (double)mVoicing.modDepthMs * lfo;
+            double modMs;
+            if (mModel == kSDD3000)
+            {
+                // SDD modulation shortens the delay (up to 2:1 at full Intensity) and scales
+                // with the delay time. ENV mode: louder input -> shorter delay; else the LFO.
+                const double a = std::abs((double)dry);
+                mEnv += ((a > mEnv) ? envAtk : envRel) * (a - mEnv);
+                const double shape = (mSddWave == 3) ? std::min(1.0, mEnv * 4.0) : 0.5 * (1.0 + lfo);
+                modMs = -(double)modAmt * (mBaseZ * 0.5) * shape; // always SHORTER than the set time
+            }
+            else
+                modMs = (double)modAmt * (double)mVoicing.modDepthMs * lfo;
             const double tSamp = std::max(3.0, (mBaseZ + modMs) * fsK);
-
-            const float dry = mono[i];
             float wet = reverse ? reverseRead(tSamp) : mLine.readFrac6(tSamp - 1.0); // REVERSE = grain playback
 
             // In-loop tone (recirculates -> compounds per repeat, the authentic
@@ -362,7 +394,7 @@ public:
             if (mVoicing.satDrive > 0.0f) wet = loopSat(wet);
 
             // Record input into the line; HOLD mutes the input so the buffer freezes/loops.
-            mLine.write(loopLimit(hold ? (fb * wet) : (dry + fb * wet)));
+            mLine.write(loopLimit(hold ? (fbSign * fb * wet) : (dry + fbSign * fb * wet))); // fbSign = SDD INV
 
             // Output-once presence sheen (not recirculated -> shapes timbre without
             // compounding down the tail): the SDD/DD digital top-end lift.
@@ -376,8 +408,11 @@ public:
             // and a mid setting gives chorus (wet beating against dry). The feedback write
             // above is unchanged (the delay input is always dry + fb·wet), so only the
             // output blend differs per model.
-            const float blended = (mModel == kMemoryMan) ? ((1.0f - mMixZ) * dry + mMixZ * outw)
-                                                         : (dry + mMixZ * outw);
+            // The Memory Man BLEND and the SDD-3000 LEVEL BALANCE are true crossfades
+            // (100% dry -> equal -> 100% wet); the DD-7/Carbon Copy add wet on top of unity dry.
+            const bool crossfade = (mModel == kMemoryMan || mModel == kSDD3000);
+            const float blended = crossfade ? ((1.0f - mMixZ) * dry + mMixZ * outw)
+                                            : (dry + mMixZ * outw);
             // The Memory Man has a master Volume/Level knob (unity at 1); the other pedals
             // have no such control, so their output is the blend unscaled.
             mono[i] = (mModel == kMemoryMan) ? (blended * mLevelZ) : blended;
@@ -484,6 +519,29 @@ private:
         mGlideK = 1.0f - (float)std::exp(-1.0 / (ms * 0.001 * mFs));
     }
 
+    // LFO waveform per model: Memory Man = triangle; SDD-3000 = its Waveform switch
+    // (Triangle/Square/Random); everything else = sine. (SDD ENV mode uses the input
+    // envelope follower below, not the LFO.)
+    int lfoWaveFor() const
+    {
+        if (mModel == kMemoryMan) return (int)Lfo::Triangle;
+        if (mModel == kSDD3000)
+            switch (mSddWave) { case 1: return (int)Lfo::Square; case 2: return (int)Lfo::SampleHold; default: return (int)Lfo::Triangle; }
+        return (int)Lfo::Sine;
+    }
+
+    // SDD-3000 analog INPUT PREAMP — the signature JRC-op-amp gain stage. The Attenuator
+    // sets the base gain (−30 dB = MOST gain + extra stage, +4 dB = least) and the Input
+    // knob drives it into soft saturation ("crunch", beloved by SDD users). Colours the
+    // whole signal (dry + delay input), since the preamp is always in circuit.
+    float sddPreamp(float x) const
+    {
+        static const float attenPre[3] = {1.6f, 1.0f, 0.6f}; // −30 hot / −10 nominal / +4 padded
+        const float g = attenPre[mSddAtten] * (1.0f + 1.2f * mSddInput);
+        const float y = std::tanh(x * g);
+        return std::isfinite(y) ? y : 0.0f;
+    }
+
     // Per-model INPUT+OUTPUT stage (impedance loading / coupling / buffer), reusing
     // IoStage.h like DriveBlock. Only the DD-7 is circuit-verified so far (2008 Roland
     // service notes, docs/predelay/dd7.md): 2SK880 JFET input buffer, 1 MΩ in = the DI
@@ -526,9 +584,15 @@ private:
     // per block by updateBandwidth(); force=true also seeds it here.
     void rebuildFixed(bool force)
     {
-        mLoopHpOn = mVoicing.loopHpHz > 0.0f;
+        // In-loop low-cut. For the SDD-3000 the LOW filter switch overrides the corner
+        // (Flat/125/250/500 Hz) with a gentle 1-pole (~the real −3 dB/oct); other models
+        // use the voicing's 2-pole corner.
+        float hpHz = mVoicing.loopHpHz;
+        if (mModel == kSDD3000) { const float lo[4] = {mVoicing.loopHpHz, 125.0f, 250.0f, 500.0f}; hpHz = lo[mSddLoCut]; }
+        mLoopHpOn = hpHz > 0.0f;
         if (mLoopHpOn)
-            mLoopHp = Biquad::highpass(mFs, std::min((double)mVoicing.loopHpHz, 0.45 * mFs), 0.5);
+            mLoopHp = (mModel == kSDD3000) ? Biquad::highpass1(mFs, std::min((double)hpHz, 0.45 * mFs))
+                                           : Biquad::highpass(mFs, std::min((double)hpHz, 0.45 * mFs), 0.5);
 
         mMidOn = mVoicing.midDb != 0.0f && mVoicing.midHz > 0.0f;
         if (mMidOn)
@@ -544,9 +608,14 @@ private:
 
         if (force && !mVoicing.bbd)
         {
-            // Digital: fixed converter bandwidth, build once.
-            mLoopLpHzBuilt = std::min(mVoicing.antiAliasHz, (float)(0.45 * mFs));
-            mLoopLp = Biquad::lowpass(mFs, mLoopLpHzBuilt, 0.5);
+            // Digital: fixed converter bandwidth. The SDD-3000 HIGH filter switch caps it
+            // lower (Flat/8k/4k/2k) with a gentle 1-pole (~the real −6 dB/oct).
+            float lpHz = mVoicing.antiAliasHz;
+            if (mModel == kSDD3000) { const float hi[4] = {mVoicing.antiAliasHz, 8000.0f, 4000.0f, 2000.0f};
+                                      lpHz = std::min(mVoicing.antiAliasHz, hi[mSddHiCut]); }
+            mLoopLpHzBuilt = std::min(lpHz, (float)(0.45 * mFs));
+            mLoopLp = (mModel == kSDD3000) ? Biquad::lowpass1(mFs, mLoopLpHzBuilt)
+                                           : Biquad::lowpass(mFs, mLoopLpHzBuilt, 0.5);
             mLoopLpOn = true;
         }
         else if (force && mVoicing.bbd)
@@ -619,6 +688,10 @@ private:
     float mTimeMs = 350.0f, mFeedback = 0.35f, mMix = 0.28f, mModAmt = 0.25f, mToneHz = 20000.0f;
     float mLevel = 1.0f, mLevelZ = 1.0f; // Memory Man master Volume/Level (unity default)
     int mChorusVib = 0;                  // Memory Man Chorus(0)/Vibrato(1) switch
+    float mSddInput = 0.3f, mSddFreqHz = 1.0f; // SDD-3000 input preamp drive + mod Frequency
+    int mSddWave = 0, mSddLoCut = 0, mSddHiCut = 0, mSddAtten = 1; // Waveform / LOW / HIGH / Attenuator
+    bool mSddInvert = false;             // SDD feedback INV
+    double mEnv = 0.0;                    // SDD ENV-mode input follower
     int mSyncIndex = 0;
 
     double mBaseZ = 350.0;   // glided base delay (ms)

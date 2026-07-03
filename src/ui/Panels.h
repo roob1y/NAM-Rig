@@ -6301,6 +6301,23 @@ public:
         mChorusVibAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
             apvts, "predelayChorusVib", mChorusVib);
 
+        // Korg SDD-3000 switches (shown only for that model) — the real front-panel complement.
+        mSddAtten.addItemList({"-30 dB", "-10 dB", "+4 dB"}, 1);
+        mSddWave.addItemList({"Triangle", "Square", "Random", "Env"}, 1);
+        mSddLoCut.addItemList({"LOW Flat", "125 Hz", "250 Hz", "500 Hz"}, 1);
+        mSddHiCut.addItemList({"HIGH Flat", "8 kHz", "4 kHz", "2 kHz"}, 1);
+        mSddInvert.addItemList({"FB Normal", "FB Invert"}, 1);
+        const std::pair<juce::ComboBox *, const char *> sddSwitches[] = {
+            {&mSddAtten, "predelaySddAtten"}, {&mSddWave, "predelaySddWave"},
+            {&mSddLoCut, "predelaySddLoCut"}, {&mSddHiCut, "predelaySddHiCut"},
+            {&mSddInvert, "predelaySddInvert"}};
+        for (const auto &s : sddSwitches)
+        {
+            addChildComponent(*s.first);
+            mSddAtts.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+                apvts, s.second, *s.first));
+        }
+
         // The Boss DD-7 MODE control is a ROTARY KNOB (8 detented positions), like the
         // hardware — turn it to step through the modes; the readout shows the mode name,
         // and clicking the readout opens the same list. Shown only for the DD-7, as the
@@ -6318,7 +6335,8 @@ public:
         const std::pair<const char *, const char *> defs[] = {
             {"predelayTime", "Time"}, {"predelayFeedback", "Feedback"},
             {"predelayMix", "Mix"}, {"predelayMod", "Mod"}, {"predelayTone", "Tone"},
-            {"predelayLevel", "Level"}}; // index 5 = Memory Man master Volume (DMM only)
+            {"predelayLevel", "Level"},   // index 5 = Memory Man master Volume (DMM only)
+            {"predelaySddFreq", "Frequency"}, {"predelaySddInput", "Input"}}; // indices 6,7 = SDD only
         for (const auto &[id, caption] : defs)
         {
             mKnobs.push_back(std::make_unique<LabeledKnob>(apvts, id, caption));
@@ -6339,6 +6357,8 @@ public:
         mLastModel = m;
         if (mModeKnob) mModeKnob->setVisible(m == 0); // the MODE rotary is a DD-7 control only
         mChorusVib.setVisible(m == 2);                // Chorus/Vibrato switch is a Memory Man control only
+        for (juce::ComboBox *c : {&mSddAtten, &mSddWave, &mSddLoCut, &mSddHiCut, &mSddInvert})
+            c->setVisible(m == 3);                    // SDD-3000 switches only
         // AUTHENTIC per-pedal control set + legends (like PremodPanel shows only the
         // real controls). Knobs: 0 Time, 1 Feedback, 2 Mix, 3 Mod, 4 Tone. Only the
         // DD-7 is circuit-verified so far, so it shows its REAL three knobs with the
@@ -6356,25 +6376,32 @@ public:
         {
         case 0: // Boss DD-7: D.TIME, E.LEVEL, F.BACK
             set(0, true, "D.Time"); set(1, true, "F.Back"); set(2, true, "E.Level");
-            set(3, false, ""); set(4, false, ""); set(5, false, "");
+            set(3, false, ""); set(4, false, ""); set(5, false, ""); set(6, false, ""); set(7, false, "");
             break;
         case 1: // MXR Carbon Copy: its REAL three knobs only — Delay, Regen, Mix. The M169
                 // has NO mod knob (modulation is internal WIDTH/RATE trimmers, baked in as a
                 // fixed subtle warble) and NO tone control (its wet path is fixed-dark). See
                 // carbon_copy.md.
             set(0, true, "Delay"); set(1, true, "Regen"); set(2, true, "Mix");
-            set(3, false, ""); set(4, false, ""); set(5, false, "");
+            set(3, false, ""); set(4, false, ""); set(5, false, ""); set(6, false, ""); set(7, false, "");
             break;
         case 2: // EHX Deluxe Memory Man: its REAL five knobs — Delay, Feedback, Blend, Depth,
                 // Level (master Volume) — plus the Chorus/Vibrato switch (laid out separately).
                 // BLEND is a true crossfade (full wet = vibrato, mid = chorus); Depth sets the
                 // deep triangle-LFO width. No tone control on the DMM. See memory_man.md.
             set(0, true, "Delay"); set(1, true, "Feedback"); set(2, true, "Blend");
-            set(3, true, "Depth"); set(4, false, ""); set(5, true, "Level");
+            set(3, true, "Depth"); set(4, false, ""); set(5, true, "Level"); set(6, false, ""); set(7, false, "");
             break;
-        default: // provisional generic set (pending per-pedal circuit research: SDD-3000)
+        case 3: // Korg SDD-3000: its real controls — knobs Delay / Feedback / Balance /
+                // Intensity / Frequency / Input, plus the switch row (Attenuator / Waveform /
+                // LOW / HIGH / Invert). Level Balance is a crossfade. See sdd3000.md.
+            set(0, true, "Delay"); set(1, true, "Feedback"); set(2, true, "Balance");
+            set(3, true, "Intensity"); set(4, false, ""); set(5, false, "");
+            set(6, true, "Frequency"); set(7, true, "Input");
+            break;
+        default: // (all four models are covered above)
             set(0, true, "Time"); set(1, true, "Feedback"); set(2, true, "Mix");
-            set(3, true, "Mod"); set(4, true, "Tone"); set(5, false, "");
+            set(3, true, "Mod"); set(4, true, "Tone"); set(5, false, ""); set(6, false, ""); set(7, false, "");
             break;
         }
         resized(); // re-centre the now-visible knobs
@@ -6404,6 +6431,18 @@ public:
             mChorusVib.setBounds(sw.removeFromLeft(w));
             area.removeFromTop(10);
         }
+        // SDD-3000 switch row: Attenuator / Waveform / LOW / HIGH / Invert, five across.
+        if (mSddWave.isVisible())
+        {
+            auto sw = area.removeFromTop(26);
+            const int sc = (sw.getWidth() - 4 * gap) / 5;
+            for (juce::ComboBox *c : {&mSddAtten, &mSddWave, &mSddLoCut, &mSddHiCut, &mSddInvert})
+            {
+                c->setBounds(sw.removeFromLeft(sc));
+                sw.removeFromLeft(gap);
+            }
+            area.removeFromTop(10);
+        }
 
         // Lay out only the VISIBLE knobs, centred. On the DD-7 the MODE knob joins the
         // row as a 4th knob (E.LEVEL / F.BACK / D.TIME / MODE, like the hardware).
@@ -6422,7 +6461,9 @@ public:
 private:
     juce::AudioProcessorValueTreeState &mApvts;
     juce::ComboBox mModel, mSync, mPos, mChorusVib; // mChorusVib = Memory Man Chorus/Vibrato switch
+    juce::ComboBox mSddAtten, mSddWave, mSddLoCut, mSddHiCut, mSddInvert; // SDD-3000 switch row
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mModelAtt, mSyncAtt, mPosAtt, mChorusVibAtt;
+    std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>> mSddAtts;
     std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
     std::unique_ptr<LabeledKnob> mModeKnob; // DD-7 MODE rotary (choice param, hardware-style)
     int mLastModel = -1;
