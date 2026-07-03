@@ -243,7 +243,7 @@ if(BUILD_RIG_HARNESS)
     endif()
 
     # Stereo-section + preset suites + tuner (PASS/FAIL, exit nonzero on failure)
-    foreach(t IN ITEMS mod_test premod_test delay_test reverb_test preset_test tuner_test env_filter_test)
+    foreach(t IN ITEMS mod_test premod_test delay_test reverb_test preset_test tuner_test env_filter_test pitch_test)
         juce_add_console_app(${t} PRODUCT_NAME "${t}")
         target_sources(${t} PRIVATE tests/${t}.cpp)
         target_include_directories(${t} PRIVATE src)

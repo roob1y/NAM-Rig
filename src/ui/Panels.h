@@ -6393,4 +6393,115 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(EnvFilterPanel)
 };
 
+// PitchPanel — pitch effects. Two selectors: TYPE (Octave Down/Up) and ENGINE
+// (Poly = clean phase vocoder for chords / Grain = mono granular character voice).
+//   Octave Down: knobs DIRECT, OCT 1, OCT 2, TONE.
+//   Octave Up:   knobs DRY, TONE, OCTAVE, VOLUME.
+// Header-right shows Type / Engine + (Grain only) the tracked note.
+class PitchPanel : public BlockPanel, private juce::Timer
+{
+public:
+    explicit PitchPanel(juce::AudioProcessorValueTreeState &apvts)
+        : BlockPanel("PITCH"), mApvts(apvts),
+          mType(apvts, "pitchType", juce::StringArray{"OCT DOWN", "OCT UP"}),
+          mEngine(apvts, "pitchEngine", juce::StringArray{"POLY", "GRAIN"}),
+          mDirect(apvts, "pitchDirect", "Direct"),
+          mOct1(apvts, "pitchOct1", "Oct 1"),
+          mOct2(apvts, "pitchOct2", "Oct 2"),
+          mTight(apvts, "pitchTight", "Tone"),
+          mFuzz(apvts, "pitchFuzz", "Dry"),
+          mTone(apvts, "pitchTone", "Tone"),
+          mOctave(apvts, "pitchOctave", "Octave"),
+          mVolume(apvts, "pitchVol", "Volume")
+    {
+        addAndMakeVisible(mType);
+        addAndMakeVisible(mEngine);
+        mType.onChange = [this](int) { refresh(); };
+        mEngine.onChange = [this](int) { refresh(); };
+        for (auto *k : {&mDirect, &mOct1, &mOct2, &mTight, &mFuzz, &mTone, &mOctave, &mVolume})
+            addChildComponent(*k);
+        refresh();
+        startTimerHz(20); // live tracked-note readout in the header
+    }
+
+    // Provider for the Grain engine's tracked fundamental (Hz), set by the editor.
+    std::function<float()> subHzProvider;
+
+    void refresh()
+    {
+        const int t = (int)mApvts.getRawParameterValue("pitchType")->load();
+        mTypeName = (t == 1) ? "Up" : "Down";
+        if (t != mTypeIdx)
+        {
+            mTypeIdx = t;
+            const bool up = (t == 1);
+            mDirect.setVisible(!up); mOct1.setVisible(!up);
+            mOct2.setVisible(!up);   mTight.setVisible(!up);
+            mFuzz.setVisible(up); mTone.setVisible(up);
+            mOctave.setVisible(up); mVolume.setVisible(up);
+            resized();
+            repaint();
+        }
+        updateHeader();
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        BlockPanel::paint(g); // panel bg + title + header-right
+        g.setColour(colors::caption);
+        g.setFont(fonts::archivo(9.5f, fonts::SemiBold, 0.6f));
+        g.drawText("TYPE", mType.getX(), mType.getY() - 13,
+                   juce::jmax(46, mType.getWidth()), 11, juce::Justification::centredLeft);
+        g.drawText("ENGINE", mEngine.getX(), mEngine.getY() - 13,
+                   juce::jmax(46, mEngine.getWidth()), 11, juce::Justification::centredLeft);
+    }
+
+    void resized() override
+    {
+        auto area = bodyArea().reduced(24, 16);
+
+        auto top = area.removeFromTop(26);
+        mType.setBounds(top.getX(), top.getY(), mType.idealWidth(), 26);
+        mEngine.setBounds(mType.getRight() + 22, top.getY(), mEngine.idealWidth(), 26);
+        area.removeFromTop(20);
+
+        auto layKnobs = [](juce::Rectangle<int> r, std::vector<LabeledKnob *> ks) {
+            const int nk = juce::jmax(1, (int)ks.size());
+            auto row = r.withSizeKeepingCentre(juce::jmin(r.getWidth(), 104 * nk),
+                                               juce::jmin(r.getHeight(), 130));
+            const int kw = row.getWidth() / nk;
+            for (auto *k : ks) k->setBounds(row.removeFromLeft(kw).reduced(5, 0));
+        };
+
+        if (mTypeIdx == 1) // Octavia
+            layKnobs(area, {&mFuzz, &mTone, &mOctave, &mVolume});
+        else               // OC-2
+            layKnobs(area, {&mDirect, &mOct1, &mOct2, &mTight});
+    }
+
+private:
+    void timerCallback() override { updateHeader(); }
+    void updateHeader()
+    {
+        const bool grain = (int)mApvts.getRawParameterValue("pitchEngine")->load() == 1;
+        juce::String r = mTypeName;
+        r << juce::String::fromUTF8(" \xC2\xB7 ") << (grain ? "Grain" : "Poly");
+        if (grain && subHzProvider) // tracked note (Grain only)
+        {
+            const int f0 = (int)subHzProvider();
+            if (f0 > 0)
+                r << juce::String::fromUTF8(" \xC2\xB7 ") << juce::String(f0) << " Hz";
+        }
+        setHeaderRight(r);
+    }
+
+    juce::AudioProcessorValueTreeState &mApvts;
+    SegmentedControl mType, mEngine;
+    LabeledKnob mDirect, mOct1, mOct2, mTight, mFuzz, mTone, mOctave, mVolume;
+    juce::String mTypeName{"Down"};
+    int mTypeIdx = -1;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PitchPanel)
+};
+
 } // namespace nam_rig::ui

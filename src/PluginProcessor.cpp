@@ -258,6 +258,52 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::ParameterID("premodPos", 1), "Pre Mod Position",
         juce::StringArray{"After Drive", "Before Drive"}, 0));
 
+    // --- Pitch effects (mono, pre-amp): rig/PitchBlock.h + OctaveShifter.h +
+    // PitchTracker.h, pitch_test.cpp. CLEAN tracked octaves (pitch-synchronous
+    // granular shift, exact ratios). One block, Type toggle; the panel shows only
+    // the chosen direction's controls. Choice order MUST match PitchBlock::Type.
+    //   Octave Down = sub-octaves (Direct/Oct1 x0.5/Oct2 x0.25 + sub Tone).
+    //   Octave Up   = clean +1 octave (Dry blend/Tone/Octave level/Volume).
+    // NB param IDs "pitchTight"/"pitchFuzz" kept for preset compat but repurposed:
+    // Tightness -> sub Tone, Fuzz -> up-octave Dry blend.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("pitchType", 1), "Pitch Type",
+        juce::StringArray{"Octave Down", "Octave Up"}, 0));
+    // Engine: Poly = clean phase vocoder (chords, ~16ms latency); Grain = mono
+    // granular character voice (gritty, zero latency, glitches on chords by design).
+    // Order MUST match PitchBlock::Engine (Poly=0, Grain=1).
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("pitchEngine", 1), "Pitch Engine",
+        juce::StringArray{"Poly", "Grain"}, 0));
+    // Octave-down knobs (dry + two sub levels + sub tone).
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("pitchDirect", 1), "Pitch Direct",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("pitchOct1", 1), "Pitch Oct 1",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.7f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("pitchOct2", 1), "Pitch Oct 2",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("pitchTight", 1), "Pitch Sub Tone",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+    // Octave-up knobs.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("pitchFuzz", 1), "Pitch Dry",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.6f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("pitchTone", 1), "Pitch Tone",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("pitchOctave", 1), "Pitch Octave",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("pitchVol", 1), "Pitch Volume",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("pitchOn", 1), "Pitch Enable", false)); // off by default (new block)
+
     // --- Envelope filter / auto-wah (mono, pre-amp): rig/EnvFilterBlock.h,
     // env_filter_test.cpp. Sits BEFORE the compressor so it tracks the raw guitar
     // dynamics. Two voices, each faithful to a real unit's control complement
@@ -970,6 +1016,38 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     // gateOn does NOT chain-bypass: the lookahead delay must keep running or
     // PDC breaks. Disabled gate = forced open (passthrough + constant delay).
     mChain.gate.setEnabled(apvts.getRawParameterValue("gateOn")->load() >= 0.5f);
+
+    // Pitch effects (zero latency; after gate, before env filter). One block, a
+    // Type toggle picks the divider engine; the panel exposes only that engine's
+    // controls. The unused engine's/direction's params are ignored by the block.
+    const int pitchType = (int)apvts.getRawParameterValue("pitchType")->load();
+    const int pitchEngine = (int)apvts.getRawParameterValue("pitchEngine")->load();
+    mChain.pitch.setType(pitchType);
+    mChain.pitch.setEngine(pitchEngine);
+    if (pitchType == 0) // octave down
+    {
+        mChain.pitch.setDirect(apvts.getRawParameterValue("pitchDirect")->load());
+        mChain.pitch.setOct1(apvts.getRawParameterValue("pitchOct1")->load());
+        mChain.pitch.setOct2(apvts.getRawParameterValue("pitchOct2")->load());
+        mChain.pitch.setTightness(apvts.getRawParameterValue("pitchTight")->load());
+    }
+    else // octave up
+    {
+        mChain.pitch.setFuzz(apvts.getRawParameterValue("pitchFuzz")->load());
+        mChain.pitch.setTone(apvts.getRawParameterValue("pitchTone")->load());
+        mChain.pitch.setOctave(apvts.getRawParameterValue("pitchOctave")->load());
+        mChain.pitch.setVolume(apvts.getRawParameterValue("pitchVol")->load());
+    }
+    const bool pitchOn = apvts.getRawParameterValue("pitchOn")->load() >= 0.5f;
+    mChain.pitch.setBypassed(!pitchOn);
+    // Only the Poly (phase-vocoder) engine adds STFT latency; Grain is zero-latency.
+    // So PDC changes with on/off AND with the engine choice — re-report on either.
+    if (pitchOn != mLastPitchOn || pitchEngine != mLastPitchEngine)
+    {
+        mLastPitchOn = pitchOn;
+        mLastPitchEngine = pitchEngine;
+        updateLatency();
+    }
 
     // Envelope filter / auto-wah (zero latency; before comp). Per-voice faithful
     // control mapping: the panel exposes only each unit's real controls; the rest

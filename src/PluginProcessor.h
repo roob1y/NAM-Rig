@@ -148,6 +148,7 @@ public:
     float gateGainDb() const { return mChain.gate.currentGainDb(); }
     float gateInDb() const { return mChain.gate.currentInDb(); }
     float envFilterCutoffHz() const { return mChain.envfilter.currentCutoffHz(); }
+    float pitchTrackedHz() const { return mChain.pitch.trackedHz(); } // OC-2 locked f0
     float compGrDb() const { return mChain.comp.grDb(); }
     float compInDb() const { return mChain.comp.inPeakDb(); }
     float compOutDb() const { return mChain.comp.outPeakDb(); }
@@ -180,7 +181,7 @@ public:
     std::atomic<float> mOutputPeakDb{-100.0f};
 
     // --- Editor session state (not persisted; survives editor close/reopen) ---
-    int uiSelectedBlock = 5; // strip selection, default AMP A (index shifted +1 by ENV FILTER at 1)
+    int uiSelectedBlock = 6; // strip selection, default AMP A (shifted +1 each by ENV FILTER at 1 and PITCH at 1)
     int uiWidth = 0;         // last editor width, 0 = use default
 
     // Momentary mod-slot solo (dial-in tool; not a parameter -> not saved, not
@@ -263,6 +264,8 @@ private:
 
     // Re-report PDC when these change (lookahead / align / mode shift latency).
     float mLastGateLookMs = -1.0f;
+    bool mLastPitchOn = false; // re-report PDC when the pitch octave engages/disengages
+    int mLastPitchEngine = 0;  // ...or when the engine (Poly latency vs Grain zero) changes
     float mLastRigAlign = -1.0e9f;
     int mLastRigMode = -1;
     int mLastFactorA = -1, mLastFactorB = -1;
