@@ -381,6 +381,19 @@ int main()
         CHECK(ratio < 4.0, "T21 f/2 stable across tail (no gurgle, ratio %.2f)", ratio);
     }
 
+    { // T22: OC-2 sub is at a usable LEVEL (not buried) — with Oct1 up and Direct 0,
+      // the sub RMS is a healthy fraction of the input level.
+        const double f = 220.0;
+        PitchBlock b; b.prepare({SR, BLK});
+        b.setType(PitchBlock::kOctDown); b.setEngine(PitchBlock::kGrain);
+        b.setDirect(0.0f); b.setOct1(1.0f); b.setOct2(0.0f);
+        std::vector<float> x = tone(f, 0.3, (int)(SR * 1.2));
+        run(b, x);
+        double s = 0; int c = 0; for (size_t i = x.size() / 2; i < x.size(); ++i) { s += (double)x[i] * x[i]; ++c; }
+        const double rms = std::sqrt(s / std::max(1, c));
+        CHECK(rms > 0.05, "T22 OC-2 sub audible level (rms %.3f vs 0.3 input)", rms);
+    }
+
     std::printf("=== %s (%d fail) ===\n", gFails ? "FAILURES" : "ALL PASS", gFails);
     return gFails ? 1 : 0;
 }

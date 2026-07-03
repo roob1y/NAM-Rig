@@ -369,8 +369,8 @@ private:
         // well down); re-derived per block, state preserved (no click).
         if (voiced)
         {
-            float cut = mTracker.hz() * 1.3f;
-            cut = cut < 90.0f ? 90.0f : (cut > 1600.0f ? 1600.0f : cut);
+            float cut = mTracker.hz() * 1.6f; // clean enough to track, wide enough for body
+            cut = cut < 110.0f ? 110.0f : (cut > 2000.0f ? 2000.0f : cut);
             if (std::abs(cut - mDetCutHz) > 2.0f)
             {
                 mDetLp1.copyCoeffsFrom(Biquad::lowpass(mSampleRate, cut));
@@ -410,8 +410,8 @@ private:
             const float hw = (d > 0.0f) ? d : kSiLeak * d;    // silicon half-wave (small leak)
             const float s1 = mOctLp1.processSample(hw * (f1 ? 1.0f : -1.0f));
             const float s2 = mOctLp2.processSample(hw * (f2 ? 1.0f : -1.0f));
-            const float g = gate * clarG;
-            mono[i] = direct * x + (l1 * s1 + l2 * s2) * g;
+            const float g = gate * clarG * kSubMakeup;        // makeup: the detection carrier
+            mono[i] = direct * x + (l1 * s1 + l2 * s2) * g;   // is band-limited, so the sub needs level
         }
         mDetPeak = flush(peak); mGate = flush(gate); mDPrev = flush(dPrev); mClarityGate = flush(clarG);
         mArmed = armed; mFf1 = f1; mFf2 = f2; mEdgeSamples = edge; mLastPeriod = lastPeriod;
@@ -449,10 +449,11 @@ private:
     }
     static float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
     static float flush(float v) { return std::abs(v) < 1.0e-30f ? 0.0f : v; }
-    static constexpr float kDetLpHz = 650.0f;    // OC-2 detection band-limit (near-sine)
-    static constexpr float kOctLpHz = 2200.0f;   // OC-2 sub output smoothing
+    static constexpr float kDetLpHz = 650.0f;    // OC-2 detection band-limit (near-sine; adaptive at runtime)
+    static constexpr float kOctLpHz = 3500.0f;   // OC-2 sub output smoothing (brighter = more present)
     static constexpr float kGateFloor = 5.0e-4f; // OC-2 silence gate (post input-cal)
     static constexpr float kSiLeak = 0.05f;      // silicon half-wave negative leak
+    static constexpr float kSubMakeup = 2.8f;    // sub makeup (band-limited carrier -> low level)
     // Identity below 0.9, then a soft knee ceilinged at ~1.0 (safety only).
     static float softLimit(float x)
     {
