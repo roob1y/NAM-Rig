@@ -265,8 +265,7 @@ private:
     // Re-report PDC when these change (lookahead / align / mode shift latency).
     float mLastGateLookMs = -1.0f;
     bool mLastPitchOn = false; // re-report PDC when the pitch octave engages/disengages
-    int mLastPitchEngine = 0;  // ...or when the engine (Poly latency vs Grain zero) changes
-    int mLastPitchType = 0;    // ...or the type (POG forces Poly latency)
+    int mLastPitchModel = 0;   // ...or when the pedal model changes (POG models add latency)
     float mLastRigAlign = -1.0e9f;
     int mLastRigMode = -1;
     int mLastFactorA = -1, mLastFactorB = -1;

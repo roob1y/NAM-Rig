@@ -6393,61 +6393,75 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(EnvFilterPanel)
 };
 
-// PitchPanel — pitch effects. Two selectors: TYPE (Octave Down/Up) and ENGINE
-// (Poly = clean phase vocoder for chords / Grain = mono granular character voice).
-//   Octave Down: knobs DIRECT, OCT 1, OCT 2, TONE.
-//   Octave Up:   knobs DRY, TONE, OCTAVE, VOLUME.
-// Header-right shows Type / Engine + (Grain only) the tracked note.
+// PitchPanel — pitch pedal MODELS, each with its faithful control complement
+// (like the env filter's FX25 / Q-Tron voices). A MODEL picker swaps the whole set:
+//   OC-2      (Boss OC-2, gritty analog sub, 0 latency):  Direct, Oct 1, Oct 2.
+//   Micro POG (EHX, clean poly):                          Dry, Sub, Octave.
+//   POG2      (EHX, full poly organ, 2 rows): Dry, -2, -1, +1, +2 / Filter, Reso, Attack, Detune.
+//   Octavia   (octave-up germanium fuzz, 0 latency):      Boost, Volume.
+// Header-right shows the model (+ the tracked note on OC-2).
 class PitchPanel : public BlockPanel, private juce::Timer
 {
 public:
     explicit PitchPanel(juce::AudioProcessorValueTreeState &apvts)
         : BlockPanel("PITCH"), mApvts(apvts),
-          mType(apvts, "pitchType", juce::StringArray{"OCT DN", "OCT UP", "POG", "OCTAVIA"}),
-          mEngine(apvts, "pitchEngine", juce::StringArray{"POLY", "GRAIN"}),
+          mModel(apvts, "pitchModel", juce::StringArray{"OC-2", "MICRO POG", "POG2", "OCTAVIA"}),
           mDirect(apvts, "pitchDirect", "Direct"),
           mOct1(apvts, "pitchOct1", "Oct 1"),
           mOct2(apvts, "pitchOct2", "Oct 2"),
-          mTight(apvts, "pitchTight", "Tone"),
-          mFuzz(apvts, "pitchFuzz", "Dry"),
-          mTone(apvts, "pitchTone", "Tone"),
           mOctave(apvts, "pitchOctave", "Octave"),
-          mVolume(apvts, "pitchVol", "Volume"),
+          mUp2(apvts, "pitchUp2", "+2"),
           mFilter(apvts, "pitchFilter", "Filter"),
-          mAttack(apvts, "pitchAttack", "Attack")
+          mReso(apvts, "pitchQ", "Reso"),
+          mAttack(apvts, "pitchAttack", "Attack"),
+          mDetune(apvts, "pitchDetune", "Detune"),
+          mBoost(apvts, "pitchFuzz", "Boost"),
+          mVolume(apvts, "pitchVol", "Volume")
     {
-        addAndMakeVisible(mType);
-        addAndMakeVisible(mEngine);
-        mType.onChange = [this](int) { refresh(); };
-        mEngine.onChange = [this](int) { refresh(); };
-        for (auto *k : {&mDirect, &mOct1, &mOct2, &mTight, &mFuzz, &mTone, &mOctave, &mVolume,
-                        &mFilter, &mAttack})
+        addAndMakeVisible(mModel);
+        mModel.onChange = [this](int) { refresh(); };
+        for (auto *k : {&mDirect, &mOct1, &mOct2, &mOctave, &mUp2, &mFilter, &mReso,
+                        &mAttack, &mDetune, &mBoost, &mVolume})
             addChildComponent(*k);
         refresh();
         startTimerHz(20); // live tracked-note readout in the header
     }
 
-    // Provider for the Grain engine's tracked fundamental (Hz), set by the editor.
+    // Provider for the OC-2 model's tracked fundamental (Hz), set by the editor.
     std::function<float()> subHzProvider;
 
     void refresh()
     {
-        const int t = (int)mApvts.getRawParameterValue("pitchType")->load();
-        mTypeName = (t == 3) ? "Octavia" : (t == 2) ? "POG" : (t == 1) ? "Up" : "Down";
-        if (t != mTypeIdx)
+        const int m = (int)mApvts.getRawParameterValue("pitchModel")->load();
+        mModelName = (m == 0) ? "OC-2" : (m == 1) ? "Micro POG" : (m == 2) ? "POG2" : "Octavia";
+        if (m != mModelIdx)
         {
-            mTypeIdx = t;
-            const bool down = (t == 0), up = (t == 1), pog = (t == 2), oct = (t == 3);
-            const bool upOrOct = up || oct; // share the Fuzz/Tone/Octave/Volume set
-            mDirect.setVisible(down || pog);
-            mOct1.setVisible(down || pog);
-            mOct2.setVisible(down);
-            mTight.setVisible(down);
-            mFuzz.setVisible(upOrOct); mTone.setVisible(upOrOct); mVolume.setVisible(upOrOct);
-            mOctave.setVisible(upOrOct || pog);
-            mFilter.setVisible(pog); mAttack.setVisible(pog);
-            mFuzz.setCaption(oct ? "Fuzz" : "Dry"); // shared knob: Octavia drive vs up-octave dry
-            mEngine.setVisible(down || up); // Poly/Grain choice only for the octave shifters
+            mModelIdx = m;
+            for (auto *k : {&mDirect, &mOct1, &mOct2, &mOctave, &mUp2, &mFilter, &mReso,
+                            &mAttack, &mDetune, &mBoost, &mVolume})
+                k->setVisible(false);
+            if (m == 0) // OC-2
+            {
+                mDirect.setCaption("Direct"); mOct1.setCaption("Oct 1");
+                mDirect.setVisible(true); mOct1.setVisible(true); mOct2.setVisible(true);
+            }
+            else if (m == 1) // Micro POG
+            {
+                mDirect.setCaption("Dry"); mOct1.setCaption("Sub"); mOctave.setCaption("Octave");
+                mDirect.setVisible(true); mOct1.setVisible(true); mOctave.setVisible(true);
+            }
+            else if (m == 2) // POG2 (full)
+            {
+                mDirect.setCaption("Dry"); mOct1.setCaption("Oct -1"); mOctave.setCaption("Oct +1");
+                mDirect.setVisible(true); mOct2.setVisible(true); mOct1.setVisible(true);
+                mOctave.setVisible(true); mUp2.setVisible(true);
+                mFilter.setVisible(true); mReso.setVisible(true);
+                mAttack.setVisible(true); mDetune.setVisible(true);
+            }
+            else // Octavia
+            {
+                mBoost.setVisible(true); mVolume.setVisible(true);
+            }
             resized();
             repaint();
         }
@@ -6459,20 +6473,15 @@ public:
         BlockPanel::paint(g); // panel bg + title + header-right
         g.setColour(colors::caption);
         g.setFont(fonts::archivo(9.5f, fonts::SemiBold, 0.6f));
-        g.drawText("TYPE", mType.getX(), mType.getY() - 13,
-                   juce::jmax(46, mType.getWidth()), 11, juce::Justification::centredLeft);
-        if (mEngine.isVisible())
-            g.drawText("ENGINE", mEngine.getX(), mEngine.getY() - 13,
-                       juce::jmax(46, mEngine.getWidth()), 11, juce::Justification::centredLeft);
+        g.drawText("MODEL", mModel.getX(), mModel.getY() - 13,
+                   juce::jmax(46, mModel.getWidth()), 11, juce::Justification::centredLeft);
     }
 
     void resized() override
     {
         auto area = bodyArea().reduced(24, 16);
-
         auto top = area.removeFromTop(26);
-        mType.setBounds(top.getX(), top.getY(), mType.idealWidth(), 26);
-        mEngine.setBounds(mType.getRight() + 22, top.getY(), mEngine.idealWidth(), 26);
+        mModel.setBounds(top.getX(), top.getY(), mModel.idealWidth(), 26);
         area.removeFromTop(20);
 
         auto layKnobs = [](juce::Rectangle<int> r, std::vector<LabeledKnob *> ks) {
@@ -6483,24 +6492,26 @@ public:
             for (auto *k : ks) k->setBounds(row.removeFromLeft(kw).reduced(5, 0));
         };
 
-        if (mTypeIdx == 2)               // POG (Full): Dry, Sub, Oct, Filter, Attack
-            layKnobs(area, {&mDirect, &mOct1, &mOctave, &mFilter, &mAttack});
-        else if (mTypeIdx == 1 || mTypeIdx == 3) // octave up / Octavia: Fuzz(Dry), Tone, Octave, Volume
-            layKnobs(area, {&mFuzz, &mTone, &mOctave, &mVolume});
-        else                             // octave down
-            layKnobs(area, {&mDirect, &mOct1, &mOct2, &mTight});
+        if (mModelIdx == 0)        // OC-2
+            layKnobs(area, {&mDirect, &mOct1, &mOct2});
+        else if (mModelIdx == 1)   // Micro POG
+            layKnobs(area, {&mDirect, &mOct1, &mOctave});
+        else if (mModelIdx == 2)   // POG2 — two rows (5 voices + 4 shaping)
+        {
+            auto r1 = area.removeFromTop(area.getHeight() / 2);
+            layKnobs(r1, {&mDirect, &mOct2, &mOct1, &mOctave, &mUp2});
+            layKnobs(area, {&mFilter, &mReso, &mAttack, &mDetune});
+        }
+        else                       // Octavia
+            layKnobs(area, {&mBoost, &mVolume});
     }
 
 private:
     void timerCallback() override { updateHeader(); }
     void updateHeader()
     {
-        const bool grain = (mTypeIdx == 0 || mTypeIdx == 1)
-                         && (int)mApvts.getRawParameterValue("pitchEngine")->load() == 1;
-        juce::String r = mTypeName;
-        if (mTypeIdx <= 2) // Down/Up/POG show the engine; Octavia is its own analog thing
-            r << juce::String::fromUTF8(" \xC2\xB7 ") << (grain ? "Grain" : "Poly");
-        if (grain && subHzProvider) // tracked note (Grain only)
+        juce::String r = mModelName;
+        if (mModelIdx == 0 && subHzProvider) // OC-2: show the tracked note
         {
             const int f0 = (int)subHzProvider();
             if (f0 > 0)
@@ -6510,10 +6521,10 @@ private:
     }
 
     juce::AudioProcessorValueTreeState &mApvts;
-    SegmentedControl mType, mEngine;
-    LabeledKnob mDirect, mOct1, mOct2, mTight, mFuzz, mTone, mOctave, mVolume, mFilter, mAttack;
-    juce::String mTypeName{"Down"};
-    int mTypeIdx = -1;
+    SegmentedControl mModel;
+    LabeledKnob mDirect, mOct1, mOct2, mOctave, mUp2, mFilter, mReso, mAttack, mDetune, mBoost, mVolume;
+    juce::String mModelName{"OC-2"};
+    int mModelIdx = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PitchPanel)
 };

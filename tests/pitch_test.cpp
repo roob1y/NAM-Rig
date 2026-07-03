@@ -251,6 +251,34 @@ int main()
         CHECK(alias < sig * 0.05 + 1e-9, "T13 ADAA keeps low-band alias small (alias %.2e vs sig %.2e)", alias, sig);
     }
 
+    { // T14: POG2 full — 4 voices at once (-2/-1/+1/+2), all present on a note.
+        const double f = 220.0;
+        PitchBlock b; b.prepare({SR, BLK});
+        b.setType(PitchBlock::kPog);
+        b.setDirect(0.0f); b.setOct1(1.0f); b.setOct2(1.0f); b.setOctave(1.0f); b.setUp2(1.0f);
+        b.setFilter(1.0f); b.setQ(0.3f); b.setAttack(0.0f); b.setDetune(0.0f);
+        std::vector<float> x = tone(f, 0.3, (int)(SR * 1.5));
+        run(b, x);
+        const double q4 = binPow(x, f / 4.0), h = binPow(x, f / 2.0), u1 = binPow(x, 2 * f), u2 = binPow(x, 4 * f);
+        CHECK(q4 > 0 && h > 0 && u1 > 0 && u2 > 0,
+              "T14 POG2 4 voices present (-2 %.1e -1 %.1e +1 %.1e +2 %.1e)", q4, h, u1, u2);
+        bool fin = true; for (float s2 : x) if (!std::isfinite(s2)) fin = false;
+        CHECK(fin, "T14 POG2 finite");
+    }
+    { // T15: POG2 detune stays finite/bounded and the up voice is still ~+1 octave.
+        const double f = 220.0;
+        PitchBlock b; b.prepare({SR, BLK});
+        b.setType(PitchBlock::kPog);
+        b.setDirect(0.0f); b.setOct1(0.0f); b.setOctave(1.0f); b.setUp2(0.0f);
+        b.setFilter(1.0f); b.setDetune(1.0f);
+        std::vector<float> x = tone(f, 0.3, (int)(SR * 1.0));
+        run(b, x);
+        bool fin = true; float pk = 0; for (float s2 : x) { if (!std::isfinite(s2)) fin = false; pk = std::max(pk, std::abs(s2)); }
+        double near2f = binPow(x, 2 * f) + binPow(x, 2 * f * 1.01) + binPow(x, 2 * f * 0.99);
+        CHECK(fin && pk < 20.0f, "T15 POG2 detune finite/bounded (pk=%.2f)", pk);
+        CHECK(near2f > binPow(x, f), "T15 POG2 detuned up still ~+1 oct");
+    }
+
     std::printf("=== %s (%d fail) ===\n", gFails ? "FAILURES" : "ALL PASS", gFails);
     return gFails ? 1 : 0;
 }

@@ -258,56 +258,53 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::ParameterID("premodPos", 1), "Pre Mod Position",
         juce::StringArray{"After Drive", "Before Drive"}, 0));
 
-    // --- Pitch effects (mono, pre-amp): rig/PitchBlock.h + OctaveShifter.h +
-    // PitchTracker.h, pitch_test.cpp. CLEAN tracked octaves (pitch-synchronous
-    // granular shift, exact ratios). One block, Type toggle; the panel shows only
-    // the chosen direction's controls. Choice order MUST match PitchBlock::Type.
-    //   Octave Down = sub-octaves (Direct/Oct1 x0.5/Oct2 x0.25 + sub Tone).
-    //   Octave Up   = clean +1 octave (Dry blend/Tone/Octave level/Volume).
-    // NB param IDs "pitchTight"/"pitchFuzz" kept for preset compat but repurposed:
-    // Tightness -> sub Tone, Fuzz -> up-octave Dry blend.
+    // --- Pitch effects (mono, pre-amp): rig/PitchBlock.h (+ SpectralShifter /
+    // OctaveShifter / PitchTracker / IoStage), pitch_test.cpp. FAITHFUL pedal MODELS
+    // — the panel swaps in each unit's real control complement (like the env filter),
+    // and this apply pins the rest per model. Model order MUST match the panel.
+    //   OC-2      (Boss OC-2, gritty analog sub, 0 latency): Direct, Oct 1, Oct 2.
+    //   Micro POG (EHX, clean poly):                         Dry, Sub, Octave.
+    //   POG2      (EHX, full poly organ):  Dry, -2, -1, +1, +2, Filter, Q, Attack, Detune.
+    //   Octavia   (octave-up germanium fuzz, 0 latency):     Boost, Volume.
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
-        juce::ParameterID("pitchType", 1), "Pitch Type",
-        juce::StringArray{"Octave Down", "Octave Up", "POG (Full)", "Octavia (Fuzz)"}, 0));
-    // Engine: Poly = clean phase vocoder (chords, ~16ms latency); Grain = mono
-    // granular character voice (gritty, zero latency, glitches on chords by design).
-    // Order MUST match PitchBlock::Engine (Poly=0, Grain=1).
-    params.push_back(std::make_unique<juce::AudioParameterChoice>(
-        juce::ParameterID("pitchEngine", 1), "Pitch Engine",
-        juce::StringArray{"Poly", "Grain"}, 0));
-    // Octave-down knobs (dry + two sub levels + sub tone).
+        juce::ParameterID("pitchModel", 1), "Pitch Model",
+        juce::StringArray{"OC-2", "Micro POG", "POG2", "Octavia"}, 0));
+    // Shared level knobs (reused per model — see the apply block for the mapping).
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("pitchDirect", 1), "Pitch Direct",
+        juce::ParameterID("pitchDirect", 1), "Pitch Dry/Direct",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("pitchOct1", 1), "Pitch Oct 1",
+        juce::ParameterID("pitchOct1", 1), "Pitch Oct -1/Sub",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.7f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("pitchOct2", 1), "Pitch Oct 2",
+        juce::ParameterID("pitchOct2", 1), "Pitch Oct -2",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("pitchTight", 1), "Pitch Sub Tone",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
-    // Octave-up knobs.
+        juce::ParameterID("pitchOctave", 1), "Pitch Oct +1",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.7f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("pitchFuzz", 1), "Pitch Dry",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.6f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("pitchTone", 1), "Pitch Tone",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("pitchOctave", 1), "Pitch Octave",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("pitchVol", 1), "Pitch Volume",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
-    // POG (Full) knobs — resonant filter + attack swell.
+        juce::ParameterID("pitchUp2", 1), "Pitch Oct +2",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
+    // POG2 tone shaping.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("pitchFilter", 1), "Pitch Filter",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.7f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("pitchQ", 1), "Pitch Resonance",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.3f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("pitchAttack", 1), "Pitch Attack",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("pitchDetune", 1), "Pitch Detune",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
+    // Octavia knobs.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("pitchFuzz", 1), "Pitch Boost",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.6f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("pitchVol", 1), "Pitch Volume",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.6f));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID("pitchOn", 1), "Pitch Enable", false)); // off by default (new block)
 
@@ -1024,44 +1021,59 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     // PDC breaks. Disabled gate = forced open (passthrough + constant delay).
     mChain.gate.setEnabled(apvts.getRawParameterValue("gateOn")->load() >= 0.5f);
 
-    // Pitch effects (zero latency; after gate, before env filter). One block, a
-    // Type toggle picks the divider engine; the panel exposes only that engine's
-    // controls. The unused engine's/direction's params are ignored by the block.
-    const int pitchType = (int)apvts.getRawParameterValue("pitchType")->load();
-    const int pitchEngine = (int)apvts.getRawParameterValue("pitchEngine")->load();
-    mChain.pitch.setType(pitchType);
-    mChain.pitch.setEngine(pitchEngine);
-    if (pitchType == 0) // octave down
+    // Pitch effects — FAITHFUL pedal models. The panel exposes each unit's real
+    // controls; here we map the model to the block's internal type/engine and PIN
+    // the controls that pedal doesn't have (like the env-filter voices).
+    auto pp = [this](const char *id) { return apvts.getRawParameterValue(id)->load(); };
+    const int pitchModel = (int)pp("pitchModel");
+    if (pitchModel == 0) // OC-2: gritty analog sub (Grain engine, octave down), 0 latency
     {
-        mChain.pitch.setDirect(apvts.getRawParameterValue("pitchDirect")->load());
-        mChain.pitch.setOct1(apvts.getRawParameterValue("pitchOct1")->load());
-        mChain.pitch.setOct2(apvts.getRawParameterValue("pitchOct2")->load());
-        mChain.pitch.setTightness(apvts.getRawParameterValue("pitchTight")->load());
+        mChain.pitch.setType(nam_rig::PitchBlock::kOctDown);
+        mChain.pitch.setEngine(nam_rig::PitchBlock::kGrain);
+        mChain.pitch.setDirect(pp("pitchDirect"));  // Direct
+        mChain.pitch.setOct1(pp("pitchOct1"));      // Oct 1 (x0.5)
+        mChain.pitch.setOct2(pp("pitchOct2"));      // Oct 2 (x0.25)
+        mChain.pitch.setTightness(0.6f);            // sub tone: pinned (OC-2 has no tone knob)
     }
-    else if (pitchType == 2) // POG (Full): dry + sub + up + resonant filter + attack (poly)
+    else if (pitchModel == 1) // Micro POG: clean poly Dry/Sub/Octave
     {
-        mChain.pitch.setDirect(apvts.getRawParameterValue("pitchDirect")->load());  // Dry
-        mChain.pitch.setOct1(apvts.getRawParameterValue("pitchOct1")->load());      // Sub x0.5
-        mChain.pitch.setOctave(apvts.getRawParameterValue("pitchOctave")->load());  // Up x2
-        mChain.pitch.setFilter(apvts.getRawParameterValue("pitchFilter")->load());
-        mChain.pitch.setAttack(apvts.getRawParameterValue("pitchAttack")->load());
+        mChain.pitch.setType(nam_rig::PitchBlock::kPog);
+        mChain.pitch.setDirect(pp("pitchDirect")); // Dry
+        mChain.pitch.setOct1(pp("pitchOct1"));     // Sub (x0.5)
+        mChain.pitch.setOctave(pp("pitchOctave")); // Octave (x2)
+        mChain.pitch.setOct2(0.0f); mChain.pitch.setUp2(0.0f);        // no -2/+2
+        mChain.pitch.setFilter(1.0f); mChain.pitch.setQ(0.0f);        // filter open, no reso
+        mChain.pitch.setAttack(0.0f); mChain.pitch.setDetune(0.0f);   // no swell/detune
     }
-    else // Octave Up (1) or Octavia fuzz (3) — same 4 controls (Fuzz/Tone/Octave/Volume)
+    else if (pitchModel == 2) // POG2: full poly organ
     {
-        mChain.pitch.setFuzz(apvts.getRawParameterValue("pitchFuzz")->load());
-        mChain.pitch.setTone(apvts.getRawParameterValue("pitchTone")->load());
-        mChain.pitch.setOctave(apvts.getRawParameterValue("pitchOctave")->load());
-        mChain.pitch.setVolume(apvts.getRawParameterValue("pitchVol")->load());
+        mChain.pitch.setType(nam_rig::PitchBlock::kPog);
+        mChain.pitch.setDirect(pp("pitchDirect")); // Dry
+        mChain.pitch.setOct2(pp("pitchOct2"));     // -2 (x0.25)
+        mChain.pitch.setOct1(pp("pitchOct1"));     // -1 (x0.5)
+        mChain.pitch.setOctave(pp("pitchOctave")); // +1 (x2)
+        mChain.pitch.setUp2(pp("pitchUp2"));       // +2 (x4)
+        mChain.pitch.setFilter(pp("pitchFilter"));
+        mChain.pitch.setQ(pp("pitchQ"));
+        mChain.pitch.setAttack(pp("pitchAttack"));
+        mChain.pitch.setDetune(pp("pitchDetune"));
     }
-    const bool pitchOn = apvts.getRawParameterValue("pitchOn")->load() >= 0.5f;
+    else // Octavia: octave-up germanium fuzz, 0 latency
+    {
+        mChain.pitch.setType(nam_rig::PitchBlock::kOctavia);
+        mChain.pitch.setFuzz(pp("pitchFuzz"));     // Boost (drive)
+        mChain.pitch.setVolume(pp("pitchVol"));    // Volume
+        mChain.pitch.setTone(0.6f);                // tone: pinned (original Octavia has no tone)
+        mChain.pitch.setOctave(1.0f);              // full octave (defeat blend pinned)
+    }
+    const bool pitchOn = pp("pitchOn") >= 0.5f;
     mChain.pitch.setBypassed(!pitchOn);
-    // Latency depends on on/off, engine (Poly=STFT vs Grain=0) AND type (POG forces
-    // Poly). Re-report PDC when any of them changes (like the gate lookahead).
-    if (pitchOn != mLastPitchOn || pitchEngine != mLastPitchEngine || pitchType != mLastPitchType)
+    // Latency depends on the model (POG models add STFT latency; OC-2/Octavia = 0)
+    // and on/off — re-report PDC when either changes (like the gate lookahead).
+    if (pitchOn != mLastPitchOn || pitchModel != mLastPitchModel)
     {
         mLastPitchOn = pitchOn;
-        mLastPitchEngine = pitchEngine;
-        mLastPitchType = pitchType;
+        mLastPitchModel = pitchModel;
         updateLatency();
     }
 

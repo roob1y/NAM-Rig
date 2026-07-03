@@ -50,6 +50,9 @@ public:
     void setEngine(int e)       { mEngine.store(e == kGrain ? kGrain : kPoly); }
     void setFilter(float v)     { mFilter.store(clamp01(v)); }  // POG resonant LPF cutoff
     void setAttack(float v)     { mAttack.store(clamp01(v)); }  // POG swell attack
+    void setUp2(float v)        { mUp2.store(clamp01(v)); }     // POG2 +2 octave (x4) level
+    void setQ(float v)          { mQ.store(clamp01(v)); }       // POG2 filter resonance
+    void setDetune(float v)     { mDetune.store(clamp01(v)); }  // POG2 upper-octave detune
     void setDirect(float v)     { mDirect.store(clamp01(v)); }
     void setOct1(float v)       { mOct1.store(clamp01(v)); }
     void setOct2(float v)       { mOct2.store(clamp01(v)); }
@@ -66,6 +69,7 @@ public:
         mPolyD1.prepare(mSampleRate); mPolyD1.setRatio(0.5f);
         mPolyD2.prepare(mSampleRate); mPolyD2.setRatio(0.25f);
         mPolyUp.prepare(mSampleRate); mPolyUp.setRatio(2.0f);
+        mPolyUp2.prepare(mSampleRate); mPolyUp2.setRatio(4.0f);
         mPolyLatency = mPolyD1.latency();
         mDry.assign((size_t)std::max(1, mPolyLatency), 0.0f);
         // Grain (tracked granular)
@@ -80,6 +84,8 @@ public:
         const int mb = std::max(1, ctx.maxBlockSize);
         mWork1.assign((size_t)mb, 0.0f);
         mWork2.assign((size_t)mb, 0.0f);
+        mWork3.assign((size_t)mb, 0.0f);
+        mWork4.assign((size_t)mb, 0.0f);
         mToneLpDn = Biquad::lowpass(mSampleRate, 4000.0);
         mToneLpUp = Biquad::lowpass(mSampleRate, 4000.0);
         mLastToneDnHz = mLastToneUpHz = -1.0f;
@@ -96,7 +102,8 @@ public:
 
     void reset() override
     {
-        mPolyD1.reset(); mPolyD2.reset(); mPolyUp.reset();
+        mPolyD1.reset(); mPolyD2.reset(); mPolyUp.reset(); mPolyUp2.reset();
+        mDetPhase = 0.0f;
         mTracker.reset(); mGrD1.reset(); mGrD2.reset(); mGrUp.reset();
         mToneLpDn.reset(); mToneLpUp.reset();
         mIoGrain.reset(); mGritX1 = 0.0;
@@ -156,6 +163,7 @@ private:
     {
         const float dryLvl = mDryUp.load(), upLvl = mOctUp.load(), vol = mVolume.load();
         float *w1 = mWork1.data();
+        mPolyUp.setRatio(2.0f); // POG may have left this detuned
         std::copy(mono, mono + numSamples, w1);
         mPolyUp.process(w1, numSamples);
         updateTone(mToneLpUp, mLastToneUpHz, 800.0f * std::pow(2.0f, mToneUp.load() * 3.3f));
@@ -168,19 +176,37 @@ private:
     }
 
     // ---------- POG (poly full octaver) : dry + sub + up, resonant filter, swell ----------
+    // POG (Micro POG / POG2): dry + up to 4 octave voices (x0.25/x0.5/x2/x4) with a
+    // resonant filter, attack swell, and an upper-octave detune LFO. Micro POG pins
+    // the extras (down2/up2 = 0, filter open, attack 0, detune 0).
     void polyPog(float *mono, int numSamples)
     {
-        const float dryLvl = mDirect.load(), subLvl = mOct1.load(), upLvl = mOctUp.load();
-        float *w1 = mWork1.data(), *w2 = mWork2.data();
-        std::copy(mono, mono + numSamples, w1);
-        mPolyD1.process(w1, numSamples);   // x0.5 sub
-        std::copy(mono, mono + numSamples, w2);
-        mPolyUp.process(w2, numSamples);   // x2 up
+        const float dryLvl = mDirect.load();
+        const float lD1 = mOct1.load();   // -1 (x0.5)
+        const float lD2 = mOct2.load();   // -2 (x0.25)
+        const float lU1 = mOctUp.load();  // +1 (x2)
+        const float lU2 = mUp2.load();    // +2 (x4)
+        const bool rD2 = lD2 > 1.0e-4f, rU2 = lU2 > 1.0e-4f;
+
+        // Upper-octave detune: one slow LFO whose depth AND rate rise together (POG2).
+        const float det = mDetune.load();
+        const float depth = det * 0.012f;              // up to ~+/-20 cents
+        const float rate = 0.3f + det * 4.0f;          // ~0.3 .. 4.3 Hz
+        mDetPhase += rate * (float)numSamples / (float)mSampleRate;
+        mDetPhase -= std::floor(mDetPhase);
+        const float mod = std::sin(6.28318530718f * mDetPhase) * depth;
+        mPolyUp.setRatio(2.0f * (1.0f + mod));
+        mPolyUp2.setRatio(4.0f * (1.0f + mod));
+
+        float *w1 = mWork1.data(), *w2 = mWork2.data(), *w3 = mWork3.data(), *w4 = mWork4.data();
+        std::copy(mono, mono + numSamples, w1); mPolyD1.process(w1, numSamples);   // x0.5
+        std::copy(mono, mono + numSamples, w2); mPolyUp.process(w2, numSamples);   // x2
+        if (rD2) { std::copy(mono, mono + numSamples, w3); mPolyD2.process(w3, numSamples); }  // x0.25
+        if (rU2) { std::copy(mono, mono + numSamples, w4); mPolyUp2.process(w4, numSamples); } // x4
 
         const float fHz = 300.0f * std::pow(2.0f, mFilter.load() * 4.7f); // ~300 Hz .. ~7.8 kHz
-        mPogFilter.setCoeffs(fHz, kPogQ);
-        // Attack = organ/volume swell: the WET voices fade in with this time constant
-        // whenever a note is present (auto-retriggers per note); 0 = instant.
+        const float q = 0.7f * std::pow(11.4f, mQ.load());                // ~0.7 .. ~8
+        mPogFilter.setCoeffs(fHz, q);
         const float attMs = 0.5f * std::pow(2.0f, mAttack.load() * 11.0f); // 0.5 .. ~1000 ms
         const float attCoef = coefForMs(attMs, mSampleRate);
         const float relCoef = coefForMs(120.0f, mSampleRate);
@@ -188,10 +214,13 @@ private:
         float att = mPogAtt;
         for (int i = 0; i < numSamples; ++i)
         {
-            const float dry = pushDry(mono[i]); // delayed to match the STFT wet voices
+            const float dry = pushDry(mono[i]);
             const float pres = (std::abs(dry) > 1.0e-3f) ? 1.0f : 0.0f;
             att += (pres > att ? attCoef : relCoef) * (pres - att);
-            const float wet = mPogFilter.tick(subLvl * w1[i] + upLvl * w2[i]).lp;
+            float voices = lD1 * w1[i] + lU1 * w2[i];
+            if (rD2) voices += lD2 * w3[i];
+            if (rU2) voices += lU2 * w4[i];
+            const float wet = mPogFilter.tick(voices).lp;
             mono[i] = dryLvl * dry + wet * att;
         }
         mPogFilter.flushDenorms();
@@ -326,12 +355,14 @@ private:
     std::atomic<float> mVolume{0.7f};
     std::atomic<float> mFilter{0.7f};  // POG resonant LPF cutoff
     std::atomic<float> mAttack{0.0f};  // POG swell attack
+    std::atomic<float> mUp2{0.0f};     // POG2 +2 octave (x4) level
+    std::atomic<float> mQ{0.3f};       // POG2 filter resonance
+    std::atomic<float> mDetune{0.0f};  // POG2 upper-octave detune
 
     // Poly engine
-    SpectralShifter mPolyD1, mPolyD2, mPolyUp;
+    SpectralShifter mPolyD1, mPolyD2, mPolyUp, mPolyUp2;
     Svf mPogFilter;
-    float mPogAtt = 0.0f;
-    static constexpr float kPogQ = 2.0f; // POG resonant filter Q (moderate)
+    float mPogAtt = 0.0f, mDetPhase = 0.0f;
     std::vector<float> mDry;
     int mDryPos = 0, mPolyLatency = 768;
     // Grain engine
@@ -348,7 +379,7 @@ private:
     float mClarityGate = 0.0f, mLastW = 800.0f, mWSmooth = 0.0014f;
     // shared
     Biquad mToneLpDn, mToneLpUp;
-    std::vector<float> mWork1, mWork2;
+    std::vector<float> mWork1, mWork2, mWork3, mWork4;
     float mLastToneDnHz = -1.0f, mLastToneUpHz = -1.0f;
     std::atomic<float> mTrackedHz{0.0f};
     double mSampleRate = 48000.0;
