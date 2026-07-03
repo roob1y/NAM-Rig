@@ -28,7 +28,6 @@
 
 #include "Blocks.h"
 #include "GateBlock.h"
-#include "PitchBlock.h"
 #include "EnvFilterBlock.h"
 #include "CompBlock.h"
 #include "DriveBlock.h"
@@ -233,13 +232,6 @@ public:
         // ---- shared mono pre ----
         if (!gate.isBypassed())
             { gate.process(ch0, numSamples);  heal(gate, ch0, numSamples); }
-        // Pitch effects (analog dividers): right after the gate, BEFORE the env
-        // filter / compressor, so the OC-2 comparator and the Octavia rectifier
-        // see the raw, un-squashed attack the real pedals track. Runs on the
-        // globally-calibrated signal (level-dependent gate anchored to the user's
-        // dBu). Zero latency; default-bypassed so SoloA stays bit-exact.
-        if (!pitch.isBypassed())
-            { pitch.process(ch0, numSamples); heal(pitch, ch0, numSamples); }
         // Envelope filter / auto-wah: runs on the globally-CALIBRATED signal (the
         // input-cal scale above already trimmed the input to the pre-amp reference,
         // so the level-dependent sweep is anchored to the user's dBu calibration,
@@ -317,7 +309,7 @@ public:
     // (max of the two voices, INCLUDING their align delays) + shared post.
     double latencySamples() const
     {
-        const double pre = gate.latencySamples() + pitch.latencySamples()
+        const double pre = gate.latencySamples()
                          + envfilter.latencySamples() + comp.latencySamples()
                          + drive.latencySamples() + premod.latencySamples();
         const double LA = amp.latencySamples() + eq.latencySamples() + cab.latencySamples();
@@ -363,7 +355,6 @@ public:
 
     // ---- the blocks ----
     GateBlock gate; // shared pre
-    PitchBlock pitch; // octaver / octave-fuzz, after gate (tracks raw attack)
     EnvFilterBlock envfilter; // auto-wah, before comp (tracks raw dynamics)
     CompBlock comp;
     DriveBlock drive; // 3-slot drive rack (shared, before split)
@@ -601,9 +592,9 @@ private:
         }
     }
 
-    std::array<MonoBlock *, 12> allMonoBlocks()
+    std::array<MonoBlock *, 11> allMonoBlocks()
     {
-        return {&gate, &pitch, &envfilter, &comp, &drive, &premod, &amp, &eq, &cab, &ampB, &eqB, &cabB};
+        return {&gate, &envfilter, &comp, &drive, &premod, &amp, &eq, &cab, &ampB, &eqB, &cabB};
     }
 
     std::array<StereoBlock *, 3> stereoBlocks() { return {&mod, &delay, &reverb}; }

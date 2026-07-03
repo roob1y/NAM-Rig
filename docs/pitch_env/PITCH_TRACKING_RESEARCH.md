@@ -345,3 +345,255 @@ the granular engine for a sustained octave (structural warble — save it for wh
 [Parviainen time/pitch scaling](https://www.surina.net/article/time-and-pitch-scaling.html) ·
 [DAFX Ch.9](https://www.dafx.de/DAFX_Book_Page/chapter9.html) ·
 [Grondin Guitar Pitch Shifter](https://www.guitarpitchshifter.com/algorithm.html)
+
+---
+
+## G. OC-2 DIVIDER REBUILD — research-first, DEFINITIVE comparator mechanism (2026-07-03)
+
+Prior divider builds all failed the same way (gurgle / double-clock / gargle) because every
+one used a **single fixed-fraction-threshold comparator** and then patched the symptoms (adaptive
+LPF, MPM debounce, makeup gain). Root cause, now confirmed against the two primary sources with
+the actual circuit described in full:
+
+**The OC-2 does NOT use one comparator. It uses a peak-referenced SR latch (a Schmitt in effect),
+then a CD4013 D-flip-flop chain.** From ValveWizard's U-Boat writeup (a deliberate OC-2-method
+clone, full prose description) + toshi.life (OC-2 MOD, scope traces):
+
+Detection path (both sources agree):
+1. **Buffer → 2nd-order LPF ~1 kHz with ~×4.5 (13 dB) gain.** Purpose stated verbatim: *"make the
+   small wiggly guitar signal as much like a big, pure sinewave as possible"* — kill the harmonics
+   that make a comparator switch at the wrong time. Aggressive treble roll-off = better tracking;
+   this is why the OC-2 tracks low notes/neck pickup and falls apart high/bright (authentic).
+2. **Balanced split** (signal + its inverse) into a **low-slew-rate op-amp comparator** (NOT a real
+   fast comparator — ValveWizard: *"a real comparator is not suitable as it will switch too fast and
+   cause many glitches"*; LM833/NE5532 beat TL072). Balanced feed = 2× zero-cross resolution.
+3. **Peak level detector** → a DC reference that *floats just below the audio peaks and decays with
+   the note* = the implicit AGC ("stable square as the note decays"). A second comparator fires when
+   an audio peak rises above that reference.
+4. **CD4013 SR latch**: the zero-crossing **SETs**, the peak **RESETs**. Output = a square exactly
+   **phase-locked** to the audio, one clean edge per cycle, immune to harmonic ripple (ripple near
+   zero can't RESET because it never reaches the peak reference; extra SETs are idempotent). The DPDT
+   "synth" mode just swaps set/reset order → 90° phase.
+5. **CD4013 D-flip-flop ÷2 → OCT1**; a second toggle **÷4 → OCT2** (ROHM BA634 + µPD4013C originally;
+   clones use CD4027 JK). Divider clocks on the **low→high edge** of the pitch square.
+
+Synthesis (toshi scope traces, CONFIRMED): the divider drives a JFET switch that **alternately
+selects the in-phase vs inverted audio every other cycle** — the OC-2 rectifies the tone (toshi says
+germanium; the OC-2 service-manual BOM is silicon 1S1588 — SOURCE CONFLICT, hold loosely; DSP knee is
+near-identical either way) and **inverts every other wave → a wave of twice the wavelength that
+inherits the note's timbre and dynamics.** ValveWizard's taxonomy: **invert on the audio PEAK = Boss
+method = smoothest**; invert on the **zero-crossing = U-Boat method = more harmonics, easier to build,
+click-free by construction** (d = 0 at the flip). Contrast MXR Blue Box = raw divider square = flat/
+sputtery (a −2-oct fuzz), which is what our earlier "carrier × sign" cuts effectively were.
+
+**Latency: ~one half-cycle, effectively zero — the sub is generated at the waveform level,
+simultaneously. Do NOT bolt an FFT/tracker onto the down-octave** (both sources; it's the whole point
+of the OC-2 vs the OC-3/OC-5's ~10-20 ms).
+
+### LOCKED DSP SPEC (faithful, zero-latency, no tracker, no adaptive filter)
+
+- **Detection near-sine `d`** = input → cascaded 2-pole LP ×2 (≈4-pole) @ ~1 kHz, unity. (4-pole
+  instead of the circuit's 2-pole = a cleaner near-sine so the Schmitt can't be fooled; the extra
+  group delay is self-consistent because we synthesize FROM `d`, so it can't cause clicks. For low
+  notes `d` keeps some harmonics → natural growl; high notes → pure → thin. Authentic note-dependence.)
+- **Peak-hold** `mDetPeak` = |d| with fast attack (~1 ms) / slow release (~300 ms). `hyst =
+  kHystFrac·mDetPeak` (≈0.20). This is the peak-referenced AGC: thresholds scale with the decaying note.
+- **Schmitt comparator** on `d`: `mHi` goes TRUE at `d > +hyst`, FALSE at `d < −hyst`. Ripple within
+  ±hyst can't add edges. Gate off (force `mHi=false`, no clock) when `mDetPeak < kGateFloor`.
+- **Dividers**: on the Schmitt **FALLING edge** (d dropped below −hyst, i.e. d<0 so the half-wave
+  carrier is already ≈0 → the sign flip is click-free): `mFf1 = !mFf1`; toggle `mFf2` every second
+  falling edge (÷4). Flipping in the d<0 region is the key click-free trick (replaces all the prior
+  zero-cross-declick hacks).
+- **Synthesis (half-wave × alternating sign, Boss method)**: `hw = d>0 ? d : kSiLeak·d` (kSiLeak≈0.05,
+  soft silicon-ish knee). `OCT1 = hw · (mFf1?+1:−1)`; `OCT2 = hw · (mFf2?+1:−1)`. Alternating the
+  half-wave lobes' sign every cycle (÷2) / every 2 cycles (÷4) = f/2 / f/4, timbre-carrying.
+- **Output** = `mOctLp` (≈2.8 kHz, Tone-adjustable) of `l1·OCT1 + l2·OCT2`, × silence gate `mGate`,
+  × `kSubMakeup` (≈2.5). Direct = clean full-band dry. Boss buffered IoStage front/back (near-transparent).
+- **Verify offline**: f/2 dominant on a pure tone (T8), f/2 STABLE across the tail on a harmonic-rich
+  tone with no period-doubling (T21), sub RMS healthy (T22), 0 latency (T9), finite/bounded.
+- **What changed vs every prior build**: single fixed-threshold comparator → **peak-referenced Schmitt
+  + falling-edge clock in the d<0 region**. No MPM tracker, no per-block adaptive cutoff, no makeup-
+  chasing. The hysteresis + the aggressive fixed pre-LPF are the entire de-gurgle mechanism, exactly
+  as the circuit does it.
+
+### G.1 Refractory guard — octave-UP jumping on sustain (play-test fix, 2026-07-03)
+
+Play-test of the §G Schmitt divider: *"the same note when I sustain seems to snap to the octave
+above then back down then above again."* Reproduced offline (a sustained low note with a beating,
+slightly-inharmonic 2nd partial): 2/18 windows had energy at **f** dominate **f/2** — the ÷2 was
+intermittently locking to **2f**. Mechanism: a real string's 2nd harmonic beats in and out; when it
+momentarily dominates the ~800 Hz-filtered near-sine, `d` shows **two swings per fundamental period**
+→ the comparator clocks twice → the sub jumps an octave up, then back as the beat evolves. **Filtering
+cannot fix this on low notes — f and 2f are adjacent, and 2f always survives any usable detection LP.**
+The cure is a TIME-domain constraint (a real analog-divider technique — a retriggerable one-shot /
+blanking monostable; the memory's flagged "PLL divider" escalation): a **self-referential refractory**
+that rejects any clock arriving sooner than `kRefracFrac` (0.70) of the running clock interval, so the
+period can never suddenly halve. The interval **lengthens readily / shortens cautiously** (bias toward
+the correct lower octave) and **re-establishes on silence** (each fresh note locks clean, no slow-track
+regression: onset locks < 40 ms). Offline: beating-harmonic sustain 0/18 jumps (110 Hz AND worst-case
+82 Hz low-E), onset lock fast, steady tones still clean. This is NOT a pitch tracker (no MPM/FFT) — just
+a monostable, so it stays 0-latency and instant-feel. Knobs if it still jumps: raise kRefracFrac toward
+0.8; if it lags on fast downward runs: lower it / speed the lengthen coefficient.
+
+### G.2 Refractory REJECTED; the octave-jump is intrinsic — the real fix (2026-07-03)
+
+Play-test of §G.1: *"absolutely atrocious now — revert it."* Reverted the refractory. WHY it failed
+(diagnosed, not guessed): the self-referential refractory has **no independent octave reference** — its
+clock-interval estimate is derived from the very edges it's trying to police, so on real playing
+(dynamics, vibrato, bends, and the 2nd harmonic genuinely becoming the loudest partial) the estimate
+wanders and it starts **rejecting legitimate clocks** → dropouts / wrong octave / stutter across normal
+playing. A time-domain guard is the right idea but it MUST be anchored to something that knows the true
+fundamental independently.
+
+**The octave-jump is intrinsic to analog dividers — real OC-2s do it too.** Community-confirmed
+(TalkBass/Basschat): the divider "follows the loudest frequency in range; the fundamental decays faster
+than the overtones, so before long the overtones are louder" → it climbs to 2f. On low notes f and 2f
+are both in-band and 2f can genuinely be the largest component, so **filtering + hysteresis cannot cure
+it** (you can't separate f from 2f by frequency when 2f is louder). The real-world "fixes" are all input
+conditioning: neck pickup, roll off tone, **compressor before the pedal**, play above the 7th fret.
+
+**The research-grounded fix = this doc's OWN §D/§E recommendation, which we have not properly tried with
+the now-clean synthesis: gate the divider clock to an octave-ROBUST MPM/NSDF pitch tracker.**
+- MPM/NSDF (already implemented, `PitchTracker.h`) estimates the true fundamental period `T0` via
+  normalised autocorrelation, which is **octave-error resistant BY DESIGN** — it sees the real period
+  even when the 2nd harmonic is the loudest component (that's exactly why MPM beats zero-cross / FFT-peak
+  for distorted guitar). This is the independent octave anchor the refractory lacked.
+- The divider stays sample-accurate and phase-locked to the audio (0 added latency); the tracker only
+  **validates** each Schmitt edge: accept a clock only inside a tolerance window around the expected next
+  edge (~`T0` after the last accepted one), reject early (harmonic) edges, and crossfade the sub out when
+  clarity is low (chords/mutes). = the time-domain analogue of the Eventide H949 de-glitcher (§E).
+- Cost: MPM needs ~2 periods (~25 ms at low E) to gain confidence, so the very first onset runs the
+  divider FREE briefly before the gate engages — fine (transient). History: Phase 2b built a crude
+  version of this (`≥0.6·T0` one-sided debounce) and play-test #2 said "not tracking accurately," but
+  that predates the clean half-wave×sign synthesis and used a one-sided gate, not the full tolerance
+  window + clarity crossfade.
+
+**Options for Robbie (his call — character vs robustness):**
+- **(A) Tracker-gated divider** — the §E-recommended fix; octave-robust; ~0-latency audio; cleaner than a
+  real OC-2. Risk: reintroduces the MPM tracker (mixed history) + possible brief onset freewheel.
+- **(B) Faithful asymmetric peak-latch only** — replace the symmetric ±hyst Schmitt with the TRUE OC-2
+  comparator (zero-cross SET + high peak-referenced RESET ~0.8·peak). More double-clock-resistant than the
+  symmetric Schmitt, pure/simple/0-latency, NO tracker — but still glitches like a real OC-2 (authentic,
+  not cured).
+- **(C) Accept-authentic + input conditioning** — keep §G, add an internal fundamental-focus aid
+  (compressor + aggressive LP before detection); frame the residual glitching as authentic OC-2 behaviour.
+
+### G.3 The octave jump, from first principles (supersedes the §G.2 anecdote, 2026-07-03)
+
+The §G.2 "real OC-2s do it too" claim leaned on forum anecdote — not evidence. Here is the grounded
+version: theory + peer-reviewed literature + a reproducible experiment (`docs/pitch_env/octave_experiment.py`).
+
+**Mechanism (deterministic, from Fourier).** A comparator / zero-crossing detector is an *instantaneous
+waveform* detector: it clocks the divider on the waveform's upward threshold crossings. For a signal
+`x(t) = sin(2πft) + a·sin(2π·2f·t + φ)` (fundamental + 2nd harmonic), once `a` is large enough the
+composite waveform has **two** upward zero-crossings per fundamental period, so the ÷2 clocks at 2f and
+the sub is one octave too high. This is not noise or a tuning error — it is the true zero-crossing count
+of the signal. A detection low-pass only helps when 2f is above its cutoff, i.e. only for high notes;
+for low/mid notes f and 2f are both in-band, so filtering cannot separate them.
+
+**Literature (peer-reviewed).** This is the classic **"octave error"** of F0 estimation:
+- **de Cheveigné & Kawahara, "YIN," JASA 111(4) 2002** — names it a *"subharmonic error, sometimes
+  called 'octave error'"*; shows threshold/instantaneous methods fail and cures it with the *cumulative
+  mean normalized difference function* (kills "too-high"/octave-up errors) + an *absolute threshold*
+  picking the first dip (kills "too-low"). Error ~3× lower than prior methods. LP prefiltering is only a
+  minor factor in their evaluation (Fig. 6c).
+- **McLeod & Wyvill, "A Smarter Way to Find Pitch" (MPM), ICMC 2005** — Fig. 2 *literally* shows *"the
+  NSDF of a signal with a strong second harmonic … the real pitch has a period of 190, but close matches
+  are made at half this period,"* and cures it by choosing the **first key maximum above `k·nmax`,
+  k∈0.8–1.0** (the lowest-frequency near-global peak = the true fundamental). MPM *"operates without
+  low-pass filtering"* — it is robust to strong harmonics *by the autocorrelation structure*, not by EQ.
+
+**Experiment (reproducible; `octave_experiment.py`).**
+- Exp 1 — threshold divider (4-pole 800 Hz detect LP, worst-case phase): tracks the fundamental for
+  2nd-harmonic ratio a≤0.5, but **DOUBLES to 2f for a≥0.8 at f=98 Hz AND f=196 Hz**; only the high note
+  (587 Hz) survives (its 2f is filtered). Quantitatively confirms: no comparator/hysteresis/filter tune
+  fixes low/mid notes.
+- Exp 2 — MPM/NSDF on the *same* signals, no filtering: **period ratio 1.00 (CORRECT) across a=0…3** at
+  all three pitches. The autocorrelation octave authority is exactly what the comparator lacks.
+
+**Conclusion (grounded).** The octave jump is a fundamental limitation of *instantaneous threshold
+detection*, provably unfixable by comparator/filter tuning on low notes. The scientifically-validated
+cure is **period-based (autocorrelation/NSDF) octave estimation** — i.e. Option A: let the MPM tracker
+(`PitchTracker.h`, already octave-robust by design) be the octave AUTHORITY that validates/gates the
+0-latency divider's clock. The earlier refractory (§G.1) failed precisely because it was still an
+*instantaneous/interval* guard with no autocorrelation octave authority. This is not ear-patching; it is
+the published fix for a named, formally-characterized error.
+
+### G.4 Note-change lag — the seeded-search octave trap + the NSDF(lag/2) escape (2026-07-03)
+
+Play-test: *"if I play octaves (not at the same time) it wants to stay on the first note rather than
+the second."* Diagnosed to the TRACKER, not the divider gate. `PitchTracker` seeds its lag search
+±1 semitone around the previous estimate (great for stability/CPU, Pardue) and explicitly rejects
+low-confidence ×2/×0.5 jumps. But when a note jumps UP an octave, **the new note is still periodic at
+the old lag L** (a signal of period L/2 is also periodic at L), so `NSDF(L) ≈ 1` and the seeded search
+never even proposes the higher octave — it self-traps on the old (lower) note indefinitely. (Octave
+DOWN is self-correcting: the lower note is NOT periodic at the old shorter lag, so the seed fails its
+gate and a full re-acquire picks it up.)
+
+Onset-triggered re-acquire was tried and rejected: a steady-level re-pluck doesn't raise amplitude
+enough to detect reliably, and forcing a full re-acquire mid-transition (window still full of the old
+note) just re-locks to the old note.
+
+**The fix (grounded, legato-safe): an NSDF(lag/2) octave-up check.** While locked at lag L, also
+evaluate `NSDF(L/2)`. Measured discriminator (`octave_up_escape_test.py`):
+- **Genuine octave-up** (note truly at L/2, old fundamental gone): `NSDF(L/2) ≈ 0.995–0.997`.
+- **Sustain doubling** (note still at L, 2nd harmonic grows — the case §G.1–G.3 must NOT re-introduce):
+  `NSDF(L/2)` climbs only to ~0.92 *even with the 2nd harmonic at 5× the fundamental*, because the
+  fundamental persists and keeps the half-period from correlating.
+
+So `NSDF(L/2) ≥ kOctaveUp (0.95)` cleanly means "the note genuinely went up an octave" → follow to L/2.
+It is NOT onset-based (works for legato/hammer-ons), it self-limits (clean single notes have low
+NSDF(L/2) so it never fires or cascades — verified across 82–440 Hz), and it can't re-introduce sustain
+doubling (0.95 sits above the ~0.92 doubling ceiling). The 3-point median makes it require ~2 frames,
+rejecting single-frame false escapes. Implemented in `PitchTracker::analyze()` (seeded branch); benefits
+BOTH tracker-driven models (OC-2 divider gate + Whammy Classic grain window). Needs Windows build +
+play-test. Lever: raise kOctaveUp toward 0.97 if any note false-escapes; lower toward 0.93 if a real
+octave-up is sluggish. NOTE: a crude hard-cut model showed a transition artifact on a P5 DOWN leap
+(196→130 → garbage) that did NOT reproduce on clean single notes — likely the model's mixed-window, but
+worth an ear-check on big downward leaps.
+
+### G.5 POG phase-vocoder quality — formant preservation (the thin up-octave) (2026-07-03)
+
+Not an octave-error (the PV octaves are exact); a NATURALNESS fix. The Bernsee shifter moves every
+bin to k·ratio, which drags the spectral ENVELOPE (formants) up with the pitch — so the +1/+2 octave
+sounds thin / chipmunky. Fix (standard source-filter, DAFX Ch.9 / Bernsee): estimate the spectral
+envelope, WHITEN the spectrum by it (excitation), shift the excitation, then RE-IMPOSE the ORIGINAL
+(unshifted) envelope → the harmonics move up but the formants stay put → the up-octave keeps its body.
+
+Envelope = cepstral lifter: `env = exp( liftered real-cepstrum )`, lifter cutoff ~1 ms of quefrency
+(keeps the broad envelope, excludes the pitch periodicity; good to ~1 kHz fundamental). Validated:
+- `formant_experiment.py` (numpy): lifter≈50 samples recovers F1/F2 across f0 100–220 Hz; the preserved
+  shift holds F1 at ~680 Hz vs the naive 1664 Hz (chipmunk), and retains 0.78× the 400–1000 Hz body vs
+  the naive 0.18×.
+- Compiled C++ (`SpectralShifter` + `ss_test.cpp`): builds clean; formant-OFF is bit-identical run-to-run
+  (existing voices untouched — it's opt-in, default off); formant-ON is finite and lifts the
+  low/high body ratio on the up-octave from 0.148 (naive) to 4.326.
+
+Implemented as `SpectralShifter::setFormantPreserve(bool)` (off by default; costs 2 extra FFTs/hop, so
+enabled ONLY on the up-octave voices `mPolyUp`/`mPolyUp2` = Micro POG +1 / POG2 +2). Down-octaves and
+Whammy Chords stay bit-identical. Needs Windows build + play-test. If CPU is a concern, it's up-voice-only;
+if he wants an A/B, expose the toggle as a param. STILL TODO (next increment): identity/peak PHASE-LOCKING
+(Laroche & Dolson) to cut the watery phasiness — a separate change to the phase-propagation loop.
+
+### G.6 POG phasiness — identity/peak phase-locking (2026-07-03)
+
+The plain phase vocoder propagates every bin's phase independently, so bins belonging to one
+sinusoid drift out of vertical alignment across frames → the watery "phasiness" (Laroche & Dolson
+1999, "Improved phase vocoder"). Fix = **identity / peak phase-locking**: find spectral peaks and
+slave each bin's synthesis phase to its region's peak — the peak evolves freely (normal accumulation)
+and its neighbours keep the current frame's phase relationship to it:
+`outPhase(k) = sumPhase(peak) + [anaPhase(src k) − anaPhase(src peak)]`, where `src ≈ k/ratio` is the
+analysis bin that fed output bin k. Restores vertical coherence.
+
+Implemented as `SpectralShifter::setPhaseLock(bool)` (default OFF): stores per-bin analysis phase,
+splits the synthesis loop into (accumulate)→(lock)→(write), finds peaks (local max over ±2 above a
+1e-4·max floor), assigns each bin its nearest peak, and re-phases. Validated in compiled C++
+(`ss_phaselock_test.cpp`): builds clean; OFF is bit-identical run-to-run; ON is finite, still shifts
+exactly up (220→440, 1.6e6× separation) AND down (0.5), works combined with formant, and measurably
+alters the phase structure (its purpose).
+
+**Left OFF by default in PitchBlock** (a commented one-liner enables it on the up/down voices) for two
+honest reasons: (1) phasiness was NOT a reported complaint — the reported issue was thinness, fixed by
+§G.5 formant preservation; (2) phase-locking is the one change I can't judge offline and it can trade
+phasiness for a slightly metallic/transient-smeared character. So the shipped build gets the clean
+formant win to evaluate; phase-locking is one uncomment away to A/B by ear (or wire a temp toggle).
