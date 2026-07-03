@@ -124,7 +124,7 @@ public:
         mIoGrain.reset();
         mDetLp1.reset(); mDetLp2.reset(); mOctLp1.reset(); mOctLp2.reset();
         mDetPeak = 0.0f; mGate = 0.0f; mDPrev = 0.0f; mArmed = false; mDetCutHz = -1.0f;
-        mFf1 = false; mFf2 = false; mEdgeSamples = 0; mLastPeriod = 0;
+        mFf1 = false; mFf2 = false; mEdgeSamples = 0; mLastPeriod = 0; mPrevLive = false;
         mPogFilter.reset(); mPogAtt = 0.0f;
         mPreRectLp.reset(); mAcHp.reset(); mIoFuzz.reset();
         mFuzzU1 = mFuzzU2 = mRectR1 = mRectR2 = 0.0;
@@ -358,33 +358,31 @@ private:
     {
         const float direct = mDirect.load(), l1 = mOct1.load(), l2 = mOct2.load();
         mIoGrain.processIn(mono, numSamples);                 // Boss buffered front-end
-        mTracker.process(mono, numSamples);                   // pitch reference (no audio delay)
+        mTracker.process(mono, numSamples);                   // octave-SAFE f0 (sets the filter floor)
         const bool voiced = mTracker.voiced();
-        const float t0 = mTracker.periodSamples();
-        const long trackerGap = (voiced && t0 > 1.0f) ? (long)(0.6f * t0) : 0;
-        // KEY to killing the gurgle: tune the detection LPF to the tracked
-        // FUNDAMENTAL so the comparator always sees a clean sine (a fixed LPF lets
-        // harmonics through on many notes -> extra zero-crossings -> the flip-flop
-        // mis-counts -> gurgle). Cutoff ~1.3*f0 (fundamental passes, 2nd+ harmonics
-        // well down); re-derived per block, state preserved (no click).
-        if (voiced)
-        {
-            float cut = mTracker.hz() * 1.6f; // clean enough to track, wide enough for body
-            cut = cut < 110.0f ? 110.0f : (cut > 2000.0f ? 2000.0f : cut);
-            if (std::abs(cut - mDetCutHz) > 2.0f)
-            {
-                mDetLp1.copyCoeffsFrom(Biquad::lowpass(mSampleRate, cut));
-                mDetLp2.copyCoeffsFrom(Biquad::lowpass(mSampleRate, cut));
-                mDetCutHz = cut;
-            }
-        }
-        const float clarTarget = voiced ? 1.0f : 0.0f;
-        const float peakDecay = coefForMs(180.0f, mSampleRate);
-        const float gAtt = coefForMs(3.0f, mSampleRate), gRel = coefForMs(120.0f, mSampleRate);
-        const float clarCoef = coefForMs(35.0f, mSampleRate);
+        const float trkHz = voiced ? mTracker.hz() : 0.0f;
 
-        float peak = mDetPeak, gate = mGate, dPrev = mDPrev, clarG = mClarityGate;
-        bool armed = mArmed, f1 = mFf1, f2 = mFf2;
+        auto setCut = [&](float c)                            // re-tune detection LPF, state-preserving
+        {
+            c = c < 110.0f ? 110.0f : (c > 2200.0f ? 2200.0f : c);
+            if (std::abs(c - mDetCutHz) > 5.0f)
+            {
+                mDetLp1.copyCoeffsFrom(Biquad::lowpass(mSampleRate, c));
+                mDetLp2.copyCoeffsFrom(Biquad::lowpass(mSampleRate, c));
+                mDetCutHz = c;
+            }
+        };
+        // Slow, octave-SAFE cutoff from the tracker (kills harmonics on sustained notes
+        // = no gurgle). The FAST self-measured period (per cycle, below) leads it on note
+        // changes so the sub responds immediately instead of waiting for the tracker.
+        if (voiced) setCut(trkHz * 1.6f);
+
+        const long minGap = (long)(mSampleRate / 1600.0);     // reject only >1.6kHz double-triggers
+        const float peakDecay = coefForMs(180.0f, mSampleRate);
+        const float gAtt = coefForMs(1.5f, mSampleRate), gRel = coefForMs(80.0f, mSampleRate);
+
+        float peak = mDetPeak, gate = mGate, dPrev = mDPrev;
+        bool armed = mArmed, f1 = mFf1, f2 = mFf2, prevLive = mPrevLive;
         long edge = mEdgeSamples, lastPeriod = mLastPeriod;
         for (int i = 0; i < numSamples; ++i)
         {
@@ -395,28 +393,36 @@ private:
             const bool live = peak > kGateFloor;
             const float gTgt = live ? 1.0f : 0.0f;
             gate += (gTgt > gate ? gAtt : gRel) * (gTgt - gate);
-            clarG += clarCoef * (clarTarget - clarG);
-            const long refractory = std::max(trackerGap, (long)(0.5f * (float)lastPeriod));
+            if (live && !prevLive) { lastPeriod = 0; setCut(1200.0f); }      // note onset: open up -> instant attack
+            prevLive = live;
+
+            const long refractory = std::max(minGap, (long)(0.5f * (float)lastPeriod)); // self-referential (fast)
             const float hyst = 0.05f * peak;
             if (d < -hyst) armed = true;
             ++edge;
             if (live && armed && dPrev <= 0.0f && d > 0.0f && edge >= refractory)
             {
                 const bool prev1 = f1; f1 = !f1; if (f1 && !prev1) f2 = !f2;
-                if (edge > 1 && edge < (long)mSampleRate) lastPeriod = edge;
+                if (edge > 2 && edge < (long)mSampleRate) lastPeriod = edge;
                 edge = 0; armed = false;
+                // Re-tune per cycle: trust the tracker's octave-SAFE f0 once it's locked
+                // (kills harmonics -> can't lock to the wrong octave); before lock (onset)
+                // use the fast self-measured period so the attack responds immediately.
+                const float selfHz = (float)mSampleRate / (float)std::max(1L, lastPeriod);
+                setCut(1.6f * (voiced ? trkHz : selfHz));
             }
             dPrev = d;
-            const float hw = (d > 0.0f) ? d : kSiLeak * d;    // silicon half-wave (small leak)
-            const float s1 = mOctLp1.processSample(hw * (f1 ? 1.0f : -1.0f));
-            const float s2 = mOctLp2.processSample(hw * (f2 ? 1.0f : -1.0f));
-            const float g = gate * clarG * kSubMakeup;        // makeup: the detection carrier
-            mono[i] = direct * x + (l1 * s1 + l2 * s2) * g;   // is band-limited, so the sub needs level
+            // Sub = the clean band-limited CARRIER sign-flipped each divided cycle. Flipping
+            // the bipolar carrier at its zero-crossing is continuous/smooth (no half-wave buzz).
+            const float s1 = mOctLp1.processSample(d * (f1 ? 1.0f : -1.0f));
+            const float s2 = mOctLp2.processSample(d * (f2 ? 1.0f : -1.0f));
+            const float g = gate * kSubMakeup;                // makeup: carrier is band-limited
+            mono[i] = direct * x + (l1 * s1 + l2 * s2) * g;
         }
-        mDetPeak = flush(peak); mGate = flush(gate); mDPrev = flush(dPrev); mClarityGate = flush(clarG);
-        mArmed = armed; mFf1 = f1; mFf2 = f2; mEdgeSamples = edge; mLastPeriod = lastPeriod;
+        mDetPeak = flush(peak); mGate = flush(gate); mDPrev = flush(dPrev);
+        mArmed = armed; mFf1 = f1; mFf2 = f2; mEdgeSamples = edge; mLastPeriod = lastPeriod; mPrevLive = prevLive;
         mIoGrain.processOut(mono, numSamples); // Boss buffered back-end
-        mTrackedHz.store(voiced ? mTracker.hz() : 0.0f);
+        mTrackedHz.store((lastPeriod > 4) ? (float)(mSampleRate / (double)lastPeriod) : 0.0f);
     }
 
     inline float pushDry(float x)
@@ -450,7 +456,7 @@ private:
     static float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
     static float flush(float v) { return std::abs(v) < 1.0e-30f ? 0.0f : v; }
     static constexpr float kDetLpHz = 650.0f;    // OC-2 detection band-limit (near-sine; adaptive at runtime)
-    static constexpr float kOctLpHz = 3500.0f;   // OC-2 sub output smoothing (brighter = more present)
+    static constexpr float kOctLpHz = 2800.0f;   // OC-2 sub output smoothing
     static constexpr float kGateFloor = 5.0e-4f; // OC-2 silence gate (post input-cal)
     static constexpr float kSiLeak = 0.05f;      // silicon half-wave negative leak
     static constexpr float kSubMakeup = 2.8f;    // sub makeup (band-limited carrier -> low level)
@@ -506,7 +512,7 @@ private:
     // OC-2 classic divider state
     Biquad mDetLp1, mDetLp2, mOctLp1, mOctLp2;
     float mDetPeak = 0.0f, mGate = 0.0f, mDPrev = 0.0f, mDetCutHz = -1.0f;
-    bool mArmed = false, mFf1 = false, mFf2 = false;
+    bool mArmed = false, mFf1 = false, mFf2 = false, mPrevLive = false;
     long mEdgeSamples = 0, mLastPeriod = 0;
     // Octavia octave-up fuzz
     Biquad mPreRectLp, mAcHp;
