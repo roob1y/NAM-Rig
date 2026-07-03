@@ -123,7 +123,7 @@ public:
         mToneLpDn.reset(); mToneLpUp.reset();
         mIoGrain.reset();
         mDetLp1.reset(); mDetLp2.reset(); mOctLp1.reset(); mOctLp2.reset();
-        mDetPeak = 0.0f; mGate = 0.0f; mDPrev = 0.0f; mArmed = false;
+        mDetPeak = 0.0f; mGate = 0.0f; mDPrev = 0.0f; mArmed = false; mDetCutHz = -1.0f;
         mFf1 = false; mFf2 = false; mEdgeSamples = 0; mLastPeriod = 0;
         mPogFilter.reset(); mPogAtt = 0.0f;
         mPreRectLp.reset(); mAcHp.reset(); mIoFuzz.reset();
@@ -358,10 +358,26 @@ private:
     {
         const float direct = mDirect.load(), l1 = mOct1.load(), l2 = mOct2.load();
         mIoGrain.processIn(mono, numSamples);                 // Boss buffered front-end
-        mTracker.process(mono, numSamples);                   // debounce reference (no audio delay)
+        mTracker.process(mono, numSamples);                   // pitch reference (no audio delay)
         const bool voiced = mTracker.voiced();
         const float t0 = mTracker.periodSamples();
         const long trackerGap = (voiced && t0 > 1.0f) ? (long)(0.6f * t0) : 0;
+        // KEY to killing the gurgle: tune the detection LPF to the tracked
+        // FUNDAMENTAL so the comparator always sees a clean sine (a fixed LPF lets
+        // harmonics through on many notes -> extra zero-crossings -> the flip-flop
+        // mis-counts -> gurgle). Cutoff ~1.3*f0 (fundamental passes, 2nd+ harmonics
+        // well down); re-derived per block, state preserved (no click).
+        if (voiced)
+        {
+            float cut = mTracker.hz() * 1.3f;
+            cut = cut < 90.0f ? 90.0f : (cut > 1600.0f ? 1600.0f : cut);
+            if (std::abs(cut - mDetCutHz) > 2.0f)
+            {
+                mDetLp1.copyCoeffsFrom(Biquad::lowpass(mSampleRate, cut));
+                mDetLp2.copyCoeffsFrom(Biquad::lowpass(mSampleRate, cut));
+                mDetCutHz = cut;
+            }
+        }
         const float clarTarget = voiced ? 1.0f : 0.0f;
         const float peakDecay = coefForMs(180.0f, mSampleRate);
         const float gAtt = coefForMs(3.0f, mSampleRate), gRel = coefForMs(120.0f, mSampleRate);
@@ -488,7 +504,7 @@ private:
     IoStage mIoGrain;
     // OC-2 classic divider state
     Biquad mDetLp1, mDetLp2, mOctLp1, mOctLp2;
-    float mDetPeak = 0.0f, mGate = 0.0f, mDPrev = 0.0f;
+    float mDetPeak = 0.0f, mGate = 0.0f, mDPrev = 0.0f, mDetCutHz = -1.0f;
     bool mArmed = false, mFf1 = false, mFf2 = false;
     long mEdgeSamples = 0, mLastPeriod = 0;
     // Octavia octave-up fuzz

@@ -360,6 +360,27 @@ int main()
         CHECK(exact, "T20 Whammy heel = bit-exact dry (no warble at rest)");
     }
 
+    { // T21: OC-2 divider on a HARMONIC-RICH note (strong 2nd/3rd) stays locked to a
+      // STABLE f/2 (the adaptive detection LPF tuned to f0 stops harmonics from
+      // mis-triggering the flip-flop = the de-gurgle fix).
+        const double f = 260.0;
+        std::vector<float> x((size_t)(SR * 1.5));
+        for (size_t i = 0; i < x.size(); ++i) { double t = (double)i / SR;
+            x[i] = (float)(0.3 * (std::sin(2 * M_PI * f * t) + 0.6 * std::sin(2 * M_PI * 2 * f * t) + 0.3 * std::sin(2 * M_PI * 3 * f * t))); }
+        PitchBlock b; b.prepare({SR, BLK});
+        b.setType(PitchBlock::kOctDown); b.setEngine(PitchBlock::kGrain);
+        b.setDirect(0.0f); b.setOct1(1.0f); b.setOct2(0.0f);
+        run(b, x);
+        std::vector<float> h1(x.begin() + x.size() / 2, x.begin() + 3 * x.size() / 4);
+        std::vector<float> h2(x.begin() + 3 * x.size() / 4, x.end());
+        auto e = [](std::vector<float> &v, double fr){ double re = 0, im = 0; for (size_t i = 0; i < v.size(); ++i) { double a = 2 * M_PI * fr * i / SR; re += v[i] * cos(a); im += v[i] * sin(a); } return (re * re + im * im) / ((double)v.size() * v.size()); };
+        const double fund = binPow(x, f);
+        CHECK(binPow(x, f / 2.0) > fund * 5.0, "T21 divider locks f/2 on harmonic tone (%.2e > f %.2e)", binPow(x, f / 2.0), fund);
+        const double a1 = e(h1, f / 2.0), a2 = e(h2, f / 2.0);
+        const double ratio = a1 > a2 ? a1 / std::max(1e-12, a2) : a2 / std::max(1e-12, a1);
+        CHECK(ratio < 4.0, "T21 f/2 stable across tail (no gurgle, ratio %.2f)", ratio);
+    }
+
     std::printf("=== %s (%d fail) ===\n", gFails ? "FAILURES" : "ALL PASS", gFails);
     return gFails ? 1 : 0;
 }
