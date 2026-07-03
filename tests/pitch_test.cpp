@@ -314,6 +314,25 @@ int main()
         CHECK(rel > 0.1, "T17 detune changes the up voice (rel diff %.2f)", rel);
     }
 
+    { // T18: Whammy — treadle up (mode +1 oct, toe) shifts to 2f; heel (0) ~ unison;
+      // a down mode drops the pitch; all finite.
+        auto renderW = [](int mode, float treadle){
+            PitchBlock b; b.prepare({SR, BLK});
+            b.setType(PitchBlock::kWhammy);
+            b.setWhammyMode(mode); b.setWhammy(treadle);
+            std::vector<float> x = tone(220.0, 0.3, (int)(SR * 1.2));
+            run(b, x);
+            return x;
+        };
+        std::vector<float> toe = renderW(1, 1.0f);   // +1 oct full
+        std::vector<float> heel = renderW(1, 0.0f);  // unison
+        CHECK(binPow(toe, 440.0) > binPow(toe, 220.0) * 4.0, "T18 Whammy toe -> +1 oct (2f)");
+        CHECK(binPow(heel, 220.0) > binPow(heel, 440.0), "T18 Whammy heel ~ unison (f)");
+        std::vector<float> dn = renderW(3, 1.0f);    // -1 oct
+        bool fin = true; float pk = 0; for (float s2 : dn) { if (!std::isfinite(s2)) fin = false; pk = std::max(pk, std::abs(s2)); }
+        CHECK(fin && pk < 20.0f && binPow(dn, 110.0) > binPow(dn, 220.0), "T18 Whammy -1 oct (f/2), finite");
+    }
+
     std::printf("=== %s (%d fail) ===\n", gFails ? "FAILURES" : "ALL PASS", gFails);
     return gFails ? 1 : 0;
 }

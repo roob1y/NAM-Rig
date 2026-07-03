@@ -6405,7 +6405,8 @@ class PitchPanel : public BlockPanel, private juce::Timer
 public:
     explicit PitchPanel(juce::AudioProcessorValueTreeState &apvts)
         : BlockPanel("PITCH"), mApvts(apvts),
-          mModel(apvts, "pitchModel", juce::StringArray{"OC-2", "MICRO POG", "POG2", "OCTAVIA"}),
+          mModel(apvts, "pitchModel", juce::StringArray{"OC-2", "MICRO POG", "POG2", "OCTAVIA", "WHAMMY"}),
+          mWMode(apvts, "pitchWMode", juce::StringArray{"+2", "+1", "+5th", "-1", "-2"}),
           mDirect(apvts, "pitchDirect", "Direct"),
           mOct1(apvts, "pitchOct1", "Oct 1"),
           mOct2(apvts, "pitchOct2", "Oct 2"),
@@ -6416,12 +6417,15 @@ public:
           mAttack(apvts, "pitchAttack", "Attack"),
           mDetune(apvts, "pitchDetune", "Detune"),
           mBoost(apvts, "pitchFuzz", "Boost"),
-          mVolume(apvts, "pitchVol", "Volume")
+          mVolume(apvts, "pitchVol", "Volume"),
+          mWhammyKnob(apvts, "pitchWhammy", "Whammy")
     {
         addAndMakeVisible(mModel);
+        addChildComponent(mWMode);
         mModel.onChange = [this](int) { refresh(); };
+        mWMode.onChange = [this](int) { refresh(); };
         for (auto *k : {&mDirect, &mOct1, &mOct2, &mOctave, &mUp2, &mFilter, &mReso,
-                        &mAttack, &mDetune, &mBoost, &mVolume})
+                        &mAttack, &mDetune, &mBoost, &mVolume, &mWhammyKnob})
             addChildComponent(*k);
         refresh();
         startTimerHz(20); // live tracked-note readout in the header
@@ -6433,13 +6437,15 @@ public:
     void refresh()
     {
         const int m = (int)mApvts.getRawParameterValue("pitchModel")->load();
-        mModelName = (m == 0) ? "OC-2" : (m == 1) ? "Micro POG" : (m == 2) ? "POG2" : "Octavia";
+        mModelName = (m == 0) ? "OC-2" : (m == 1) ? "Micro POG" : (m == 2) ? "POG2"
+                   : (m == 3) ? "Octavia" : "Whammy";
         if (m != mModelIdx)
         {
             mModelIdx = m;
             for (auto *k : {&mDirect, &mOct1, &mOct2, &mOctave, &mUp2, &mFilter, &mReso,
-                            &mAttack, &mDetune, &mBoost, &mVolume})
+                            &mAttack, &mDetune, &mBoost, &mVolume, &mWhammyKnob})
                 k->setVisible(false);
+            mWMode.setVisible(m == 4); // Whammy interval selector
             if (m == 0) // OC-2
             {
                 mDirect.setCaption("Direct"); mOct1.setCaption("Oct 1");
@@ -6458,9 +6464,13 @@ public:
                 mFilter.setVisible(true); mReso.setVisible(true);
                 mAttack.setVisible(true); mDetune.setVisible(true);
             }
-            else // Octavia
+            else if (m == 3) // Octavia
             {
                 mBoost.setVisible(true); mVolume.setVisible(true);
+            }
+            else // Whammy: interval selector (top) + treadle knob
+            {
+                mWhammyKnob.setVisible(true);
             }
             resized();
             repaint();
@@ -6475,6 +6485,9 @@ public:
         g.setFont(fonts::archivo(9.5f, fonts::SemiBold, 0.6f));
         g.drawText("MODEL", mModel.getX(), mModel.getY() - 13,
                    juce::jmax(46, mModel.getWidth()), 11, juce::Justification::centredLeft);
+        if (mWMode.isVisible())
+            g.drawText("SHIFT", mWMode.getX(), mWMode.getY() - 13,
+                       juce::jmax(46, mWMode.getWidth()), 11, juce::Justification::centredLeft);
     }
 
     void resized() override
@@ -6482,6 +6495,8 @@ public:
         auto area = bodyArea().reduced(24, 16);
         auto top = area.removeFromTop(26);
         mModel.setBounds(top.getX(), top.getY(), mModel.idealWidth(), 26);
+        if (mModelIdx == 4) // Whammy interval selector sits beside the model picker
+            mWMode.setBounds(mModel.getRight() + 22, top.getY(), mWMode.idealWidth(), 26);
         area.removeFromTop(20);
 
         auto layKnobs = [](juce::Rectangle<int> r, std::vector<LabeledKnob *> ks) {
@@ -6502,8 +6517,10 @@ public:
             layKnobs(r1, {&mDirect, &mOct2, &mOct1, &mOctave, &mUp2});
             layKnobs(area, {&mFilter, &mReso, &mAttack, &mDetune});
         }
-        else                       // Octavia
+        else if (mModelIdx == 3)   // Octavia
             layKnobs(area, {&mBoost, &mVolume});
+        else                       // Whammy — the treadle knob
+            layKnobs(area, {&mWhammyKnob});
     }
 
 private:
@@ -6521,8 +6538,9 @@ private:
     }
 
     juce::AudioProcessorValueTreeState &mApvts;
-    SegmentedControl mModel;
-    LabeledKnob mDirect, mOct1, mOct2, mOctave, mUp2, mFilter, mReso, mAttack, mDetune, mBoost, mVolume;
+    SegmentedControl mModel, mWMode;
+    LabeledKnob mDirect, mOct1, mOct2, mOctave, mUp2, mFilter, mReso, mAttack, mDetune, mBoost, mVolume,
+                mWhammyKnob;
     juce::String mModelName{"OC-2"};
     int mModelIdx = -1;
 

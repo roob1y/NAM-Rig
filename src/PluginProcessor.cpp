@@ -268,7 +268,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     //   Octavia   (octave-up germanium fuzz, 0 latency):     Boost, Volume.
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("pitchModel", 1), "Pitch Model",
-        juce::StringArray{"OC-2", "Micro POG", "POG2", "Octavia"}, 0));
+        juce::StringArray{"OC-2", "Micro POG", "POG2", "Octavia", "Whammy"}, 0));
+    // Whammy: target interval (toe) + the treadle position (heel 0 .. toe 1).
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("pitchWMode", 1), "Pitch Whammy Mode",
+        juce::StringArray{"+2 Oct", "+1 Oct", "+5th", "-1 Oct", "-2 Oct"}, 1));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("pitchWhammy", 1), "Pitch Whammy",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
     // Shared level knobs (reused per model — see the apply block for the mapping).
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("pitchDirect", 1), "Pitch Dry/Direct",
@@ -1058,13 +1065,19 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         mChain.pitch.setAttack(pp("pitchAttack"));
         mChain.pitch.setDetune(pp("pitchDetune"));
     }
-    else // Octavia: octave-up germanium fuzz, 0 latency
+    else if (pitchModel == 3) // Octavia: octave-up germanium fuzz, 0 latency
     {
         mChain.pitch.setType(nam_rig::PitchBlock::kOctavia);
         mChain.pitch.setFuzz(pp("pitchFuzz"));     // Boost (drive)
         mChain.pitch.setVolume(pp("pitchVol"));    // Volume
         mChain.pitch.setTone(0.7f);                // tone: pinned (original Octavia has no tone)
         mChain.pitch.setOctave(0.65f);             // mostly octave + some fuzz body (not thin/starved)
+    }
+    else // Whammy: continuous pitch bend, 0 latency
+    {
+        mChain.pitch.setType(nam_rig::PitchBlock::kWhammy);
+        mChain.pitch.setWhammyMode((int)pp("pitchWMode"));
+        mChain.pitch.setWhammy(pp("pitchWhammy")); // treadle
     }
     const bool pitchOn = pp("pitchOn") >= 0.5f;
     mChain.pitch.setBypassed(!pitchOn);
