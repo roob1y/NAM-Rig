@@ -186,6 +186,48 @@ int main()
               "T9 Poly latency %.0f > 0, Grain %.0f == 0", bp.latencySamples(), bg.latencySamples());
     }
 
+    { // T10: IoStage — transparent = identity; buffered = low-freq (coupling HP) cut;
+      // loaded (fuzz) = high-freq (input-Z shelf) cut.
+        auto rms = [](nam_rig::IoStage &io, double f) {
+            std::vector<float> x = tone(f, 0.3, (int)(SR * 0.5));
+            io.reset();
+            for (size_t p = 0; p < x.size(); p += BLK)
+            { const int n = (int)std::min<size_t>(BLK, x.size() - p); io.processIn(x.data() + p, n); io.processOut(x.data() + p, n); }
+            double s = 0; int c = 0; for (size_t i = x.size() / 2; i < x.size(); ++i) { s += (double)x[i] * x[i]; ++c; } return std::sqrt(s / c);
+        };
+        nam_rig::IoStage tr; tr.prepare(SR); tr.setTransparent();
+        std::mt19937 rng(5); std::uniform_real_distribution<float> sg(-0.5f, 0.5f);
+        std::vector<float> a(2048), b(2048);
+        for (size_t i = 0; i < a.size(); ++i) { a[i] = sg(rng); b[i] = a[i]; }
+        tr.processIn(b.data(), (int)b.size()); tr.processOut(b.data(), (int)b.size());
+        bool ident = true; for (size_t i = 0; i < a.size(); ++i) if (a[i] != b[i]) { ident = false; break; }
+        CHECK(ident, "T10 transparent IoStage = identity");
+        nam_rig::IoStage buf; buf.prepare(SR); buf.setBuffered(30.0f, 30.0f, 0.0f, 0.0f);
+        CHECK(rms(buf, 15.0) < rms(buf, 1000.0) * 0.7, "T10 buffered cuts sub-bass (HP)");
+        nam_rig::IoStage fz; fz.prepare(SR); fz.setLoaded(14.0f, 2500.0f, -8.0f, -1.0f, 20.0f, 0.0f);
+        CHECK(rms(fz, 8000.0) < rms(fz, 300.0) * 0.7, "T10 loaded (fuzz) cuts highs (input-Z shelf)");
+    }
+
+    { // T11: POG voicing (Type=POG) — dry + sub(x0.5) + up(x2) at once, polyphonic,
+      // resonant filter. A chord shows both the sub and up of each note.
+        const double f1 = 200.0, f2 = 300.0;
+        PitchBlock b; b.prepare({SR, BLK});
+        b.setType(PitchBlock::kPog);
+        b.setDirect(0.0f); b.setOct1(1.0f); b.setOctave(1.0f); b.setFilter(1.0f); b.setAttack(0.0f);
+        std::vector<float> x = chord({f1, f2}, 0.4, (int)(SR * 1.5));
+        run(b, x);
+        const double sub1 = binPow(x, f1 / 2.0), up1 = binPow(x, 2 * f1);
+        const double sub2 = binPow(x, f2 / 2.0), up2 = binPow(x, 2 * f2);
+        CHECK(sub1 > binPow(x, f1) * 3.0 && up1 > binPow(x, f1) * 3.0,
+              "T11 POG note1 sub+up present (sub %.2e up %.2e vs f %.2e)", sub1, up1, binPow(x, f1));
+        CHECK(sub2 > 0.0 && up2 > 0.0 && std::isfinite(sub2 + up2), "T11 POG note2 sub+up present");
+    }
+    { // T12: POG latency = poly STFT (even with engine=Grain, POG forces poly).
+        PitchBlock b; b.prepare({SR, BLK}); b.setBypassed(false);
+        b.setType(PitchBlock::kPog); b.setEngine(PitchBlock::kGrain);
+        CHECK(b.latencySamples() > 0.0, "T12 POG uses poly latency (%.0f)", b.latencySamples());
+    }
+
     std::printf("=== %s (%d fail) ===\n", gFails ? "FAILURES" : "ALL PASS", gFails);
     return gFails ? 1 : 0;
 }

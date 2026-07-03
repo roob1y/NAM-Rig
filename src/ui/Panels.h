@@ -6403,7 +6403,7 @@ class PitchPanel : public BlockPanel, private juce::Timer
 public:
     explicit PitchPanel(juce::AudioProcessorValueTreeState &apvts)
         : BlockPanel("PITCH"), mApvts(apvts),
-          mType(apvts, "pitchType", juce::StringArray{"OCT DOWN", "OCT UP"}),
+          mType(apvts, "pitchType", juce::StringArray{"OCT DN", "OCT UP", "POG"}),
           mEngine(apvts, "pitchEngine", juce::StringArray{"POLY", "GRAIN"}),
           mDirect(apvts, "pitchDirect", "Direct"),
           mOct1(apvts, "pitchOct1", "Oct 1"),
@@ -6412,13 +6412,16 @@ public:
           mFuzz(apvts, "pitchFuzz", "Dry"),
           mTone(apvts, "pitchTone", "Tone"),
           mOctave(apvts, "pitchOctave", "Octave"),
-          mVolume(apvts, "pitchVol", "Volume")
+          mVolume(apvts, "pitchVol", "Volume"),
+          mFilter(apvts, "pitchFilter", "Filter"),
+          mAttack(apvts, "pitchAttack", "Attack")
     {
         addAndMakeVisible(mType);
         addAndMakeVisible(mEngine);
         mType.onChange = [this](int) { refresh(); };
         mEngine.onChange = [this](int) { refresh(); };
-        for (auto *k : {&mDirect, &mOct1, &mOct2, &mTight, &mFuzz, &mTone, &mOctave, &mVolume})
+        for (auto *k : {&mDirect, &mOct1, &mOct2, &mTight, &mFuzz, &mTone, &mOctave, &mVolume,
+                        &mFilter, &mAttack})
             addChildComponent(*k);
         refresh();
         startTimerHz(20); // live tracked-note readout in the header
@@ -6430,15 +6433,19 @@ public:
     void refresh()
     {
         const int t = (int)mApvts.getRawParameterValue("pitchType")->load();
-        mTypeName = (t == 1) ? "Up" : "Down";
+        mTypeName = (t == 2) ? "POG" : (t == 1) ? "Up" : "Down";
         if (t != mTypeIdx)
         {
             mTypeIdx = t;
-            const bool up = (t == 1);
-            mDirect.setVisible(!up); mOct1.setVisible(!up);
-            mOct2.setVisible(!up);   mTight.setVisible(!up);
-            mFuzz.setVisible(up); mTone.setVisible(up);
-            mOctave.setVisible(up); mVolume.setVisible(up);
+            const bool down = (t == 0), up = (t == 1), pog = (t == 2);
+            mDirect.setVisible(down || pog);
+            mOct1.setVisible(down || pog);
+            mOct2.setVisible(down);
+            mTight.setVisible(down);
+            mFuzz.setVisible(up); mTone.setVisible(up); mVolume.setVisible(up);
+            mOctave.setVisible(up || pog);
+            mFilter.setVisible(pog); mAttack.setVisible(pog);
+            mEngine.setVisible(!pog); // POG is always the poly engine
             resized();
             repaint();
         }
@@ -6452,8 +6459,9 @@ public:
         g.setFont(fonts::archivo(9.5f, fonts::SemiBold, 0.6f));
         g.drawText("TYPE", mType.getX(), mType.getY() - 13,
                    juce::jmax(46, mType.getWidth()), 11, juce::Justification::centredLeft);
-        g.drawText("ENGINE", mEngine.getX(), mEngine.getY() - 13,
-                   juce::jmax(46, mEngine.getWidth()), 11, juce::Justification::centredLeft);
+        if (mEngine.isVisible())
+            g.drawText("ENGINE", mEngine.getX(), mEngine.getY() - 13,
+                       juce::jmax(46, mEngine.getWidth()), 11, juce::Justification::centredLeft);
     }
 
     void resized() override
@@ -6473,9 +6481,11 @@ public:
             for (auto *k : ks) k->setBounds(row.removeFromLeft(kw).reduced(5, 0));
         };
 
-        if (mTypeIdx == 1) // Octavia
+        if (mTypeIdx == 2)      // POG (Full): Dry, Sub, Oct, Filter, Attack
+            layKnobs(area, {&mDirect, &mOct1, &mOctave, &mFilter, &mAttack});
+        else if (mTypeIdx == 1) // octave up
             layKnobs(area, {&mFuzz, &mTone, &mOctave, &mVolume});
-        else               // OC-2
+        else                    // octave down
             layKnobs(area, {&mDirect, &mOct1, &mOct2, &mTight});
     }
 
@@ -6483,7 +6493,7 @@ private:
     void timerCallback() override { updateHeader(); }
     void updateHeader()
     {
-        const bool grain = (int)mApvts.getRawParameterValue("pitchEngine")->load() == 1;
+        const bool grain = mTypeIdx != 2 && (int)mApvts.getRawParameterValue("pitchEngine")->load() == 1;
         juce::String r = mTypeName;
         r << juce::String::fromUTF8(" \xC2\xB7 ") << (grain ? "Grain" : "Poly");
         if (grain && subHzProvider) // tracked note (Grain only)
@@ -6497,7 +6507,7 @@ private:
 
     juce::AudioProcessorValueTreeState &mApvts;
     SegmentedControl mType, mEngine;
-    LabeledKnob mDirect, mOct1, mOct2, mTight, mFuzz, mTone, mOctave, mVolume;
+    LabeledKnob mDirect, mOct1, mOct2, mTight, mFuzz, mTone, mOctave, mVolume, mFilter, mAttack;
     juce::String mTypeName{"Down"};
     int mTypeIdx = -1;
 

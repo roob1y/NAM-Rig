@@ -268,7 +268,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     // Tightness -> sub Tone, Fuzz -> up-octave Dry blend.
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("pitchType", 1), "Pitch Type",
-        juce::StringArray{"Octave Down", "Octave Up"}, 0));
+        juce::StringArray{"Octave Down", "Octave Up", "POG (Full)"}, 0));
     // Engine: Poly = clean phase vocoder (chords, ~16ms latency); Grain = mono
     // granular character voice (gritty, zero latency, glitches on chords by design).
     // Order MUST match PitchBlock::Engine (Poly=0, Grain=1).
@@ -301,6 +301,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("pitchVol", 1), "Pitch Volume",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+    // POG (Full) knobs — resonant filter + attack swell.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("pitchFilter", 1), "Pitch Filter",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.7f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("pitchAttack", 1), "Pitch Attack",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID("pitchOn", 1), "Pitch Enable", false)); // off by default (new block)
 
@@ -1031,21 +1038,30 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         mChain.pitch.setOct2(apvts.getRawParameterValue("pitchOct2")->load());
         mChain.pitch.setTightness(apvts.getRawParameterValue("pitchTight")->load());
     }
-    else // octave up
+    else if (pitchType == 1) // octave up
     {
         mChain.pitch.setFuzz(apvts.getRawParameterValue("pitchFuzz")->load());
         mChain.pitch.setTone(apvts.getRawParameterValue("pitchTone")->load());
         mChain.pitch.setOctave(apvts.getRawParameterValue("pitchOctave")->load());
         mChain.pitch.setVolume(apvts.getRawParameterValue("pitchVol")->load());
     }
+    else // POG (Full): dry + sub + up + resonant filter + attack swell (poly only)
+    {
+        mChain.pitch.setDirect(apvts.getRawParameterValue("pitchDirect")->load());  // Dry
+        mChain.pitch.setOct1(apvts.getRawParameterValue("pitchOct1")->load());      // Sub x0.5
+        mChain.pitch.setOctave(apvts.getRawParameterValue("pitchOctave")->load());  // Up x2
+        mChain.pitch.setFilter(apvts.getRawParameterValue("pitchFilter")->load());
+        mChain.pitch.setAttack(apvts.getRawParameterValue("pitchAttack")->load());
+    }
     const bool pitchOn = apvts.getRawParameterValue("pitchOn")->load() >= 0.5f;
     mChain.pitch.setBypassed(!pitchOn);
-    // Only the Poly (phase-vocoder) engine adds STFT latency; Grain is zero-latency.
-    // So PDC changes with on/off AND with the engine choice — re-report on either.
-    if (pitchOn != mLastPitchOn || pitchEngine != mLastPitchEngine)
+    // Latency depends on on/off, engine (Poly=STFT vs Grain=0) AND type (POG forces
+    // Poly). Re-report PDC when any of them changes (like the gate lookahead).
+    if (pitchOn != mLastPitchOn || pitchEngine != mLastPitchEngine || pitchType != mLastPitchType)
     {
         mLastPitchOn = pitchOn;
         mLastPitchEngine = pitchEngine;
+        mLastPitchType = pitchType;
         updateLatency();
     }
 
