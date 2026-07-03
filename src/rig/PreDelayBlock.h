@@ -39,14 +39,18 @@
 //                         items (corner, coupling caps, clock chip) offer a controlled-
 //                         probe measurement against Robbie's real pedal.
 //
-//   2  MEMORY MAN       — EHX Deluxe Memory Man: lush ANALOG BBD (MN3005). Documented
-//                         voice: "high end heavily attenuated, LITTLE bass cut, a
-//                         STRONG MID BOOST alongside the high cut." So: an in-loop MID
-//                         bump + gentle low-cut + BBD bandwidth that goes very dark at
-//                         its long settings (single 4096-stage line → Nyquist ~1.8 kHz
-//                         at 550 ms), companding, and its signature DEEP chorus/vibrato
-//                         modulation. Sings and washes where the Carbon Copy stays dry
-//                         and dark. Max 550 ms.
+//   2  MEMORY MAN       — EHX Deluxe Memory Man: lush ANALOG BBD. Researched from the real
+//                         circuit (docs/predelay/memory_man.md): **2× MN3005 in SERIES =
+//                         8192 stages**, 550 ms, CD4047 clock, NE570/571 compander, and NO
+//                         tone control. Its measured voice (Morrin scope trace) is a BAND-
+//                         PASS: heavily attenuated highs, LITTLE bass cut, a STRONG MID
+//                         BOOST — modeled as an in-loop mid bump + gentle low-cut + a fixed
+//                         ~3.8 kHz reconstruction LP (the darkness is mostly this filter,
+//                         not the clock, since 8192 stages hold bandwidth). Its signature
+//                         is a DEEP TRIANGLE-LFO modulation (Depth knob) through a TRUE
+//                         CROSSFADE Blend — full-wet = vibrato, mid = chorus — plus a low-Z
+//                         (~100 kΩ inverting) loading input. Sings and washes where the
+//                         Carbon Copy stays dry and dark; self-oscillates readily.
 //
 //   3  KORG SDD-3000    — early DIGITAL rack delay (the U2/"present digital" sound).
 //                         "12-bit-plus-one" (~13-bit) companded conversion → a gritty,
@@ -176,13 +180,20 @@ public:
             //       bbd    maxMs    stages   aa       hp      midHz midDb midQ  sat    asym   presHz presDb modHz  modMs glide fbC
             return { true,  600.0f,  8192.0f, 2600.0f, 100.0f, 0.0f, 0.0f, 0.7f, 0.50f, 0.06f, 0.0f,  0.0f,  1.20f, 1.3f, 70.0f, 1.18f };
         case kMemoryMan:
-            // Lush analog BBD (single 4096-stage MN3005 path -> Nyquist drops to
-            // ~1.8 kHz at 550 ms, so it goes very dark long). Its documented voice is a
-            // STRONG MID BOOST + high cut + little bass cut, so: an in-loop mid bump at
-            // ~650 Hz, a gentle 80 Hz low-cut, a slightly higher anti-alias ceiling than
-            // the Carbon Copy (brighter mids pop at short times). Deep signature chorus.
-            //       bbd    maxMs    stages  aa       hp     midHz  midDb  midQ  sat    asym   presHz presDb modHz  modMs  glide  fbC
-            return { true,  550.0f,  4096.0f, 3800.0f, 80.0f, 650.0f, 4.0f, 0.80f, 0.45f, 0.06f, 0.0f,  0.0f,  0.85f, 2.2f,  80.0f, 1.06f };
+            // Lush analog BBD — researched (docs/predelay/memory_man.md): **2× MN3005 in
+            // SERIES = 8192 stages** (not one 4096 chip), 550 ms max, CD4047 clock, NE570/571
+            // compander. Its measured voice (Morrin scope trace) is a BAND-PASS: heavily
+            // attenuated highs, LITTLE bass cut, a STRONG MID BOOST — so an in-loop mid bump
+            // at ~650 Hz (+4 dB, magnitude ear-tunable/unverified) over a gentle 80 Hz low-cut
+            // and a ~3.8 kHz reconstruction LP (2-pole approx of the real ~24 dB/oct multipole;
+            // corner NOT circuit-verified). With 8192 stages the clock-Nyquist stays higher
+            // than the Carbon Copy's, so the darkness is mostly the fixed filter, not the clock.
+            // DEEP TRIANGLE-LFO modulation (Depth knob) + a true CROSSFADE Blend (full wet =
+            // vibrato, mid = chorus) + a low-Z loading input — all wired below. fbCeiling 1.06
+            // self-oscillates readily (runaway, a DMM feature) because its LP is brighter than
+            // the Carbon Copy's. No tone control on the DMM.
+            //       bbd    maxMs    stages   aa       hp     midHz  midDb midQ  sat    asym   presHz presDb modHz modMs glide  fbC
+            return { true,  550.0f,  8192.0f, 3800.0f, 80.0f, 650.0f, 4.0f, 0.80f, 0.45f, 0.06f, 0.0f,  0.0f,  1.60f, 3.0f, 80.0f, 1.06f };
         case kSDD3000:
             // Bright early-digital. 17 kHz fixed bandwidth (a converter, not a swept
             // clock), 13-bit companding grit (gentle in-loop soft-clip), and the
@@ -220,7 +231,7 @@ public:
         const int maxDelay = (int)std::ceil((2.0f * kMaxTimeMs + 20.0f) * 0.001f * (float)mFs);
         mLine.prepare(maxDelay);
         mLfo.prepare(mFs);
-        mLfo.setWaveform(Lfo::Sine);
+        mLfo.setWaveform(mModel == kMemoryMan ? Lfo::Triangle : Lfo::Sine); // DMM uses a triangle LFO
         mSmoothK = 1.0f - std::exp((float)(-1.0 / (0.010 * mFs))); // 10 ms de-zip on mix
         updateGlide();
         mIo.prepare(mFs);
@@ -258,7 +269,8 @@ public:
         {
             mModel = mm;
             mVoicing = voicingFor(mm);
-            if (mPrepared) { updateGlide(); applyIo(); rebuildFixed(true); mLfo.setRateHz(mVoicing.modRateHz); }
+            if (mPrepared) { updateGlide(); applyIo(); rebuildFixed(true); mLfo.setRateHz(mVoicing.modRateHz);
+                             mLfo.setWaveform(mModel == kMemoryMan ? Lfo::Triangle : Lfo::Sine); }
         }
     }
     void setDd7Mode(int m) { mMode = std::clamp(m, 0, (int)kNumDd7Modes - 1); }
@@ -344,10 +356,15 @@ public:
             float outw = wet;
             if (mPresOn) outw = mPres.processSample(outw);
 
-            // Authentic delay-pedal mix: the DRY stays at unity (on the DD-7 it is a
-            // fixed ANALOG through-path that never hits the converter) and the WET is
-            // ADDED on top, scaled by the mix/E.LEVEL knob — NOT a dry/wet crossfade.
-            mono[i] = dry + mMixZ * outw;
+            // Mix law. DD-7 / Carbon Copy: the DRY stays at unity (a fixed analog
+            // through-path) and the WET is ADDED on top (E.LEVEL/Mix scales the wet) —
+            // NOT a crossfade. Memory Man: the BLEND knob is a TRUE CROSSFADE (100% dry ->
+            // equal at centre -> 100% wet), which is how full-wet gives vibrato (wet only)
+            // and a mid setting gives chorus (wet beating against dry). The feedback write
+            // above is unchanged (the delay input is always dry + fb·wet), so only the
+            // output blend differs per model.
+            mono[i] = (mModel == kMemoryMan) ? ((1.0f - mMixZ) * dry + mMixZ * outw)
+                                             : (dry + mMixZ * outw);
             mLfo.advance();
         }
         mIo.processOut(mono, numSamples); // output buffer / coupling stage (per model)
@@ -474,8 +491,16 @@ private:
             // in-loop reconstruction LP, not the output buffer.
             mIo.setBuffered(2.0f, 1.6f, 0.0f, 0.0f);
             break;
+        case kMemoryMan:
+            // Vintage DMM (docs/predelay/memory_man.md): a LOW ~100 kΩ INVERTING input that
+            // loads the source (the famous "dark dry tone" gotcha) — unlike the DD-7/Carbon
+            // Copy 1 MΩ buffers. Modeled as a gentle high-shelf CUT (mostly relevant with a
+            // high-Z guitar; subtle here since the predelay sits after the buffered drive).
+            // ~300 Ω buffered output (Nano spec). Exact coupling caps schematic-gated -> subsonic HPs.
+            mIo.setLoaded(7.0f, 3000.0f, -1.5f, -0.5f, 2.0f, 0.0f);
+            break;
         default:
-            mIo.setTransparent(); // pending per-pedal circuit research (Memory Man / SDD-3000)
+            mIo.setTransparent(); // pending per-pedal circuit research (SDD-3000)
             break;
         }
     }

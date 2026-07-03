@@ -14,6 +14,7 @@
 // T10 DD-7 max feedback self-oscillation sustains + bounded
 // T11 all 8 DD-7 MODE positions run clean; T12 REVERSE produces output
 // T13 Carbon Copy circuit-grounded voicing (600 ms / 8192 stages / dark / self-osc)
+// T14 Memory Man circuit-grounded voicing (550 ms / 8192 stages / crossfade Blend)
 #include "rig/PreDelayBlock.h"
 #include <cstdio>
 #include <cmath>
@@ -394,6 +395,34 @@ int main()
         CHECK(finite, "T13 Carbon Copy self-osc finite");
         CHECK(pk > 0.25, "T13 Carbon Copy self-osc SUSTAINS (tail peak %.2f)", pk);
         CHECK(pk < 4.0, "T13 Carbon Copy self-osc bounded (tail peak %.2f)", pk);
+    }
+
+    // ---- T14: Memory Man circuit-grounded voicing (docs/predelay/memory_man.md) ----
+    // 2× MN3005 = 8192 stages, 550 ms; and the BLEND is a true CROSSFADE (full wet removes
+    // the dry -> vibrato), unlike the DD-7/Carbon Copy dry+wet law.
+    {
+        PreDelayBlock mm;
+        mm.setModel(PreDelayBlock::kMemoryMan);
+        mm.prepare({SR, BLK});
+        const auto v = mm.currentVoicing();
+        CHECK(v.bbd && std::abs(v.maxTimeMs - 550.0f) < 0.5f && std::abs(v.bbdStages - 8192.0f) < 0.5f,
+              "T14 Memory Man = BBD, 550 ms, 8192 stages (%.0f ms, %.0f stages)", v.maxTimeMs, v.bbdStages);
+        // crossfade: at Mix 1 the dry impulse is removed (wet-only vibrato path)
+        PreDelayBlock xf;
+        xf.setModel(PreDelayBlock::kMemoryMan);
+        xf.setTimeMs(250.0f);
+        xf.setFeedback(0.0f);
+        xf.setMod(0.0f);
+        xf.setMix(1.0f); // full wet -> crossfade removes dry
+        xf.prepare({SR, BLK});
+        std::vector<float> m((size_t)SR, 0.0f);
+        m[0] = 1.0f;
+        run(xf, m);
+        const size_t T = (size_t)(0.250 * SR);
+        const double dryPk = peakAmpNear(m, 0, 64);    // dry impulse should be gone at full wet
+        const double echoPk = peakAmpNear(m, T, 400);  // the echo is present
+        CHECK(dryPk < 0.05, "T14 Blend crossfade removes dry at full wet (t0 peak %.3f)", dryPk);
+        CHECK(echoPk > 0.1, "T14 wet echo present at full wet (echo peak %.3f)", echoPk);
     }
 
     std::printf("\n%s (%d failures)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);

@@ -6356,7 +6356,13 @@ public:
             set(0, true, "Delay"); set(1, true, "Regen"); set(2, true, "Mix");
             set(3, false, ""); set(4, false, "");
             break;
-        default: // provisional generic set (pending per-pedal circuit research)
+        case 2: // EHX Deluxe Memory Man: Delay, Feedback, Blend, Depth. Its BLEND is a true
+                // crossfade (full wet = vibrato, mid = chorus); Depth sets the deep triangle-LFO
+                // modulation width. No tone control on the DMM. See memory_man.md.
+            set(0, true, "Delay"); set(1, true, "Feedback"); set(2, true, "Blend");
+            set(3, true, "Depth"); set(4, false, "");
+            break;
+        default: // provisional generic set (pending per-pedal circuit research: SDD-3000)
             set(0, true, "Time"); set(1, true, "Feedback"); set(2, true, "Mix");
             set(3, true, "Mod"); set(4, true, "Tone");
             break;
