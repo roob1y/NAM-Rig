@@ -279,6 +279,18 @@ int main()
         CHECK(near2f > binPow(x, f), "T15 POG2 detuned up still ~+1 oct");
     }
 
+    { // T16: foolproof output limiter — stacked voices at high input never hard-clip
+      // (|out| bounded ~<=1). (Transparency below the knee is covered by T6's exact
+      // dry-delay passthrough, since those samples are < 0.9.)
+        PitchBlock b; b.prepare({SR, BLK});
+        b.setType(PitchBlock::kPog);
+        b.setDirect(1.0f); b.setOct1(1.0f); b.setOct2(1.0f); b.setOctave(1.0f); b.setUp2(1.0f); b.setFilter(1.0f);
+        std::vector<float> x = tone(180.0, 0.9, (int)(SR * 0.8));
+        run(b, x);
+        float pk = 0; bool fin = true; for (float s2 : x) { pk = std::max(pk, std::abs(s2)); if (!std::isfinite(s2)) fin = false; }
+        CHECK(fin && pk <= 1.02f, "T16 output limiter bounds stacked voices (pk=%.3f)", pk);
+    }
+
     std::printf("=== %s (%d fail) ===\n", gFails ? "FAILURES" : "ALL PASS", gFails);
     return gFails ? 1 : 0;
 }

@@ -130,11 +130,17 @@ public:
     {
         if (!mPrepared || numSamples > (int)mWork1.size()) return;
         const int type = mType.load();
-        if (type == kOctavia) { octavia(mono, numSamples); return; } // octave-up fuzz
-        if (type == kPog)     { polyPog(mono, numSamples); return; } // full octaver, poly only
-        const bool up = (type == kOctUp);
-        if (mEngine.load() == kPoly) { up ? polyUp(mono, numSamples)  : polyDown(mono, numSamples); }
-        else                         { up ? grainUp(mono, numSamples) : grainDown(mono, numSamples); }
+        if (type == kOctavia)  octavia(mono, numSamples);       // octave-up fuzz
+        else if (type == kPog) polyPog(mono, numSamples);       // full octaver, poly only
+        else
+        {
+            const bool up = (type == kOctUp);
+            if (mEngine.load() == kPoly) { up ? polyUp(mono, numSamples)  : polyDown(mono, numSamples); }
+            else                         { up ? grainUp(mono, numSamples) : grainDown(mono, numSamples); }
+        }
+        // Foolproof output guard: transparent below ~0.9, soft-limits peaks so
+        // stacking Direct + several octave voices can never hard-clip the amp input.
+        for (int i = 0; i < numSamples; ++i) mono[i] = softLimit(mono[i]);
     }
 
     float trackedHz() const { return mTrackedHz.load(); }
@@ -338,6 +344,14 @@ private:
         if (std::abs(hz - last) > 1.0f) { f.copyCoeffsFrom(Biquad::lowpass(mSampleRate, hz)); last = hz; }
     }
     static float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
+    // Identity below 0.9, then a soft knee ceilinged at ~1.0 (safety only).
+    static float softLimit(float x)
+    {
+        const float a = std::abs(x);
+        if (a <= 0.9f) return x;
+        const float s = x < 0.0f ? -1.0f : 1.0f;
+        return s * (0.9f + 0.1f * std::tanh((a - 0.9f) * 10.0f));
+    }
     static float coefForMs(float ms, double sr)
     {
         return 1.0f - (float)std::exp(-1.0 / (std::max(0.05f, ms) * 0.001 * sr));
