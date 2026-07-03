@@ -333,6 +333,31 @@ int main()
         CHECK(fin && pk < 20.0f && binPow(dn, 110.0) > binPow(dn, 220.0), "T18 Whammy -1 oct (f/2), finite");
     }
 
+    { // T19: Whammy CHORDS (poly) shifts a two-note chord cleanly (+1 oct); Classic
+      // reports 0 latency, Chords reports the STFT latency.
+        PitchBlock b; b.prepare({SR, BLK});
+        b.setType(PitchBlock::kWhammy);
+        b.setWhammyPoly(true); b.setWhammyMode(1); b.setWhammy(1.0f);
+        std::vector<float> x = chord({200.0, 300.0}, 0.4, (int)(SR * 1.5));
+        run(b, x);
+        CHECK(binPow(x, 400.0) > binPow(x, 200.0) * 3.0 && binPow(x, 600.0) > binPow(x, 300.0) * 3.0,
+              "T19 Whammy Chords shifts both notes +1 oct");
+        PitchBlock cl; cl.prepare({SR, BLK}); cl.setBypassed(false); cl.setType(PitchBlock::kWhammy);
+        PitchBlock ch; ch.prepare({SR, BLK}); ch.setBypassed(false); ch.setType(PitchBlock::kWhammy); ch.setWhammyPoly(true);
+        CHECK(cl.latencySamples() == 0.0 && ch.latencySamples() > 0.0,
+              "T19 Classic latency %.0f == 0, Chords %.0f > 0", cl.latencySamples(), ch.latencySamples());
+    }
+    { // T20: Whammy heel (treadle 0) is BIT-EXACT dry (Classic) -> no shifter warble
+      // when "no whammy" (the reported wider issue).
+        PitchBlock b; b.prepare({SR, BLK});
+        b.setType(PitchBlock::kWhammy); b.setWhammy(0.0f); b.setWhammyMode(1);
+        std::mt19937 rng(21); std::uniform_real_distribution<float> sg(-0.7f, 0.7f);
+        std::vector<float> in(4096), wk(4096); for (size_t i = 0; i < in.size(); ++i) { in[i] = sg(rng); wk[i] = in[i]; }
+        run(b, wk);
+        bool exact = true; for (size_t i = 0; i < in.size(); ++i) if (wk[i] != in[i]) { exact = false; break; }
+        CHECK(exact, "T20 Whammy heel = bit-exact dry (no warble at rest)");
+    }
+
     std::printf("=== %s (%d fail) ===\n", gFails ? "FAILURES" : "ALL PASS", gFails);
     return gFails ? 1 : 0;
 }

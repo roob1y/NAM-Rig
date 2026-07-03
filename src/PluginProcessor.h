@@ -266,6 +266,7 @@ private:
     float mLastGateLookMs = -1.0f;
     bool mLastPitchOn = false; // re-report PDC when the pitch octave engages/disengages
     int mLastPitchModel = 0;   // ...or when the pedal model changes (POG models add latency)
+    int mLastPitchWPoly = 0;   // ...or the Whammy Classic(0)/Chords(STFT latency) voice
     float mLastRigAlign = -1.0e9f;
     int mLastRigMode = -1;
     int mLastFactorA = -1, mLastFactorB = -1;

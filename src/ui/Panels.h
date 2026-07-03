@@ -6407,6 +6407,7 @@ public:
         : BlockPanel("PITCH"), mApvts(apvts),
           mModel(apvts, "pitchModel", juce::StringArray{"OC-2", "MICRO POG", "POG2", "OCTAVIA", "WHAMMY"}),
           mWMode(apvts, "pitchWMode", juce::StringArray{"+2", "+1", "+5th", "-1", "-2"}),
+          mWPoly(apvts, "pitchWPoly", juce::StringArray{"CLASSIC", "CHORDS"}),
           mDirect(apvts, "pitchDirect", "Direct"),
           mOct1(apvts, "pitchOct1", "Oct 1"),
           mOct2(apvts, "pitchOct2", "Oct 2"),
@@ -6422,8 +6423,10 @@ public:
     {
         addAndMakeVisible(mModel);
         addChildComponent(mWMode);
+        addChildComponent(mWPoly);
         mModel.onChange = [this](int) { refresh(); };
         mWMode.onChange = [this](int) { refresh(); };
+        mWPoly.onChange = [this](int) { refresh(); };
         for (auto *k : {&mDirect, &mOct1, &mOct2, &mOctave, &mUp2, &mFilter, &mReso,
                         &mAttack, &mDetune, &mBoost, &mVolume, &mWhammyKnob})
             addChildComponent(*k);
@@ -6446,6 +6449,7 @@ public:
                             &mAttack, &mDetune, &mBoost, &mVolume, &mWhammyKnob})
                 k->setVisible(false);
             mWMode.setVisible(m == 4); // Whammy interval selector
+            mWPoly.setVisible(m == 4); // Whammy Classic/Chords voice
             if (m == 0) // OC-2
             {
                 mDirect.setCaption("Direct"); mOct1.setCaption("Oct 1");
@@ -6488,6 +6492,9 @@ public:
         if (mWMode.isVisible())
             g.drawText("SHIFT", mWMode.getX(), mWMode.getY() - 13,
                        juce::jmax(46, mWMode.getWidth()), 11, juce::Justification::centredLeft);
+        if (mWPoly.isVisible())
+            g.drawText("VOICE", mWPoly.getX(), mWPoly.getY() - 13,
+                       juce::jmax(46, mWPoly.getWidth()), 11, juce::Justification::centredLeft);
     }
 
     void resized() override
@@ -6495,8 +6502,6 @@ public:
         auto area = bodyArea().reduced(24, 16);
         auto top = area.removeFromTop(26);
         mModel.setBounds(top.getX(), top.getY(), mModel.idealWidth(), 26);
-        if (mModelIdx == 4) // Whammy interval selector sits beside the model picker
-            mWMode.setBounds(mModel.getRight() + 22, top.getY(), mWMode.idealWidth(), 26);
         area.removeFromTop(20);
 
         auto layKnobs = [](juce::Rectangle<int> r, std::vector<LabeledKnob *> ks) {
@@ -6519,8 +6524,14 @@ public:
         }
         else if (mModelIdx == 3)   // Octavia
             layKnobs(area, {&mBoost, &mVolume});
-        else                       // Whammy — the treadle knob
+        else                       // Whammy — Shift + Classic/Chords selectors, then treadle
+        {
+            auto selRow = area.removeFromTop(26);
+            mWMode.setBounds(selRow.getX(), selRow.getY(), mWMode.idealWidth(), 26);
+            mWPoly.setBounds(mWMode.getRight() + 22, selRow.getY(), mWPoly.idealWidth(), 26);
+            area.removeFromTop(18);
             layKnobs(area, {&mWhammyKnob});
+        }
     }
 
 private:
@@ -6538,7 +6549,7 @@ private:
     }
 
     juce::AudioProcessorValueTreeState &mApvts;
-    SegmentedControl mModel, mWMode;
+    SegmentedControl mModel, mWMode, mWPoly;
     LabeledKnob mDirect, mOct1, mOct2, mOctave, mUp2, mFilter, mReso, mAttack, mDetune, mBoost, mVolume,
                 mWhammyKnob;
     juce::String mModelName{"OC-2"};

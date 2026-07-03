@@ -276,6 +276,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("pitchWhammy", 1), "Pitch Whammy",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
+    // Classic = mono granular (0 latency, warbles on chords); Chords = poly phase
+    // vocoder (clean on chords, ~16 ms latency) — the Whammy 5's own switch.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("pitchWPoly", 1), "Pitch Whammy Voice",
+        juce::StringArray{"Classic", "Chords"}, 0));
     // Shared level knobs (reused per model — see the apply block for the mapping).
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("pitchDirect", 1), "Pitch Dry/Direct",
@@ -1073,20 +1078,23 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         mChain.pitch.setTone(0.7f);                // tone: pinned (original Octavia has no tone)
         mChain.pitch.setOctave(0.65f);             // mostly octave + some fuzz body (not thin/starved)
     }
-    else // Whammy: continuous pitch bend, 0 latency
+    else // Whammy: continuous pitch bend
     {
         mChain.pitch.setType(nam_rig::PitchBlock::kWhammy);
         mChain.pitch.setWhammyMode((int)pp("pitchWMode"));
         mChain.pitch.setWhammy(pp("pitchWhammy")); // treadle
+        mChain.pitch.setWhammyPoly((int)pp("pitchWPoly") == 1); // Chords vs Classic
     }
     const bool pitchOn = pp("pitchOn") >= 0.5f;
+    const int pitchWPoly = (int)pp("pitchWPoly");
     mChain.pitch.setBypassed(!pitchOn);
-    // Latency depends on the model (POG models add STFT latency; OC-2/Octavia = 0)
-    // and on/off — re-report PDC when either changes (like the gate lookahead).
-    if (pitchOn != mLastPitchOn || pitchModel != mLastPitchModel)
+    // Latency depends on the model (POG add STFT latency; OC-2/Octavia/Whammy-Classic
+    // = 0; Whammy-Chords = STFT) and on/off — re-report PDC when any changes.
+    if (pitchOn != mLastPitchOn || pitchModel != mLastPitchModel || pitchWPoly != mLastPitchWPoly)
     {
         mLastPitchOn = pitchOn;
         mLastPitchModel = pitchModel;
+        mLastPitchWPoly = pitchWPoly;
         updateLatency();
     }
 

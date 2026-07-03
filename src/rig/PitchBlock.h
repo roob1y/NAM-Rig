@@ -50,6 +50,7 @@ public:
     void setEngine(int e)       { mEngine.store(e == kGrain ? kGrain : kPoly); }
     void setWhammyMode(int m)   { mWMode.store(m < 0 ? 0 : (m > 4 ? 4 : m)); } // target interval
     void setWhammy(float v)     { mWhammyPos.store(clamp01(v)); }              // treadle 0..1
+    void setWhammyPoly(bool p)  { mWhammyPolyMode.store(p); } // Chords (poly PV) vs Classic (mono)
     void setFilter(float v)     { mFilter.store(clamp01(v)); }  // POG resonant LPF cutoff
     void setAttack(float v)     { mAttack.store(clamp01(v)); }  // POG swell attack
     void setUp2(float v)        { mUp2.store(clamp01(v)); }     // POG2 +2 octave (x4) level
@@ -80,6 +81,7 @@ public:
         mTracker.prepare(mSampleRate);
         mGrD1.prepare(mSampleRate); mGrD2.prepare(mSampleRate); mGrUp.prepare(mSampleRate);
         mWhammy.prepare(mSampleRate);
+        mWhammyPoly.prepare(mSampleRate); mWhammyPoly.setRatio(1.0f);
         mWSmooth = coefForMs(15.0f, mSampleRate);
         // GRAIN = the vintage character engine: Boss OC-2-style buffered I/O
         // (coupling HPs + gentle top smoothing). POLY stays transparent.
@@ -112,7 +114,7 @@ public:
         std::fill(mChorusBuf.begin(), mChorusBuf.end(), 0.0f);
         mChorusPos = 0; mChorusPhase = 0.0f;
         mTracker.reset(); mGrD1.reset(); mGrD2.reset(); mGrUp.reset();
-        mWhammy.reset(); mWhammyRatio = 1.0f;
+        mWhammy.reset(); mWhammyPoly.reset(); mWhammyRatio = 1.0f;
         mToneLpDn.reset(); mToneLpUp.reset();
         mIoGrain.reset(); mGritX1 = 0.0;
         mPogFilter.reset(); mPogAtt = 0.0f;
@@ -128,7 +130,8 @@ public:
     {
         if (isBypassed()) return 0.0;
         const int type = mType.load();
-        if (type == kOctavia || type == kWhammy) return 0.0; // fuzz / granular Whammy = 0 latency
+        if (type == kOctavia) return 0.0;                        // fuzz = zero latency
+        if (type == kWhammy) return mWhammyPolyMode.load() ? (double)mPolyLatency : 0.0; // Chords vs Classic
         // POG is always the poly (STFT) engine; Down/Up are poly OR grain(=0).
         const bool poly = (type == kPog) || (mEngine.load() == kPoly);
         return poly ? (double)mPolyLatency : 0.0;
@@ -251,9 +254,32 @@ private:
     {
         static constexpr float kCents[5] = { 2400.0f, 1200.0f, 700.0f, -1200.0f, -2400.0f };
         const float targetCents = kCents[mWMode.load()];
+        const float treadle = mWhammyPos.load();
         // Treadle -> shift ratio in the LOG (cents) domain: heel (0) = unison,
-        // toe (1) = the full mode interval. Glide is slewed to avoid zipper.
-        const float targetRatio = std::pow(2.0f, mWhammyPos.load() * targetCents / 1200.0f);
+        // toe (1) = the full mode interval.
+        const float targetRatio = std::pow(2.0f, treadle * targetCents / 1200.0f);
+        // Blend to PURE DRY at the heel so "no whammy" is clean — the shifter itself
+        // colours/warbles even at unison, so we crossfade it in as the treadle moves.
+        const float wet = clamp01(treadle * 10.0f); // fully wet by ~0.1 treadle
+
+        float *w1 = mWork1.data();
+        if (mWhammyPolyMode.load())
+        {
+            // CHORDS: phase vocoder — clean on chords, STFT latency. Ratio glides
+            // per block (the treadle moves at human speed). Dry delayed to match.
+            mWhammyRatio += 0.5f * (targetRatio - mWhammyRatio);
+            mWhammyPoly.setRatio(mWhammyRatio);
+            std::copy(mono, mono + numSamples, w1);
+            mWhammyPoly.process(w1, numSamples);
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const float dry = pushDry(mono[i]);
+                mono[i] = (1.0f - wet) * dry + wet * w1[i];
+            }
+            mTrackedHz.store(0.0f);
+            return;
+        }
+        // CLASSIC: mono granular shift, zero latency, warbles on chords (authentic).
         mTracker.process(mono, numSamples);
         const bool voiced = mTracker.voiced();
         const float t0 = mTracker.periodSamples();
@@ -263,8 +289,10 @@ private:
         float ratio = mWhammyRatio;
         for (int i = 0; i < numSamples; ++i)
         {
+            const float dry = mono[i];
             ratio += rSlew * (targetRatio - ratio);
-            mono[i] = mWhammy.process(mono[i], wT, ratio, ws); // 100% wet
+            const float sh = mWhammy.process(mono[i], wT, ratio, ws);
+            mono[i] = (1.0f - wet) * dry + wet * sh; // heel = dry, no shifter warble
         }
         mWhammyRatio = ratio;
         mTrackedHz.store(voiced ? mTracker.hz() : 0.0f);
@@ -439,8 +467,10 @@ private:
     // Grain engine
     PitchTracker mTracker;
     OctaveShifter mGrD1, mGrD2, mGrUp, mWhammy;
+    SpectralShifter mWhammyPoly;       // Whammy Chords (poly) engine
     std::atomic<int>   mWMode{1};      // Whammy target interval (default +1 oct)
     std::atomic<float> mWhammyPos{0.0f}; // treadle
+    std::atomic<bool>  mWhammyPolyMode{false}; // Chords (poly) vs Classic (mono)
     float mWhammyRatio = 1.0f;         // slewed shift ratio
     IoStage mIoGrain;
     static constexpr double kGritG = 2.5, kGritB = 0.15; // germanium grit (curvature/bias)
