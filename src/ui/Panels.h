@@ -6263,6 +6263,142 @@ private:
 };
 
 //==============================================================================
+// PreDelayPanel — the mono front-of-amp DELAY pedal (rig/PreDelayBlock.h). A
+// per-model voicing picker (Boss DD-7 / Carbon Copy / Memory Man / Korg SDD-3000)
+// + free/sync time + position, and a compact real-pedal control set: Time,
+// Feedback, Mix, Mod, Tone. Time is owned by the sync division when synced (greyed).
+class PreDelayPanel : public BlockPanel
+{
+public:
+    explicit PreDelayPanel(juce::AudioProcessorValueTreeState &apvts)
+        : BlockPanel("PRE DELAY"), mApvts(apvts)
+    {
+        // Model picker — order MUST match PreDelayBlock::Model / the predelayModel StringArray.
+        mModel.addItemList({"Boss DD-7", "Carbon Copy", "Memory Man", "Korg SDD-3000"}, 1);
+        addAndMakeVisible(mModel);
+        mModelAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, "predelayModel", mModel);
+        mModel.onChange = [this] { refresh(); };
+
+        // Tempo-sync division (Off = free time). Matches the predelaySync StringArray.
+        mSync.addItemList({"Off", "1/1", "1/2", "1/4", "1/4.", "1/4T",
+                           "1/8", "1/8.", "1/8T", "1/16"}, 1);
+        addAndMakeVisible(mSync);
+        mSyncAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, "predelaySync", mSync);
+        mSync.onChange = [this] { refresh(); };
+
+        // Position relative to the drive rack (echoes before or after the overdrive).
+        mPos.addItemList({"After Drive", "Before Drive"}, 1);
+        addAndMakeVisible(mPos);
+        mPosAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, "predelayPos", mPos);
+
+        // The Boss DD-7 MODE control is a ROTARY KNOB (8 detented positions), like the
+        // hardware — turn it to step through the modes; the readout shows the mode name,
+        // and clicking the readout opens the same list. Shown only for the DD-7, as the
+        // 4th knob in the row (E.LEVEL / F.BACK / D.TIME / MODE).
+        mModeKnob = std::make_unique<LabeledKnob>(apvts, "predelayMode", "Mode");
+        mModeKnob->setReadoutFn([](double v) {
+            static const char *const n[8] = {"50 ms", "200 ms", "800 ms", "3200 ms",
+                                             "Hold", "Modulate", "Analog", "Reverse"};
+            return juce::String(n[juce::jlimit(0, 7, (int)std::lround(v))]);
+        });
+        mModeKnob->setValueMenu({"50 ms", "200 ms", "800 ms", "3200 ms",
+                                 "Hold", "Modulate", "Analog", "Reverse"}, "Mode");
+        addChildComponent(*mModeKnob); // visibility set per model in refresh()
+
+        const std::pair<const char *, const char *> defs[] = {
+            {"predelayTime", "Time"}, {"predelayFeedback", "Feedback"},
+            {"predelayMix", "Mix"}, {"predelayMod", "Mod"}, {"predelayTone", "Tone"}};
+        for (const auto &[id, caption] : defs)
+        {
+            mKnobs.push_back(std::make_unique<LabeledKnob>(apvts, id, caption));
+            addAndMakeVisible(*mKnobs.back());
+        }
+        refresh();
+    }
+
+    void refresh()
+    {
+        const bool synced = (int)mApvts.getRawParameterValue("predelaySync")->load() > 0;
+        if (mKnobs.size() > 0) mKnobs[0]->setEnabled(!synced); // Time owned by the host division when synced
+        const int m = (int)mApvts.getRawParameterValue("predelayModel")->load();
+        static const char *const kNames[] = {"Boss DD-7", "Carbon Copy", "Memory Man", "Korg SDD-3000"};
+        setHeaderRight(kNames[juce::jlimit(0, 3, m)]);
+        if (m == mLastModel)
+            return; // control set only changes with the pedal model
+        mLastModel = m;
+        if (mModeKnob) mModeKnob->setVisible(m == 0); // the MODE rotary is a DD-7 control only
+        // AUTHENTIC per-pedal control set + legends (like PremodPanel shows only the
+        // real controls). Knobs: 0 Time, 1 Feedback, 2 Mix, 3 Mod, 4 Tone. Only the
+        // DD-7 is circuit-verified so far, so it shows its REAL three knobs with the
+        // real hardware legends (D.TIME / E.LEVEL / F.BACK) and hides the rest (the
+        // DD-7 has no tone knob and no mod-amount knob). The other models keep a
+        // generic set until each is circuit-researched.
+        auto set = [&](int i, bool vis, const char *cap) {
+            if (i < (int)mKnobs.size())
+            {
+                mKnobs[(size_t)i]->setVisible(vis);
+                if (vis) mKnobs[(size_t)i]->setCaption(cap);
+            }
+        };
+        switch (m)
+        {
+        case 0: // Boss DD-7: D.TIME, E.LEVEL, F.BACK
+            set(0, true, "D.Time"); set(1, true, "F.Back"); set(2, true, "E.Level");
+            set(3, false, ""); set(4, false, "");
+            break;
+        default: // provisional generic set (pending per-pedal circuit research)
+            set(0, true, "Time"); set(1, true, "Feedback"); set(2, true, "Mix");
+            set(3, true, "Mod"); set(4, true, "Tone");
+            break;
+        }
+        resized(); // re-centre the now-visible knobs
+    }
+
+    void resized() override
+    {
+        auto area = bodyArea().reduced(24, 14);
+
+        // Top row: Model + Sync + Position pickers side by side.
+        auto pickers = area.removeFromTop(30);
+        const int gap = 12;
+        const int w = (pickers.getWidth() - 2 * gap) / 3;
+        mModel.setBounds(pickers.removeFromLeft(w));
+        pickers.removeFromLeft(gap);
+        mSync.setBounds(pickers.removeFromLeft(w));
+        pickers.removeFromLeft(gap);
+        mPos.setBounds(pickers.removeFromLeft(w));
+
+        area.removeFromTop(16);
+
+        // Lay out only the VISIBLE knobs, centred. On the DD-7 the MODE knob joins the
+        // row as a 4th knob (E.LEVEL / F.BACK / D.TIME / MODE, like the hardware).
+        std::vector<LabeledKnob *> vis;
+        for (auto &k : mKnobs)
+            if (k->isVisible()) vis.push_back(k.get());
+        if (mModeKnob && mModeKnob->isVisible()) vis.push_back(mModeKnob.get());
+        const int nk = juce::jmax(1, (int)vis.size());
+        auto row = area.withSizeKeepingCentre(
+            juce::jmin(area.getWidth(), 104 * nk), juce::jmin(area.getHeight(), 130));
+        const int kw = row.getWidth() / nk;
+        for (auto *k : vis)
+            k->setBounds(row.removeFromLeft(kw).reduced(5, 0));
+    }
+
+private:
+    juce::AudioProcessorValueTreeState &mApvts;
+    juce::ComboBox mModel, mSync, mPos;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mModelAtt, mSyncAtt, mPosAtt;
+    std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
+    std::unique_ptr<LabeledKnob> mModeKnob; // DD-7 MODE rotary (choice param, hardware-style)
+    int mLastModel = -1;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PreDelayPanel)
+};
+
+//==============================================================================
 // EnvFilterPanel — envelope filter, faithful to each unit's real control set.
 // The Voice picker swaps the WHOLE control complement. Switches are rendered as
 // segmented toggle pills (like the real pedal's physical toggles), not dropdowns:

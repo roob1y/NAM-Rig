@@ -223,15 +223,16 @@ public:
             {"COMP",   "compOn",      2, Full},
             {"DRIVE",  "driveOn",     3, Full},
             {"PREMOD", "premodOn",    4, Full}, // mono front-of-amp mod pedal
-            {"AMP A",  "",            5, Top},
-            {"EQ A",   "eqOn",        6, Top},
-            {"AMP B",  "",            5, Bot},
-            {"EQ B",   "eqOnB",       6, Bot},
-            {"CAB",    "",            7, Full},
-            {"MIX",    "",            8, Full},
-            {"MOD",    "modOn",       9, Full},
-            {"DELAY",  "delayOn",    10, Full},
-            {"VERB",   "reverbOn",   11, Full},
+            {"PREDLY", "predelayOn",  5, Full}, // mono front-of-amp delay pedal
+            {"AMP A",  "",            6, Top},
+            {"EQ A",   "eqOn",        7, Top},
+            {"AMP B",  "",            6, Bot},
+            {"EQ B",   "eqOnB",       7, Bot},
+            {"CAB",    "",            8, Full},
+            {"MIX",    "",            9, Full},
+            {"MOD",    "modOn",      10, Full},
+            {"DELAY",  "delayOn",    11, Full},
+            {"VERB",   "reverbOn",   12, Full},
         };
         for (const auto &s : slots)
         {
@@ -248,11 +249,11 @@ public:
         // Amp A / Amp B indicators. Lit = that rig is active AND its amp engaged.
         // Click logic (see ampClick): an inactive rig's amp selects/solos that rig;
         // an active amp toggles its own bypass (Single) or both amps' (Dual).
-        if (mTiles.size() > 9)
+        if (mTiles.size() > 10)
         {
-            mTiles[5]->setManualLed([this] { ampClick(0); }); // Amp A (tile 5)
-            mTiles[7]->setManualLed([this] { ampClick(1); }); // Amp B (tile 7)
-            mTiles[9]->setManualLed([this] { cabClick(); }); // CAB (tile 9, toggles both)
+            mTiles[6]->setManualLed([this] { ampClick(0); }); // Amp A (tile 6)
+            mTiles[8]->setManualLed([this] { ampClick(1); }); // Amp B (tile 8)
+            mTiles[10]->setManualLed([this] { cabClick(); }); // CAB (tile 10, toggles both)
         }
         updateLeds();
         startTimerHz(20);
@@ -280,17 +281,17 @@ public:
         for (size_t i = 0; i < mTiles.size(); ++i)
         {
             const int col = mLayout[i].first, lane = mLayout[i].second;
-            const int x = col * (colW + gap) + (col >= 5 ? branchExtra : 0); // shift past the split (PREMOD col 4 -> AMP col 5)
+            const int x = col * (colW + gap) + (col >= 6 ? branchExtra : 0); // shift past the split (PREDLY col 5 -> AMP col 6)
             int y = 0, h = H;
             if (lane == Top) { y = 0; h = laneH; }
             else if (lane == Bot) { y = H - laneH; h = laneH; }
             mTiles[i]->setBounds(x, y, colW, h);
         }
         // Single/Dual switch centred in the widened split gutter (between
-        // PREMOD (tile 4) and AMP A (tile 5)).
-        if (mModeSwitch && mTiles.size() > 5)
+        // PREDLY (tile 5) and AMP A (tile 6)).
+        if (mModeSwitch && mTiles.size() > 6)
         {
-            const int splitX = (mTiles[4]->getRight() + mTiles[5]->getX()) / 2;
+            const int splitX = (mTiles[5]->getRight() + mTiles[6]->getX()) / 2;
             const int sw = 34, sh = juce::jmin(H - 4, 46);
             mModeSwitch->setBounds(splitX - sw / 2, (H - sh) / 2, sw, sh);
         }
@@ -302,14 +303,14 @@ public:
         const float yC = (float)getHeight() * 0.5f;
         auto cy = [](BlockTile &t) { return (float)t.getBounds().getCentreY(); };
 
-        // Split: PREMOD (tile 4) -> AMP A (tile 5, top) and AMP B (tile 7, bottom).
-        const float splitX = ((float)mTiles[4]->getRight() + (float)mTiles[5]->getX()) * 0.5f;
-        branch(g, (float)mTiles[4]->getRight(), yC, splitX, cy(*mTiles[5]),
-               (float)mTiles[5]->getX(), cy(*mTiles[7]), (float)mTiles[7]->getX());
-        // Merge: EQ A (tile 6) / EQ B (tile 8) -> the single CAB tile (9).
-        const float mergeX = ((float)mTiles[6]->getRight() + (float)mTiles[9]->getX()) * 0.5f;
-        branch(g, (float)mTiles[9]->getX(), yC, mergeX, cy(*mTiles[5]),
-               (float)mTiles[6]->getRight(), cy(*mTiles[7]), (float)mTiles[8]->getRight());
+        // Split: PREDLY (tile 5) -> AMP A (tile 6, top) and AMP B (tile 8, bottom).
+        const float splitX = ((float)mTiles[5]->getRight() + (float)mTiles[6]->getX()) * 0.5f;
+        branch(g, (float)mTiles[5]->getRight(), yC, splitX, cy(*mTiles[6]),
+               (float)mTiles[6]->getX(), cy(*mTiles[8]), (float)mTiles[8]->getX());
+        // Merge: EQ A (tile 7) / EQ B (tile 9) -> the single CAB tile (10).
+        const float mergeX = ((float)mTiles[7]->getRight() + (float)mTiles[10]->getX()) * 0.5f;
+        branch(g, (float)mTiles[10]->getX(), yC, mergeX, cy(*mTiles[6]),
+               (float)mTiles[7]->getRight(), cy(*mTiles[8]), (float)mTiles[9]->getRight());
 
         // Flow chevrons between adjacent same-lane tiles.
         g.setColour(juce::Colour(0xff5d646f));
@@ -317,12 +318,13 @@ public:
         chevron(g, *mTiles[1], *mTiles[2]);   // ENV -> COMP
         chevron(g, *mTiles[2], *mTiles[3]);   // COMP -> DRIVE
         chevron(g, *mTiles[3], *mTiles[4]);   // DRIVE -> PREMOD
-        chevron(g, *mTiles[5], *mTiles[6]);   // AMP A -> EQ A
-        chevron(g, *mTiles[7], *mTiles[8]);   // AMP B -> EQ B
-        chevron(g, *mTiles[9], *mTiles[10]);  // CAB -> MIX
-        chevron(g, *mTiles[10], *mTiles[11]); // MIX -> MOD
-        chevron(g, *mTiles[11], *mTiles[12]); // MOD -> DELAY
-        chevron(g, *mTiles[12], *mTiles[13]); // DELAY -> VERB
+        chevron(g, *mTiles[4], *mTiles[5]);   // PREMOD -> PREDLY
+        chevron(g, *mTiles[6], *mTiles[7]);   // AMP A -> EQ A
+        chevron(g, *mTiles[8], *mTiles[9]);   // AMP B -> EQ B
+        chevron(g, *mTiles[10], *mTiles[11]); // CAB -> MIX
+        chevron(g, *mTiles[11], *mTiles[12]); // MIX -> MOD
+        chevron(g, *mTiles[12], *mTiles[13]); // MOD -> DELAY
+        chevron(g, *mTiles[13], *mTiles[14]); // DELAY -> VERB
     }
 
 private:
@@ -363,7 +365,7 @@ private:
 
     void updateLeds()
     {
-        if (mTiles.size() <= 9) return;
+        if (mTiles.size() <= 10) return;
         const int mode = (int)getF("rigMode");
         // Invariant: in Dual the two amps move together — you can never end up
         // with exactly one active (e.g. after switching in from a Solo bypass).
@@ -373,9 +375,14 @@ private:
             setF("ampOnB", 1.0f);
         }
         const bool aRig = (mode != 1), bRig = (mode != 0); // rig in the signal path
-        mTiles[5]->setLedOn(aRig && getF("ampOnA") >= 0.5f);
-        mTiles[7]->setLedOn(bRig && getF("ampOnB") >= 0.5f);
-        mTiles[9]->setLedOn(getF("cabOn") >= 0.5f || getF("cabOnB") >= 0.5f);
+        // Manual (radio-style) LEDs only — the AMP A/B and CAB tiles. These indices
+        // MUST match the setManualLed() wiring (AMP A 6, AMP B 8, CAB 10). The other
+        // tiles own real bypass-param LEDs (ButtonAttachment) and must NOT be forced
+        // here, or their bypass state gets clobbered on the timer (was the PREDLY/EQ
+        // "offset bypass" bug when this list wasn't reindexed after inserting PREDLY).
+        mTiles[6]->setLedOn(aRig && getF("ampOnA") >= 0.5f);
+        mTiles[8]->setLedOn(bRig && getF("ampOnB") >= 0.5f);
+        mTiles[10]->setLedOn(getF("cabOn") >= 0.5f || getF("cabOnB") >= 0.5f);
     }
 
     // The single CAB tile toggles both cabs together.
@@ -415,7 +422,7 @@ private:
         updateLeds();
     }
 
-    static constexpr int kCols = 12; // GATE,ENV,COMP,DRIVE,PREMOD,AMP,EQ,CAB,MIX,MOD,DELAY,VERB
+    static constexpr int kCols = 13; // GATE,ENV,COMP,DRIVE,PREMOD,PREDLY,AMP,EQ,CAB,MIX,MOD,DELAY,VERB
     juce::AudioProcessorValueTreeState &mApvts;
     std::vector<std::unique_ptr<BlockTile>> mTiles;
     std::vector<std::pair<int, int>> mLayout; // (col, lane) per tile

@@ -69,6 +69,7 @@ private:
     nam_rig::ui::CompPanel mCompPanel;
     nam_rig::ui::DrivePanel mDrivePanel;
     nam_rig::ui::PremodPanel mPremodPanel; // mono front-of-amp mod pedal
+    nam_rig::ui::PreDelayPanel mPredelayPanel; // mono front-of-amp delay pedal
     nam_rig::ui::CombinedAmpPanel mAmpPanel; // both amps (A | B) in one panel
     nam_rig::ui::EqPanel mEqPanelA, mEqPanelB;
     nam_rig::ui::CombinedCabPanel mCabPanel; // both cabs (A | B) in one panel
@@ -80,7 +81,7 @@ private:
     nam_rig::ui::IrBrowser mIrBrowser;     // IR library overlay (opened from a cab)
     nam_rig::ui::AmpBrowser mAmpBrowser;   // amp-model library overlay (from an amp)
     nam_rig::ui::TunerOverlay mTunerPanel; // header tuner overlay
-    std::array<juce::Component *, 14> mPanels;
+    std::array<juce::Component *, 15> mPanels;
 
     void openIrBrowser(int rig);
     void openAmpBrowser(int rig);

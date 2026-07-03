@@ -13,6 +13,7 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
       mCompPanel(p.apvts),
       mDrivePanel(p.apvts),
       mPremodPanel(p.apvts),
+      mPredelayPanel(p.apvts),
       mAmpPanel(p),
       mEqPanelA(p.apvts, 0),
       mEqPanelB(p.apvts, 1),
@@ -22,12 +23,12 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
       mDelayPanel(p.apvts),
       mReverbPanel(p.apvts),
       mCalPanel(p.apvts),
-      // ENV FILTER sits at index 1 (after GATE), PREMOD at 4. One combined AMP panel
-      // fed by both lanes sits at BOTH amp indices (5 = AMP A, 7 = AMP B), like the
-      // single CAB panel — either tile reveals it. EQ stays per-rig at 6 / 8.
+      // ENV FILTER sits at index 1 (after GATE), PREMOD at 4, PREDLY at 5. One combined
+      // AMP panel fed by both lanes sits at BOTH amp indices (6 = AMP A, 8 = AMP B), like
+      // the single CAB panel — either tile reveals it. EQ stays per-rig at 7 / 9.
       mPanels{&mGatePanel, &mEnvFilterPanel, &mCompPanel, &mDrivePanel,
-              &mPremodPanel, &mAmpPanel, &mEqPanelA, &mAmpPanel, &mEqPanelB, &mCabPanel,
-              &mMixPanel, &mModPanel, &mDelayPanel, &mReverbPanel}
+              &mPremodPanel, &mPredelayPanel, &mAmpPanel, &mEqPanelA, &mAmpPanel, &mEqPanelB,
+              &mCabPanel, &mMixPanel, &mModPanel, &mDelayPanel, &mReverbPanel}
 {
     setLookAndFeel(&mLnf.get());
     // The process default LookAndFeel (used by manually-shown PopupMenus that don't
@@ -342,6 +343,7 @@ void NamRigEditor::timerCallback()
     mCompPanel.setBypassed(off("compOn"));
     mDrivePanel.setBypassed(off("driveOn"));
     mPremodPanel.setBypassed(off("premodOn"));
+    mPredelayPanel.setBypassed(off("predelayOn"));
     mAmpPanel.ampA().setBypassed(aOut || off("ampOnA"));
     mAmpPanel.ampB().setBypassed(bOut || off("ampOnB"));
     mEqPanelA.setBypassed(aOut || off("eqOn"));
