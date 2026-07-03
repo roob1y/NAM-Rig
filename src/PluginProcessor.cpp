@@ -301,6 +301,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::StringArray{"Fast", "Slow"}, 0));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID("envfilterOn", 1), "Env Filter Enable", false)); // off by default (new block)
+    // Position relative to the drive rack. Pre = classic auto-wah into the drive
+    // (sweeps the clean pick dynamics, then distorts — vocal/quacky). Post = wah on
+    // the already-driven signal (fatter, cocked-wah/synthy). Default Pre = current.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("envfilterPos", 1), "Env Filter Position",
+        juce::StringArray{"Pre Drive", "Post Drive"}, 0));
 
     // --- Modulation: 3-slot series section (rig/ModBlock.h; mod_test.cpp).
     // Per-slot bank (superset; the panel shows only each effect's real
@@ -1000,6 +1006,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         mChain.envfilter.setAttackMs((int)apvts.getRawParameterValue("envfilterResponse")->load() == 1 ? 35.0f : 8.0f); // Slow/Fast
     }
     mChain.envfilter.setBypassed(apvts.getRawParameterValue("envfilterOn")->load() < 0.5f);
+    mChain.setEnvFilterPostDrive((int)apvts.getRawParameterValue("envfilterPos")->load() == 1); // Pre/Post drive rack
 
     // Comp/Boost parameters (zero latency, so plain chain bypass is safe).
     mChain.comp.setSustain(apvts.getRawParameterValue("compSustain")->load());

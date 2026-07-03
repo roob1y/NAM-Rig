@@ -6276,6 +6276,7 @@ public:
     explicit EnvFilterPanel(juce::AudioProcessorValueTreeState &apvts)
         : BlockPanel("ENV FILTER"), mApvts(apvts),
           mVoice(apvts, "envfilterVoice", juce::StringArray{"FX25", "Q-Tron"}),
+          mPos(apvts, "envfilterPos", juce::StringArray{"Pre", "Post"}),
           mMode(apvts, "envfilterMode", juce::StringArray{"LP", "BP", "HP", "MIX"}),
           mDrive(apvts, "envfilterDir", juce::StringArray{"Up", "Down"}),
           mQRange(apvts, "envfilterQRange", juce::StringArray{"Lo", "Hi"}),
@@ -6287,6 +6288,7 @@ public:
           mBlend(apvts, "envfilterMix", "Blend")
     {
         addAndMakeVisible(mVoice);
+        addAndMakeVisible(mPos); // Pre/Post drive — visible in both voices
         mVoice.onChange = [this](int) { refresh(); };
         for (auto *c : {&mMode, &mDrive, &mQRange, &mBoost, &mResponse})
             addChildComponent(*c);
@@ -6332,6 +6334,7 @@ public:
                        juce::Justification::centredLeft);
         };
         cap(mVoice, "VOICE");
+        cap(mPos, "DRIVE");
         if (mVoiceIdx == 1)
         {
             cap(mMode, "MODE"); cap(mDrive, "DRIVE"); cap(mQRange, "RANGE");
@@ -6345,6 +6348,7 @@ public:
 
         auto top = area.removeFromTop(26);
         mVoice.setBounds(top.getX(), top.getY(), mVoice.idealWidth(), 26);
+        mPos.setBounds(mVoice.getRight() + 22, top.getY(), mPos.idealWidth(), 26);
         area.removeFromTop(20);
 
         auto layKnobs = [](juce::Rectangle<int> r, std::vector<LabeledKnob *> ks) {
@@ -6385,7 +6389,7 @@ private:
     }
 
     juce::AudioProcessorValueTreeState &mApvts;
-    SegmentedControl mVoice, mMode, mDrive, mQRange, mBoost, mResponse;
+    SegmentedControl mVoice, mPos, mMode, mDrive, mQRange, mBoost, mResponse;
     LabeledKnob mSens, mRange, mReso, mBlend;
     juce::String mVoiceName{"FX25"};
     int mVoiceIdx = -1;

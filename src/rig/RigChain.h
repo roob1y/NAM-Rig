@@ -105,6 +105,9 @@ public:
     void setInputCal(float g) { mInputCal = g; } // global, pre-everything
     // Pre-amp mod pedal position: true = BEFORE the drive rack, false = AFTER it (default).
     void setPremodPreDrive(bool b) { mPremodPreDrive = b; }
+    // Envelope filter position: false = BEFORE the drive rack (default, classic
+    // auto-wah-into-drive), true = AFTER the drive rack (wah on the driven signal).
+    void setEnvFilterPostDrive(bool b) { mEnvFilterPostDrive = b; }
     void setInTrimA(float g) { mInTrimA = g; }
     void setInTrimB(float g) { mInTrimB = g; }
     void setOutTrimA(float g) { mOutTrimA = g; }
@@ -235,9 +238,12 @@ public:
         // Envelope filter / auto-wah: runs on the globally-CALIBRATED signal (the
         // input-cal scale above already trimmed the input to the pre-amp reference,
         // so the level-dependent sweep is anchored to the user's dBu calibration,
-        // exactly like the gate/comp/drive), and BEFORE the compressor so it tracks
-        // the un-squashed dynamics the real pedal senses. Zero latency.
-        if (!envfilter.isBypassed())
+        // exactly like the gate/comp/drive). Position relative to the drive rack is
+        // switchable (mEnvFilterPostDrive): PRE-drive (default) runs here, BEFORE the
+        // compressor, so it tracks the un-squashed dynamics the real pedal senses and
+        // then feeds the wah'd signal into the overdrive; POST-drive runs after the
+        // drive rack (below), sweeping the already-driven signal. Zero latency.
+        if (!mEnvFilterPostDrive && !envfilter.isBypassed())
             { envfilter.process(ch0, numSamples); heal(envfilter, ch0, numSamples); }
         if (!comp.isBypassed())
             { comp.process(ch0, numSamples);  heal(comp, ch0, numSamples); }
@@ -252,6 +258,10 @@ public:
             { drive.process(ch0, numSamples); heal(drive, ch0, numSamples); }
         if (!mPremodPreDrive && !premod.isBypassed())
             { premod.process(ch0, numSamples); heal(premod, ch0, numSamples); }
+        // Env filter POST-drive branch: sweep the already-driven signal (fatter,
+        // cocked-wah/synthy). Still mono, still before the amp split. Zero latency.
+        if (mEnvFilterPostDrive && !envfilter.isBypassed())
+            { envfilter.process(ch0, numSamples); heal(envfilter, ch0, numSamples); }
 
         // ---- split into the two voice buffers ----
         float *vA = mVoiceA.data();
@@ -606,6 +616,7 @@ private:
     float mPolA = 1.0f, mPolB = 1.0f;  // polarity (+1 / -1)
     float mInputCal = 1.0f; // global input calibration (pre-split)
     bool mPremodPreDrive = false; // pre-amp mod pedal: before (true) / after (false) the drive rack
+    bool mEnvFilterPostDrive = false; // env filter: before (false, default) / after (true) the drive rack
     float mInTrimA = 1.0f, mInTrimB = 1.0f;
     float mOutTrimA = 1.0f, mOutTrimB = 1.0f;
     double mAlignA = 0.0, mAlignB = 0.0; // fractional align delay (samples)
