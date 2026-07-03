@@ -54,6 +54,8 @@ static double rms(const std::vector<float> &x)
 static std::vector<float> naiveSlot(Kind k, float drive, const std::vector<float> &in)
 {
     const auto v = DriveBlock::voicingFor(k);
+    nam_rig::IoStage io; io.prepare(SR); DriveBlock::applyIo(io, DriveBlock::ioFor(k, 0));
+    std::vector<float> xin = in; io.processIn(xin.data(), (int)xin.size());
     const float preGain = v.gMin * std::pow(v.gMax / v.gMin, drive);
     const float hpCoef = (v.lowCutHz > 0.0f) ? 1.0f - (float)std::exp(-2.0 * M_PI * v.lowCutHz / SR) : 0.0f;
     const float lpCoef = (v.lpHz > 0.0f) ? 1.0f - (float)std::exp(-2.0 * M_PI * v.lpHz / SR) : 0.0f;
@@ -73,7 +75,7 @@ static std::vector<float> naiveSlot(Kind k, float drive, const std::vector<float
     float hp = 0, lpz = 0, dcx = 0, dcy = 0;
     for (size_t i = 0; i < in.size(); ++i)
     {
-        float u = in[i] * preGain;
+        float u = xin[i] * preGain;
         if (hpCoef > 0.0f) { hp += hpCoef * (u - hp); float hipassed = u - hp; u += shapeAmt * (hipassed - u); }
         if (useMid && !midPost) { float m = mid.processSample(u); u += shapeAmt * (m - u); }
         float c = (float)clipF((double)u + inBias);
@@ -82,6 +84,7 @@ static std::vector<float> naiveSlot(Kind k, float drive, const std::vector<float
         float dcOut = c - dcx + kDcR * dcy; dcx = c; dcy = dcOut; c = dcOut;
         y[i] = c * v.outTrim; // tone flat, level 0 dB
     }
+    io.processOut(y.data(), (int)y.size());
     return y;
 }
 
@@ -572,9 +575,17 @@ int main()
         const double h2h1 = goertzel(y, 440.0) / (goertzel(y, 220.0) + 1e-9);
         CHECK(thd > 0.5 && h2h1 > 0.005,
               "T31 Round Fuzz II heavy asym fuzz: THD %.2f, h2/h1 %.3f", thd, h2h1);
+        // Authentic Fuzz Face I/O: the ~5-8k input impedance DAMPS the guitar's
+        // pickup resonance, so the small-signal top is tamed -- the midband body
+        // (300Hz) now sits ABOVE both the trimmed sub-bass (60Hz) and the
+        // loading-damped top (3kHz). (Before the IoStage the top was ~flat/brighter.)
         auto g = [&](double f) { auto in = sine(f, 0.005f, 16384); return goertzel(realSlotM(Kind::Fuzz, 0, 0.2f, in), f) / goertzel(in, f); };
-        const double brightDb = 20.0 * std::log10(g(3000.0) / g(60.0));
-        CHECK(brightDb > 1.0, "T31 bright + sub-bass trim: 3k vs 60Hz +%.1f dB", brightDb);
+        const double subTrimDb = 20.0 * std::log10(g(300.0) / g(60.0));
+        const double topDampDb = 20.0 * std::log10(g(300.0) / g(3000.0));
+        CHECK(subTrimDb > 1.0, "T31 sub-bass trim: 300Hz vs 60Hz +%.1f dB", subTrimDb);
+        CHECK(topDampDb > 2.0, "T31 input-loading damps the top: 300Hz vs 3k +%.1f dB", topDampDb);
+        CHECK(DriveBlock::ioFor(Kind::Fuzz, 0).shelfCutDb < -3.0f,
+              "T31 Round Fuzz has a real low-Z loading shelf (%.1f dB)", DriveBlock::ioFor(Kind::Fuzz, 0).shelfCutDb);
     }
 
     // ---- T32: soft-to-hard -- the clip gets harder as the input level rises (the FF touch) ----
@@ -1121,6 +1132,59 @@ int main()
         CHECK(a3 < n3 * 0.5, "T64 Breaker ADAA2 cuts alias@3k: %.2e < naive %.2e", a3, n3);
         const double redDb = 20.0 * std::log10(n3 / std::max(a3, 1e-12));
         CHECK(redDb > 12.0, "T64 Breaker alias@3k reduced by %.1f dB (2nd-order cubic)", redDb);
+    }
+
+    // ====== IoStage: authentic input/output stages (impedance loading + coupling caps) ======
+
+    // ---- T65: per-model I/O classification matches the real circuits ----
+    // Buffered / ~1 MOhm inputs impose NO loading shelf; the low-Z inputs (Fuzz Face,
+    // Rangemaster, Big Muff 39k) do; TS808 (446k) and RAT (494k) get only a GENTLE damp.
+    {
+        auto cut = [](Kind k, int m){ return DriveBlock::ioFor(k, m).shelfCutDb; };
+        // buffered / high-Z -> flat
+        CHECK(cut(Kind::Overdrive,1)==0.0f, "T65 Super Drive (SD-1 ~1M) buffered: no shelf");
+        CHECK(cut(Kind::Overdrive,2)==0.0f, "T65 Gold Horse (Klon) buffered: no shelf");
+        CHECK(cut(Kind::Overdrive,3)==0.0f, "T65 Breaker Drive (BB ~1M) buffered: no shelf");
+        CHECK(cut(Kind::Boost,1)==0.0f,     "T65 Plex Boost (EP ~2.2M) buffered: no shelf");
+        // low-Z -> strong shelf
+        CHECK(cut(Kind::Fuzz,0) < -3.0f,       "T65 Round Fuzz (~5-8k) strong loading %.1f", cut(Kind::Fuzz,0));
+        CHECK(cut(Kind::Boost,0) < -3.0f,      "T65 Range '65 (~12k) strong loading %.1f", cut(Kind::Boost,0));
+        CHECK(cut(Kind::Fuzz,1) < -3.0f,       "T65 Violet Ram (Muff 39k) strong loading %.1f", cut(Kind::Fuzz,1));
+        // TS / RAT ~470k -> gentle damp (present but small)
+        CHECK(cut(Kind::Overdrive,0) < 0.0f && cut(Kind::Overdrive,0) > -2.5f,
+              "T65 Green Drive (TS 446k) gentle damp %.1f", cut(Kind::Overdrive,0));
+        CHECK(cut(Kind::Distortion,0) < 0.0f && cut(Kind::Distortion,0) > -2.5f,
+              "T65 Black Rodent (RAT 494k) gentle damp %.1f", cut(Kind::Distortion,0));
+    }
+
+    // ---- T66: the IoStage mechanism itself -- loaded anchors damp the top, buffered
+    // anchors are transparent (unit-tested in isolation so the pedals' own voicing EQ
+    // doesn't confound the comparison). Measures the front-end gain @3.5k vs @250 Hz. ----
+    {
+        auto topDb = [&](Kind k, int m){
+            nam_rig::IoStage io; io.prepare(SR); DriveBlock::applyIo(io, DriveBlock::ioFor(k, m));
+            auto gainAt = [&](double f){
+                io.reset(); auto x = sine(f, 0.1f, 16384); io.processIn(x.data(), (int)x.size());
+                return goertzel(x, f) / 0.1; // input amplitude 0.1
+            };
+            return 20.0 * std::log10(gainAt(3500.0) / gainAt(250.0));
+        };
+        const double fuzz  = topDb(Kind::Fuzz, 0);      // low-Z loading -> top damped
+        const double sd    = topDb(Kind::Overdrive, 1); // SD-1 buffered -> flat
+        const double klon  = topDb(Kind::Overdrive, 2); // Klon buffered -> flat
+        CHECK(fuzz < -3.0, "T66 loaded Fuzz IoStage damps the top: %.1f dB", fuzz);
+        CHECK(std::fabs(sd) < 0.5 && std::fabs(klon) < 0.5,
+              "T66 buffered IoStage transparent up top: SD %.2f, Klon %.2f dB", sd, klon);
+        CHECK(sd > fuzz + 3.0, "T66 buffered keeps top vs loaded (%.1f vs %.1f dB)", sd, fuzz);
+    }
+
+    // ---- T67: an Off slot stays bit-exact (IoStage only runs on ACTIVE slots) ----
+    {
+        auto in = sine(220.0, 0.3f, 4096);
+        DriveBlock d; d.setKind(0, (int)Kind::Off); d.prepare({SR, BLK});
+        auto x = in; run(d, x);
+        bool same = true; for (size_t i=0;i<in.size();++i) same = same && (x[i]==in[i]);
+        CHECK(same, "T67 Off slot bit-exact (no IoStage on bypassed slots)");
     }
 
     std::printf("\n%s (%d failure%s)\n", gFails ? "RESULT: FAIL" : "RESULT: ALL PASS", gFails, gFails == 1 ? "" : "s");

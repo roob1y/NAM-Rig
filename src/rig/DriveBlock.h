@@ -120,6 +120,7 @@
 
 #include "Blocks.h"
 #include "Biquad.h"
+#include "IoStage.h"
 #include <atomic>
 #include <cmath>
 
@@ -368,6 +369,70 @@ public:
     }
     static Voicing voicingFor(Kind c) { return voicingFor(c, 0); } // compat (model 0)
 
+    // ---- authentic INPUT + OUTPUT stage per model (impedance loading + coupling caps) ----
+    // The guitar is DI'd into the plugin through a ~1 MOhm Hi-Z interface, so the
+    // pickup loading already happened at capture. We can only model the DELTA from
+    // that reference: a low pedal input impedance DAMPS the pickup's resonant peak
+    // (~2.5-3 kHz) and drops a little level; a high/buffered input barely loads it
+    // (just the DC-blocking coupling high-passes). Anchors are FIT to the measured
+    // circuits (ElectroSmash analyses + Lemme's "<=47 kOhm makes the resonant peak
+    // vanish"). Applied via IoStage (front-end before the drive gain, back-end after
+    // the level). Buffered voicings are audibly transparent; only the low-Z inputs
+    // (Fuzz Face / Rangemaster / Big Muff) colour the tone, with a small TS/RAT damp.
+    struct IoAnchors { float inHpHz, shelfHz, shelfCutDb, inLevelDb, inLpHz, outHpHz, outLevelDb; };
+
+    static IoAnchors ioFor(Kind c, int model)
+    {
+        switch (c)
+        {
+        case Kind::Boost:
+            // 0 Range '65 (Rangemaster): germanium common-emitter, Zin ~10-12 kOhm ->
+            // STRONG loading (well below 47 kOhm, the peak is heavily damped). inHp 0:
+            // the 5 nF input cap IS the voicing's 2653 Hz high-pass, don't double it.
+            // It stays bright because its GAIN stage re-emphasises treble after the damp.
+            if (model == 0) return { 0.0f, 2800.0f, -4.0f, -0.7f, 0.0f, 7.0f, 0.0f };
+            // 1 Plex Boost (EP Booster): JFET, Zin ~2.2 MOhm, buffered out -> transparent.
+            return { 4.0f, 0.0f, 0.0f, 0.0f, 0.0f, 7.0f, 0.0f };
+        case Kind::Overdrive:
+            // 0 Green Drive (TS808): BJT emitter-follower buffer, Zin 446 kOhm (ElectroSmash)
+            // -- high but NOT a megohm, so a GENTLE resonance damp, not flat. Coupling ~8 Hz.
+            if (model == 0) return { 8.0f, 3000.0f, -1.0f, -0.2f, 0.0f, 8.0f, 0.0f };
+            // 1 Super Drive (SD-1): Boss BJT input buffer ~1 MOhm -> transparent.
+            if (model == 1) return { 7.0f, 0.0f, 0.0f, 0.0f, 0.0f, 7.0f, 0.0f };
+            // 2 Gold Horse (Klon): buffered bypass, high Zin -> transparent.
+            if (model == 2) return { 4.0f, 0.0f, 0.0f, 0.0f, 0.0f, 7.0f, 0.0f };
+            // 3 Breaker Drive (Bluesbreaker): TL072, R1 1 MOhm pulldown -> transparent.
+            // inHp 0: the C1 10n / R1 1M ~16 Hz coupling IS the voicing's 20 Hz low-cut.
+            return { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 7.0f, 0.0f };
+        case Kind::Distortion:
+            // 0 Black Rodent (RAT): NOT buffered -- the LM308 non-inverting input sees a
+            // 1M||1M pulldown = Zin 494 kOhm (ElectroSmash). ~470 kOhm like the TS -> a
+            // GENTLE damp, not flat. Coupling 22 nF / 1M = 7.2 Hz. Out = JFET follower.
+            return { 7.0f, 3000.0f, -1.0f, -0.2f, 0.0f, 7.0f, 0.0f };
+        case Kind::Fuzz:
+            // 0 Round Fuzz (Fuzz Face): PNP common-emitter, Zin ~5-8 kOhm -> STRONG loading
+            // (the resonant peak vanishes; "needs to see the pickup inductance"). Coupling
+            // 2.2uF / 5k = 14 Hz; output cap / vol = ~31 Hz. Volume-cleanup deferred.
+            if (model == 0) return { 14.0f, 2700.0f, -5.0f, -1.0f, 0.0f, 31.0f, 0.0f };
+            // 1 Violet Ram (Big Muff): R2 39 kOhm series input -> "low input impedance,
+            // tone sucking" (ElectroSmash); below 47 kOhm so the peak nearly vanishes ->
+            // a real loading shelf (stronger than a mild buffer damp). Coupling ~3.8 Hz.
+            return { 4.0f, 2800.0f, -4.0f, -0.6f, 0.0f, 4.0f, 0.0f };
+        default:
+            return { 8.0f, 0.0f, 0.0f, 0.0f, 0.0f, 8.0f, 0.0f };
+        }
+    }
+
+    // Configure an IoStage from a model's anchors (loaded if there's a shelf cut,
+    // else a near-transparent buffered front/back-end). IoStage must be prepared first.
+    static void applyIo(IoStage &io, const IoAnchors &a)
+    {
+        if (a.shelfCutDb != 0.0f)
+            io.setLoaded(a.inHpHz, a.shelfHz, a.shelfCutDb, a.inLevelDb, a.outHpHz, a.outLevelDb);
+        else
+            io.setBuffered(a.inHpHz, a.outHpHz, a.inLpHz, a.outLevelDb);
+    }
+
     // Treble-boost input-cap switch: larger cap (Mid/Full) lets more low-end
     // through and shifts the emphasis down (Treble = bright, Full = fat).
     static void applyRange(Voicing &v, int rng)
@@ -386,6 +451,7 @@ public:
     {
         mSampleRate = ctx.sampleRate;
         reset();
+        for (auto &s : mSlot) s.io.prepare(mSampleRate); // set IoStage sample rate (reconfigured per voicing on first process)
         mPrepared = true;
     }
 
@@ -426,6 +492,7 @@ public:
                     s.emphPost = Biquad::highshelf(sr, v.emphHz, -v.emphDb);
                 }
                 else { s.emphPre = Biquad::identity(); s.emphPost = Biquad::identity(); }
+                applyIo(s.io, ioFor(k, model)); // authentic input/output stage (impedance loading + coupling caps)
             }
 
             const float preGain = v.gMin * std::pow(v.gMax / v.gMin, s.drive.load()); // log
@@ -525,6 +592,8 @@ public:
             const float envRel = 1.0f - (float)std::exp(-1.0 / (0.120 * sr)); // ~120 ms
             const float invEnvRef = 1.0f / 0.25f; // picking-level reference
             const float gpkDecay = (float)std::exp(-1.0 / (0.5 * sr)); // gate peak-hold release ~500 ms
+
+            s.io.processIn(mono, numSamples); // front-end: input coupling HP + impedance-loading shelf (colours what the drive sees)
 
             float hp = s.hp, lpz = s.lp, low = s.toneLp;
             float dcx = s.dcX1, dcy = s.dcY1;
@@ -684,6 +753,8 @@ public:
                 mono[i] = std::isfinite(outv) ? outv : 0.0f; // never emit NaN/Inf downstream
             }
 
+            s.io.processOut(mono, numSamples); // back-end: output coupling HP + output level
+
             s.hp = flush(hp); s.lp = flush(lpz); s.toneLp = flush(low);
             s.dcX1 = flush(dcx); s.dcY1 = flush(dcy); s.x0 = flushD(x0);
             s.adaaX1 = flushD(adx1); s.adaaX2 = flushD(adx2); s.env = flush(env); s.gpk = flush(gpk);
@@ -731,13 +802,14 @@ private:
         int lastKind = -1;
         Biquad mid;     // pre/post-shaper peak (state preserved across blocks)
         Biquad emphPre, emphPost; // pre/de-emphasis pair (clip 3)
+        IoStage io;     // authentic input/output stage (impedance loading + coupling caps)
         void resetState()
         {
             hp = lp = toneLp = dcX1 = dcY1 = 0.0f; x0 = 0.0;
             adaaX1 = adaaX2 = 0.0; env = 0.0f; gpk = 0.0f; shX1 = shY1 = 0.0f;
             adaaX1b = adaaX2b = 0.0; mLpPre = mHpInt = mLpInt = 0.0f;
             mtX1 = mtX2 = mtY1 = mtY2 = 0.0f;
-            lastKind = -1; mid.reset(); emphPre.reset(); emphPost.reset();
+            lastKind = -1; mid.reset(); emphPre.reset(); emphPost.reset(); io.reset();
         }
     };
 
