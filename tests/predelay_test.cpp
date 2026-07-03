@@ -15,6 +15,7 @@
 // T11 all 8 DD-7 MODE positions run clean; T12 REVERSE produces output
 // T13 Carbon Copy circuit-grounded voicing (600 ms / 8192 stages / dark / self-osc)
 // T14 Memory Man circuit-grounded voicing (550 ms / 8192 stages / crossfade Blend)
+// T15 Memory Man master Level (Volume) + Chorus/Vibrato switch (LFO speed range)
 #include "rig/PreDelayBlock.h"
 #include <cstdio>
 #include <cmath>
@@ -423,6 +424,40 @@ int main()
         const double echoPk = peakAmpNear(m, T, 400);  // the echo is present
         CHECK(dryPk < 0.05, "T14 Blend crossfade removes dry at full wet (t0 peak %.3f)", dryPk);
         CHECK(echoPk > 0.1, "T14 wet echo present at full wet (echo peak %.3f)", echoPk);
+    }
+
+    // ---- T15: Memory Man master Level (Volume) + Chorus/Vibrato switch (LFO speed) ----
+    {
+        auto rms = [](float level){
+            PreDelayBlock d;
+            d.setModel(PreDelayBlock::kMemoryMan);
+            d.setTimeMs(200.0f); d.setFeedback(0.3f); d.setMix(0.6f); d.setMod(0.0f);
+            d.setLevel(level);
+            d.prepare({SR, BLK});
+            std::vector<float> m((size_t)SR, 0.0f);
+            for (size_t i=0;i<m.size();++i) m[i]=0.25f*std::sin(2.0*3.14159265*196.0*i/SR);
+            run(d, m);
+            double s2=0; for(size_t i=SR/4;i<m.size();++i) s2+=(double)m[i]*m[i];
+            return std::sqrt(s2/(double)(m.size()-SR/4));
+        };
+        const double full = rms(1.0f), half = rms(0.4f);
+        CHECK(full > 1e-4 && std::abs(half/full - 0.4) < 0.05,
+              "T15 Level scales output (0.4/1.0 ratio %.3f)", half/full);
+
+        // Chorus (slow) vs Vibrato (fast) = different LFO rate => different modulated echo.
+        auto renderCV = [](int cv){
+            PreDelayBlock d;
+            d.setModel(PreDelayBlock::kMemoryMan);
+            d.setTimeMs(300.0f); d.setFeedback(0.0f); d.setMix(1.0f); d.setMod(1.0f);
+            d.setChorusVib(cv);
+            d.prepare({SR, BLK});
+            settle(d, 0.4);
+            std::vector<float> m((size_t)SR, 0.0f); m[0]=1.0f;
+            run(d, m);
+            return peakNear(m, (size_t)(0.300*SR), 800);
+        };
+        CHECK(renderCV(0) != renderCV(1),
+              "T15 Chorus vs Vibrato differ (chorus=%zu vibrato=%zu)", renderCV(0), renderCV(1));
     }
 
     std::printf("\n%s (%d failures)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);

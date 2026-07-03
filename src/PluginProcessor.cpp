@@ -300,6 +300,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("predelayPos", 1), "Pre Delay Position",
         juce::StringArray{"After Drive", "Before Drive"}, 0));
+    // Memory Man extras (shown only for that model): a master Volume/Level (unity at 1) and
+    // the Chorus/Vibrato switch (selects the LFO speed range). See rig/PreDelayBlock.h.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("predelayLevel", 1), "Pre Delay Level",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("predelayChorusVib", 1), "Pre Delay Chorus/Vibrato",
+        juce::StringArray{"Chorus", "Vibrato"}, 0));
 
     // --- Envelope filter / auto-wah (mono, pre-amp): rig/EnvFilterBlock.h,
     // env_filter_test.cpp. Sits BEFORE the compressor so it tracks the raw guitar
@@ -1147,6 +1155,8 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         mChain.predelay.setMix(apvts.getRawParameterValue("predelayMix")->load());
         mChain.predelay.setMod(apvts.getRawParameterValue("predelayMod")->load());
         mChain.predelay.setToneHz(apvts.getRawParameterValue("predelayTone")->load());
+        mChain.predelay.setLevel(apvts.getRawParameterValue("predelayLevel")->load());
+        mChain.predelay.setChorusVib((int)apvts.getRawParameterValue("predelayChorusVib")->load());
         mChain.predelay.setBypassed(apvts.getRawParameterValue("predelayOn")->load() < 0.5f);
         mChain.setPredelayPreDrive((int)apvts.getRawParameterValue("predelayPos")->load() == 1);
     }

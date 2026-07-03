@@ -122,6 +122,10 @@ public:
     // trimmers (WIDTH/RATE), always on and subtle. So the Carbon Copy uses a FIXED internal
     // mod depth and ignores the user Mod param (its panel shows only Delay/Regen/Mix).
     static constexpr float kCarbonCopyMod  = 0.35f;
+    // Memory Man Chorus/Vibrato switch = the EH7850's LFO speed-range select (it swaps a
+    // cap: Chorus = slow, Vibrato = fast; it does NOT change the waveform). Named DMM rates.
+    static constexpr float kDmmChorusRateHz  = 1.0f;
+    static constexpr float kDmmVibratoRateHz = 4.0f;
     static constexpr double kAnalogLpHz    = 2800.0; // DM-2 model: in-loop darkening of the repeats
     static constexpr float kAnalogSatDrive = 0.4f, kAnalogSatAsym = 0.05f;
 
@@ -259,6 +263,7 @@ public:
         mRevPhase = 0.0;
         mBaseZ = (double)currentTimeMs();
         mMixZ = mMix;
+        mLevelZ = mLevel;
     }
 
     // ---- parameters (audio thread) ----
@@ -280,6 +285,8 @@ public:
     void setFeedback(float f) { mFeedback = std::clamp(f, 0.0f, 1.0f); } // 0..1 knob
     void setMix(float m) { mMix = std::clamp(m, 0.0f, 1.0f); }
     void setMod(float m) { mModAmt = std::clamp(m, 0.0f, 1.0f); }        // scales the built-in mod depth
+    void setLevel(float l) { mLevel = std::clamp(l, 0.0f, 1.0f); }       // Memory Man master Volume/Level (unity at 1)
+    void setChorusVib(int m) { mChorusVib = std::clamp(m, 0, 1); }       // Memory Man 0=Chorus (slow) 1=Vibrato (fast)
     void setToneHz(float hz)
     {
         if (hz != mToneHz) { mToneHz = hz; if (mPrepared) rebuildTone(); }
@@ -304,7 +311,12 @@ public:
         const int mode = (mModel == kDD7) ? mMode : (int)kMode800;
         const bool hold = (mode == kHold), reverse = (mode == kReverse);
         const bool analog = (mode == kAnalog), modulate = (mode == kModulate);
-        mLfo.setRateHz(modulate ? kModulateRateHz : mVoicing.modRateHz);
+        // LFO rate: the DD-7 Modulate MODE forces a fixed chorus; the Memory Man's rate is
+        // set by its Chorus/Vibrato switch (slow/fast); others use the voicing rate.
+        float lfoRate = mVoicing.modRateHz;
+        if (mModel == kDD7 && modulate)  lfoRate = kModulateRateHz;
+        else if (mModel == kMemoryMan)   lfoRate = mChorusVib ? kDmmVibratoRateHz : kDmmChorusRateHz;
+        mLfo.setRateHz(lfoRate);
         const float baseTarget = currentTimeMs();
         // Feedback: knob (0..1) scaled by the model ceiling; HOLD locks it to 1 (freeze).
         // Analog models push past unity (self-oscillation) — the in-loop companding
@@ -323,6 +335,7 @@ public:
         for (int i = 0; i < numSamples; ++i)
         {
             mMixZ += mSmoothK * (mMix - mMixZ);
+            mLevelZ += mSmoothK * (mLevel - mLevelZ);
             // Glide the base delay toward the target (analog = slow pitch swoop; digital
             // = quick, click-free). Snap when within a hair to kill one-pole crawl.
             mBaseZ += (double)mGlideK * ((double)baseTarget - mBaseZ);
@@ -363,8 +376,11 @@ public:
             // and a mid setting gives chorus (wet beating against dry). The feedback write
             // above is unchanged (the delay input is always dry + fb·wet), so only the
             // output blend differs per model.
-            mono[i] = (mModel == kMemoryMan) ? ((1.0f - mMixZ) * dry + mMixZ * outw)
-                                             : (dry + mMixZ * outw);
+            const float blended = (mModel == kMemoryMan) ? ((1.0f - mMixZ) * dry + mMixZ * outw)
+                                                         : (dry + mMixZ * outw);
+            // The Memory Man has a master Volume/Level knob (unity at 1); the other pedals
+            // have no such control, so their output is the blend unscaled.
+            mono[i] = (mModel == kMemoryMan) ? (blended * mLevelZ) : blended;
             mLfo.advance();
         }
         mIo.processOut(mono, numSamples); // output buffer / coupling stage (per model)
@@ -601,6 +617,8 @@ private:
     static constexpr double kEvenShape = 2.0;   // cosh even-harmonic richness
 
     float mTimeMs = 350.0f, mFeedback = 0.35f, mMix = 0.28f, mModAmt = 0.25f, mToneHz = 20000.0f;
+    float mLevel = 1.0f, mLevelZ = 1.0f; // Memory Man master Volume/Level (unity default)
+    int mChorusVib = 0;                  // Memory Man Chorus(0)/Vibrato(1) switch
     int mSyncIndex = 0;
 
     double mBaseZ = 350.0;   // glided base delay (ms)

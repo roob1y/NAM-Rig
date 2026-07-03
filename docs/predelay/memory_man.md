@@ -105,5 +105,10 @@ vs wet** → LEVEL gain block → **~300 Ω buffered output** (Nano spec). Modul
 - **IoStage = LOADED (gentle).** ~100 kΩ inverting input → a gentle high-shelf cut (−1.5 dB from
   ~3 kHz, −0.5 dB level) representing the loading (mostly relevant with a high-Z guitar; subtle
   here since the predelay sits after the buffered drive). ~300 Ω buffered output; subsonic couplings.
-- **Panel controls = Delay / Feedback / Blend / Depth, no Tone.** The DMM's real knobs (LEVEL is the
-  global output). Chorus/Vibrato is set by the Blend position, not a separate control.
+- **Panel = the DMM's real FIVE knobs + a switch: Delay / Feedback / Blend / Depth / Level, plus a
+  CHORUS/VIBRATO switch.** LEVEL = master output Volume (new `predelayLevel` param, unity at 1,
+  applied only for the DMM). The CHORUS/VIBRATO switch (new `predelayChorusVib` param) selects the
+  LFO speed range like the EH7850's toggle — **Chorus ≈ 1 Hz (slow), Vibrato ≈ 4 Hz (fast)** — it
+  does NOT change the waveform. (Robbie correction 2026-07-03: "the Memory Man should have 5 knobs
+  and a switch.") No tone control. Whether you perceive chorus vs vibrato still also depends on the
+  Blend position (full-wet crossfade = the pitch wobble heard directly = vibrato).

@@ -6294,6 +6294,13 @@ public:
         mPosAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
             apvts, "predelayPos", mPos);
 
+        // Memory Man CHORUS/VIBRATO switch (shown only for that model) — selects the LFO
+        // speed range (chorus = slow, vibrato = fast), like the EH7850's toggle.
+        mChorusVib.addItemList({"Chorus", "Vibrato"}, 1);
+        addChildComponent(mChorusVib); // visibility set per model in refresh()
+        mChorusVibAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, "predelayChorusVib", mChorusVib);
+
         // The Boss DD-7 MODE control is a ROTARY KNOB (8 detented positions), like the
         // hardware — turn it to step through the modes; the readout shows the mode name,
         // and clicking the readout opens the same list. Shown only for the DD-7, as the
@@ -6310,7 +6317,8 @@ public:
 
         const std::pair<const char *, const char *> defs[] = {
             {"predelayTime", "Time"}, {"predelayFeedback", "Feedback"},
-            {"predelayMix", "Mix"}, {"predelayMod", "Mod"}, {"predelayTone", "Tone"}};
+            {"predelayMix", "Mix"}, {"predelayMod", "Mod"}, {"predelayTone", "Tone"},
+            {"predelayLevel", "Level"}}; // index 5 = Memory Man master Volume (DMM only)
         for (const auto &[id, caption] : defs)
         {
             mKnobs.push_back(std::make_unique<LabeledKnob>(apvts, id, caption));
@@ -6330,6 +6338,7 @@ public:
             return; // control set only changes with the pedal model
         mLastModel = m;
         if (mModeKnob) mModeKnob->setVisible(m == 0); // the MODE rotary is a DD-7 control only
+        mChorusVib.setVisible(m == 2);                // Chorus/Vibrato switch is a Memory Man control only
         // AUTHENTIC per-pedal control set + legends (like PremodPanel shows only the
         // real controls). Knobs: 0 Time, 1 Feedback, 2 Mix, 3 Mod, 4 Tone. Only the
         // DD-7 is circuit-verified so far, so it shows its REAL three knobs with the
@@ -6347,24 +6356,25 @@ public:
         {
         case 0: // Boss DD-7: D.TIME, E.LEVEL, F.BACK
             set(0, true, "D.Time"); set(1, true, "F.Back"); set(2, true, "E.Level");
-            set(3, false, ""); set(4, false, "");
+            set(3, false, ""); set(4, false, ""); set(5, false, "");
             break;
         case 1: // MXR Carbon Copy: its REAL three knobs only — Delay, Regen, Mix. The M169
                 // has NO mod knob (modulation is internal WIDTH/RATE trimmers, baked in as a
                 // fixed subtle warble) and NO tone control (its wet path is fixed-dark). See
                 // carbon_copy.md.
             set(0, true, "Delay"); set(1, true, "Regen"); set(2, true, "Mix");
-            set(3, false, ""); set(4, false, "");
+            set(3, false, ""); set(4, false, ""); set(5, false, "");
             break;
-        case 2: // EHX Deluxe Memory Man: Delay, Feedback, Blend, Depth. Its BLEND is a true
-                // crossfade (full wet = vibrato, mid = chorus); Depth sets the deep triangle-LFO
-                // modulation width. No tone control on the DMM. See memory_man.md.
+        case 2: // EHX Deluxe Memory Man: its REAL five knobs — Delay, Feedback, Blend, Depth,
+                // Level (master Volume) — plus the Chorus/Vibrato switch (laid out separately).
+                // BLEND is a true crossfade (full wet = vibrato, mid = chorus); Depth sets the
+                // deep triangle-LFO width. No tone control on the DMM. See memory_man.md.
             set(0, true, "Delay"); set(1, true, "Feedback"); set(2, true, "Blend");
-            set(3, true, "Depth"); set(4, false, "");
+            set(3, true, "Depth"); set(4, false, ""); set(5, true, "Level");
             break;
         default: // provisional generic set (pending per-pedal circuit research: SDD-3000)
             set(0, true, "Time"); set(1, true, "Feedback"); set(2, true, "Mix");
-            set(3, true, "Mod"); set(4, true, "Tone");
+            set(3, true, "Mod"); set(4, true, "Tone"); set(5, false, "");
             break;
         }
         resized(); // re-centre the now-visible knobs
@@ -6386,6 +6396,15 @@ public:
 
         area.removeFromTop(16);
 
+        // Memory Man Chorus/Vibrato switch sits on its own row (one picker-width, left) above
+        // the knobs; only visible for the DMM, so it doesn't disturb the other models' layout.
+        if (mChorusVib.isVisible())
+        {
+            auto sw = area.removeFromTop(26);
+            mChorusVib.setBounds(sw.removeFromLeft(w));
+            area.removeFromTop(10);
+        }
+
         // Lay out only the VISIBLE knobs, centred. On the DD-7 the MODE knob joins the
         // row as a 4th knob (E.LEVEL / F.BACK / D.TIME / MODE, like the hardware).
         std::vector<LabeledKnob *> vis;
@@ -6402,8 +6421,8 @@ public:
 
 private:
     juce::AudioProcessorValueTreeState &mApvts;
-    juce::ComboBox mModel, mSync, mPos;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mModelAtt, mSyncAtt, mPosAtt;
+    juce::ComboBox mModel, mSync, mPos, mChorusVib; // mChorusVib = Memory Man Chorus/Vibrato switch
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mModelAtt, mSyncAtt, mPosAtt, mChorusVibAtt;
     std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
     std::unique_ptr<LabeledKnob> mModeKnob; // DD-7 MODE rotary (choice param, hardware-style)
     int mLastModel = -1;
