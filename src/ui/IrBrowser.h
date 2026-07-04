@@ -1,6 +1,7 @@
 #pragma once
 #include "PluginProcessor.h"
 #include "ui/RigLookAndFeel.h"
+#include "ui/IrGraph.h"
 #include "ui/IrTagCache.h"
 #include "ui/SortableFileList.h"
 #include "ui/SortableFolderTree.h"
@@ -199,7 +200,14 @@ public:
         mZoneB.setBounds(zones);
         r.removeFromTop(6);
         mHintRect = r.removeFromTop(14);
-        r.removeFromTop(4);
+        r.removeFromTop(6);
+
+        // Frequency-curve preview of the selected IR, pinned full-width to the
+        // bottom: a caption row above the response well.
+        auto preview = r.removeFromBottom(120);
+        r.removeFromBottom(10);
+        mPreviewLabelRect = preview.removeFromTop(14);
+        mPreviewRect = preview;
 
         // Two panes: folders (left ~38%) | files (right).
         mBodyRect = r;
@@ -243,6 +251,25 @@ public:
             g.drawText("Pick a folder on the left, then drag an IR onto Cab A or Cab B",
                        mHintRect, juce::Justification::centredLeft);
         }
+
+        // Preview well: the selected IR's frequency curve, drawn with the same
+        // painter the loaded cab uses, so it looks identical once dropped on a
+        // cab. Empty prompt until a file is picked.
+        g.setColour(colors::caption);
+        g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.12f));
+        g.drawText("FREQUENCY RESPONSE", mPreviewLabelRect, juce::Justification::centredLeft);
+        if (mHaveSel)
+        {
+            g.setColour(colors::text2);
+            g.setFont(fonts::mono(10.0f, fonts::SemiBold));
+            g.drawText(mSelTag, mPreviewLabelRect, juce::Justification::centredRight, true);
+            drawIrResponse(g, mPreviewRect.toFloat(), mSelResp.data(), true, {});
+        }
+        else
+        {
+            drawIrResponse(g, mPreviewRect.toFloat(), mSelResp.data(), false,
+                           juce::String::fromUTF8("Select an IR to preview its curve"));
+        }
     }
 
 private:
@@ -265,16 +292,16 @@ private:
                               });
     }
 
-    // Preview the selected IR's tone tag in the hint line.
+    // Preview the selected IR's tone tag in the hint line AND its frequency curve
+    // in the bottom well (same graph the cab shows once the file is loaded).
     void fileSelected()
     {
         auto f = mFileList.getSelectedFile();
-        std::array<float, nam_rig::ir::kResPts> resp{};
         if (f.existsAsFile() && IrDropZone::looksLikeIr(f.getFullPathName())
-            && nam_rig::ir::analyzeFile(f, resp.data()))
+            && nam_rig::ir::analyzeFile(f, mSelResp.data()))
         {
             mSelName = f.getFileNameWithoutExtension();
-            mSelTag = nam_rig::ir::classify(resp.data());
+            mSelTag = nam_rig::ir::classify(mSelResp.data());
             mHaveSel = true;
         }
         else { mHaveSel = false; mSelTag = {}; }
@@ -290,8 +317,9 @@ private:
     juce::StringArray mTags;
     juce::TextButton mChooseBtn, mCloseBtn;
     IrDropZone mZoneA, mZoneB;
-    juce::Rectangle<int> mHintRect, mBodyRect;
+    juce::Rectangle<int> mHintRect, mBodyRect, mPreviewRect, mPreviewLabelRect;
     juce::String mSelName, mSelTag;
+    std::array<float, nam_rig::ir::kResPts> mSelResp{}; // selected IR's response curve
     bool mHaveSel = false;
     std::unique_ptr<juce::FileChooser> mChooser;
     std::function<juce::File()> mGetRoot;
