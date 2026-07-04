@@ -1560,6 +1560,13 @@ public:
                                                       juce::StringArray{"Off", "Gate"});
         addChildComponent(*mGateSeg);
 
+        // Distortion-only RAT hump-migration range (Tight/Full), shown for Black Rodent.
+        // Tight = the hump stays a mid honk when cranked; Full = it collapses darker
+        // (the authentic LM308 GBW ~300 Hz collapse). Default Tight.
+        mMigrateSeg = std::make_unique<SegmentedControl>(apvts, p + "dMigrate",
+                                                         juce::StringArray{"Tight", "Full"});
+        addChildComponent(*mMigrateSeg);
+
         mOnAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             apvts, p + "On", mOn);
         mOn.onClick = [this] { refresh(); };
@@ -1689,15 +1696,19 @@ public:
         LabeledKnob *ks[3] = {mDrive.get(), mTone.get(), mLevel.get()};
         int nVis = 0;
         for (auto *k : ks) if (k->isVisible()) ++nVis;
-        // Round Fuzz's Off/Gate toggle rides up in the knob row as a trailing
-        // column (instead of sitting down in the silkscreen area), so the art shows.
-        const bool gateInRow = mGateSeg->isVisible();
-        const int nSlots = nVis + (gateInRow ? 1 : 0);
+        // A per-model 2-way toggle rides up in the knob row as a trailing column
+        // (instead of sitting down in the silkscreen area), so the art still shows:
+        // Round Fuzz's Off/Gate, or Black Rodent's Tight/Full hump range. They belong
+        // to different categories, so at most one is ever visible.
+        SegmentedControl *extraSeg = mGateSeg->isVisible() ? mGateSeg.get()
+                                   : (mMigrateSeg->isVisible() ? mMigrateSeg.get() : nullptr);
+        const bool segInRow = (extraSeg != nullptr);
+        const int nSlots = nVis + (segInRow ? 1 : 0);
         if (nSlots > 0)
         {
-            // Non-gate pedals keep their exact shipped spacing (2 knobs = 16, else 0);
-            // only Round Fuzz's extra gate column introduces a gap at 3 slots.
-            const int gap = gateInRow ? 8 : ((nVis == 2) ? 16 : 0);
+            // Knob-only pedals keep their exact shipped spacing (2 knobs = 16, else 0);
+            // the extra toggle column introduces a gap at the added slot.
+            const int gap = segInRow ? 8 : ((nVis == 2) ? 16 : 0);
             const int kw = juce::jmin(78, juce::jmax(1, (knobRow.getWidth() - gap * (nSlots - 1)) / nSlots));
             auto grp = knobRow.withSizeKeepingCentre(kw * nSlots + gap * (nSlots - 1), knobRow.getHeight());
             bool first = true;
@@ -1708,18 +1719,18 @@ public:
                     k->setBounds(grp.removeFromLeft(kw).reduced(3, 0));
                     first = false;
                 }
-            if (gateInRow) // Off/Gate as a vertical 2-cell column, level with the knob dials
+            if (segInRow) // the toggle as a vertical 2-cell column, level with the knob dials
             {
                 if (!first) grp.removeFromLeft(gap);
                 auto cell = grp.removeFromLeft(kw);
-                mGateSeg->setVertical(true);
-                const int sw = juce::jlimit(36, mGateSeg->idealCellWidth(), kw);
+                extraSeg->setVertical(true);
+                const int sw = juce::jlimit(36, extraSeg->idealCellWidth(), kw);
                 const int sh = 58;
                 int dialCy = knobRow.getCentreY();
                 for (auto *k : ks)
                     if (k->isVisible())
                         dialCy = k->getBounds().getY() + k->slider().getBounds().getCentreY();
-                mGateSeg->setBounds(cell.getCentreX() - sw / 2, dialCy - sh / 2, sw, sh);
+                extraSeg->setBounds(cell.getCentreX() - sw / 2, dialCy - sh / 2, sw, sh);
             }
         }
 
@@ -1909,6 +1920,9 @@ private:
         mGateSeg->setAccent(segAcc);
         mGateSeg->setVisible(nam_rig::DriveBlock::modelHasGate(cat, model)); // Round Fuzz only
         mGateSeg->setEnabled(mActive);
+        mMigrateSeg->setAccent(segAcc);
+        mMigrateSeg->setVisible(nam_rig::DriveBlock::modelHasMigrate(cat, model)); // Black Rodent (RAT) only
+        mMigrateSeg->setEnabled(mActive);
         mOn.setAccent(colors::driveModelAccent(type, model).led); // footswitch glow tracks the LED (= accent, except Violet Ram = violet)
         mOn.setLit(mActive);
     }
@@ -1918,6 +1932,7 @@ private:
     juce::ComboBox mType, mModel;
     std::unique_ptr<SegmentedControl> mRangeSeg;
     std::unique_ptr<SegmentedControl> mGateSeg; // fuzz bias-starved gate (Off/Gate)
+    std::unique_ptr<SegmentedControl> mMigrateSeg; // RAT hump-migration range (Tight/Full)
     Footswitch mOn;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mOnAtt;

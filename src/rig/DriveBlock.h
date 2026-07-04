@@ -143,6 +143,7 @@ public:
     void setOn(int slot, bool on) { at(slot).on.store(on); }            // footswitch (default on)
     void setModel(int slot, int m) { at(slot).model.store(m); }         // model within the category
     void setGateOn(int slot, bool on) { at(slot).gateOn.store(on); }    // fuzz bias-starved gate enable (default on)
+    void setMigrateFull(int slot, bool full) { at(slot).migrateFull.store(full); } // RAT hump migration range: false Tight (default) / true Full
 
     bool anyActive() const
     {
@@ -200,6 +201,22 @@ public:
                              //     circuit's distinct, HIGHER corner ~1.78 kHz -> keeps the
                              //     low-mid grind that a single shared corner over-darkens).
                              //     0 -> fall back to muffLpHz. Only used when muffStages>1.
+        // --- ProCo RAT authenticity extras; 0 = the fixed-peak / no-slew behaviour ---
+        float midMigrate;    // >0: the mid PEAK FREQUENCY slides DOWN as Drive climbs
+                             //     (the LM308 gain-bandwidth product collapsing the closed-
+                             //     loop bandwidth -> the RAT's ~2.3 kHz hump at low gain
+                             //     drops toward ~300 Hz cranked). The endpoints are picked
+                             //     by the runtime Tight/Full toggle (setMigrateFull); the
+                             //     peak is log-interpolated by the Drive knob (circuit-
+                             //     consistent since log(preGain) is linear in Drive). 0 =
+                             //     the fixed midHz peak (every other model zero-fills this).
+        float slewMax;       // >0: LM308 slew-rate limit on the pre-clip op-amp output, in
+                             //     clip-normalized units/sample at a 48 kHz reference (scaled
+                             //     by 48000/fs at runtime). Rounds fast edges the way the
+                             //     RAT's slow op-amp does (smooth-but-aggressive grind; large-
+                             //     signal HF loss when cranked) -> level/rate dependent, so
+                             //     it's invisible to the small-signal frequency response.
+                             //     Applied in the hard-clip (adaa2) branch only. 0 = off.
     };
 
     // A specific pedal MODEL inside a category (Type). A category can hold several
@@ -300,14 +317,22 @@ public:
              { 3, 3.0f, 48.0f,  20.0f, 4000.0f, 4.7f, 0.68f,13000.0f, 0.00f, 1200.0f, 1.15f, 0.0f, 0.0f,  5.0f, 700.0f, 0.22f, 0.45f, 0.0f, 0.0f}, false},
         };
         static const Model dist[] = {
-            // model 0: circuit-fit ProCo RAT. Pre-clip gain-stage EQ (gentle low-cut +
-            // ~935 Hz hump + top roll) FIT to the LM308 stage at a ~1 kHz-hump Distortion
-            // setting (docs/drive/proco_rat_response.py, RMS 0.03 dB), bloomed with Drive
+            // model 0: circuit-fit ProCo RAT (the sole Distortion model -- the old
+            // simple hard-clip stand-in was retired, so this IS "Black Rodent"). Pre-clip
+            // gain-stage EQ (gentle low-cut + a mid hump + top roll) FIT to the LM308
+            // stage (docs/drive/proco_rat_response.py, RMS 0.03 dB), bloomed with Drive
             // (shapeTrack 1, PRE-clip so bass clips LEAST). Symmetric HARD clip (silicon
             // diodes to ground) on 2nd-order ADAA. Tone = the RAT "Filter" sweepable
             // low-pass (darker CW). Hot, calibration-referenced range (LM308 Gv up to ~2300).
+            // Two RAT-authentic behaviours the fixed voicing missed: (1) the hump
+            // MIGRATES down with Drive (midMigrate 1 -> the LM308 GBW collapse; Tight/Full
+            // toggle picks the endpoints); (2) the LM308 SLEW limit rounds fast edges
+            // (slewMax). midHz 935 stays the nominal noon anchor; the migration overrides
+            // the peak frequency per block. Trailing fields: gate 0, trebleShelfDb 0,
+            // muffStages/muffLpHz/muffInterLpHz 0, then midMigrate 1, slewMax.
             {"Black Rodent", "Hard-Clip Distortion",
-             { 1, 4.0f,150.0f,  62.0f,  935.0f,17.0f, 0.5f, 4800.0f, 0.00f, 1500.0f, 0.47f, 1.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.0f, 475.0f, 1.0f}, false},
+             { 1, 4.0f,150.0f,  62.0f,  935.0f,17.0f, 0.5f, 4800.0f, 0.00f, 1500.0f, 0.47f, 1.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.0f, 475.0f, 1.0f,
+               0.0f, 0.0f, 0.0f, 0.0f, 0.0f, /*midMigrate*/1.0f, /*slewMax*/2.5f}, false},
         };
         static const Model fuzz[] = {
             // model 0: circuit-fit germanium Fuzz Face (AC128, the "round" one). Voicing is
@@ -360,6 +385,8 @@ public:
     { int n = 0; const Model *a = modelsFor(c, n); return a && n > 0 && a[juce::jlimit(0, n - 1, m)].hasRange; }
     static bool modelHasGate(Kind c, int m) // exposes the bias-starved gate toggle (fuzz)
     { return voicingFor(c, m).gate > 0.0f; }
+    static bool modelHasMigrate(Kind c, int m) // exposes the RAT Tight/Full hump-migration toggle
+    { return voicingFor(c, m).midMigrate > 0.0f; }
 
     static Voicing voicingFor(Kind c, int m)
     {
@@ -495,10 +522,25 @@ public:
                 applyIo(s.io, ioFor(k, model)); // authentic input/output stage (impedance loading + coupling caps)
             }
 
-            const float preGain = v.gMin * std::pow(v.gMax / v.gMin, s.drive.load()); // log
+            const float drv = s.drive.load();
+            const float preGain = v.gMin * std::pow(v.gMax / v.gMin, drv); // log
             // How much of the pre-shaper EQ is engaged: static voicings use the
             // full EQ; for the overdrive the hump + bass-tighten scale with Drive.
-            const float shapeAmt = 1.0f - v.shapeTrack * (1.0f - s.drive.load());
+            const float shapeAmt = 1.0f - v.shapeTrack * (1.0f - drv);
+            // ProCo RAT hump MIGRATION: the LM308's gain-bandwidth product collapses the
+            // closed-loop bandwidth as the Distortion pot climbs, so the pre-clip mid PEAK
+            // slides DOWN with Drive. Re-derive the peaking biquad per block (state-
+            // preserving via copyCoeffsFrom -> no click) at a log-interpolated corner; the
+            // Tight/Full toggle picks the endpoints. Every other model has midMigrate 0 and
+            // keeps the config-time fixed peak (byte-exact).
+            if (v.midMigrate > 0.0f && v.midDb != 0.0f)
+            {
+                const bool full = s.migrateFull.load();
+                const float fHi = full ? kRatHumpFullHi : kRatHumpTightHi;
+                const float fLo = full ? kRatHumpFullLo : kRatHumpTightLo;
+                const float peakHz = fHi * std::pow(fLo / fHi, drv); // log-interp by the Drive knob
+                s.mid.copyCoeffsFrom(Biquad::peaking(sr, peakHz, v.midQ, v.midDb));
+            }
             const float hpCoef = (v.lowCutHz > 0.0f) ? coefForHz(v.lowCutHz, sr) : 0.0f;
             const float lpCoef = (v.lpHz > 0.0f) ? coefForHz(v.lpHz, sr) : 0.0f;
             const bool useMid = (v.midDb != 0.0f);
@@ -513,6 +555,8 @@ public:
             const bool softPoly = (cubic || asymCubic) && !cascade; // single-shaper poly path (cascade has its own branch)
             const double kn = asymCubic ? (1.0 - (double)v.bias) : 1.0; // clip-4 negative knee (asymmetry)
             const bool adaa2 = (v.adaa2 > 0.5f);          // 2nd-order ADAA for this clip (hard clip)
+            const bool useSlew = (v.slewMax > 0.0f);      // LM308 slew-rate limit (RAT hard-clip branch)
+            const float slewStep = useSlew ? v.slewMax * (48000.0f / (float)sr) : 0.0f; // units/sample, 48k-referenced
             const bool ratTone = (v.toneFilterHz > 0.0f); // Tone = sweepable post-clip LP (RAT "Filter")
             const double asym = (v.clip == 2) ? (double)v.bias : 0.0;     // type-2 rail
             const double inBias = (v.clip == 2 || v.clip == 4) ? 0.0 : (double)v.bias; // type 0/1/3 input bias (4 = in-shaper asym)
@@ -603,6 +647,7 @@ public:
             double adx1b = s.adaaX1b, adx2b = s.adaaX2b; // Big Muff stage-2 ADAA history
             float mLpPre = s.mLpPre, mHpInt = s.mHpInt, mLpInt = s.mLpInt; // cascade Miller LPs / inter HP
             float mtx1 = s.mtX1, mtx2 = s.mtX2, mty1 = s.mtY1, mty2 = s.mtY2; // Muff tone-stack biquad state
+            float slewPrev = s.slewPrev; // LM308 slew limiter running output (RAT)
 
             for (int i = 0; i < numSamples; ++i)
             {
@@ -673,10 +718,28 @@ public:
                     // ---- hard clip on 2nd-order ADAA (peak-guarded): Black Rodent
                     // (RAT) and Gold Horse (Klon). The pre-clip EQ (low-cut + mid hump) is
                     // already in u, so mids hit the diodes hardest and bass clips least. ----
+                    // LM308 SLEW LIMIT (RAT only, useSlew): the slow op-amp output can't move
+                    // faster than slewStep/sample, so it rounds the transit THROUGH the diode-
+                    // clamp band -> the hard clip's edges become ramps instead of vertical =
+                    // the RAT's aggressive-but-not-buzzy grind (and large-signal HF loss when
+                    // cranked). Applied to the op-amp output (u) before the diodes; the ceil
+                    // bounds the swing so the slew ramps don't alias past what the ADAA fixes.
+                    // The slew is a FOLLOWER of u (no feedback), so it can't wind up. Klon has
+                    // slewMax 0 -> untouched (byte-exact).
+                    if (useSlew)
+                    {
+                        float du = u - slewPrev;
+                        if (du > slewStep) du = slewStep;
+                        else if (du < -slewStep) du = -slewStep;
+                        slewPrev += du;
+                        if (slewPrev > kRatSlewCeil) slewPrev = kRatSlewCeil;
+                        else if (slewPrev < -kRatSlewCeil) slewPrev = -kRatSlewCeil;
+                        u = slewPrev;
+                    }
                     const double xb = (double)u + inBias;
                     const double y = clipHardADAA2(xb, adx1, adx2);
                     adx2 = adx1; adx1 = xb;
-                    const float cc = (float)y;
+                    float cc = (float)y;
                     // HEAVY parallel clean blend (the Klon "transparent" sum): mix the RAW
                     // full-range input back in -> restores the low end + dynamics that the
                     // mid-focused clipped path drops. Clean is at INPUT level (xin, NOT the
@@ -762,6 +825,7 @@ public:
             s.adaaX1b = flushD(adx1b); s.adaaX2b = flushD(adx2b);
             s.mLpPre = flush(mLpPre); s.mHpInt = flush(mHpInt); s.mLpInt = flush(mLpInt);
             s.mtX1 = flush(mtx1); s.mtX2 = flush(mtx2); s.mtY1 = flush(mty1); s.mtY2 = flush(mty2);
+            s.slewPrev = flush(slewPrev);
         }
     }
 
@@ -778,6 +842,17 @@ private:
                                                    // sustain ceiling at max — Robbie's moderate-default
                                                    // /hot-ceiling brief, instead of the always-pinned
                                                    // stock Muff)
+    // ---- ProCo RAT hump-migration endpoints (Hz), log-interpolated by the Drive knob.
+    // The peak slides from *Hi (Drive 0, LM308 wide-band) down to *Lo (Drive max, GBW
+    // collapsed). Tight = a tasteful, bounded slide that keeps a mid honk cranked; Full
+    // = the authentic collapse toward the real ~300 Hz. Both anchor near the fixed-voicing
+    // 935 Hz honk around noon (geo-mean ~965 / ~852). Ear-tunable (Robbie play-tests). ----
+    static constexpr float kRatHumpTightHi = 1500.0f, kRatHumpTightLo = 620.0f;
+    static constexpr float kRatHumpFullHi  = 2200.0f, kRatHumpFullLo  = 330.0f;
+    // LM308 slew: cap the op-amp output swing into the diodes (~rails, in clip-normalized
+    // units) so the slew-limited ramps stay bounded -> no runaway aliasing the ADAA can't
+    // catch. 1.5 = mildly-over-threshold (keeps hard-clip character, controls fold-back).
+    static constexpr float kRatSlewCeil = 1.5f;
 
     struct Slot
     {
@@ -789,6 +864,7 @@ private:
         std::atomic<int> model{0};
         std::atomic<bool> on{true};
         std::atomic<bool> gateOn{true}; // fuzz bias-starved gate enable (control, not DSP state)
+        std::atomic<bool> migrateFull{false}; // RAT hump migration range: false Tight / true Full (control)
         float hp = 0.0f, lp = 0.0f, toneLp = 0.0f, dcX1 = 0.0f, dcY1 = 0.0f;
         double x0 = 0.0; // 1st-order ADAA history (double)
         double adaaX1 = 0.0, adaaX2 = 0.0; // 2nd-order ADAA history (cubic, double)
@@ -799,6 +875,7 @@ private:
         double adaaX1b = 0.0, adaaX2b = 0.0; // stage-2 cubic 2nd-order ADAA history
         float mLpPre = 0.0f, mHpInt = 0.0f, mLpInt = 0.0f; // pre-clip Miller LP, inter-stage HP, inter-stage Miller LP
         float mtX1 = 0.0f, mtX2 = 0.0f, mtY1 = 0.0f, mtY2 = 0.0f; // passive Muff tone-stack biquad (Direct Form I)
+        float slewPrev = 0.0f; // LM308 slew-rate limiter running output (RAT)
         int lastKind = -1;
         Biquad mid;     // pre/post-shaper peak (state preserved across blocks)
         Biquad emphPre, emphPost; // pre/de-emphasis pair (clip 3)
@@ -808,7 +885,7 @@ private:
             hp = lp = toneLp = dcX1 = dcY1 = 0.0f; x0 = 0.0;
             adaaX1 = adaaX2 = 0.0; env = 0.0f; gpk = 0.0f; shX1 = shY1 = 0.0f;
             adaaX1b = adaaX2b = 0.0; mLpPre = mHpInt = mLpInt = 0.0f;
-            mtX1 = mtX2 = mtY1 = mtY2 = 0.0f;
+            mtX1 = mtX2 = mtY1 = mtY2 = 0.0f; slewPrev = 0.0f;
             lastKind = -1; mid.reset(); emphPre.reset(); emphPost.reset(); io.reset();
         }
     };

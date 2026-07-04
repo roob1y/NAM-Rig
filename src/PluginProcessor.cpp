@@ -179,6 +179,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
             juce::ParameterID(pid + "dLevel", 1), lbl + "Dist Volume",
             juce::NormalisableRange<float>(-12.0f, 12.0f, 0.1f), 0.0f,
             juce::AudioParameterFloatAttributes().withLabel("dB")));
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID(pid + "dMigrate", 1), lbl + "Dist Hump Range", false)); // RAT hump migration: false Tight / true Full
         // Fuzz: Fuzz / Volume (+ Tone, used only by the Big Muff model 2).
         params.push_back(std::make_unique<juce::AudioParameterFloat>(
             juce::ParameterID(pid + "fDrive", 1), lbl + "Fuzz",
@@ -1098,6 +1100,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
             mChain.drive.setTone(s, g("dTone"));
             mChain.drive.setLevelDb(s, g("dLevel"));
             mChain.drive.setRange(s, 0); mChain.drive.setModel(s, (int)g("bModel"));
+            mChain.drive.setMigrateFull(s, g("dMigrate") > 0.5f); // RAT hump range: Tight / Full
             break;
         case 4: // Fuzz (2 models: 0 Round Fuzz (Fuzz Face) / 1 Violet Ram (Big Muff))
             mChain.drive.setDrive(s, g("fDrive"));

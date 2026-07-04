@@ -49,6 +49,15 @@ static double rms(const std::vector<float> &x)
     double e = 0; for (float v : x) e += (double)v * v; return std::sqrt(e / x.size());
 }
 
+// Black Rodent (Distortion model 0 = circuit-fit ProCo RAT) authenticity constants,
+// mirroring the private DriveBlock kRat* (kept in sync here so the naive/ADAA mirrors
+// below reproduce the engine). The mid PEAK migrates DOWN with Drive (LM308 GBW
+// collapse); these are the Tight-toggle endpoints (the default). slew ceil bounds the
+// op-amp swing into the diodes.
+static constexpr float kRatTightHi = 1500.0f, kRatTightLo = 620.0f; // == DriveBlock kRatHumpTight{Hi,Lo}
+static constexpr float kRatSlewCeil = 1.5f;                          // == DriveBlock kRatSlewCeil
+static double ratPeakHz(float drive) { return kRatTightHi * std::pow(kRatTightLo / kRatTightHi, drive); }
+
 // Naive (memoryless) mirror of one DriveBlock slot, sharing the exact voicing
 // constants — identical to the block EXCEPT the shaper is pointwise (no ADAA).
 static std::vector<float> naiveSlot(Kind k, float drive, const std::vector<float> &in)
@@ -60,7 +69,8 @@ static std::vector<float> naiveSlot(Kind k, float drive, const std::vector<float
     const float hpCoef = (v.lowCutHz > 0.0f) ? 1.0f - (float)std::exp(-2.0 * M_PI * v.lowCutHz / SR) : 0.0f;
     const float lpCoef = (v.lpHz > 0.0f) ? 1.0f - (float)std::exp(-2.0 * M_PI * v.lpHz / SR) : 0.0f;
     const bool useMid = (v.midDb != 0.0f), useLp = (v.lpHz > 0.0f);
-    Biquad mid = useMid ? Biquad::peaking(SR, v.midHz, v.midQ, v.midDb) : Biquad::identity();
+    const float peakHz = (v.midMigrate > 0.0f) ? (float)ratPeakHz(drive) : v.midHz; // RAT peak migrates (Tight)
+    Biquad mid = useMid ? Biquad::peaking(SR, peakHz, v.midQ, v.midDb) : Biquad::identity();
     const double asym = (v.clip == 2) ? (double)v.bias : 0.0;
     const double inBias = (v.clip == 2) ? 0.0 : (double)v.bias;
     const float shapeAmt = 1.0f - v.shapeTrack * (1.0f - drive);
@@ -128,16 +138,29 @@ static std::vector<float> naiveCubic(float drive, const std::vector<float> &in)
     return y;
 }
 
-// Memoryless mirror of Black Rodent II (Distortion model 1): the SAME pre-clip
-// EQ (drive-scaled low-cut + ~935 Hz mid hump) + post low-pass, but a pointwise
-// hard clip instead of the 2nd-order ADAA. Alias baseline that isolates the ADAA.
+// hard-clip 2nd-order ADAA (copied from DriveBlock so the ADAA mirror below runs
+// the SAME clip the engine does -- lets us isolate the slew's sub-sample rounding).
+static double hF(double x) { return x > 1.0 ? 1.0 : (x < -1.0 ? -1.0 : x); }
+static double hF1(double x) { double a = std::abs(x); return a <= 1.0 ? 0.5 * x * x : a - 0.5; }
+static double hF2(double x) { double a = std::abs(x); if (a <= 1.0) return x * x * x / 6.0; double s = x < 0.0 ? -1.0 : 1.0; return s * (0.5 * a * a - 0.5 * a + 1.0 / 6.0); }
+static double hD(double a, double b) { double d = a - b; if (std::abs(d) < 1e-5) return hF1(0.5 * (a + b)); return (hF2(a) - hF2(b)) / d; }
+static double clipHardADAA2(double x, double x1, double x2) {
+    const double T = 1e-5;
+    if (std::abs(x - x1) < T) { double xb = 0.5 * (x + x2), dl = xb - x1; if (std::abs(dl) < T) return hF(0.5 * (xb + x1)); return (2.0 / dl) * (hF1(xb) + (hF2(x1) - hF2(xb)) / dl); }
+    if (std::abs(x - x2) < T) return (hF1(x) - hF1(x1)) / (x - x1);
+    return (2.0 / (x - x2)) * (hD(x, x1) - hD(x1, x2));
+}
+
+// Memoryless mirror of Black Rodent: the SAME pre-clip EQ (drive-scaled low-cut +
+// the MIGRATING mid hump, Tight) + post low-pass, but a pointwise hard clip instead
+// of the 2nd-order ADAA. Alias baseline that isolates the ADAA (T16).
 static std::vector<float> naiveDistII(float drive, const std::vector<float> &in)
 {
     const auto v = DriveBlock::voicingFor(Kind::Distortion, 0);
     const float pg = v.gMin * std::pow(v.gMax / v.gMin, drive);
     const float hpC = 1.0f - (float)std::exp(-2.0 * M_PI * v.lowCutHz / SR);
     const float lpC = 1.0f - (float)std::exp(-2.0 * M_PI * v.lpHz / SR);
-    Biquad mid = Biquad::peaking(SR, v.midHz, v.midQ, v.midDb);
+    Biquad mid = Biquad::peaking(SR, ratPeakHz(drive), v.midQ, v.midDb); // migrating peak (Tight)
     const float sAmt = 1.0f - v.shapeTrack * (1.0f - drive);
     const float kDcR = 0.9995f;
     std::vector<float> y(in.size());
@@ -154,6 +177,46 @@ static std::vector<float> naiveDistII(float drive, const std::vector<float> &in)
         y[i] = c * v.outTrim;
     }
     return y;
+}
+
+// ADAA mirror of Black Rodent (Tight migration + optional slew) -- runs the engine's
+// exact hard-clip ADAA so the slew's sub-sample edge rounding is visible (a pointwise
+// clip samples too coarsely to see it). slew on/off isolates the LM308 slew limit.
+static std::vector<float> ratAdaaMirror(float drive, const std::vector<float> &in, bool slew)
+{
+    const auto v = DriveBlock::voicingFor(Kind::Distortion, 0);
+    const float pg = v.gMin * std::pow(v.gMax / v.gMin, drive);
+    const float hpC = 1.0f - (float)std::exp(-2.0 * M_PI * v.lowCutHz / SR);
+    const float lpC = 1.0f - (float)std::exp(-2.0 * M_PI * v.lpHz / SR);
+    Biquad mid = Biquad::peaking(SR, ratPeakHz(drive), v.midQ, v.midDb);
+    const float sAmt = 1.0f - v.shapeTrack * (1.0f - drive);
+    const float step = v.slewMax * (48000.0f / (float)SR), kDcR = 0.9995f;
+    const float toneC = 1.0f - (float)std::exp(-2.0 * M_PI * 18000.0f / SR); // Filter open (tone 0)
+    std::vector<float> y(in.size());
+    float hp = 0, lpz = 0, low = 0, dcx = 0, dcy = 0, sp = 0; double x0 = 0, x1 = 0;
+    for (size_t i = 0; i < in.size(); ++i)
+    {
+        float u = in[i] * pg;
+        hp += hpC * (u - hp); u += sAmt * ((u - hp) - u);
+        { const float m = mid.processSample(u); u += sAmt * (m - u); }
+        if (slew) { float du = u - sp; if (du > step) du = step; else if (du < -step) du = -step; sp += du; if (sp > kRatSlewCeil) sp = kRatSlewCeil; else if (sp < -kRatSlewCeil) sp = -kRatSlewCeil; u = sp; }
+        double xb = (double)u; double yv = clipHardADAA2(xb, x0, x1); x1 = x0; x0 = xb;
+        float c = (float)yv;
+        lpz += lpC * (c - lpz); c += sAmt * (lpz - c);
+        const float dcOut = c - dcx + kDcR * dcy; dcx = c; dcy = dcOut; c = dcOut;
+        low += toneC * (c - low); y[i] = low * v.outTrim;
+    }
+    return y;
+}
+
+// Real RAT with the Tight/Full migration toggle set (small-signal or full-level).
+static std::vector<float> realSlotMig(bool full, float drive, float tone, const std::vector<float> &in)
+{
+    DriveBlock d;
+    d.setKind(0, (int)Kind::Distortion); d.setModel(0, 0); d.setDrive(0, drive);
+    d.setTone(0, tone); d.setLevelDb(0, 0.0f); d.setMigrateFull(0, full);
+    d.prepare({SR, BLK});
+    auto x = in; run(d, x); return x;
 }
 
 // harmonic energy (n=2..N) over the fundamental -- a THD-ish "how dirty" measure.
@@ -336,32 +399,69 @@ int main()
               "T14 v2 shaper @drive0: 780Hz +%.1f vs 100Hz, +%.1f vs 3k", midVs100, midVs3k);
     }
 
-    // ====== Black Rodent II (Distortion model 1): circuit-fit ProCo RAT ======
+    // ====== Black Rodent (Distortion model 0): circuit-fit ProCo RAT ======
+    // The RAT is the SOLE Distortion model -- the old simple hard-clip stand-in was
+    // retired, so model 0 IS the circuit-fit RAT (no legacy A/B target survives).
 
-    // ---- T15: model 0 byte-for-byte unchanged; category now has 2 models ----
+    // ---- T15: pin the shipped Black Rodent voicing (an accidental row edit trips
+    // these). Replaces the old tautological "== legacy default" A/B check (the legacy
+    // model it compared against is gone, so that CHECK could never fail). ----
     {
-        auto in = sine(220.0, 0.2f, 8192);
-        auto m0 = realSlotM(Kind::Distortion, 0, 0.7f, in);
-        auto def = realSlot(Kind::Distortion, 0.7f, in); // default model == 0
-        bool same = true;
-        for (size_t i = 0; i < in.size(); ++i) same = same && (m0[i] == def[i]);
-        CHECK(same, "T15 Dist model 0 == legacy default (A/B preserves the original Black Rodent)");
+        const auto v = DriveBlock::voicingFor(Kind::Distortion, 0);
         CHECK(DriveBlock::modelCount(Kind::Distortion) == 1, "T15 Distortion holds 1 model (Black Rodent)");
+        CHECK(v.clip == 1 && v.adaa2 > 0.5f, "T15 RAT hard clip (1) on 2nd-order ADAA");
+        CHECK(v.midHz == 935.0f && v.midDb == 17.0f && v.midQ == 0.5f, "T15 RAT nominal hump 935Hz/+17dB/Q0.5");
+        CHECK(v.gMin == 4.0f && v.gMax == 150.0f, "T15 RAT hot gain range 4..150 (LM308)");
+        CHECK(v.toneFilterHz == 475.0f, "T15 RAT Filter sweepable-LP darkest corner 475Hz");
+        CHECK(v.midMigrate > 0.0f, "T15 RAT hump migration ON");
+        CHECK(v.slewMax == 2.5f, "T15 RAT LM308 slew limit = 2.5 units/sample @48k");
+    }
+
+    // ---- T15b: the mid HUMP MIGRATES down with Drive (LM308 GBW collapse), and the
+    // Full toggle collapses it further than Tight. Small-signal 400/1400 Hz tilt: a
+    // lower peak passes more 400 relative to 1400, so the ratio RISES as the peak drops. ----
+    {
+        auto tilt = [&](bool full, float dr) {
+            auto g = [&](double f) { auto in = sine(f, 0.0004f, 16384); return goertzel(realSlotMig(full, dr, 0.0f, in), f) / goertzel(in, f); };
+            return g(400.0) / g(1400.0);
+        };
+        const double lo = tilt(false, 0.35f), hi = tilt(false, 0.85f);
+        CHECK(hi > lo * 1.5, "T15b RAT hump migrates down (Tight): 400/1400 tilt %.2f -> %.2f as Drive climbs", lo, hi);
+        const double tght = tilt(false, 0.85f), full = tilt(true, 0.85f);
+        CHECK(full > tght * 1.4, "T15b Full darker than Tight @Drive0.85: tilt %.2f > %.2f", full, tght);
+    }
+
+    // ---- T15c: the LM308 SLEW LIMIT rounds the hard-clip edges at high Drive. The
+    // effect is sub-sample at 48k, so it's invisible to a pointwise clip -- measured
+    // through the engine's own ADAA (ratAdaaMirror), slew on vs off, isolating it. ----
+    {
+        auto in = sine(1000.0, 0.20f, 24000);
+        auto topOct = [&](const std::vector<float> &y) { double e = 0; for (double f = 8000; f <= 16000; f *= 1.05) e += goertzel(y, f); return e; };
+        const double on = topOct(ratAdaaMirror(1.0f, in, true)), off = topOct(ratAdaaMirror(1.0f, in, false));
+        CHECK(on < off * 0.92, "T15c RAT slew rounds the top octave @maxdrive: %.2f < %.2f (%.0f%%)", on, off, 100.0 * on / off);
+        const double fOn = goertzel(ratAdaaMirror(1.0f, in, true), 1000.0), fOff = goertzel(ratAdaaMirror(1.0f, in, false), 1000.0);
+        CHECK(std::fabs(fOn - fOff) < fOff * 0.05, "T15c slew preserves the fundamental: %.0f ~ %.0f (<5%%)", fOn, fOff);
+        // the ADAA mirror tracks the real engine (ties the slew measurement to the shipped path)
+        const double fe = goertzel(realSlotMig(false, 1.0f, 0.0f, in), 1000.0), fm = goertzel(ratAdaaMirror(1.0f, in, true), 1000.0);
+        CHECK(std::fabs(fe - fm) < fe * 0.10, "T15c mirror tracks engine fundamental: eng %.0f ~ mirror %.0f (<10%%)", fe, fm);
     }
 
     // ---- T16: 2nd-order ADAA on the HARD clip crushes alias vs a naive hard clip ----
-    // Hard clipping fizzes the most; the RAT's pre-clip mid-hump + high gain make the
-    // 2nd-order win real here (a bare hard clip showed none -- so this is measured).
+    // Hard clipping fizzes the most. Probed at Drive 0.6 (well-driven): at the very top
+    // the LM308 SLEW already band-limits the 5 kHz and does the anti-alias work itself, so
+    // the ADAA has little left to cut there (that's the slew's job). At 0.6 the slew is
+    // gentler, isolating the 2nd-order ADAA. The naive shares the SAME migrating pre-clip
+    // EQ, so only ADAA vs pointwise differs. 5 kHz: 9th/7th harmonics fold to 3 k / 13 k.
     {
-        auto in = sine(5000.0, 0.05f, 48000); // 7th/9th harmonics fold to 13 k / 3 k
-        auto adaa = realSlotMT(Kind::Distortion, 0, 1.0f, 0.0f, in); // tone bright = Filter open
-        auto naive = naiveDistII(1.0f, in);
+        auto in = sine(5000.0, 0.05f, 48000);
+        auto adaa = realSlotMT(Kind::Distortion, 0, 0.6f, 0.0f, in); // tone bright = Filter open
+        auto naive = naiveDistII(0.6f, in);
         const double a3 = goertzel(adaa, 3000.0), n3 = goertzel(naive, 3000.0);
         const double a13 = goertzel(adaa, 13000.0), n13 = goertzel(naive, 13000.0);
-        CHECK(a3 < n3 * 0.3 && a13 < n13 * 0.3,
+        CHECK(a3 < n3 * 0.5 && a13 < n13 * 0.7,
               "T16 RAT ADAA2 cuts alias: 3k %.2e<%.2e, 13k %.2e<%.2e", a3, n3, a13, n13);
         const double redDb = 20.0 * std::log10(n3 / std::max(a3, 1e-12));
-        CHECK(redDb > 12.0, "T16 RAT alias@3k reduced by %.1f dB (2nd-order hard clip)", redDb);
+        CHECK(redDb > 6.0, "T16 RAT alias@3k reduced by %.1f dB (2nd-order hard clip)", redDb);
     }
 
     // ---- T17: model 1 never spikes (peak-guarded 2nd-order ADAA) -- maxabs sweep ----
@@ -387,19 +487,21 @@ int main()
               "T18 RAT Filter darker CW: 3k dark %.2e << bright %.2e (%.1fx)", dark, bright, bright / std::max(dark, 1e-12));
     }
 
-    // ---- T19: model 1 is a mid-forward RAT voicing that blooms with Drive ----
+    // ---- T19: the RAT is a mid-forward voicing that blooms with Drive ----
     // Small-signal probe (tiny amp -> stays linear even at the RAT's high gain): the
-    // ~935 Hz hump sits forward of bass+treble, and the bass tightens as Drive climbs
-    // (the LM308 gain stage's frequency-selective clipping, pre-clip + shapeTrack).
+    // hump sits forward of bass+treble, and the bass tightens as Drive climbs (the LM308
+    // gain stage's frequency-selective clipping, pre-clip + shapeTrack). At max Drive the
+    // hump has MIGRATED down (Tight ~620 Hz), so probe the migrated peak, not a fixed 935.
     {
         auto g = [&](double f, float dr) {
             auto in = sine(f, 0.0004f, 16384);
             return goertzel(realSlotM(Kind::Distortion, 0, dr, in), f) / goertzel(in, f);
         };
-        const double midVs100 = 20.0 * std::log10(g(935.0, 1.0f) / g(100.0, 1.0f));
-        const double midVs5k  = 20.0 * std::log10(g(935.0, 1.0f) / g(5000.0, 1.0f));
+        const double peak = ratPeakHz(1.0f); // ~620 Hz (Tight, the default toggle) at max Drive
+        const double midVs100 = 20.0 * std::log10(g(peak, 1.0f) / g(100.0, 1.0f));
+        const double midVs5k  = 20.0 * std::log10(g(peak, 1.0f) / g(5000.0, 1.0f));
         CHECK(midVs100 > 8.0 && midVs5k > 8.0,
-              "T19 RAT mid-forward @drive1: 935Hz +%.1f vs 100Hz, +%.1f vs 5k", midVs100, midVs5k);
+              "T19 RAT mid-forward @drive1: %.0fHz +%.1f vs 100Hz, +%.1f vs 5k", peak, midVs100, midVs5k);
         const double bass0 = 20.0 * std::log10(g(100.0, 0.0f) / g(1000.0, 0.0f));
         const double bass1 = 20.0 * std::log10(g(100.0, 1.0f) / g(1000.0, 1.0f));
         CHECK(bass1 < bass0 - 6.0,
