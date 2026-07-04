@@ -117,4 +117,31 @@ hardcoded `setModel(s, 0)` (the documented "2nd model" gotcha) — now reads `bM
 - **The Fuzz Face is mostly odd-harmonic + touch + gate**, not an octave box; the
   modest even-harmonic content (h2/h1 ~0.016) is realistic, not a miss.
 
+## 2026-07-04 — bias SAG (attack-end compression, UNCOMMITTED)
+
+The 2026-07-04 model review flagged the static bias: a real FF's operating
+point *walks with signal* (the bias network's caps are huge — 22 µF × 33 k ≈
+0.7 s — so hard playing shifts Q1's bias over tens of ms). The decay end of
+that behaviour was already the gate ("velcro"); this adds the **attack end**:
+
+- new zero-filled voicing field `sagDepth` (0.35 for Round Fuzz, 0 = byte-exact
+  everywhere else). A slow follower (attack ~60 ms, recovery ~250 ms) closes
+  the asym clip's **negative knee** (`kn`, floored) when the input exceeds
+  ~60 % of the calibrated picking reference (full sag at 160 %) — so
+  reference-level playing (and T30–T37's voiced behaviour) is untouched.
+- **what it sounds like:** dig in and the slammed note *dips* ~1 dB over
+  ~60 ms then holds, recovering as you back off — bias-sag compression, plus a
+  touch more duty asymmetry. NOT reactive auto-level: it's a fixed, thresholded
+  circuit behaviour, defeatable via `sagDepth 0`.
+- **measurement lesson (T69):** even-harmonic content is the WRONG metric for a
+  rail-closing sag — at fuzz gain the wave is a rail-to-rail square, and an
+  asymmetric-rail square at ~50 % duty is just DC + a scaled square; the DC
+  blocker eats the DC. RMS is also polluted by the DC blocker's ~40 ms charge.
+  **Peak-to-peak** is the honest observable: only the negative rail moves, and
+  pp is DC-immune. Measured: pp dips **11.1 %** (~1 dB) on a hot pick, ≤1.6 %
+  drift at reference level. T69 also pins sagDepth per model + determinism.
+
+Needs Windows build + play-test (listen for: hard hits bloom DOWN slightly and
+sputter, soft playing identical to before).
+
 Sources: ElectroSmash "Fuzz Face Analysis".
