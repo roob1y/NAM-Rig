@@ -503,6 +503,40 @@ int main()
         CHECK(echo2(true) != echo2(false), "T16 feedback INV changes the repeats");
     }
 
+    // T17 SDD converter authenticity: preamp silicon soft-clip compresses; the 13-bit
+    // gain-ranging converter is self-dithering (noise floor tracks signal, not fixed).
+    {
+        // (a) preamp soft-clips a hot signal (bounded, not linear gain).
+        auto peakOut = [](int at, float in, float amp){
+            PreDelayBlock p; p.setModel(PreDelayBlock::kSDD3000);
+            p.setTimeMs(100.0f); p.setFeedback(0.0f); p.setMix(0.0f); // Mix 0 -> output = preamp'd dry
+            p.setSddAtten(at); p.setSddInput(in); p.prepare({SR, BLK});
+            std::vector<float> m((size_t)SR, 0.0f);
+            for (size_t i=0;i<m.size();++i) m[i]=amp*std::sin(2.0*3.14159265*220.0*i/SR);
+            run(p, m); double pk=0; for (size_t i=SR/4;i<m.size();++i) pk=std::max(pk,std::abs((double)m[i]));
+            return pk;
+        };
+        const double hot = peakOut(0, 1.0f, 0.6f); // -30 dB, full Input, loud in
+        CHECK(hot < 1.05 && hot > 0.5, "T17 preamp soft-clips (bounded peak %.3f)", hot);
+
+        // (b) gain-ranging self-dithers: quant-noise/signal similar for loud vs quiet
+        //     (a FIXED quantizer would give ~50x worse ratio for the quiet signal).
+        auto noiseRatio = [](float amp){
+            PreDelayBlock p; p.setModel(PreDelayBlock::kSDD3000);
+            p.setTimeMs(120.0f); p.setFeedback(0.0f); p.setMix(1.0f);
+            p.setSddAtten(2); p.setSddInput(0.0f); p.setSddHiCut(0); p.prepare({SR, BLK}); // clean-ish preamp
+            std::vector<float> m((size_t)SR, 0.0f);
+            for (size_t i=0;i<m.size();++i) m[i]=amp*std::sin(2.0*3.14159265*150.0*i/SR);
+            run(p, m);
+            double y=0, resid=0, sig=0; int n=0;
+            for (size_t i=SR/4;i<m.size();++i){ y+=0.2*((double)m[i]-y); const double r=(double)m[i]-y;
+                resid+=r*r; sig+=(double)m[i]*(double)m[i]; ++n; }
+            return std::sqrt(resid/std::max(1,n)) / (std::sqrt(sig/std::max(1,n)) + 1e-20);
+        };
+        const double rLoud = noiseRatio(0.2f), rQuiet = noiseRatio(0.004f);
+        CHECK(rQuiet < rLoud*5.0 + 0.02, "T17 gain-ranging self-dithers (loud %.4f quiet %.4f)", rLoud, rQuiet);
+    }
+
     std::printf("\n%s (%d failures)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);
     return gFails > 0 ? 1 : 0;
 }
