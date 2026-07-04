@@ -105,10 +105,18 @@ int main()
             pm.setDepth(1.0f);
             pm.setMix(0.0f);
         });
+        // With Mix=0 no wet is added, but the pedal's authentic input/output stage
+        // still colours the signal (the real CE-2's ~407k input loads the guitar), so
+        // "transparent" now means it settles to the IoStage-processed dry, not raw x.
+        std::vector<float> ref = x;
+        IoStage io; io.prepare(fs);
+        PreModBlock::applyIo(io, PreModBlock::ioFor(PreModBlock::kChorus));
+        io.processIn(ref.data(), (int)ref.size());
+        io.processOut(ref.data(), (int)ref.size());
         const size_t half = x.size() / 2; // past the 10 ms smoothing ramp
         float maxDev = 0.0f;
-        for (size_t i = half; i < x.size(); ++i) maxDev = std::max(maxDev, std::fabs(y[i] - x[i]));
-        check(maxDev < 1.0e-4f, "T2 Mix=0 settles to dry (transparent)");
+        for (size_t i = half; i < x.size(); ++i) maxDev = std::max(maxDev, std::fabs(y[i] - ref[i]));
+        check(maxDev < 1.0e-4f, "T2 Mix=0 settles to dry through the IoStage (no wet added)");
     }
 
     // T3: the chorus wet path moves (swept vs a fixed LFO). Compare a normal
@@ -269,18 +277,28 @@ int main()
             pm.setType(PreModBlock::kTremolo);
             pm.setRateHz(5.0f); pm.setDepth(0.8f); pm.setWave(0.3f);
         });
+        // Cut-only is relative to what actually enters the VCA (i.e. after the pedal's
+        // input stage), so compare against the IoStage-processed input, not raw x.
+        std::vector<float> ref = x;
+        { IoStage io; io.prepare(fs); PreModBlock::applyIo(io, PreModBlock::ioFor(PreModBlock::kTremolo));
+          io.processIn(ref.data(), (int)ref.size()); io.processOut(ref.data(), (int)ref.size()); }
         check(allFinite(y), "T15 tremolo finite");
-        check(maxAbs(y) <= maxAbs(x) + 1.0e-4f, "T15 tremolo cut-only (no boost above input)");
+        check(maxAbs(y) <= maxAbs(ref) + 1.0e-3f, "T15 tremolo cut-only (never boosts above what enters the VCA)");
         check(rmsDiff(x, y) > 1.0e-3, "T16 tremolo modulates (differs from dry)");
     }
     {
         auto y = run(x, fs, [](PreModBlock &pm) {
             pm.setType(PreModBlock::kTremolo); pm.setRateHz(5.0f); pm.setDepth(0.0f);
         });
+        std::vector<float> ref = x;
+        IoStage io; io.prepare(fs);
+        PreModBlock::applyIo(io, PreModBlock::ioFor(PreModBlock::kTremolo));
+        io.processIn(ref.data(), (int)ref.size());
+        io.processOut(ref.data(), (int)ref.size());
         const size_t half = x.size() / 2;
         float dev = 0.0f;
-        for (size_t i = half; i < x.size(); ++i) dev = std::max(dev, std::fabs(y[i] - x[i]));
-        check(dev < 1.0e-4f, "T17 tremolo Depth 0 is transparent");
+        for (size_t i = half; i < x.size(); ++i) dev = std::max(dev, std::fabs(y[i] - ref[i]));
+        check(dev < 1.0e-4f, "T17 tremolo Depth 0 settles to dry (buffered IoStage transparent)");
     }
 
     // T19-21: Uni-Vibe — finite/bounded, swept staggered notches move, and
@@ -310,6 +328,32 @@ int main()
             pm.setType(PreModBlock::kUniVibe); pm.setRateHz(1.0f); pm.setDepth(0.8f); pm.setMix(1.0f);
         });
         check(allFinite(vibrato) && rmsDiff(chorus, vibrato) > 1.0e-3, "T21 uni-vibe Chorus vs Vibrato mode differ");
+    }
+
+    // T22-24: authentic IoStage (impedance loading + coupling caps). A 200 Hz and a
+    // 3 kHz probe through each pedal's front/back end: the Uni-Vibe's 69k input load
+    // must cut the 3 kHz (pickup-peak region) relative to 200 Hz; the TR-2's 1 MOhm
+    // FET input must stay essentially flat; and the anchor table must classify them.
+    {
+        auto probe = [&](PreModBlock::Type t, double f) {
+            std::vector<float> s((size_t)n);
+            for (int i = 0; i < n; ++i) s[(size_t)i] = (float)std::sin(2.0 * M_PI * f * i / fs);
+            IoStage io; io.prepare(fs);
+            PreModBlock::applyIo(io, PreModBlock::ioFor(t));
+            io.processIn(s.data(), n);
+            io.processOut(s.data(), n);
+            float m = 0.0f; for (int i = n / 2; i < n; ++i) m = std::max(m, std::fabs(s[(size_t)i]));
+            return m;
+        };
+        const float uLo = probe(PreModBlock::kUniVibe, 200.0);
+        const float uHi = probe(PreModBlock::kUniVibe, 3000.0);
+        const float tLo = probe(PreModBlock::kTremolo, 200.0);
+        const float tHi = probe(PreModBlock::kTremolo, 3000.0);
+        check(uHi < uLo * 0.85f, "T22 Uni-Vibe 69k input loads down the top (treble-suck shelf)");
+        check(tHi > tLo * 0.98f && tHi < tLo * 1.02f, "T23 TR-2 1M FET input is flat (transparent)");
+        check(PreModBlock::ioFor(PreModBlock::kUniVibe).shelfCutDb < 0.0f
+                  && PreModBlock::ioFor(PreModBlock::kTremolo).shelfCutDb == 0.0f,
+              "T24 anchors: Uni-Vibe loaded (shelf) vs TR-2 buffered (no shelf)");
     }
 
     std::printf("%s (%d failures)\n", g_fail == 0 ? "ALL PASS" : "FAILURES", g_fail);

@@ -28,12 +28,13 @@
 //     trim removes the polynomial's even-harmonic DC; de-zippered params.
 //
 // STATE: all five are voiced — CHORUS (CE-2), PHASER (Phase 90 / Small Stone),
-// FLANGER (BBD, M117 / Electric Mistress), TREMOLO (Boss TR-2) and UNI-VIBE
+// FLANGER (MXR EVH117 / M117R -- identical circuit), TREMOLO (Boss TR-2) and UNI-VIBE
 // (Shin-ei). Mono; zero reported latency. JUCE-free core DSP, verified by
 // tests/premod_test.cpp.
 
 #include "Blocks.h"
 #include "Lfo.h"
+#include "IoStage.h"
 #include <algorithm>
 #include <cmath>
 
@@ -71,12 +72,14 @@ public:
     // (closed-form feedback) so the resonance stays tuned and stable even on a fast
     // sweep — a plain unit-delay loop mistunes the notches and blows up (per DAFx).
     static constexpr int kPhaserStages = 4;
-    static constexpr double kPhaserCenterHz = 500.0; // sweep centre of the all-pass corner
-    static constexpr double kPhaserOctaves = 2.2;    // ± sweep width (octaves) at Depth 1
+    static constexpr double kPhaserRestHz = 141.0;   // at-rest all-pass corner (JFET at max R):
+                                                     // notches sit at 58.5 & 340.8 Hz (ElectroSmash)
+    static constexpr double kPhaserOctaves = 3.9;    // UPWARD sweep span (octaves) at Depth 1 --
+                                                     // the JFET only ever RAISES the corner from rest
     static constexpr float kPhaserFbMax = 0.70f;     // musical feedback ceiling; kept modest so the swept
                                                      // resonance peak doesn't spike the level as it crosses a note
 
-    // ---- flanger voicing (BBD flanger: MXR M117 / Electric Mistress family) ----
+    // ---- flanger voicing (BBD flanger: MXR EVH117 / M117R -- identical circuit) ----
     // A SHORT swept delay makes a harmonically-spaced comb (notches at odd multiples
     // of 1/2t, peaks at n/t); as the delay sweeps, the whole comb sweeps = the "jet".
     // Feedback (regen) reinforces the peaks into the resonant metallic sweep; it's
@@ -89,10 +92,11 @@ public:
     static constexpr double kFlManualMinMs = 0.5;  // Manual 0 -> shortest base delay
     static constexpr double kFlManualMaxMs = 8.0;  // Manual 1 -> longest base delay
     static constexpr double kFlSweepMs = 6.0;      // sweep excursion above the base at Depth 1
-    static constexpr double kFlMaxMs = 14.0;       // hard clamp on the swept delay
+    static constexpr double kFlMaxMs = 12.8;       // EVH117/M117R published max delay (12.8 ms)
     static constexpr float kFlFbMax = 0.78f;    // regen ceiling; the feedback state is also soft-clipped
                                                 // so high regen self-limits (like an analog flanger) instead of spiking
     static constexpr double kFlFbLpHz = 6500.0; // one-pole low-pass in the feedback path (tames fizz)
+    static constexpr double kFlWetLpHz = 8200.0; // flanger reconstruction ceiling -- brighter than the CE-2's 6.6k so the comb's upper notches (the "jet") stay audible
 
     // ---- tremolo voicing (Boss TR-2: VCA amplitude modulation) ----
     // Wave morphs the triangle LFO toward a TRAPEZOID (steeper sides, flat top) by
@@ -113,8 +117,8 @@ public:
     static constexpr double kUniCenterHz = 430.0; // geometric centre of the staggered stages
     static constexpr double kUniMult[4] = {0.616, 0.042, 19.6, 1.97}; // staggered ratios (from the caps)
     static constexpr double kUniOctaves = 1.2;    // sweep width (octaves) at Depth 1
-    static constexpr float kUniLampHeatMs = 8.0f; // lamp heats fast
-    static constexpr float kUniLampCoolMs = 55.0f;// ...cools slow (the lopsided sweep)
+    static constexpr float kUniLampHeatMs = 12.0f; // lamp filament heats fast (~10-40 ms, DAFx-19)
+    static constexpr float kUniLampCoolMs = 110.0f;// ...and cools much slower -> the lopsided "throb"
     static constexpr float kUniGamma = 1.5f;      // LDR power-law transfer (fc ~ light^gamma)
     static constexpr float kUniAmDepth = 0.08f;   // subtle photocell amplitude throb
     static constexpr float kUniFbMax = 0.5f;      // hot-rod feedback ceiling (stock = 0)
@@ -133,8 +137,55 @@ public:
         if (t == kChorus) return kChorusMaxRateHz; // 3.5 Hz (CE-2 ceiling)
         if (t == kPhaser) return 5.0f;             // Phase 90 tops ~5 Hz
         if (t == kTremolo) return 12.0f;           // TR-2 tops ~11 Hz
-        if (t == kUniVibe) return 8.0f;            // Uni-Vibe tops ~7.6 Hz
+        if (t == kUniVibe) return 7.6f;            // Uni-Vibe tops ~7.6 Hz (DAFx-19 measured)
         return 10.0f;                              // flanger (A/DA to 10 Hz)
+    }
+
+    // Per-type wet reconstruction ceiling: the CE-2 chorus is dark (~6.6 kHz Sallen-
+    // Key reconstruction); the EVH117 flanger runs a faster BBD clock and stays
+    // brighter so its comb sings. Non-BBD types don't use the wet low-pass.
+    static double wetLpHzFor(Type t) { return (t == kFlanger) ? kFlWetLpHz : kWetLpHz; }
+
+    // ---- authentic input/output stage (impedance loading + coupling caps) ----
+    // The guitar is DI'd at ~1 MOhm, so we model only the DELTA each pedal's real
+    // input impedance adds vs that reference: a low Zin damps the pickup's resonant
+    // peak (~2.7-3 kHz) and drops a little level; a buffered/high-Z input is just its
+    // DC-blocking coupling high-passes. Verified Zin per pedal (research 2026-07-04):
+    //   CE-2     ~407 kOhm (R2 470k)        -> gentle damp   (ElectroSmash)
+    //   Phase 90 ~470 kOhm, C5 10n          -> gentle damp, ~33 Hz coupling
+    //   EVH117   470 kOhm (spec), 1k out    -> gentle damp
+    //   TR-2     1 MOhm FET input           -> transparent (just coupling)
+    //   Uni-Vibe 69 kOhm (22k + 47k divider)-> STRONG treble-suck load (geofex)
+    struct IoAnchors { float inHpHz, shelfHz, shelfCutDb, inLevelDb, inLpHz, outHpHz, outLevelDb; };
+    static IoAnchors ioFor(Type t)
+    {
+        switch (t)
+        {
+        // CE-2: buffered emitter-follower, but Zin ~407k (below a modern 1M) loads the
+        // pickup slightly -> a gentle resonance damp like the TS. Coupling ~8 Hz;
+        // reconstruction output HP ~14.6 Hz.
+        case kChorus:  return { 8.0f, 2800.0f, -1.0f, -0.2f, 0.0f, 15.0f, 0.0f };
+        // Phase 90: buffered input ~470k with C5 10n -> ~33 Hz coupling; gentle damp;
+        // discrete PNP output stage HP ~22 Hz.
+        case kPhaser:  return { 33.0f, 3000.0f, -1.0f, -0.2f, 0.0f, 22.0f, 0.0f };
+        // EVH117/M117R: op-amp buffered ~470k -> gentle damp; 1k output, low coupling.
+        case kFlanger: return { 8.0f, 3000.0f, -1.0f, -0.2f, 0.0f, 8.0f, 0.0f };
+        // TR-2: 1 MOhm JFET input -> transparent (matches the DI); just the coupling
+        // caps (C1 27n ~5.9 Hz in, C4 0.1u out).
+        case kTremolo: return { 6.0f, 0.0f, 0.0f, 0.0f, 0.0f, 7.0f, 0.0f };
+        // Uni-Vibe: 22k series + 47k-to-ground = 69k load -> "significant treble loss
+        // to single coils" (geofex). Above 47k so a strong (not total) loading shelf +
+        // a small level drop. Input coupling ~45 Hz; output effectively full-range.
+        case kUniVibe: return { 45.0f, 2800.0f, -3.0f, -0.5f, 0.0f, 12.0f, 0.0f };
+        default:       return { 8.0f, 0.0f, 0.0f, 0.0f, 0.0f, 8.0f, 0.0f };
+        }
+    }
+    static void applyIo(IoStage &io, const IoAnchors &a)
+    {
+        if (a.shelfCutDb != 0.0f)
+            io.setLoaded(a.inHpHz, a.shelfHz, a.shelfCutDb, a.inLevelDb, a.outHpHz, a.outLevelDb);
+        else
+            io.setBuffered(a.inHpHz, a.outHpHz, a.inLpHz, a.outLevelDb);
     }
 
     const char *name() const override { return "Pre Mod"; }
@@ -146,8 +197,10 @@ public:
         mLine.prepare((int)std::ceil(maxDelayMs * 0.001 * mFs));
         mLfo.prepare(mFs);
         mSmoothK = 1.0f - std::exp((float)(-1.0 / (0.010 * mFs))); // 10 ms de-zip
-        rbjLowpass(kWetLpHz, 0.70710678, mFs, mLpB0, mLpB1, mLpB2, mLpA1, mLpA2);
+        rbjLowpass(wetLpHzFor(mType), 0.70710678, mFs, mLpB0, mLpB1, mLpB2, mLpA1, mLpA2);
         mHpCoef = coefForHz(kWetHpHz, mFs);
+        mIo.prepare(mFs);
+        applyIo(mIo, ioFor(mType)); // authentic input/output stage for the current pedal
         mFlFbCoef = coefForHz(kFlFbLpHz, mFs);
         mTremCoef = coefForMs(kTremSlewMs, mFs);
         mUniHeatCoef = coefForMs(kUniLampHeatMs, mFs);
@@ -160,6 +213,7 @@ public:
     {
         mLine.reset();
         mLfo.reset();
+        mIo.reset();
         mLpZ1 = mLpZ2 = 0.0f;
         mHpLp = 0.0f;
         mNlX1 = 0.0;
@@ -180,7 +234,17 @@ public:
     void setType(int t)
     {
         const Type ty = (Type)std::min(std::max(t, 0), (int)kNumTypes - 1);
-        if (ty != mType) { mType = ty; if (mPrepared) reset(); }
+        if (ty != mType)
+        {
+            mType = ty;
+            if (mPrepared)
+            {
+                // per-type wet ceiling + the new pedal's authentic input/output stage
+                rbjLowpass(wetLpHzFor(mType), 0.70710678, mFs, mLpB0, mLpB1, mLpB2, mLpA1, mLpA2);
+                applyIo(mIo, ioFor(mType));
+                reset();
+            }
+        }
     }
     void setRateHz(float hz) { mFreeRateHz = hz; }
     void setSyncIndex(int i) { mSyncIndex = i; } // 0 = Off (free)
@@ -200,6 +264,10 @@ public:
 
     void process(float *mono, int numSamples) override
     {
+        // front-end: coupling HP + impedance-loading shelf -> colours what the pedal
+        // (and its LFO-swept filters/delays) sees, like the real input stage loading
+        // the guitar.
+        mIo.processIn(mono, numSamples);
         mLfo.setRateHz(effectiveRateHz());
         // Uni-Vibe's LFO is a sine (then the lamp lag skews it); the others use triangle.
         mLfo.setWaveform(mType == kUniVibe ? Lfo::Sine : Lfo::Triangle);
@@ -213,6 +281,7 @@ public:
             mono[i] = processSample(mono[i]);
             mLfo.advance();
         }
+        mIo.processOut(mono, numSamples); // back-end: output coupling HP + level
         flushDenormals();
     }
 
@@ -252,9 +321,13 @@ private:
             // Phase-90 notch structure) resolves in closed form with no unit delay:
             //   u = (x - k·B)/(1 + k·A);  denom > 0 for all k >= 0 -> always stable.
             const float lfo = mLfo.value(); // triangle [-1, 1]
+            // Authentic Phase 90 sweep: the JFET only ever RAISES the all-pass corner
+            // above its rest value, so it sweeps UPWARD from kPhaserRestHz (notches
+            // 58.5/340.8 Hz at rest) rather than symmetrically about a centre.
+            const double up = 0.5 + 0.5 * (double)lfo; // triangle -> [0, 1]
             const double fc = std::min(
                 0.45 * mFs,
-                std::max(20.0, kPhaserCenterHz * std::pow(2.0, (double)lfo * kPhaserOctaves
+                std::max(20.0, kPhaserRestHz * std::pow(2.0, up * kPhaserOctaves
                                                                     * (double)mDepthZ)));
             const double g = std::tan(3.14159265358979323846 * fc / mFs);
             const float G = (float)(g / (1.0 + g));
@@ -455,6 +528,7 @@ private:
     float mFlFbState = 0.0f, mFlFbLp = 0.0f, mFlFbCoef = 1.0f; // flanger regen state + tone-shape
     float mTremG = 1.0f, mTremCoef = 1.0f;                     // tremolo smoothed gain + de-click coef
     float mUniLamp = 0.5f, mUniHeatCoef = 1.0f, mUniCoolCoef = 1.0f; // uni-vibe lamp thermal state + coeffs
+    IoStage mIo; // authentic per-pedal input/output stage (impedance loading + coupling caps)
 
     float mDepth = 0.5f, mMix = 0.5f, mFeedback = 0.0f, mManual = 0.15f, mWave = 0.3f;
     float mDepthZ = 0.5f, mMixZ = 0.5f, mFeedbackZ = 0.0f, mManualZ = 0.15f, mWaveZ = 0.3f, mSmoothK = 0.01f;
