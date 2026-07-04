@@ -300,9 +300,8 @@ public:
             // is a near-clean boost (the Klon reputation), distorting more as Drive climbs.
             // Bright/open top (lpHz 4700, the 27V headroom feel). Modest
             // gMin (genuinely clean min), moderate gMax (~the real 40 dB), lots of output
-            // (outTrim -- it is also a boost). Tone = treble tilt ~450 Hz (the active
-            // treble-shelf corner ~408 Hz, approximated by the engine tilt). Calibrated.
-            // tone = ACTIVE treble shelf (trebleShelfDb 18 @ pivot 408 Hz): the real
+            // (outTrim -- it is also a boost). Calibrated.
+            // Tone = ACTIVE treble shelf (trebleShelfDb 18 @ pivot 408 Hz): the real
             // Klon high-shelf (bass fixed, +18/-8 dB), noon = flat. NOT the engine tilt.
             {"Gold Horse", "Transparent Overdrive",
              { 1, 2.0f, 70.0f, 210.0f,  980.0f, 3.2f, 0.3f, 4700.0f, 0.00f,  408.0f, 0.95f, 1.0f, 0.0f,  0.0f, 700.0f, 0.30f, 0.30f, 0.0f, 1.0f, 0.0f, 18.0f,

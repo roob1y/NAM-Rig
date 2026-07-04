@@ -48,10 +48,10 @@ response from −15 dB (clipped alone) to **−4.7 dB** (open, full low end).
 ## 3. The clip + the clean sum (the actual work)
 
 Clip **type 1 (hard, symmetric)** on **2nd-order ADAA** — same clean hard-clip path
-as Black Rodent II (the germanium diodes are a symmetric hard clip to ground).
+as Black Rodent (the germanium diodes are a symmetric hard clip to ground).
 
 The identity is the **heavy parallel clean blend**, which the engine only had on the
-soft-poly clips (3/4). Added to the **hard-clip path** (guarded so Black Rodent II,
+soft-poly clips (3/4). Added to the **hard-clip path** (guarded so Black Rodent,
 `cleanBlend 0`, stays byte-exact — regression T46):
 
 - The clean is the **RAW input** (`xin`), full-range and flat, so it restores the
@@ -80,7 +80,7 @@ soft-poly clips (3/4). Added to the **hard-clip path** (guarded so Black Rodent 
   Klon reputation). T48.
 
 Measured character (humbucker): THD climbs 0.001 → 0.02 → 0.20 → 0.52 across the
-Drive sweep (cleaner than both Green Drive II and Super Drive at low/mid Drive — the
+Drive sweep (cleaner than both Green Drive and Super Drive at low/mid Drive — the
 transparent feel); lows stay present at playing levels (100 Hz within ~0.4 dB of
 1 kHz, T47); symmetric so even harmonics stay low (h2/h1 ~0, T49, unlike the asym
 Super Drive).
@@ -88,7 +88,7 @@ Super Drive).
 ## 4. Range, output, tone, feel
 
 - **Faithful Klon** (Robbie's call): `gMin 2` (genuinely clean at minimum — clean
-  boost), `gMax 70` (~the real 40 dB), `outTrim 0.95` (≈ Green Drive II at noon;
+  boost), `gMax 70` (~the real 40 dB), `outTrim 0.95` (≈ Green Drive at noon;
   the Klon's famous *boost* comes from the per-slot **Level** knob, kept safe so the
   parallel clean sum doesn't overshoot the amp). Calibration-referenced; humbucker
   drives harder than single-coil (fixed clip threshold).
