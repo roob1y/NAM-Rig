@@ -1,9 +1,14 @@
-# Pre-Amp Delay Pedal — Handoff for the NEXT character
+# Pre-Amp Delay Pedal — Handoff / method + iteration notes
 
-**READ THIS FIRST before voicing the next delay pedal.** It captures the method,
-architecture, standards, and hard-won gotchas from building the Boss DD-7 (the first
-of four). The bar here is the drive-pedal bar: **circuit-fit from the REAL schematic,
-no guessing, flag what can't be verified, verify offline, judge by ear.**
+**READ THIS FIRST, then the per-pedal docs + `MODEL_REVIEW_2026-07-04.md`.** It captures
+the method, architecture, standards, and hard-won gotchas from voicing the three delay
+models. The bar here is the drive-pedal bar: **circuit-fit from the REAL schematic/service
+data, no guessing, flag what can't be verified, verify offline, judge by ear.**
+
+**STATUS (2026-07-04): all THREE models are built + circuit-researched — there is no
+"next pedal."** The KORG SDD-3000 (formerly model 3) was REMOVED at Robbie's request
+(`docs/predelay/sdd3000.md`). Remaining work is ear-driven ITERATION and closing the
+few FLAGGED items (see §6 + the review doc), not a new character.
 
 Related memory (loaded every session via MEMORY.md): `[[pre-amp-delay-pedal]]` (the full
 worklog), `[[robbie]]`, `[[drives-build-worklog]]`, `[[drive-io-stages]]`,
@@ -14,19 +19,19 @@ Per-pedal circuit doc: `docs/predelay/dd7.md` (the DD-7 verified circuit).
 
 ## 1. What this is
 
-A NEW **mono, front-of-amp delay pedal** — `src/rig/PreDelayBlock.h` — that sits in the
+A **mono, front-of-amp delay pedal** — `src/rig/PreDelayBlock.h` — that sits in the
 shared pre section (after the drive rack, before the A/B split), switchable pre/post
-drive. It is DISTINCT from the existing post-cab **stereo** `DelayBlock`. It hosts four
-per-model voicings, chosen by Robbie:
+drive. It is DISTINCT from the existing post-cab **stereo** `DelayBlock`. It hosts THREE
+per-model voicings, chosen by Robbie, **all circuit-researched**:
 
-- **0 Boss DD-7** — clean digital. **DONE + circuit-verified.**
-- **1 MXR Carbon Copy** — dark analog BBD. **NEXT.** (placeholder voicing, must be replaced)
-- **2 EHX Deluxe Memory Man** — lush analog BBD. placeholder.
-- **3 Korg SDD-3000** — bright colored early digital. placeholder.
+- **0 Boss DD-7** — clean digital. DONE, verified from the 2008 Roland service notes (`dd7.md`).
+- **1 MXR Carbon Copy** — dark analog BBD (4× BL3208, SA571). DONE (`carbon_copy.md`).
+- **2 EHX Deluxe Memory Man** — lush analog BBD (2× MN3005, crossfade Blend, triangle LFO).
+  DONE (`memory_man.md`); REVOICED 2026-07-04 from the factory calibration (see the review doc).
 
-**The Carbon Copy / Memory Man / SDD-3000 voicings currently in the code are educated
-placeholders written BEFORE the circuit-research standard. Do NOT trust them. Each pedal
-gets its own deep-research pass and a fresh, circuit-grounded voicing.**
+(Former **3 Korg SDD-3000** — REMOVED 2026-07-04, `sdd3000.md`.) The voicings are grounded
+in each real circuit; the remaining unknowns are FLAGGED per model (schematic images for the
+two BBDs are bot-blocked) and offered as controlled-probe "measure it" items.
 
 ---
 
@@ -67,11 +72,16 @@ bool  bbd;          // analog BBD: bandwidth tracks the clock (darkens with time
 float maxTimeMs;    // the pedal's REAL max delay
 float bbdStages;    // total BBD stages -> Nyquist(time) = stages/(4*tSec); ignored if !bbd
 float antiAliasHz;  // fixed reconstruction/anti-alias LP ceiling (IN-LOOP, recirculates)
+float bwQ;          // Q of that in-loop LP: 0.5 = dark/non-resonant; >0.707 = a RESONANT
+                    //   reconstruction filter -> a presence peak just below the corner
+                    //   (Memory Man's factory-measured ~2.5 kHz peak = bwQ 1.30)
 float loopHpHz;     // in-loop low-cut (bass build control); 0 = off
-float midHz,midDb,midQ;   // in-loop mid bump (Memory Man's documented mid boost); 0 dB = off
+float midHz,midDb,midQ;   // in-loop mid bump; 0 dB = off (DMM now uses bwQ, not this)
 float satDrive,satAsym;   // companding/preamp soft-clip knee (cubic ADAA, in-loop); 0 = clean
 float presHz,presDb;      // OUTPUT-ONCE presence sheen (digital top); 0 dB = off
-float modRateHz,modDepthMs; // built-in modulation (user Mod knob scales depth)
+float modRateHz,modDepthMs; // DIGITAL (DD-7 Modulate) modulation: fixed-ms chorus depth
+float modDepthFrac; // BBD modulation: clock warble = a FRACTION of the delay time (varicap
+                    //   on the clock -> pitch swing scales with time). DMM factory = 0.10 (±10%)
 float glideMs;      // time-change feel: analog = slow pitch-bend swoop; digital = quick
 float fbCeiling;    // feedback ceiling; >1 => self-oscillates (loopLimit bounds it)
 ```
@@ -143,19 +153,22 @@ reads backward at 2× rate — needs a 2× ring). `predelay_test` = T1–T12, **
 
 ---
 
-## 6. NEXT: MXR Carbon Copy (M169) — what its research must nail
+## 6. Remaining FLAGGED items (the only open unknowns) — see `MODEL_REVIEW_2026-07-04.md`
 
-Do a `deep-research` pass on the **real M169 schematic** (freestompboxes/diystompboxes traced
-schematic, the MXR M169 manual, ElectroSmash-style analysis). Get, cited:
-- **BBD**: which chip(s) and how many stages (V3205SD / BL3208 / MN3xxx?) → sets max delay
-  (~600 ms) and the clock→Nyquist behavior. Confirm the "two internal trimmers" = mod width + rate.
-- **Companding**: which compander IC (NE570/571?) and its emphasis network.
-- **Reconstruction / anti-alias filters**: the actual corner(s) that make it DARK (the Carbon
-  Copy's signature is a low fixed LP — get the real corner, don't assume ~2.6 kHz).
-- **Input/output impedance + buffer topology** (for `IoStage`): is the input buffered/high-Z or
-  loading? output Z? coupling caps?
-- **Feedback (Regen)** range + whether/how it self-oscillates; any in-loop tone shaping.
-- **The Mod switch**: rate/depth of the chorus warble (from the trimmers/LFO).
-Then write `docs/predelay/carbon_copy.md`, replace the `kCarbonCopy` `Voicing` + `applyIo()`
-anchors + the panel's authentic knob legends (Delay / Mix / Regen; Mod switch), add a test
-check, and hand to Robbie for the play-test. Then Memory Man, then SDD-3000, same way.
+All three models are voiced from their real circuits. What is NOT circuit-verified (because
+the two BBDs' schematics circulate only as bot-blocked images) is flagged and offered as a
+controlled-probe "measure it" against Robbie's real pedals:
+
+- **Carbon Copy `antiAliasHz` 2600** — the exact reconstruction −3 dB corner. Now grounded by
+  comparison to the Memory Man factory reference (a same-era 8192-stage BBD reconstruction is
+  −3 dB at ~3.2–3.5 kHz with a presence peak; the CC is darker and has NO peak, so a lower,
+  non-resonant 2-pole corner is consistent). Exact corner still needs the probe.
+- **Carbon Copy modulation depth** (`modDepthFrac` 0.006) — no published CC depth spec; only
+  the 0.2–2.2 Hz rate range is in the M169 manual. Subtle, flagged.
+- **Memory Man mid magnitude/corner** — now anchored to the 1978 factory calibration (flat
+  ≤900 Hz, +3 dB peak @2.5 kHz, −3 dB @3.2–3.5 kHz) -> `antiAlias 3200, bwQ 1.30`, verified.
+- **The compander** is modelled as a static in-loop soft-clip (a deliberate simplification of
+  the real level-dependent NE570/SA571 companding).
+
+Iteration loop for any of these: offline `predelay_test` first (build recipe in §5), then
+Robbie's Windows build + ear test. Update the per-pedal doc + the review doc when a flag closes.

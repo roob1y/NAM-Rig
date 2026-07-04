@@ -6358,11 +6358,12 @@ public:
         if (mModeKnob) mModeKnob->setVisible(m == 0); // the MODE rotary is a DD-7 control only
         mChorusVib.setVisible(m == 2);                // Chorus/Vibrato switch is a Memory Man control only
         // AUTHENTIC per-pedal control set + legends (like PremodPanel shows only the
-        // real controls). Knobs: 0 Time, 1 Feedback, 2 Mix, 3 Mod, 4 Tone. Only the
-        // DD-7 is circuit-verified so far, so it shows its REAL three knobs with the
-        // real hardware legends (D.TIME / E.LEVEL / F.BACK) and hides the rest (the
-        // DD-7 has no tone knob and no mod-amount knob). The other models keep a
-        // generic set until each is circuit-researched.
+        // real controls). Knob slots: 0 Time, 1 Feedback, 2 Mix, 3 Mod, 4 Tone, 5 Level.
+        // All three models are circuit-researched and show only their REAL hardware knobs:
+        // DD-7 = D.TIME / F.BACK / E.LEVEL (+ the MODE rotary; no tone/mod knob), Carbon
+        // Copy = Delay / Regen / Mix (no tone, no mod knob), Memory Man = Delay / Feedback /
+        // Blend / Depth / Level (+ Chorus/Vibrato switch; no tone). The `default:` generic
+        // set (Time/Feedback/Mix/Mod/Tone) is now unreachable — kept only as a safety net.
         auto set = [&](int i, bool vis, const char *cap) {
             if (i < (int)mKnobs.size())
             {

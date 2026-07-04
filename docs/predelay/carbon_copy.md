@@ -90,12 +90,16 @@ via the MIX pot → **1 kΩ buffered output**. Bypass = a "Millennium-style" FET
 ## → kCarbonCopy voicing decisions
 - **bbd = true; maxTimeMs = 600; bbdStages = 8192** — all verified (4× BL3208 = 8192; 600 ms max).
   The in-loop LP tracks the clock Nyquist so the repeats darken with time (physics already in the block).
-- **antiAliasHz ≈ 2600 Hz (FLAGGED, not circuit-verified).** The real reconstruction filter is a
-  steep multi-pole Sallen-Key with a ~3 kHz −3 dB corner; our in-loop filter is a single 2-pole, which
-  rolls off ~12 dB/oct and so would stay *brighter* than the real pedal above the corner. Setting the
-  2-pole corner a little lower (~2.6 kHz) matches the *perceived* darkness/energy in the guitar band.
-  This is the single "measure it" item — offer Robbie the controlled-probe path (capture his real
-  M169 at a fixed setting, null against ours) and/or a future multi-pole in-loop filter upgrade.
+- **antiAliasHz ≈ 2600 Hz + bwQ 0.5 (still not circuit-verified, but better GROUNDED as of
+  2026-07-04).** The real reconstruction filter is a steep multi-pole Sallen-Key with a ~3 kHz −3 dB
+  corner; our in-loop filter is a single 2-pole (~12 dB/oct), so a lower 2600 corner matches the
+  *perceived* darkness/energy in the guitar band, and the in-loop recirculation steepens it on
+  sustained repeats. NEW grounding: the Memory Man's 1978 FACTORY calibration (see memory_man.md)
+  shows a same-era 8192-stage BBD reconstruction is −3 dB at ~3.2–3.5 kHz **with a +3 dB presence
+  peak at 2.5 kHz**. The Carbon Copy is universally described as **darker** and has **no** presence
+  peak (no Bright switch on the M169 — that's the Deluxe M292), so modelling it as a **non-resonant**
+  (bwQ 0.5) LP at a corner **below** the DMM's ~3.3 kHz is circuit-consistent. Exact corner still
+  needs the controlled-probe (capture the real M169, null against ours).
 - **satDrive 0.50 / satAsym 0.06 (gentle).** Stands in for the SA571 compander's program-dependent
   compression knee + a touch of BBD even-harmonic warmth — subtle, since companding is a noise-
   reduction scheme, not a distortion. Also bounds the self-oscillating loop.
@@ -103,10 +107,13 @@ via the MIX pot → **1 kΩ buffered output**. Bypass = a "Millennium-style" FET
   practical floor to stop bass runaway in self-oscillation, not the Deluxe Bright's 200 Hz cut.
 - **midDb 0, presDb 0** — no documented mid bump (that's the Memory Man) and no presence sheen (it's
   a dark pedal, no top lift).
-- **modRateHz 1.2 (within the verified 0.2–2.2 Hz), modDepthMs 1.3 (subtle), FIXED internal amount
-  (kCarbonCopyMod 0.35).** The M169 has NO mod knob — its modulation is two internal trimmers
-  (WIDTH/RATE), always on and subtle — so the Carbon Copy voice ignores the user Mod param and bakes
-  in a fixed subtle warble. (Robbie correction 2026-07-03: "the actual pedal doesn't have a mod knob.")
+- **modRateHz 1.2 (within the verified 0.2–2.2 Hz), modDepthFrac 0.006 (delay-PROPORTIONAL, subtle,
+  FLAGGED magnitude), FIXED internal amount (kCarbonCopyMod 0.35).** The M169 has NO mod knob — its
+  modulation is two internal trimmers (WIDTH/RATE), always on and subtle — so the Carbon Copy voice
+  ignores the user Mod param and bakes in a fixed subtle warble. Updated 2026-07-04: the depth is now
+  a PERCENTAGE of the delay time (BBD clock warble scales with the period), like the DMM; the CC
+  fraction is a subtle ~0.6 % (no published CC depth spec, so magnitude flagged). (Robbie correction
+  2026-07-03: "the actual pedal doesn't have a mod knob.")
 - **glideMs 70** — analog BBD repitch: turning the Delay knob sweeps the clock → the repeats pitch-
   bend/swoop rather than snapping (tape/analog-delay feel).
 - **fbCeiling 1.18** — self-oscillates past ~2 o'clock. Higher than the DD-7's 1.05 because the

@@ -71,34 +71,52 @@ vs wet** → LEVEL gain block → **~300 Ω buffered output** (Nano spec). Modul
   → EHX vintage manual
 - Op-amps = **JRC4558D** in the audio path (input + elsewhere). → mmmod
 
-## Could NOT verify (do NOT build hard numbers on these — schematic images are bot-blocked)
-- **Exact reconstruction/anti-alias −3 dB corner(s)** of the DMM (no published kHz; the real filter
-  is ~24 dB/oct multipole, ours is a single 2-pole approximation) → voicing uses ~3.8 kHz, FLAGGED.
-- **Center frequency + dB height of the mid bump** — the scope trace shows it but doesn't quantify
-  it → voicing uses ~650 Hz / +4 dB, FLAGGED (ear-tunable).
-- **The low-cut corner** ("little bass cut" is qualitative only) → voicing uses a gentle 80 Hz HP.
-- **Exact CD4047 clock fclk range**, input/output coupling-cap values, and the vintage input-Z
-  precise figure (~100 kΩ is reported secondhand from the freestompboxes analysis) and vintage
-  output-Z (only the Nano's 300 Ω is official).
-- **LFO Rate continuous endpoints in Hz** (only the ~1 Hz chorus / ~4 Hz vibrato points are cited)
-  and the **modulation depth in ms/cents** (nowhere specced; "deep/lush" is qualitative).
+## RESOLVED 2026-07-04 — the FACTORY calibration quantifies the delay-path response
+The earlier "could not verify the corner / the mid" flags are **CLOSED** by the official
+EH-7850 calibration procedure (Howard Davis/EHX, 8/1/1978, archived by David Morrin), which
+specifies the delay-path frequency response at the real test points:
+- FREQ. RESPONSE CHECK #1 (at MN3005 pin 7): *"flat up to about 900 Hz, rise to a max of about
+  2 V p-p at around 2.5 kHz … drop back to 1.5 V p-p at about 3.8 kHz and roll off sharply above
+  this."* (baseline 1.5 V → the peak is ≈ +2.5 dB)
+- FREQ. RESPONSE CHECK #2 (after the NE570 expander): max delay = *"flat … and −3 dB at about
+  3.2 kHz"*; min delay = *"a peak of about +3 dB (×1.4) around 2.5 kHz and roll off sharply above
+  3.5 kHz."*
+  → <https://sites.google.com/site/davidmorrinoldsite/home/trouble/troubleeffects/electro-harmonix-memory-man/eh-7850-calibration>
+
+So the real voice is **flat below ~900 Hz, a RESONANT presence peak of ~+3 dB at ~2.5 kHz, and a
+−3 dB corner at ~3.2–3.5 kHz.** There is NO boost near 650 Hz — the earlier "strong mid boost"
+read off Morrin's swept-sine was this **2.5 kHz filter resonance**, mislocated ~2 octaves low.
+Also verified here: modulation = *"~10 % of the period"* swing at max Chorus; Chorus rate
+*"slightly less than 1 Hz"*, Vibrato *"approx 4 Hz"*; runaway self-oscillation at max Feedback.
+
+## Could NOT verify (schematic images bot-blocked)
+- Exact **CD4047 clock fclk range**, input/output coupling-cap values, and the vintage input-Z
+  precise figure (~100 kΩ secondhand from the freestompboxes analysis) and vintage output-Z
+  (only the Nano's 300 Ω is official). The low-cut corner ("little bass cut" is qualitative) →
+  voicing uses a gentle 80 Hz HP.
+- **LFO Rate continuous endpoints in Hz** (only the ~0.85 Hz chorus / ~4 Hz vibrato points are
+  cited — now factory-confirmed).
 
 ## → kMemoryMan voicing decisions
 - **bbd = true; maxTimeMs = 550; bbdStages = 8192** — corrected to the real 2× MN3005 series pair.
-- **antiAliasHz ≈ 3800 Hz (FLAGGED).** The fixed reconstruction filter dominates the darkness; set
-  just above the max-delay clock-Nyquist (~3.7 kHz) so a subtle authentic time-darkening remains.
-  2-pole approximation of the real ~24 dB/oct multipole → ear-tunable / controlled-probe "measure
-  it" item. Brighter than the Carbon Copy's 2600 (the DMM is more present/hi-fi, mid-forward).
-- **midHz 650 / midDb +4 / midQ 0.80 (magnitude FLAGGED)** — the documented "strong mid boost";
-  with the 80 Hz low-cut and the ~3.8 kHz LP this composites into the measured band-pass.
+- **antiAliasHz 3200 + bwQ 1.30 (REVOICED 2026-07-04 from the factory calibration; was a FLAGGED
+  3800).** The reconstruction filter is modelled as one RESONANT 2-pole LP: measured (analytic
+  `Biquad` magnitude) it is flat ≤900 Hz, **+3.0 dB at ~2.53 kHz**, 0 dB at ~3.5 kHz — a direct
+  match to the factory curve. 3200 sits just above the 550 ms clock-Nyquist (3165 Hz) so the fixed
+  filter dominates with a whisper of the real time-darkening. Brighter/peakier than the Carbon
+  Copy's dark, non-resonant 2600 (that peak is why the DMM reads present/hi-fi).
+- **midHz 0 / midDb 0 (the separate mid bump is DROPPED).** The old "+4 dB @ 650 Hz" was a
+  mislocation of the 2.5 kHz filter resonance ~2 octaves low; the resonant LP (bwQ) IS the peak.
 - **loopHpHz 80** — the gentle "little bass cut" (lows largely preserved).
 - **satDrive 0.45 / satAsym 0.06** — the NE570/571 compander knee + a touch of BBD warmth (subtle).
-- **modRateHz 1.6, modDepthMs 3.0, TRIANGLE LFO** — deep/lush modulation (deeper than the Carbon
-  Copy's 1.3 ms), triangle waveform per the real LFO; Depth knob (user Mod) scales it. Chorus vs
-  vibrato emerges from the Blend position (like the Nano), so no separate switch is modeled.
+- **modDepthFrac 0.10 (delay-PROPORTIONAL, factory-verified ±10%), TRIANGLE LFO.** BBD clock
+  modulation is a percentage of the delay period (varicap on the clock), so the pitch swing scales
+  with time — restoring the DMM's lush long-delay wobble (a fixed ms wrongly vanished at long
+  delays). Depth knob (user Mod) scales it. Chorus rate ~0.85 Hz / Vibrato ~4 Hz (factory), set by
+  the Chorus/Vibrato switch; whether you *hear* chorus vs vibrato also depends on the Blend position.
 - **glideMs 80** — analog BBD repitch swoop on a Delay-knob change.
-- **fbCeiling 1.06** — self-oscillates readily (the brighter LP retains loop gain), a DMM feature;
-  bounded by the in-loop compander sat + loopLimit. (Offline: sustained + bounded at ~1.6 tail.)
+- **fbCeiling 1.06** — self-oscillates readily, a DMM feature; the resonant LP adds loop gain but
+  the in-loop compander sat + loopLimit keep it bounded (offline: sustained + bounded at ~1.6 tail).
 - **Mix law = TRUE CROSSFADE** (not the DD-7/Carbon Copy dry+wet): `(1−mix)·dry + mix·wet`, so
   full-wet = vibrato (dry removed), mid = chorus. The feedback write (delay input = dry + fb·wet)
   is unchanged — only the output blend differs.

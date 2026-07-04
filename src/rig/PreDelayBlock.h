@@ -42,15 +42,16 @@
 //   2  MEMORY MAN       — EHX Deluxe Memory Man: lush ANALOG BBD. Researched from the real
 //                         circuit (docs/predelay/memory_man.md): **2× MN3005 in SERIES =
 //                         8192 stages**, 550 ms, CD4047 clock, NE570/571 compander, and NO
-//                         tone control. Its measured voice (Morrin scope trace) is a BAND-
-//                         PASS: heavily attenuated highs, LITTLE bass cut, a STRONG MID
-//                         BOOST — modeled as an in-loop mid bump + gentle low-cut + a fixed
-//                         ~3.8 kHz reconstruction LP (the darkness is mostly this filter,
-//                         not the clock, since 8192 stages hold bandwidth). Its signature
-//                         is a DEEP TRIANGLE-LFO modulation (Depth knob) through a TRUE
-//                         CROSSFADE Blend — full-wet = vibrato, mid = chorus — plus a low-Z
-//                         (~100 kΩ inverting) loading input. Sings and washes where the
-//                         Carbon Copy stays dry and dark; self-oscillates readily.
+//                         tone control. Voiced from the FACTORY calibration (Howard Davis/EHX
+//                         1978): the delay path is flat below ~900 Hz, has a RESONANT PRESENCE
+//                         PEAK of ~+3 dB at ~2.5 kHz, and a −3 dB corner at ~3.2–3.5 kHz that
+//                         rolls off sharply — modeled as one RESONANT reconstruction LP
+//                         (antiAlias 3200, bwQ 1.30), no separate mid. That 2.5 kHz peak is why
+//                         it reads present/hi-fi where the Carbon Copy stays dark. Its signature
+//                         is a DEEP TRIANGLE-LFO modulation (Depth knob, delay-PROPORTIONAL
+//                         ±10% at max per the factory spec) through a TRUE CROSSFADE Blend —
+//                         full-wet = vibrato, mid = chorus — plus a low-Z (~100 kΩ inverting)
+//                         loading input. Sings and washes; self-oscillates readily.
 //
 // Signal per sample (mono):
 //   dry = x
@@ -118,8 +119,8 @@ public:
     static constexpr float kCarbonCopyMod  = 0.35f;
     // Memory Man Chorus/Vibrato switch = the EH7850's LFO speed-range select (it swaps a
     // cap: Chorus = slow, Vibrato = fast; it does NOT change the waveform). Named DMM rates.
-    static constexpr float kDmmChorusRateHz  = 1.0f;
-    static constexpr float kDmmVibratoRateHz = 4.0f;
+    static constexpr float kDmmChorusRateHz  = 0.85f; // factory: chorus "slightly less than 1 Hz"
+    static constexpr float kDmmVibratoRateHz = 4.0f;  // factory: vibrato "approx 4 Hz"
     static constexpr double kAnalogLpHz    = 2800.0; // DM-2 model: in-loop darkening of the repeats
     static constexpr float kAnalogSatDrive = 0.4f, kAnalogSatAsym = 0.05f;
 
@@ -146,11 +147,17 @@ public:
         float maxTimeMs;    // the real unit's maximum delay (clamps the Time knob's top)
         float bbdStages;    // total BBD stages -> Nyquist(time) = stages/(4·tSec); ignored if !bbd
         float antiAliasHz;  // fixed reconstruction/anti-alias LP ceiling (in-loop, recirculates)
+        float bwQ;          // Q of the in-loop bandwidth LP: 0.5 = gentle/dark (no peak);
+                            //   >0.707 = a RESONANT reconstruction filter -> a presence peak
+                            //   just below the corner (Memory Man's measured ~2.5 kHz peak)
         float loopHpHz;     // in-loop low-cut (bass build-up control); 0 = off
-        float midHz, midDb, midQ; // in-loop mid bump (Memory Man); 0 dB = off
+        float midHz, midDb, midQ; // in-loop mid bump (0 dB = off; unused now the DMM uses bwQ)
         float satDrive, satAsym;  // companding/preamp soft-clip (cubic ADAA, in-loop); 0 = clean
         float presHz, presDb;     // output-once presence sheen (digital top); 0 dB = off
-        float modRateHz, modDepthMs; // built-in modulation; user Mod knob scales the depth
+        float modRateHz, modDepthMs; // digital (DD-7 Modulate) modulation: FIXED-ms chorus depth
+        float modDepthFrac; // BBD modulation: clock warble = a FRACTION of the delay time (the
+                            //   varicap pulls the clock, so pitch swing scales with time). Used
+                            //   when bbd; the DMM factory max is ~0.10 (±10% of the period).
         float glideMs;      // time-change glide (BBD repitch swoop vs a quick digital move)
         float fbCeiling;    // feedback ceiling (analog can self-oscillate >1 — sat bounds it)
     };
@@ -175,23 +182,32 @@ public:
             // controlled-probe measurement. loopHpHz 100 = a gentle bass-runaway floor (the
             // M169 is warm/keeps lows). No mid bump, no presence, no tone control on the
             // M169. Input 1 MOhm / output 1 kOhm buffered stage in applyIo().
-            //       bbd    maxMs    stages   aa       hp      midHz midDb midQ  sat    asym   presHz presDb modHz  modMs glide fbC
-            return { true,  600.0f,  8192.0f, 2600.0f, 100.0f, 0.0f, 0.0f, 0.7f, 0.50f, 0.06f, 0.0f,  0.0f,  1.20f, 1.3f, 70.0f, 1.18f };
+            // Modulation is delay-PROPORTIONAL (BBD clock warble): modDepthFrac 0.006 is a
+            // SUBTLE ~0.6% swing (FLAGGED -- no published CC depth spec; only the 0.2-2.2 Hz
+            // rate range is in the M169 manual). bwQ 0.5 = a dark, NON-resonant LP (no presence
+            // peak -- the M169 has no Bright switch), which is why it reads darker than the DMM.
+            //       bbd    maxMs    stages   aa       bwQ    hp      midHz midDb midQ  sat    asym   presHz presDb modHz  modMs modFrac glide fbC
+            return { true,  600.0f,  8192.0f, 2600.0f, 0.50f, 100.0f, 0.0f, 0.0f, 0.7f, 0.50f, 0.06f, 0.0f,  0.0f,  1.20f, 1.3f, 0.006f, 70.0f, 1.18f };
         case kMemoryMan:
-            // Lush analog BBD — researched (docs/predelay/memory_man.md): **2× MN3005 in
-            // SERIES = 8192 stages** (not one 4096 chip), 550 ms max, CD4047 clock, NE570/571
-            // compander. Its measured voice (Morrin scope trace) is a BAND-PASS: heavily
-            // attenuated highs, LITTLE bass cut, a STRONG MID BOOST — so an in-loop mid bump
-            // at ~650 Hz (+4 dB, magnitude ear-tunable/unverified) over a gentle 80 Hz low-cut
-            // and a ~3.8 kHz reconstruction LP (2-pole approx of the real ~24 dB/oct multipole;
-            // corner NOT circuit-verified). With 8192 stages the clock-Nyquist stays higher
-            // than the Carbon Copy's, so the darkness is mostly the fixed filter, not the clock.
-            // DEEP TRIANGLE-LFO modulation (Depth knob) + a true CROSSFADE Blend (full wet =
-            // vibrato, mid = chorus) + a low-Z loading input — all wired below. fbCeiling 1.06
-            // self-oscillates readily (runaway, a DMM feature) because its LP is brighter than
-            // the Carbon Copy's. No tone control on the DMM.
-            //       bbd    maxMs    stages   aa       hp     midHz  midDb midQ  sat    asym   presHz presDb modHz modMs glide  fbC
-            return { true,  550.0f,  8192.0f, 3800.0f, 80.0f, 650.0f, 4.0f, 0.80f, 0.45f, 0.06f, 0.0f,  0.0f,  1.60f, 3.0f, 80.0f, 1.06f };
+            // Lush analog BBD — 2× MN3005 in SERIES = 8192 stages, 550 ms, CD4047 clock,
+            // NE570/571 compander (docs/predelay/memory_man.md). REVOICED 2026-07-04 from the
+            // FACTORY calibration procedure (Howard Davis/EHX 1978, archived by Morrin), which
+            // specifies the delay-path response: flat below ~900 Hz, a RESONANT PRESENCE PEAK of
+            // ~+3 dB at ~2.5 kHz, and a −3 dB corner at ~3.2–3.5 kHz that rolls off sharply. So
+            // the voice is a single RESONANT reconstruction LP: antiAlias 3200 (the −3 dB corner,
+            // just above the 550 ms clock-Nyquist so a subtle time-darkening remains) with bwQ
+            // 1.30 -> +3.0 dB peak at ~2.5 kHz. NO separate mid bump (midDb 0): the old "+4 dB @
+            // 650 Hz" was a mislocation of this 2.5 kHz filter resonance ~2 octaves too low. The
+            // 2.5 kHz peak is what makes the DMM read "present/hi-fi" vs the Carbon Copy's dark,
+            // non-resonant LP. Gentle 80 Hz low-cut ("little bass cut"). Modulation is delay-
+            // PROPORTIONAL (varicap on the clock): modDepthFrac 0.10 = the factory ±10%-of-period
+            // swing at max Depth -> the lush long-delay wobble (a fixed ms wrongly vanished at long
+            // delays). DEEP TRIANGLE-LFO (Depth knob) + a true CROSSFADE Blend (full wet = vibrato,
+            // mid = chorus) + a low-Z loading input — all wired below. fbCeiling 1.06 self-
+            // oscillates readily (a DMM feature; bounded by the in-loop compander sat + loopLimit).
+            // Chorus rate ~0.85 Hz / Vibrato ~4 Hz (factory). No tone control on the DMM.
+            //       bbd    maxMs    stages   aa       bwQ    hp     midHz midDb midQ  sat    asym   presHz presDb modHz modMs modFrac glide  fbC
+            return { true,  550.0f,  8192.0f, 3200.0f, 1.30f, 80.0f, 0.0f, 0.0f, 0.80f, 0.45f, 0.06f, 0.0f,  0.0f,  1.60f, 3.0f, 0.10f, 80.0f, 1.06f };
         case kDD7:
         default:
             // Boss DD-7 — VERIFIED from the 2008 Roland service notes (docs/predelay/dd7.md):
@@ -200,7 +216,7 @@ public:
             // do NOT degrade per pass (constant bandwidth, unlike a BBD). So: antiAlias ~19 kHz
             // (effectively full band; the recirculating 2-pole there is transparent in the
             // guitar band yet loses a hair per pass so max feedback can't run away), satDrive 0
-            // (no companding/compression), fbCeiling 1.0 (F.BACK self-oscillates -> "Trick
+            // (no companding/compression), fbCeiling 1.05 (F.BACK self-oscillates -> "Trick
             // Sound"). The Mod knob defaults 0 so the standard mode is clean; dialing it in
             // emulates the DD-7's separate Modulate mode (a small static chorus). Repitch off
             // (digital, quick time move). Input 1 MΩ / output 1 kΩ buffered stage in ioFor().
@@ -208,8 +224,8 @@ public:
             // as they slew (the authentic digital-delay time-sweep), not an instant jump.
             // fbCeiling 1.05: F.BACK builds into a self-oscillating swell at the top
             // ("Trick Sound") — the loopLimit backstop keeps it bounded.
-            //       bbd    maxMs     stages aa        hp    midHz midDb midQ  sat   asym  presHz presDb modHz modMs glide fbC
-            return { false, 2000.0f, 0.0f,  19000.0f, 0.0f, 0.0f, 0.0f, 0.7f, 0.0f, 0.0f, 0.0f,  0.0f,  0.35f, 0.9f, 45.0f, 1.05f };
+            //       bbd    maxMs     stages aa        bwQ    hp    midHz midDb midQ  sat   asym  presHz presDb modHz modMs modFrac glide fbC
+            return { false, 2000.0f, 0.0f,  19000.0f, 0.50f, 0.0f, 0.0f, 0.0f, 0.7f, 0.0f, 0.0f, 0.0f,  0.0f,  0.35f, 0.9f, 0.0f,   45.0f, 1.05f };
         }
     }
 
@@ -331,7 +347,12 @@ public:
 
             const float dry = mono[i];
             const double lfo = (double)mLfo.value();
-            const double modMs = (double)modAmt * (double)mVoicing.modDepthMs * lfo;
+            // BBD clock modulation is a PERCENTAGE of the delay period (the varicap pulls the
+            // clock), so the pitch warble scales with the delay time -> depth = frac * time.
+            // Digital (DD-7 Modulate) uses a fixed-ms chorus. (DMM factory: ~±10% at max Depth.)
+            const double depthMs = mVoicing.bbd ? ((double)mVoicing.modDepthFrac * mBaseZ)
+                                                : (double)mVoicing.modDepthMs;
+            const double modMs = (double)modAmt * depthMs * lfo;
             const double tSamp = std::max(3.0, (mBaseZ + modMs) * fsK);
             float wet = reverse ? reverseRead(tSamp) : mLine.readFrac6(tSamp - 1.0); // REVERSE = grain playback
 
@@ -343,9 +364,9 @@ public:
             if (mToneOn)   wet = mTone.processSample(wet);   // user high-cut
             if (analog) { wet = mAnalogLp.processSample(wet); wet = analogSat(wet); } // DD-7 ANALOG = DM-2 dark + warm
 
-            // Companding / preamp soft-clip (cubic 2nd-order ADAA, in-loop). Stands in
-            // for the BBD compander's compression knee (Carbon Copy / Memory Man).
-            // 13-bit companded grit (model 3). Bounds the feedback loop.
+            // Companding / preamp soft-clip (cubic 2nd-order ADAA, in-loop). Stands in for
+            // the BBD compander's compression knee (Carbon Copy SA571 / Memory Man NE570/571):
+            // near-transparent at normal level, bends only on overload. Bounds the feedback loop.
             if (mVoicing.satDrive > 0.0f) wet = loopSat(wet);
 
             // Record input into the line; HOLD mutes the input so the buffer freezes/loops.
@@ -477,13 +498,15 @@ private:
 
 
     // Per-model INPUT+OUTPUT stage (impedance loading / coupling / buffer), reusing
-    // IoStage.h like DriveBlock. Only the DD-7 is circuit-verified so far (2008 Roland
-    // service notes, docs/predelay/dd7.md): 2SK880 JFET input buffer, 1 MΩ in = the DI
-    // reference -> NO loading shelf; 10 µF couplings -> subsonic high-passes (~0.02 Hz
-    // in, ~1.6 Hz out); 24-bit AK4552 codec -> no HF smoothing. So DD-7 = transparent
-    // buffered (just the couplings). The BBD/other models load their source and colour
-    // differently, but their I/O stages are NOT circuit-researched yet (one pedal at a
-    // time) -> transparent until their schematics are verified. Never guessed.
+    // IoStage.h like DriveBlock. Each model's I/O is now set from its researched circuit
+    // doc: DD-7 (2008 Roland service notes, dd7.md) = 2SK880 JFET buffer, 1 MΩ in = the DI
+    // reference -> NO loading shelf, 10 µF couplings -> subsonic HPs, 24-bit codec -> no HF
+    // smoothing, so transparent buffered. Carbon Copy (M169 manual, carbon_copy.md) = 1 MΩ
+    // buffered in / 1 kΩ out, also transparent (darkness is the in-loop LP, not the I/O).
+    // Memory Man (memory_man.md) = a LOW ~100 kΩ inverting input that LOADS the source (the
+    // "dark dry" gotcha) -> a gentle high-shelf cut. Only impedances/behaviour are anchored;
+    // exact coupling-cap values are schematic-gated (bot-blocked images) so the couplings are
+    // modeled as subsonic HPs. Never guessed.
     void applyIo()
     {
         switch (mModel)
@@ -538,7 +561,7 @@ private:
         {
             // Digital: fixed converter bandwidth, build once.
             mLoopLpHzBuilt = std::min(mVoicing.antiAliasHz, (float)(0.45 * mFs));
-            mLoopLp = Biquad::lowpass(mFs, mLoopLpHzBuilt, 0.5);
+            mLoopLp = Biquad::lowpass(mFs, mLoopLpHzBuilt, mVoicing.bwQ);
             mLoopLpOn = true;
         }
         else if (force && mVoicing.bbd)
@@ -570,7 +593,7 @@ private:
         if (mLoopLpHzBuilt < 0.0f || std::abs(corner - mLoopLpHzBuilt) > 0.03f * mLoopLpHzBuilt)
         {
             const float z1 = mLoopLp.z1, z2 = mLoopLp.z2; // keep state across a coefficient swap
-            mLoopLp = Biquad::lowpass(mFs, std::min((double)corner, 0.45 * mFs), 0.5);
+            mLoopLp = Biquad::lowpass(mFs, std::min((double)corner, 0.45 * mFs), mVoicing.bwQ);
             mLoopLp.z1 = z1;
             mLoopLp.z2 = z2;
             mLoopLpHzBuilt = corner;

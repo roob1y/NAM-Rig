@@ -5,7 +5,8 @@
 // T1  first echo lands at the set free time (sample accuracy)
 // T2  feedback produces a decaying train of echoes at the delay period
 // T3  tempo sync resolves divisions exactly (currentTimeMs + echo position)
-// T4  BBD bandwidth tracks time (analog darkens as delay lengthens); digital is fixed
+// T4  in-loop bandwidth hierarchy (DD-7 bright/fixed > Memory Man > Carbon Copy) + the
+//     clock-cap never exceeds the fixed corner (8192-stage BBDs are fixed-filter dominated)
 // T5  per-model max-time clamp (Carbon Copy/Memory Man can't reach 2000 ms)
 // T6  modulation moves the echo timing (and Mod 0 leaves it static)
 // T7  mix law: Mix 0 = dry, Mix 1 = wet only; output always finite
@@ -16,6 +17,8 @@
 // T13 Carbon Copy circuit-grounded voicing (600 ms / 8192 stages / dark / self-osc)
 // T14 Memory Man circuit-grounded voicing (550 ms / 8192 stages / crossfade Blend)
 // T15 Memory Man master Level (Volume) + Chorus/Vibrato switch (LFO speed range)
+// T16 Memory Man revoice (2026-07-04): a PRESENCE peak at ~2.5 kHz (not a 650 Hz low-mid
+//     boost), delay-PROPORTIONAL modulation (±10% of the period), and bounded self-osc
 #include "rig/PreDelayBlock.h"
 #include <cstdio>
 #include <cmath>
@@ -126,44 +129,54 @@ int main()
         CHECK(std::llabs((long long)at - (long long)expect) <= 2, "T3 echo at %zu (expect %zu)", at, expect);
     }
 
-    // ---- T4: BBD bandwidth tracks delay time; digital is fixed ----
+    // ---- T4: in-loop bandwidth hierarchy + the clock-Nyquist cap ----
+    // NOTE (2026-07-04 revoice): both BBD models have 8192 stages, so their clock-Nyquist
+    // stays ABOVE their fixed reconstruction corner across their whole delay range -> the
+    // FIXED filter dominates and time-darkening is negligible (the clock-tracking code is
+    // real but only bites for lower-stage BBDs, which the shipped lineup no longer has).
+    // So T4 asserts the accurate voicing HIERARCHY (DD-7 bright fixed > Memory Man ~3.2k
+    // resonant > Carbon Copy ~2.6k dark) and that the clock cap never lets the corner
+    // exceed the fixed antiAlias — NOT a "darkens with time" effect that doesn't exist here.
     {
-        // Memory Man (analog BBD): darker at long delay than short delay.
-        PreDelayBlock mm;
-        mm.setModel(PreDelayBlock::kMemoryMan);
-        mm.setMix(0.5f);
-        mm.prepare({SR, BLK});
-        mm.setTimeMs(120.0f);
-        settle(mm, 0.3);
-        const float shortCorner = mm.currentLoopLpHz();
-        mm.setTimeMs(550.0f);
-        settle(mm, 0.3);
-        const float longCorner = mm.currentLoopLpHz();
-        CHECK(longCorner < shortCorner,
-              "T4 Memory Man darkens with time (%.0f Hz @550ms < %.0f Hz @120ms)", longCorner, shortCorner);
-
-        // Boss DD-7 (digital): fixed bandwidth regardless of time.
+        // Boss DD-7 (digital): fixed, full-band bandwidth regardless of time.
         PreDelayBlock dd;
         dd.setModel(PreDelayBlock::kDD7);
         dd.setMix(0.5f);
         dd.prepare({SR, BLK});
         dd.setTimeMs(120.0f);
         settle(dd, 0.2);
-        const float c1 = dd.currentLoopLpHz();
+        const float ddC = dd.currentLoopLpHz();
         dd.setTimeMs(1500.0f);
         settle(dd, 0.2);
-        const float c2 = dd.currentLoopLpHz();
-        CHECK(std::abs(c1 - c2) < 1.0f, "T4 DD-7 bandwidth fixed (%.0f vs %.0f Hz)", c1, c2);
+        const float ddC2 = dd.currentLoopLpHz();
+        CHECK(std::abs(ddC - ddC2) < 1.0f, "T4 DD-7 bandwidth fixed (%.0f vs %.0f Hz)", ddC, ddC2);
 
-        // Carbon Copy is darker than DD-7 at the same setting.
+        // Memory Man: fixed reconstruction corner (~3.2 kHz), never above its antiAlias, and
+        // essentially constant across the range (fixed-filter dominated).
+        PreDelayBlock mm;
+        mm.setModel(PreDelayBlock::kMemoryMan);
+        mm.setMix(0.5f);
+        mm.prepare({SR, BLK});
+        mm.setTimeMs(120.0f);
+        settle(mm, 0.3);
+        const float mmShort = mm.currentLoopLpHz();
+        mm.setTimeMs(550.0f);
+        settle(mm, 0.3);
+        const float mmLong = mm.currentLoopLpHz();
+        CHECK(mmShort <= mm.currentVoicing().antiAliasHz + 1.0f && mmLong <= mmShort + 1.0f,
+              "T4 Memory Man corner capped by antiAlias, ~constant (%.0f short, %.0f long, aa %.0f)",
+              mmShort, mmLong, mm.currentVoicing().antiAliasHz);
+
+        // Carbon Copy is darker than the Memory Man, both far darker than the DD-7.
         PreDelayBlock cc;
         cc.setModel(PreDelayBlock::kCarbonCopy);
         cc.setMix(0.5f);
         cc.prepare({SR, BLK});
         cc.setTimeMs(400.0f);
         settle(cc, 0.3);
-        CHECK(cc.currentLoopLpHz() < c1,
-              "T4 Carbon Copy darker than DD-7 (%.0f < %.0f Hz)", cc.currentLoopLpHz(), c1);
+        CHECK(cc.currentLoopLpHz() < mmShort && mmShort < ddC,
+              "T4 hierarchy DD-7 > Memory Man > Carbon Copy (%.0f > %.0f > %.0f Hz)",
+              ddC, mmShort, cc.currentLoopLpHz());
     }
 
     // ---- T5: per-model max-time clamp ----
@@ -234,7 +247,7 @@ int main()
         PreDelayBlock d;
         d.setModel(PreDelayBlock::kCarbonCopy);
         d.setTimeMs(150.0f);
-        d.setFeedback(1.0f); // ceiling 1.03 -> would run away without the in-loop compander
+        d.setFeedback(1.0f); // Carbon Copy ceiling 1.18 -> would run away without the in-loop compander
         d.setMix(1.0f);
         d.setMod(0.5f);
         d.prepare({SR, BLK});
@@ -274,14 +287,15 @@ int main()
     }
 
     // ---- T10: DD-7 at MAX feedback stays bounded ----
-    // The DD-7 self-oscillates ("Trick Sound") so its ceiling is 1.0, and it has NO
+    // The DD-7 self-oscillates ("Trick Sound"); its ceiling is 1.05, and it has NO
     // in-loop saturation (24-bit, no compander) — the only thing keeping it from
-    // running away is the sub-unity in-loop LP. Verify it sustains without blowing up.
+    // running away is the sub-unity in-loop LP + the loopLimit. Verify it sustains
+    // without blowing up.
     {
         PreDelayBlock d;
         d.setModel(PreDelayBlock::kDD7);
         d.setTimeMs(200.0f);
-        d.setFeedback(1.0f); // fb = 1.0 * ceiling 1.0
+        d.setFeedback(1.0f); // fb = 1.0 * ceiling 1.05
         d.setMix(1.0f);
         d.setMod(0.0f);
         d.prepare({SR, BLK});
@@ -380,7 +394,7 @@ int main()
         PreDelayBlock osc;
         osc.setModel(PreDelayBlock::kCarbonCopy);
         osc.setTimeMs(180.0f);
-        osc.setFeedback(1.0f); // ceiling 1.05
+        osc.setFeedback(1.0f); // Carbon Copy ceiling 1.18
         osc.setMix(1.0f);
         osc.setMod(0.3f);
         osc.prepare({SR, BLK});
@@ -458,6 +472,76 @@ int main()
         };
         CHECK(renderCV(0) != renderCV(1),
               "T15 Chorus vs Vibrato differ (chorus=%zu vibrato=%zu)", renderCV(0), renderCV(1));
+    }
+
+    // ---- T16: Memory Man revoice (docs/predelay/MODEL_REVIEW_2026-07-04.md) ----
+    // Factory calibration (Howard Davis/EHX 1978): the delay path is flat below ~900 Hz,
+    // peaks ~+3 dB at ~2.5 kHz, and rolls off above ~3.3 kHz. So the wet must be LOUDER at
+    // 2.5 kHz than at 500 Hz (a PRESENCE peak) — the OPPOSITE of the old +4 dB @ 650 Hz
+    // voicing, which would fail this. And the modulation is delay-PROPORTIONAL (clock warble
+    // = a % of the period), so the pitch swing scales with the delay time.
+    {
+        // (a) presence peak: wet-only steady-state RMS at 2.5 kHz vs 500 Hz.
+        auto wetRmsAt = [](double hz) {
+            PreDelayBlock d;
+            d.setModel(PreDelayBlock::kMemoryMan);
+            d.setTimeMs(200.0f); d.setFeedback(0.0f); d.setMix(1.0f); d.setMod(0.0f);
+            d.prepare({SR, BLK});
+            std::vector<float> m((size_t)SR, 0.0f);
+            for (size_t i = 0; i < m.size(); ++i) m[i] = 0.25f * std::sin(2.0 * 3.14159265 * hz * i / SR);
+            run(d, m);
+            double s = 0.0; int n = 0;
+            for (size_t i = m.size() / 2; i < m.size(); ++i) { s += (double)m[i] * m[i]; ++n; }
+            return std::sqrt(s / (double)std::max(1, n));
+        };
+        const double r500 = wetRmsAt(500.0), r2500 = wetRmsAt(2500.0);
+        CHECK(r2500 > r500 * 1.15,
+              "T16 Memory Man presence peak: 2.5kHz louder than 500Hz (r2500=%.3f > r500=%.3f)", r2500, r500);
+        // pin the revoiced fields so an accidental edit trips
+        PreDelayBlock v; v.setModel(PreDelayBlock::kMemoryMan); v.prepare({SR, BLK});
+        const auto vc = v.currentVoicing();
+        CHECK(vc.midDb == 0.0f && vc.bwQ > 1.0f && std::abs(vc.antiAliasHz - 3200.0f) < 1.0f
+                  && std::abs(vc.modDepthFrac - 0.10f) < 1e-4f,
+              "T16 Memory Man voicing pinned (mid %.0fdB, bwQ %.2f, aa %.0f, modFrac %.3f)",
+              vc.midDb, vc.bwQ, vc.antiAliasHz, vc.modDepthFrac);
+
+        // (b) delay-proportional modulation: the MAX echo displacement (swept over the LFO
+        // cycle so we catch the peak, not a chance zero-crossing) scales with the delay time.
+        // Fixed-ms would give equal displacement; proportional gives ~5x from 100->500 ms.
+        auto maxEchoDev = [](float timeMs) {
+            const size_t nominal = (size_t)(timeMs * 0.001 * SR);
+            double mx = 0.0;
+            for (double ph = 0.0; ph < 1.25; ph += 0.1) { // sweep >1 LFO period (chorus ~0.85 Hz)
+                PreDelayBlock d;
+                d.setModel(PreDelayBlock::kMemoryMan);
+                d.setTimeMs(timeMs); d.setFeedback(0.0f); d.setMix(1.0f); d.setMod(1.0f);
+                d.prepare({SR, BLK});
+                settle(d, ph);
+                std::vector<float> m((size_t)SR, 0.0f); m[0] = 1.0f;
+                run(d, m);
+                const size_t at = peakNear(m, nominal, 3000);
+                mx = std::max(mx, (double)std::llabs((long long)at - (long long)nominal));
+            }
+            return mx;
+        };
+        const double dev100 = maxEchoDev(100.0f), dev500 = maxEchoDev(500.0f);
+        CHECK(dev100 > 50.0 && dev500 > dev100 * 2.5,
+              "T16 modulation is delay-proportional (maxdev100=%.0f maxdev500=%.0f, ratio %.1f)",
+              dev100, dev500, dev500 / std::max(1.0, dev100));
+
+        // (c) the resonant reconstruction LP must keep self-oscillation bounded.
+        PreDelayBlock osc;
+        osc.setModel(PreDelayBlock::kMemoryMan);
+        osc.setTimeMs(200.0f); osc.setFeedback(1.0f); osc.setMix(1.0f); osc.setMod(0.4f);
+        osc.prepare({SR, BLK});
+        std::vector<float> m((size_t)(SR * 4.0), 0.0f);
+        for (int k = 0; k < 300; ++k) m[(size_t)k] = 0.4f;
+        run(osc, m);
+        double pk = 0.0; bool finite = true;
+        for (size_t i = m.size() * 3 / 4; i < m.size(); ++i)
+        { pk = std::max(pk, std::abs((double)m[i])); if (!std::isfinite(m[i])) finite = false; }
+        CHECK(finite && pk > 0.1 && pk < 4.0,
+              "T16 Memory Man self-osc sustains + bounded (tail peak %.2f)", pk);
     }
 
     std::printf("\n%s (%d failures)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);
