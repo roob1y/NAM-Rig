@@ -106,6 +106,32 @@ The corners were already right in the stand-in. The substance of the rework:
 - **A treble booster stays bright.** No de-emphasis, no top roll — the output is
   meant to be trebly; the warmth is the soft-clip compression, derived separately
   from the clean small-signal curve.
-- **Add, don't edit.** Shipped as model 2; the stand-in is preserved for A/B.
+- **Add, don't edit.** Originally shipped alongside the v1 stand-in for A/B; the
+  stand-in was later retired, so this is now Boost model 0.
+
+## 2026-07-04 — ADAA2 saturator (anti-aliasing rework, UNCOMMITTED)
+
+The 2026-07-04 model review found Range '65 was the worst aliasing offender of
+all drive models: the 2.65 kHz input-cap HP leaves ONLY top-octave content,
+which the legacy 1st-order-ADAA tanh then clips at gains up to 80 — everything
+it folds lands in-band. tanh has no closed-form 2nd antiderivative
+(dilogarithm), so instead of oversampling (CPU) the tanh was replaced by a
+**7th-order odd polynomial FIT to tanh** (`docs/drive/rangemaster_sat_fit.py`):
+
+- constrained LSQ on [0, 2]: `c1 = 1` (unit small-signal gain), `s(2) = tanh(2)`,
+  `s'(2) = 0` → C1 join into flat ±0.964 rails; max fit error **0.6 %**, monotone.
+- exact closed-form F1/F2 → the same Parker/Bilbao **2nd-order ADAA** + peak
+  guard as the cubic/hard clips (`DriveBlock kSat*`, `clipSatADAA2`). Selected
+  per-voicing: `clip 0 + adaa2 1` = Range '65 only; **Plex Boost keeps the
+  legacy tanh path byte-exact** (it barely clips at gMax 6).
+- the flat rail vs tanh's creep to 1.0 costs ≤0.3 dB on extreme peaks — if
+  anything a touch more germanium squash.
+
+Measured (T68 + rangemaster_sat_fit.py): dominant **13 kHz fold −18.2 dB** vs
+the 1st-order tanh (5 kHz probe, max Drive); **h1–h3 within ~0.5 dB** of the
+legacy tanh at the calibrated operating points (the voicing survives — T22–T25
+pass unchanged); the 3 kHz bin (9th-harmonic fold, beyond the poly's order) is
+~2 dB worse but sits ~40 dB below the 13 kHz fold. Needs Windows build +
+play-test (expect the same pedal, less fizz into a cranked amp).
 
 Sources: ElectroSmash, "Dallas Rangemaster Treble Booster Circuit Analysis".

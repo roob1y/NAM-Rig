@@ -78,7 +78,9 @@
 // Zero latency, all-Off rack bit-exact.
 //
 // Base shapers:
-//   0 soft (tanh)            — Treble Boost / Overdrive v1 (asymmetry via bias)
+//   0 soft (tanh)            — Boost (asymmetry via bias). 1st-order ADAA; with
+//                              v.adaa2: the tanh-FIT poly saturator on 2nd-order
+//                              ADAA (Range '65 — see kSat* below)
 //   1 hard clip +/-1 (sym)   — Distortion (1st-order ADAA, or 2nd-order if v.adaa2)
 //   2 hard clip, ASYM rails  — Fuzz (positive rail +1, negative rail -(1-bias))
 //   3 cubic soft (poly)      — Overdrive v2 (cheap F1+F2 -> 2nd-order ADAA)
@@ -247,12 +249,15 @@ public:
             // full-gain treble clips most (the booster's frequency-selective grind).
             // Lifelike gain range gMin 4 -> gMax 80 = the real Gv = gm*Rc ~ 80 (38 dB) at
             // full Volume (the stand-in's gMax 20 was ~4x too low, like the early TS).
-            // Soft germanium clip (tanh) with an OFF-CENTRE bias (the Rangemaster's
+            // Soft germanium clip (tanh-fit poly saturator, adaa2 1 -> 2nd-order ADAA:
+            // the treble booster clips almost pure top-octave content, where the old
+            // 1st-order tanh aliased worst of ALL models; dominant 13 kHz fold -18 dB,
+            // h1-h3 within ~0.4 dB of the legacy tanh) with an OFF-CENTRE bias (the Rangemaster's
             // deliberately asymmetric operating point) -> even-harmonic warmth + soft
             // compression when strummed hard. Static (shapeTrack 0): the input-cap
             // network is fixed, so it shapes even at Drive 0. Calibration-referenced.
             {"Range '65", "Germanium Treble Boost",
-             { 0, 4.0f, 80.0f, 2653.0f,   0.0f, 0.0f, 0.7f,    0.0f, 0.30f, 2500.0f, 0.50f, 0.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.0f,   0.0f, 0.0f}, true},
+             { 0, 4.0f, 80.0f, 2653.0f,   0.0f, 0.0f, 0.7f,    0.0f, 0.30f, 2500.0f, 0.50f, 0.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.0f,   0.0f, 1.0f}, true},
             // model 1: Echoplex EP-3 preamp / Xotic EP Booster (single JFET common-source).
             // The PURE EP-3 stage measures essentially FLAT across the audio band (the
             // Cin/Rgate HPF sits ~3 Hz, the source is unbypassed, the 220 pF roll is
@@ -572,6 +577,7 @@ public:
             const bool softPoly = (cubic || asymCubic) && !cascade; // single-shaper poly path (cascade has its own branch)
             const double kn = asymCubic ? (1.0 - (double)v.bias) : 1.0; // clip-4 negative knee (asymmetry)
             const bool adaa2 = (v.adaa2 > 0.5f);          // 2nd-order ADAA for this clip (hard clip)
+            const bool satAdaa2 = adaa2 && (v.clip == 0); // tanh-fit poly saturator on ADAA2 (Range '65)
             const bool useSlew = (v.slewMax > 0.0f);      // LM308 slew-rate limit (RAT hard-clip branch)
             const float slewStep = useSlew ? v.slewMax * (48000.0f / (float)sr) : 0.0f; // units/sample, 48k-referenced
             const bool ratTone = (v.toneFilterHz > 0.0f); // Tone = sweepable post-clip LP (RAT "Filter")
@@ -729,6 +735,20 @@ public:
                         gOpen *= gOpen;                                 // sharper knee = the abrupt cut
                         c *= (1.0f - v.gate * (1.0f - gOpen));
                     }
+                }
+                else if (satAdaa2)
+                {
+                    // ---- soft saturator (tanh-fit odd poly) on 2nd-order ADAA: Range '65.
+                    // The legacy 1st-order tanh aliased worst HERE of all models (everything
+                    // the 2.65 kHz input-cap HP leaves is top-octave, gain up to 80). Same
+                    // Parker/Bilbao kernel + peak guard as the other polys (kSat* below).
+                    // Voicing preserved: unit small-signal gain, h1-h3 within ~0.4 dB of
+                    // tanh; ceiling flat at 0.964 (=tanh(2)) vs tanh's creep to 1.0 ->
+                    // <=0.3 dB extra squash on extreme peaks (if anything, more germanium). ----
+                    const double xb = (double)u + inBias;
+                    const double y = clipSatADAA2(xb, adx1, adx2);
+                    adx2 = adx1; adx1 = xb;
+                    c = (float)y;
                 }
                 else if (adaa2)
                 {
@@ -1087,6 +1107,60 @@ private:
         if (std::abs(x - x2) < TOL)
             return (hardF1(x) - hardF1(x1)) / (x - x1); // peak guard: proper 1st-order over the step
         return (2.0 / (x - x2)) * (hardD(x, x1) - hardD(x1, x2));
+    }
+
+    // ---- soft saturator (type 0 + v.adaa2, Range '65): tanh-FIT odd 7th-order poly ----
+    // s(x) = x + c3 x^3 + c5 x^5 + c7 x^7 on |x| <= A, +/-L beyond (constrained LSQ fit
+    // to tanh on [0,2]: c1 pinned to 1 -> unit small-signal gain, s(A)=tanh(2) and
+    // s'(A)=0 -> C1 join, max fit error 0.6%, monotone). Polynomial -> exact closed-form
+    // F1/F2 (the constants keep both continuous at |x|=A, like hardF2's 1/6) -> the same
+    // cheap Parker/Bilbao 2nd-order ADAA + peak guard as the cubic/hard paths. Fit:
+    // docs/drive/rangemaster_sat_fit.py. Replaces the legacy 1st-order tanh for the
+    // treble booster; measured 13 kHz fold (5 kHz probe, max Drive) -18 dB.
+    static constexpr double kSatC3 = -0.292616402, kSatC5 = 0.064248717, kSatC7 = -0.005867189;
+    static constexpr double kSatA   = 2.0;
+    static constexpr double kSatL   = kSatA + kSatC3 * 8.0 + kSatC5 * 32.0 + kSatC7 * 128.0;            // s(A) = 0.964028 (tanh 2)
+    static constexpr double kSatF1A = 2.0 + kSatC3 * 4.0 + kSatC5 * (64.0 / 6.0) + kSatC7 * 32.0;       // F1(A)
+    static constexpr double kSatF2A = 8.0 / 6.0 + kSatC3 * 1.6 + kSatC5 * (128.0 / 42.0) + kSatC7 * (512.0 / 72.0); // F2(A)
+    static double satF(double x)
+    {
+        if (std::abs(x) <= kSatA) { const double x2 = x * x; return x * (1.0 + x2 * (kSatC3 + x2 * (kSatC5 + x2 * kSatC7))); }
+        return x < 0.0 ? -kSatL : kSatL;
+    }
+    static double satF1(double x) // antiderivative (even)
+    {
+        const double a = std::abs(x);
+        if (a <= kSatA) { const double x2 = x * x; return x2 * (0.5 + x2 * (kSatC3 / 4.0 + x2 * (kSatC5 / 6.0 + x2 * (kSatC7 / 8.0)))); }
+        return kSatF1A + kSatL * (a - kSatA);
+    }
+    static double satF2(double x) // 2nd antiderivative (odd)
+    {
+        const double a = std::abs(x);
+        if (a <= kSatA) { const double x2 = x * x; return x * x2 * (1.0 / 6.0 + x2 * (kSatC3 / 20.0 + x2 * (kSatC5 / 42.0 + x2 * (kSatC7 / 72.0)))); }
+        const double sg = x < 0.0 ? -1.0 : 1.0, t = a - kSatA;
+        return sg * (kSatF2A + kSatF1A * t + 0.5 * kSatL * t * t);
+    }
+    static double satD(double a, double b) // (F2(a)-F2(b))/(a-b), L'Hopital -> F1(mid)
+    {
+        const double d = a - b;
+        if (std::abs(d) < 1.0e-5) return satF1(0.5 * (a + b));
+        return (satF2(a) - satF2(b)) / d;
+    }
+    // Same Parker/Bilbao 2nd-order kernel + the SAME peak guard as the cubic/hard clips.
+    static double clipSatADAA2(double x, double x1, double x2)
+    {
+        const double TOL = 1.0e-5;
+        if (std::abs(x - x1) < TOL)
+        {
+            const double xBar = 0.5 * (x + x2);
+            const double delta = xBar - x1;
+            if (std::abs(delta) < TOL)
+                return satF(0.5 * (xBar + x1));
+            return (2.0 / delta) * (satF1(xBar) + (satF2(x1) - satF2(xBar)) / delta);
+        }
+        if (std::abs(x - x2) < TOL)
+            return (satF1(x) - satF1(x1)) / (x - x1); // peak guard: proper 1st-order over the step
+        return (2.0 / (x - x2)) * (satD(x, x1) - satD(x1, x2));
     }
 
     static float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }

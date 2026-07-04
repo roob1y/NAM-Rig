@@ -1310,6 +1310,93 @@ int main()
         CHECK(same, "T67 Off slot bit-exact (no IoStage on bypassed slots)");
     }
 
+    // ====== Range '65 ADAA2 saturator (tanh-fit odd poly; Boost model 0) ======
+
+    // ---- T68: the saturator preserves the tanh voicing, crushes the dominant alias
+    // fold, Plex stays on the legacy path, and the engine actually runs the new path.
+    // In-test mirrors of the shared pipeline (input-cap HP + bias -> shaper): the
+    // legacy 1st-order-ADAA tanh vs the poly on the engine's exact ADAA2 kernel
+    // (kSat* duplicated below == DriveBlock kSat*; docs/drive/rangemaster_sat_fit.py).
+    // Pure-DSP comparison (no IoStage) isolates the shaper swap. ----
+    {
+        const double C3 = -0.292616402, C5 = 0.064248717, C7 = -0.005867189;
+        const double SA = 2.0, SL = SA + C3 * 8.0 + C5 * 32.0 + C7 * 128.0;
+        const double SF1A = 2.0 + C3 * 4.0 + C5 * (64.0 / 6.0) + C7 * 32.0;
+        const double SF2A = 8.0 / 6.0 + C3 * 1.6 + C5 * (128.0 / 42.0) + C7 * (512.0 / 72.0);
+        auto sF  = [&](double x) { if (std::abs(x) <= SA) { const double q = x * x; return x * (1.0 + q * (C3 + q * (C5 + q * C7))); } return x < 0.0 ? -SL : SL; };
+        auto sF1 = [&](double x) { const double a = std::abs(x); if (a <= SA) { const double q = x * x; return q * (0.5 + q * (C3 / 4.0 + q * (C5 / 6.0 + q * (C7 / 8.0)))); } return SF1A + SL * (a - SA); };
+        auto sF2 = [&](double x) { const double a = std::abs(x); if (a <= SA) { const double q = x * x; return x * q * (1.0 / 6.0 + q * (C3 / 20.0 + q * (C5 / 42.0 + q * (C7 / 72.0)))); } const double sg = x < 0.0 ? -1.0 : 1.0, tt = a - SA; return sg * (SF2A + SF1A * tt + 0.5 * SL * tt * tt); };
+        const auto v = DriveBlock::voicingFor(Kind::Boost, 0);
+        CHECK(v.adaa2 > 0.5f && v.clip == 0, "T68 Range '65 runs the ADAA2 saturator (clip 0, adaa2 1)");
+        CHECK(DriveBlock::voicingFor(Kind::Boost, 1).adaa2 == 0.0f,
+              "T68 Plex Boost stays on the legacy tanh path (adaa2 0, byte-exact)");
+        auto mirror = [&](const std::vector<float> &in, float drive, bool poly) {
+            const float pg = v.gMin * std::pow(v.gMax / v.gMin, drive);
+            const float hpC = 1.0f - (float)std::exp(-2.0 * M_PI * v.lowCutHz / SR);
+            std::vector<float> y(in.size());
+            float hp = 0, dcx = 0, dcy = 0; const float kDcR = 0.9995f;
+            double x0 = 0, x1 = 0, x2 = 0;
+            for (size_t i = 0; i < in.size(); ++i)
+            {
+                float u = in[i] * pg; hp += hpC * (u - hp); u = u - hp;
+                const double xb = (double)u + (double)v.bias;
+                double o;
+                if (poly)
+                {
+                    const double TOL = 1.0e-5;
+                    auto D = [&](double a, double b) { const double dd = a - b; if (std::abs(dd) < 1.0e-5) return sF1(0.5 * (a + b)); return (sF2(a) - sF2(b)) / dd; };
+                    if (std::abs(xb - x1) < TOL) { const double xB = 0.5 * (xb + x2), dl = xB - x1; o = std::abs(dl) < TOL ? sF(0.5 * (xB + x1)) : (2.0 / dl) * (sF1(xB) + (sF2(x1) - sF2(xB)) / dl); }
+                    else if (std::abs(xb - x2) < TOL) o = (sF1(xb) - sF1(x1)) / (xb - x1);
+                    else o = (2.0 / (xb - x2)) * (D(xb, x1) - D(x1, x2));
+                    x2 = x1; x1 = xb;
+                }
+                else
+                {
+                    const double dd = xb - x0; // legacy 1st-order ADAA tanh (log-cosh antiderivative)
+                    o = std::abs(dd) > 1.0e-6 ? (std::log(std::cosh(xb)) - std::log(std::cosh(x0))) / dd
+                                              : std::tanh(0.5 * (xb + x0));
+                    x0 = xb;
+                }
+                float c = (float)o;
+                const float dcOut = c - dcx + kDcR * dcy; dcx = c; dcy = dcOut;
+                y[i] = dcOut * v.outTrim;
+            }
+            return y;
+        };
+        {   // (1) voicing preserved: h1-h3 at 3 kHz within 1 dB of the legacy tanh
+            auto in = sine(3000.0, 0.2f, 16384);
+            auto a = mirror(in, 0.7f, false), b = mirror(in, 0.7f, true);
+            bool close = true; double worst = 0;
+            for (int h = 1; h <= 3; ++h)
+            {
+                const double dDb = 20.0 * std::log10(goertzel(b, 3000.0 * h) / goertzel(a, 3000.0 * h));
+                worst = std::max(worst, std::abs(dDb)); close = close && std::abs(dDb) < 1.0;
+            }
+            CHECK(close, "T68 saturator preserves the tanh voice: h1-h3 within 1 dB (worst %.2f)", worst);
+        }
+        {   // (2) the dominant alias fold collapses: 5 kHz probe at max Drive, 13 kHz bin
+            auto in = sine(5000.0, 0.05f, 48000);
+            auto a = mirror(in, 1.0f, false), b = mirror(in, 1.0f, true);
+            const double redDb = 20.0 * std::log10(goertzel(a, 13000.0) / std::max(goertzel(b, 13000.0), 1e-15));
+            CHECK(redDb > 10.0, "T68 ADAA2 cuts the 13k fold by %.1f dB vs the 1st-order tanh", redDb);
+        }
+        {   // (3) the ENGINE runs the poly path (tracks the mirror, IoStage colour aside) + no spikes
+            auto in = sine(3000.0, 0.2f, 16384);
+            auto eng = realSlotM(Kind::Boost, 0, 0.7f, in);
+            const double fe = goertzel(eng, 3000.0), fm = goertzel(mirror(in, 0.7f, true), 3000.0);
+            CHECK(fe > fm * 0.4 && fe < fm * 1.1,
+                  "T68 engine tracks the poly mirror @3k (io-shelf aside): eng %.4f ~ mirror %.4f", fe, fm);
+            double worst = 0.0;
+            for (float dr = 0.0f; dr <= 1.001f; dr += 0.25f)
+                for (double f = 100.0; f <= 12000.0; f *= 1.3)
+                {
+                    auto y = realSlotM(Kind::Boost, 0, dr, sine(f, 0.5f, 8192));
+                    for (float s : y) worst = std::max(worst, (double)std::fabs(s));
+                }
+            CHECK(worst < 1.5, "T68 Range '65 no spikes across full-scale sweep: worst |out| %.2f", worst);
+        }
+    }
+
     std::printf("\n%s (%d failure%s)\n", gFails ? "RESULT: FAIL" : "RESULT: ALL PASS", gFails, gFails == 1 ? "" : "s");
     return gFails ? 1 : 0;
 }
