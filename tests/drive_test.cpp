@@ -1397,6 +1397,55 @@ int main()
         }
     }
 
+    // ====== Fuzz Face bias SAG (Round Fuzz, clip 4 + sagDepth) ======
+
+    // ---- T69: dig in hard and the negative rail closes over ~60 ms -> the slammed
+    // (rail-to-rail) note DIPS in level then holds sagged: bias-sag compression.
+    // (NB even-harmonic content is the WRONG metric here: an asymmetric-rail square
+    // at ~50% duty is DC + a scaled square, and the DC blocker eats the DC -- the
+    // audible sag is the LEVEL dip.) At reference level the sag never engages, so
+    // the voiced T30-T37 behaviour is untouched. sagDepth pins guard the others. ----
+    {
+        CHECK(DriveBlock::voicingFor(Kind::Fuzz, 0).sagDepth == 0.35f,
+              "T69 Round Fuzz bias sag on (sagDepth 0.35)");
+        bool others = DriveBlock::voicingFor(Kind::Fuzz, 1).sagDepth == 0.0f
+                   && DriveBlock::voicingFor(Kind::Overdrive, 0).sagDepth == 0.0f
+                   && DriveBlock::voicingFor(Kind::Overdrive, 3).sagDepth == 0.0f
+                   && DriveBlock::voicingFor(Kind::Distortion, 0).sagDepth == 0.0f;
+        CHECK(others, "T69 every other model keeps a static bias (sagDepth 0, byte-exact)");
+        // level dip between windows of a sustained HOT tone (0.45 >> ref): window A =
+        // 5-20 ms (sag barely engaged), window B = 300-500 ms (fully sagged). Metric =
+        // PEAK-TO-PEAK: only the negative rail moves, and pp is immune to the DC
+        // blocker's ~40 ms charge transient (which polluted an RMS version of this).
+        auto ppWin = [&](const std::vector<float> &y, size_t a, size_t b) {
+            float lo = 1e9f, hi = -1e9f;
+            for (size_t i = a; i < b; ++i) { lo = std::min(lo, y[i]); hi = std::max(hi, y[i]); }
+            return (double)(hi - lo);
+        };
+        {
+            auto hot = realSlotM(Kind::Fuzz, 0, 0.6f, sine(220.0, 0.45f, 24000));
+            const double early = ppWin(hot, 240, 960), late = ppWin(hot, 14400, 24000);
+            CHECK(late < early * 0.95,
+                  "T69 hot pick sags: peak-to-peak dips %.3f -> %.3f (%.1f%%)", early, late, 100.0 * (1.0 - late / early));
+            auto soft = realSlotM(Kind::Fuzz, 0, 0.6f, sine(220.0, 0.10f, 24000));
+            const double sEarly = ppWin(soft, 240, 960), sLate = ppWin(soft, 14400, 24000);
+            CHECK(std::fabs(sLate / sEarly - 1.0) < 0.03,
+                  "T69 reference-level playing untouched: pp %.3f ~ %.3f", sEarly, sLate);
+        }
+        {   // determinism + no spikes at hot levels (the sagged knee stays bounded)
+            auto a = realSlotM(Kind::Fuzz, 0, 0.8f, sine(220.0, 0.5f, 12000));
+            auto b = realSlotM(Kind::Fuzz, 0, 0.8f, sine(220.0, 0.5f, 12000));
+            bool same = true, finite = true; double worst = 0;
+            for (size_t i = 0; i < a.size(); ++i)
+            {
+                same = same && (a[i] == b[i]); finite = finite && std::isfinite(a[i]);
+                worst = std::max(worst, (double)std::fabs(a[i]));
+            }
+            CHECK(same && finite && worst < 1.5,
+                  "T69 sag deterministic + bounded: worst |out| %.2f", worst);
+        }
+    }
+
     std::printf("\n%s (%d failure%s)\n", gFails ? "RESULT: FAIL" : "RESULT: ALL PASS", gFails, gFails == 1 ? "" : "s");
     return gFails ? 1 : 0;
 }

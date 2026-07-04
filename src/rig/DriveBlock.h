@@ -230,6 +230,17 @@ public:
                              //     rides on top. The clean leg stays LEVEL-CONSTANT either way
                              //     (the real behaviour). 0 = the flat cleanBlend at every
                              //     Drive (byte-exact; only the Klon hard-clip path uses it).
+        // --- Fuzz Face bias SAG; 0 = static bias (every other model zero-fills) ---
+        float sagDepth;      // >0 (clip 4 only): dig in past the calibrated picking
+                             //     reference and Q1's operating point SAGS -- the negative
+                             //     knee (kn) closes further over ~60 ms (the bias network's
+                             //     big caps, not instant) and recovers in ~250 ms. At fuzz
+                             //     gain the wave is rail-to-rail, so the closing rail is
+                             //     heard as the note DIPPING ~1 dB on a hard attack then
+                             //     recovering (bias-sag compression) + a touch more duty
+                             //     asymmetry -- the attack-end complement of the decay-end
+                             //     gate. Thresholded ABOVE the reference level so normal
+                             //     picking (T30-T37) is untouched. 0 = off (byte-exact).
     };
 
     // A specific pedal MODEL inside a category (Type). A category can hold several
@@ -360,9 +371,13 @@ public:
             // persistent asymmetry at all gains (cold-biased Q1) -> soft for small signals,
             // a tilted square when cranked; 2nd-order ADAA (polynomial, no dilog). dynDepth
             // gives the touch/volume cleanup (soft picking -> cleaner); gate gives the
-            // bias-starved "velcro"/splat on decay. Hot, calibration-referenced gain range.
+            // bias-starved "velcro"/splat on decay; sagDepth 0.35 gives the ATTACK-end
+            // complement (dig in past the reference level and the bias point sags -> the
+            // hard-hit note dips ~1 dB over ~60 ms then recovers ~250 ms; reference-level
+            // playing untouched). Hot, calibration-referenced gain range.
             {"Round Fuzz", "Germanium Fuzz",
-             { 4, 8.0f,200.0f,  50.0f,    0.0f, 0.0f, 0.7f,    0.0f, 0.45f,  700.0f, 0.65f, 0.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.50f,  0.0f, 0.0f, 0.6f}, false},
+             { 4, 8.0f,200.0f,  50.0f,    0.0f, 0.0f, 0.7f,    0.0f, 0.45f,  700.0f, 0.65f, 0.0f, 0.0f,  0.0f, 700.0f, 0.0f, 0.50f,  0.0f, 0.0f, 0.6f,
+               0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, /*sagDepth*/0.35f}, false},
             // model 1: circuit-fit EHX Big Muff Pi (Ram's Head '73). Filed under FUZZ
             // (it is marketed/perceived as a fuzz, though technically a diode distortion).
             // The Muff is NOT a single shaper -- it is TWO consecutive SOFT-clip stages
@@ -659,13 +674,19 @@ public:
             const float envRel = 1.0f - (float)std::exp(-1.0 / (0.120 * sr)); // ~120 ms
             const float invEnvRef = 1.0f / 0.25f; // picking-level reference
             const float gpkDecay = (float)std::exp(-1.0 / (0.5 * sr)); // gate peak-hold release ~500 ms
+            // Fuzz Face bias sag (clip 4 + sagDepth): a SLOWER follower than the touch
+            // env -- the bias network reacts over ~60 ms and recovers in ~250 ms (the
+            // real bias caps are huge: 22 uF x 33 k ~ 0.7 s, so 60 ms is conservative).
+            const bool useSag = asymCubic && (v.sagDepth > 0.0f);
+            const float sagAtk = 1.0f - (float)std::exp(-1.0 / (0.060 * sr));
+            const float sagRel = 1.0f - (float)std::exp(-1.0 / (0.250 * sr));
 
             s.io.processIn(mono, numSamples); // front-end: input coupling HP + impedance-loading shelf (colours what the drive sees)
 
             float hp = s.hp, lpz = s.lp, low = s.toneLp;
             float dcx = s.dcX1, dcy = s.dcY1;
             double x0 = s.x0, adx1 = s.adaaX1, adx2 = s.adaaX2;
-            float env = s.env, gpk = s.gpk;
+            float env = s.env, gpk = s.gpk, sagEnv = s.sagEnv;
             float shx1 = s.shX1, shy1 = s.shY1;
             double adx1b = s.adaaX1b, adx2b = s.adaaX2b; // Big Muff stage-2 ADAA history
             float mLpPre = s.mLpPre, mHpInt = s.mHpInt, mLpInt = s.mLpInt; // cascade Miller LPs / inter HP
@@ -715,8 +736,25 @@ public:
                     float bEff = v.cleanBlend + v.dynDepth * (0.5f - envN); // soft picking -> more clean
                     bEff = bEff < 0.0f ? 0.0f : (bEff > 0.9f ? 0.9f : bEff);
 
+                    // ---- Fuzz Face BIAS SAG (useSag): dig in past the calibrated picking
+                    // reference and the negative knee closes over ~60 ms -> the slammed
+                    // (rail-to-rail) note DIPS ~1 dB then recovers (~250 ms) as the bias
+                    // network settles -- bias-sag compression, the attack-end complement
+                    // of the decay-end gate. Threshold 60% of reference -> full sag at
+                    // 160%, so soft/reference-level playing (and the voiced T30-T37
+                    // behaviour) is untouched. kn varies SLOWLY vs the ADAA history (like
+                    // a swept filter) -> the antiderivative mismatch is negligible.
+                    // Floored so the shaper stays well-conditioned. ----
+                    double knS = kn;
+                    if (useSag)
+                    {
+                        sagEnv += (aenv > sagEnv ? sagAtk : sagRel) * (aenv - sagEnv);
+                        const float over = clamp01(sagEnv * invEnvRef - 0.6f);
+                        float knMul = 1.0f - v.sagDepth * over;
+                        knS = kn * (double)(knMul < 0.25f ? 0.25f : knMul);
+                    }
                     const double xb = (double)s.emphPre.processSample(u) + inBias;
-                    const double y = asymCubic ? clipAsymCubicADAA2(xb, adx1, adx2, kn)
+                    const double y = asymCubic ? clipAsymCubicADAA2(xb, adx1, adx2, knS)
                                                : clipCubicADAA2(xb, adx1, adx2);
                     adx2 = adx1; adx1 = xb;
                     float cc = s.emphPost.processSample((float)y);
@@ -865,6 +903,7 @@ public:
             s.hp = flush(hp); s.lp = flush(lpz); s.toneLp = flush(low);
             s.dcX1 = flush(dcx); s.dcY1 = flush(dcy); s.x0 = flushD(x0);
             s.adaaX1 = flushD(adx1); s.adaaX2 = flushD(adx2); s.env = flush(env); s.gpk = flush(gpk);
+            s.sagEnv = flush(sagEnv);
             s.shX1 = flush(shx1); s.shY1 = flush(shy1);
             s.adaaX1b = flushD(adx1b); s.adaaX2b = flushD(adx2b);
             s.mLpPre = flush(mLpPre); s.mHpInt = flush(mHpInt); s.mLpInt = flush(mLpInt);
@@ -917,6 +956,7 @@ private:
         double adaaX1 = 0.0, adaaX2 = 0.0; // 2nd-order ADAA history (cubic, double)
         float env = 0.0f; // envelope follower (touch dynamics)
         float gpk = 0.0f; // gate peak-hold (relative bias-starved gate)
+        float sagEnv = 0.0f; // Fuzz Face bias-sag follower (slow, ~15/250 ms)
         float shX1 = 0.0f, shY1 = 0.0f; // Klon treble-shelf 1st-order filter state
         // Big Muff 2-stage cascade state (only used when muffStages>1):
         double adaaX1b = 0.0, adaaX2b = 0.0; // stage-2 cubic 2nd-order ADAA history
@@ -930,7 +970,7 @@ private:
         void resetState()
         {
             hp = lp = toneLp = dcX1 = dcY1 = 0.0f; x0 = 0.0;
-            adaaX1 = adaaX2 = 0.0; env = 0.0f; gpk = 0.0f; shX1 = shY1 = 0.0f;
+            adaaX1 = adaaX2 = 0.0; env = 0.0f; gpk = 0.0f; sagEnv = 0.0f; shX1 = shY1 = 0.0f;
             adaaX1b = adaaX2b = 0.0; mLpPre = mHpInt = mLpInt = 0.0f;
             mtX1 = mtX2 = mtY1 = mtY2 = 0.0f; slewPrev = 0.0f;
             lastKind = -1; mid.reset(); emphPre.reset(); emphPost.reset(); io.reset();
