@@ -261,13 +261,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     // --- Pre-amp delay pedal (mono, front-of-amp): rig/PreDelayBlock.h,
     // predelay_test.cpp. Sits after the premod and before the amp split, so the
     // echoes feed the amp like a real delay stompbox — distinct from the post-cab
-    // stereo DelayBlock. Four per-model voicings (order MUST match
+    // stereo DelayBlock. Three per-model voicings (order MUST match
     // PreDelayBlock::Model): Boss DD-7 (clean digital), MXR Carbon Copy (dark BBD),
-    // Memory Man (lush BBD), Korg SDD-3000 (bright colored digital). Off by default
+    // Memory Man (lush BBD). Off by default
     // (new block). Time is shared free/sync (the Sync choice mirrors PreMod).
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("predelayModel", 1), "Pre Delay Model",
-        juce::StringArray{"Boss DD-7", "Carbon Copy", "Memory Man", "Korg SDD-3000"}, 0));
+        juce::StringArray{"Boss DD-7", "Carbon Copy", "Memory Man"}, 0));
     // DD-7 MODE rotary (only the DD-7 uses it): four normal-delay time ranges, then the
     // special modes. Order MUST match PreDelayBlock::Dd7Mode.
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
@@ -308,28 +308,6 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("predelayChorusVib", 1), "Pre Delay Chorus/Vibrato",
         juce::StringArray{"Chorus", "Vibrato"}, 0));
-    // Korg SDD-3000 controls (shown only for that model): the real front-panel complement.
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("predelaySddInput", 1), "Pre Delay SDD Input",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.3f)); // input preamp drive
-    params.push_back(std::make_unique<juce::AudioParameterChoice>(
-        juce::ParameterID("predelaySddAtten", 1), "Pre Delay SDD Attenuator",
-        juce::StringArray{"-30 dB", "-10 dB", "+4 dB"}, 1));
-    params.push_back(std::make_unique<juce::AudioParameterChoice>(
-        juce::ParameterID("predelaySddWave", 1), "Pre Delay SDD Waveform",
-        juce::StringArray{"Triangle", "Square", "Random", "Env"}, 0));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("predelaySddFreq", 1), "Pre Delay SDD Frequency",
-        juce::NormalisableRange<float>(0.1f, 15.0f, 0.01f, 0.4f), 1.0f,
-        juce::AudioParameterFloatAttributes().withLabel("Hz")));
-    params.push_back(std::make_unique<juce::AudioParameterChoice>(
-        juce::ParameterID("predelaySddLoCut", 1), "Pre Delay SDD Low Filter",
-        juce::StringArray{"Flat", "125 Hz", "250 Hz", "500 Hz"}, 0));
-    params.push_back(std::make_unique<juce::AudioParameterChoice>(
-        juce::ParameterID("predelaySddHiCut", 1), "Pre Delay SDD High Filter",
-        juce::StringArray{"Flat", "8 kHz", "4 kHz", "2 kHz"}, 0));
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID("predelaySddInvert", 1), "Pre Delay SDD Invert", false)); // feedback INV
 
     // --- Envelope filter / auto-wah (mono, pre-amp): rig/EnvFilterBlock.h,
     // env_filter_test.cpp. Sits BEFORE the compressor so it tracks the raw guitar
@@ -1179,13 +1157,6 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         mChain.predelay.setToneHz(apvts.getRawParameterValue("predelayTone")->load());
         mChain.predelay.setLevel(apvts.getRawParameterValue("predelayLevel")->load());
         mChain.predelay.setChorusVib((int)apvts.getRawParameterValue("predelayChorusVib")->load());
-        mChain.predelay.setSddInput(apvts.getRawParameterValue("predelaySddInput")->load());
-        mChain.predelay.setSddAtten((int)apvts.getRawParameterValue("predelaySddAtten")->load());
-        mChain.predelay.setSddWave((int)apvts.getRawParameterValue("predelaySddWave")->load());
-        mChain.predelay.setSddFreq(apvts.getRawParameterValue("predelaySddFreq")->load());
-        mChain.predelay.setSddLoCut((int)apvts.getRawParameterValue("predelaySddLoCut")->load());
-        mChain.predelay.setSddHiCut((int)apvts.getRawParameterValue("predelaySddHiCut")->load());
-        mChain.predelay.setSddInvert(apvts.getRawParameterValue("predelaySddInvert")->load() > 0.5f);
         mChain.predelay.setBypassed(apvts.getRawParameterValue("predelayOn")->load() < 0.5f);
         mChain.setPredelayPreDrive((int)apvts.getRawParameterValue("predelayPos")->load() == 1);
     }
