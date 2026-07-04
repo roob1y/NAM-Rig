@@ -223,8 +223,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     // --- Pre-amp modulation pedal (mono, front-of-amp): rig/PreModBlock.h,
     // premod_test.cpp. Sits after the drive rack and before the amp split, so it
     // feeds the amp like a real stompbox — distinct from the post-cab stereo mod
-    // section below. Scaffold: Chorus voiced; other types voiced later. Type order
-    // must match PreModBlock::Type (Chorus, Phaser, Flanger, Tremolo, Uni-Vibe).
+    // section below. All five types are voiced to real pedals (Chorus CE-2, Phaser
+    // Phase 90, Flanger EVH117, Tremolo TR-2, Uni-Vibe); the per-type sweet-spot
+    // pins live in the update block below (~1130-1148). Type order must match
+    // PreModBlock::Type (Chorus, Phaser, Flanger, Tremolo, Uni-Vibe).
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("premodType", 1), "Pre Mod Type",
         juce::StringArray{"Chorus", "Phaser", "Flanger", "Tremolo", "Uni-Vibe"}, 0));

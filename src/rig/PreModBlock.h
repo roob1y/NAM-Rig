@@ -249,6 +249,10 @@ public:
     void setRateHz(float hz) { mFreeRateHz = hz; }
     void setSyncIndex(int i) { mSyncIndex = i; } // 0 = Off (free)
     void setBpm(double bpm) { if (bpm > 0.0) mBpm = bpm; }
+    // NB: the member defaults below are NOT the shipped voice. The fool-proof panel
+    // hides most knobs and PluginProcessor.cpp (~1130-1148) pins them per-type — e.g.
+    // the shipped phaser runs feedback 0.35 + depth 0.60, the flanger Manual 0.15.
+    // Audit the pin table there, not these defaults, to know how a pedal actually sounds.
     void setDepth(float d) { mDepth = d; }
     void setMix(float m) { mMix = m; }
     void setFeedback(float f) { mFeedback = f; } // phaser resonance / flanger regen

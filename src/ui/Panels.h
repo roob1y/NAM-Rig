@@ -6171,10 +6171,13 @@ private:
 
 //==============================================================================
 // PremodPanel — the MONO front-of-amp modulation pedal (rig/PreModBlock.h). Sits
-// between DRIVE and the amp split. Scaffold UI: a Type picker + Sync picker and
-// the Rate / Depth / Mix knobs. Chorus is voiced; the other types are transparent
-// stubs (a "voicing soon" note shows for them). Feedback exists as a param but is
-// hidden until the phaser/flanger are voiced.
+// between DRIVE and the amp split. All five types are voiced (Chorus CE-2 /
+// Phaser Phase 90 / Flanger EVH117 / Tremolo TR-2 / Uni-Vibe). FOOL-PROOF UI:
+// Type + Sync + Position pickers, and each pedal SHOWS only the knobs the real
+// one has — Rate (all); Depth (all but the phaser); Mix (Uni-Vibe only);
+// Feedback/Regen (flanger only); Wave (tremolo only). The hidden knobs are pinned
+// to their per-type sweet spot in the processor (PluginProcessor.cpp:1130-1148),
+// so the shipped voice is NOT the knob defaults in PreModBlock.h.
 class PremodPanel : public BlockPanel
 {
 public:

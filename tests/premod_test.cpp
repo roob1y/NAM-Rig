@@ -1,15 +1,35 @@
 // premod_test — offline verification harness for the MONO front-of-amp
 // modulation pedal (PreModBlock). Measurement-first; exits nonzero on any FAIL.
 //
-//   T1  chorus output is finite, bounded, and non-silent (audibly modulates)
-//   T2  Mix = 0 is bit-exact dry (block is transparent at zero mix)
-//   T3  chorus wet path actually MOVES (a swept comb: output varies vs a
-//       fixed-delay reference -> pitch/comb modulation is present)
-//   T4  un-voiced types (Phaser/Flanger/Tremolo/Uni-Vibe) are exact passthrough
-//       (scaffold stubs -> transparent, never silent)
+// ALL FIVE types are voiced (Chorus CE-2 / Phaser Phase 90 / Flanger EVH117 /
+// Tremolo TR-2 / Uni-Vibe Shin-ei) — none is a passthrough stub. A T<n> denotes
+// one scenario and may carry several check() lines (e.g. T1 has three). 34
+// checks across T1-T24:
+//
+//   T1  chorus finite, bounded, non-silent, and audibly differs from dry
+//   T2  Mix = 0 settles to the IoStage-processed dry (no wet added)
+//   T3  chorus wet path MOVES (swept comb vs a static-delay reference differ)
+//   T4  every type is finite + non-silent (all voiced; none is a silent stub)
 //   T5  tempo sync resolves the LFO rate from BPM x division (effectiveRateHz)
 //   T6  free Rate is capped per pedal (chorus <= kChorusMaxRateHz; sync uncapped)
 //   T7  determinism: same input + same params -> identical output
+//   T8  phaser finite, bounded, non-silent, and differs from dry
+//   T9  phaser stays bounded at max feedback (the ZDF loop is stable)
+//   T10 phaser sweep MOVES (swept notches vs a static filter differ)
+//   T11 flanger finite, bounded, non-silent, and differs from dry
+//   T12 flanger stays bounded at max regen (feedback stable below unity)
+//   T13 flanger sweep MOVES (swept comb vs a static comb differ)
+//   T14 flanger Manual shifts the comb (different base delay -> different tone)
+//   T15 tremolo output finite
+//   T16 tremolo cut-only (never boosts above what enters the VCA)
+//   T17 tremolo modulates (differs from dry)
+//   T18 tremolo Depth 0 settles to dry (buffered IoStage transparent)
+//   T19 uni-vibe finite + bounded, and differs from dry
+//   T20 uni-vibe sweep MOVES (swept staggered notches vs a static filter differ)
+//   T21 uni-vibe Chorus (dry+wet) vs Vibrato (wet-only) modes differ
+//   T22 Uni-Vibe 69k input loads down the top (treble-suck shelf)
+//   T23 TR-2 1M FET input is flat (transparent)
+//   T24 IoStage anchors: Uni-Vibe loaded (shelf) vs TR-2 buffered (no shelf)
 
 #include "rig/PreModBlock.h"
 
@@ -271,7 +291,7 @@ int main()
               "T14 flanger Manual shifts the comb");
     }
 
-    // T15-17: tremolo (TR-2) — cut-only gain, modulates, transparent at Depth 0.
+    // T15-18: tremolo (TR-2) — cut-only gain, modulates, transparent at Depth 0.
     {
         auto y = run(x, fs, [](PreModBlock &pm) {
             pm.setType(PreModBlock::kTremolo);
@@ -283,8 +303,8 @@ int main()
         { IoStage io; io.prepare(fs); PreModBlock::applyIo(io, PreModBlock::ioFor(PreModBlock::kTremolo));
           io.processIn(ref.data(), (int)ref.size()); io.processOut(ref.data(), (int)ref.size()); }
         check(allFinite(y), "T15 tremolo finite");
-        check(maxAbs(y) <= maxAbs(ref) + 1.0e-3f, "T15 tremolo cut-only (never boosts above what enters the VCA)");
-        check(rmsDiff(x, y) > 1.0e-3, "T16 tremolo modulates (differs from dry)");
+        check(maxAbs(y) <= maxAbs(ref) + 1.0e-3f, "T16 tremolo cut-only (never boosts above what enters the VCA)");
+        check(rmsDiff(x, y) > 1.0e-3, "T17 tremolo modulates (differs from dry)");
     }
     {
         auto y = run(x, fs, [](PreModBlock &pm) {
@@ -298,7 +318,7 @@ int main()
         const size_t half = x.size() / 2;
         float dev = 0.0f;
         for (size_t i = half; i < x.size(); ++i) dev = std::max(dev, std::fabs(y[i] - ref[i]));
-        check(dev < 1.0e-4f, "T17 tremolo Depth 0 settles to dry (buffered IoStage transparent)");
+        check(dev < 1.0e-4f, "T18 tremolo Depth 0 settles to dry (buffered IoStage transparent)");
     }
 
     // T19-21: Uni-Vibe — finite/bounded, swept staggered notches move, and
