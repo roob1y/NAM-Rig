@@ -109,11 +109,15 @@ Also verified here: modulation = *"~10 % of the period"* swing at max Chorus; Ch
   mislocation of the 2.5 kHz filter resonance ~2 octaves low; the resonant LP (bwQ) IS the peak.
 - **loopHpHz 80** — the gentle "little bass cut" (lows largely preserved).
 - **satDrive 0.45 / satAsym 0.06** — the NE570/571 compander knee + a touch of BBD warmth (subtle).
-- **modDepthFrac 0.10 (delay-PROPORTIONAL, factory-verified ±10%), TRIANGLE LFO.** BBD clock
-  modulation is a percentage of the delay period (varicap on the clock), so the pitch swing scales
-  with time — restoring the DMM's lush long-delay wobble (a fixed ms wrongly vanished at long
-  delays). Depth knob (user Mod) scales it. Chorus rate ~0.85 Hz / Vibrato ~4 Hz (factory), set by
-  the Chorus/Vibrato switch; whether you *hear* chorus vs vibrato also depends on the Blend position.
+- **modDepthMs 2.5 (a FIXED musical depth), TRIANGLE LFO.** The factory says the clock swings
+  *"~10 % of the period"*, but realising the depth as a % of the delay makes the pitch swing scale
+  with the delay time → an unusable ≈1.5-octave warble at long delays (measured: 139 cents @ 25 ms
+  vs ~1818 cents @ 300 ms). A FIXED ms gives constant pitch modulation at every delay (pitch dev =
+  depthMs·4·rate, delay-independent) = a musical, predictable chorus/vibrato (~±70 cent vibrato /
+  ~±15 cent chorus at max Depth). Depth knob (user Mod) scales it. Chorus rate ~0.85 Hz / Vibrato
+  ~4 Hz (factory), set by the Chorus/Vibrato switch; whether you *hear* chorus vs vibrato also
+  depends on the Blend position. (Robbie ear-fix 2026-07-04: the delay-proportional attempt was
+  removed because it warbled wildly at the default/longer delays.)
 - **glideMs 80** — analog BBD repitch swoop on a Delay-knob change.
 - **fbCeiling 1.06** — self-oscillates readily, a DMM feature; the resonant LP adds loop gain but
   the in-loop compander sat + loopLimit keep it bounded (offline: sustained + bounded at ~1.6 tail).

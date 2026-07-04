@@ -105,12 +105,13 @@ bot-blocked images).
    to "derived by comparison to the DMM factory reference, exact corner still
    unverified."** The one true "measure it" path stays: controlled-probe capture
    of Robbie's real M169.
-2. **Modulation depth was a fixed 1.3 ms — physically wrong for a BBD.** A BBD's
-   warble is the LFO pulling the *clock*, so the pitch deviation is a **percentage
-   of the delay time**, not a fixed ms. Fixed-ms means the wobble vanishes at long
-   delays and is (relatively) too strong at short ones. Fixed to delay-proportional
-   (see the engine change); CC uses a **subtle** fraction (~0.6 %), FLAGGED (no
-   published CC depth spec — only the 0.2–2.2 Hz rate range is in the M169 manual).
+2. **Modulation depth = a fixed 1.3 ms (kept).** A BBD's warble is the LFO pulling the
+   *clock* (physically a % of the period), but a fixed absolute ms is the musically-correct
+   realisation — it gives a consistent warble at every delay, whereas delay-proportional
+   depth warbles wildly at long delays (see the Memory Man section — an early proportional
+   attempt was reverted for both models). CC's warble stays deliberately subtle
+   (effective ~0.35·1.3 ms). No published CC depth spec; only the 0.2–2.2 Hz rate range is
+   in the M169 manual.
 3. `fbCeiling` 1.18 is behaviour-tuned (self-oscillates past ~2 o'clock,
    bounded by the in-loop compander sat + loopLimit), not a circuit number — the
    real loop gain isn't specced. Left as-is; the stale test comments calling it
@@ -160,13 +161,18 @@ mislocated ~two octaves low.
    at min delay → 3.2 kHz at max delay) while the fixed resonant filter dominates —
    which is the corrected 8192-stage physics ("the darkness is the fixed filter,
    not the clock").
-3. **Modulation depth fixed-ms → delay-proportional, anchored to the factory
-   ±10 %.** Calibration: *"at max chorus setting the period should swing approx.
-   10 % of its average value."* The old fixed 3.0 ms gave ~10 % only near ~30 ms
-   delay and ~0.6 % at 500 ms — i.e. the DMM's signature deep/lush pitch wobble was
-   **missing at the long delays it's famous for**. Now `depthMs = 0.10 · delayMs`
-   at full Depth (the varicap-on-clock physics). This is the DMM's seasick vibrato
-   restored, and it's a **verified** magnitude.
+3. **Modulation depth — FIXED ms, not delay-proportional (corrected 2026-07-04 by
+   ear).** I first made the depth delay-proportional (`modDepthFrac 0.10`) to match the
+   factory *"~10 % of the period"* clock swing. Measured, that is **unusable**: pitch dev
+   = `depthMs·4·rate`, so a fixed % of a long delay is a huge swing — at Depth max the
+   vibrato measured **139 cents @ 25 ms but ~1818 cents (≈1.5 octaves) @ 300 ms**, a
+   seasick warble that "doesn't sound like chorus/vibrato" at the default/typical (longer)
+   delays (Robbie's report). A **fixed absolute `modDepthMs`** gives the SAME pitch
+   modulation at every delay (2.5 ms → ~±70 cent vibrato / ~±15 cent chorus, measured
+   constant 25 ms→300 ms) = a musical, predictable Depth knob. So `modDepthFrac` was
+   **removed** and the depth reverted to fixed ms (DMM 2.5, Carbon Copy 1.3). The clock
+   warble is physically a % of the period, but the pedal's chorus/vibrato is used across
+   the whole delay range, so the fixed-depth realisation is the musically-correct one.
 4. **Chorus LFO rate 1.0 Hz → 0.85 Hz.** Factory: chorus = *"slightly less than
    1 Hz"*, vibrato ≈ 4 Hz (vibrato 4.0 already correct). Minor.
 5. `fbCeiling` re-checked after the resonant-LP change (the +3 dB resonance adds
@@ -190,15 +196,18 @@ All P1 rot + the ranked P2 Memory Man items below were implemented this pass;
   `applyIo` header + the Panels "only DD-7 verified / generic" comment; rewrote the
   read-first `NEXT_CHARACTER_HANDOFF.md` status/inventory (kept its method + gotchas);
   updated `memory_man.md` + `carbon_copy.md`.
-- **P2 Memory Man revoice** (new per-model `bwQ` + `modDepthFrac` fields; DD-7 + Carbon
-  Copy bandwidth byte-exact via bwQ 0.5): 650 Hz mid → dropped; resonant reconstruction LP
-  antiAlias 3200 / bwQ 1.30 (measured +3.0 dB @ 2.53 kHz, flat ≤900 Hz — factory match);
-  antiAlias 3800→3200; chorus rate 1.0→0.85 Hz; modulation fixed-ms → delay-proportional
-  0.10 (verified ±10 %). Carbon Copy modulation also made delay-proportional (0.006, flagged).
+- **P2 Memory Man revoice** (new per-model `bwQ` field; DD-7 + Carbon Copy bandwidth
+  byte-exact via bwQ 0.5): 650 Hz mid → dropped; resonant reconstruction LP antiAlias 3200 /
+  bwQ 1.30 (measured +3.0 dB @ 2.53 kHz, flat ≤900 Hz — factory match); antiAlias 3800→3200;
+  chorus rate 1.0→0.85 Hz.
+- **Modulation depth (corrected 2026-07-04 by ear):** first made delay-proportional, but that
+  measured as a ≈1.5-octave warble at long delays (unusable — Robbie's "doesn't sound like
+  chorus/vibrato"). Reverted to a FIXED `modDepthMs` (DMM 2.5, CC 1.3) → constant, musical
+  pitch modulation at every delay; the `modDepthFrac` field was removed.
 - **New tests:** T4 rewritten to the accurate bandwidth hierarchy (the old "MM darkens with
   time" tested a near-nonexistent effect for an 8192-stage BBD); T16 pins the revoice
-  (presence peak @2.5 kHz > 500 Hz, voicing fields, delay-proportional mod ratio ~5×, bounded
-  self-osc).
+  (presence peak @2.5 kHz > 500 Hz, voicing fields, **fixed/constant** mod swing across
+  delays, bounded self-osc).
 
 Suggested scoped commit:
 `predelay: fix SDD-removal rot + revoice Memory Man from the EH-7850 factory calibration`
@@ -212,10 +221,10 @@ numbers in the three test comments + the DD-7 header/`dd7.md` "1.0"; update the
 `NEXT_CHARACTER_HANDOFF.md`'s status/inventory** (keep its method + gotchas).
 
 **P2 — sound, ranked by audibility:** Memory Man 650 Hz mid → 2.5 kHz resonant
-reconstruction (wrong by ~2 octaves — top item) → Memory Man delay-proportional
-modulation (restores the lush long-delay wobble, factory-verified 10 %) →
-Memory Man antiAlias 3800→3200 → Memory Man chorus rate 1.0→0.85. Carbon Copy
-modulation → delay-proportional (subtle, magnitude flagged).
+reconstruction (wrong by ~2 octaves — top item) → Memory Man modulation depth made
+a FIXED musical ms (an early delay-proportional attempt measured as a ≈1.5-octave
+warble at long delays — Robbie ear-fix) → Memory Man antiAlias 3800→3200 →
+Memory Man chorus rate 1.0→0.85.
 
 **P3 — doc the deliberate/unverifiable deviations** so they survive fresh
 sessions: Carbon Copy antiAlias 2600 (2-pole stand-in for a steep ~3 kHz filter,

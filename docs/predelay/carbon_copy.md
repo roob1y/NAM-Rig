@@ -107,12 +107,12 @@ via the MIX pot → **1 kΩ buffered output**. Bypass = a "Millennium-style" FET
   practical floor to stop bass runaway in self-oscillation, not the Deluxe Bright's 200 Hz cut.
 - **midDb 0, presDb 0** — no documented mid bump (that's the Memory Man) and no presence sheen (it's
   a dark pedal, no top lift).
-- **modRateHz 1.2 (within the verified 0.2–2.2 Hz), modDepthFrac 0.006 (delay-PROPORTIONAL, subtle,
-  FLAGGED magnitude), FIXED internal amount (kCarbonCopyMod 0.35).** The M169 has NO mod knob — its
-  modulation is two internal trimmers (WIDTH/RATE), always on and subtle — so the Carbon Copy voice
-  ignores the user Mod param and bakes in a fixed subtle warble. Updated 2026-07-04: the depth is now
-  a PERCENTAGE of the delay time (BBD clock warble scales with the period), like the DMM; the CC
-  fraction is a subtle ~0.6 % (no published CC depth spec, so magnitude flagged). (Robbie correction
+- **modRateHz 1.2 (within the verified 0.2–2.2 Hz), modDepthMs 1.3 (a FIXED subtle depth), FIXED
+  internal amount (kCarbonCopyMod 0.35).** The M169 has NO mod knob — its modulation is two internal
+  trimmers (WIDTH/RATE), always on and subtle — so the Carbon Copy voice ignores the user Mod param
+  and bakes in a fixed subtle warble (effective ~0.35·1.3 ms). NB a brief 2026-07-04 experiment made
+  the depth delay-proportional; it was reverted (with the DMM) because a fixed ms gives a consistent,
+  musical warble at every delay whereas proportional warbles wildly at long delays. (Robbie correction
   2026-07-03: "the actual pedal doesn't have a mod knob.")
 - **glideMs 70** — analog BBD repitch: turning the Delay knob sweeps the clock → the repeats pitch-
   bend/swoop rather than snapping (tape/analog-delay feel).

@@ -79,9 +79,10 @@ float loopHpHz;     // in-loop low-cut (bass build control); 0 = off
 float midHz,midDb,midQ;   // in-loop mid bump; 0 dB = off (DMM now uses bwQ, not this)
 float satDrive,satAsym;   // companding/preamp soft-clip knee (cubic ADAA, in-loop); 0 = clean
 float presHz,presDb;      // OUTPUT-ONCE presence sheen (digital top); 0 dB = off
-float modRateHz,modDepthMs; // DIGITAL (DD-7 Modulate) modulation: fixed-ms chorus depth
-float modDepthFrac; // BBD modulation: clock warble = a FRACTION of the delay time (varicap
-                    //   on the clock -> pitch swing scales with time). DMM factory = 0.10 (±10%)
+float modRateHz,modDepthMs; // built-in modulation: a FIXED absolute ms depth (user Mod/Depth
+                    //   scales it). Fixed ms -> pitch-mod swing is CONSTANT across delay settings
+                    //   (pitch dev = depthMs·4·rate) = a musical chorus/vibrato at any delay. NB a
+                    //   delay-PROPORTIONAL depth was tried + reverted (warbled ~1.5 oct at long delays)
 float glideMs;      // time-change feel: analog = slow pitch-bend swoop; digital = quick
 float fbCeiling;    // feedback ceiling; >1 => self-oscillates (loopLimit bounds it)
 ```
@@ -163,8 +164,8 @@ controlled-probe "measure it" against Robbie's real pedals:
   comparison to the Memory Man factory reference (a same-era 8192-stage BBD reconstruction is
   −3 dB at ~3.2–3.5 kHz with a presence peak; the CC is darker and has NO peak, so a lower,
   non-resonant 2-pole corner is consistent). Exact corner still needs the probe.
-- **Carbon Copy modulation depth** (`modDepthFrac` 0.006) — no published CC depth spec; only
-  the 0.2–2.2 Hz rate range is in the M169 manual. Subtle, flagged.
+- **Carbon Copy modulation depth** (fixed `modDepthMs` 1.3, effective ~0.35·1.3 ms) — no
+  published CC depth spec; only the 0.2–2.2 Hz rate range is in the M169 manual. Subtle, flagged.
 - **Memory Man mid magnitude/corner** — now anchored to the 1978 factory calibration (flat
   ≤900 Hz, +3 dB peak @2.5 kHz, −3 dB @3.2–3.5 kHz) -> `antiAlias 3200, bwQ 1.30`, verified.
 - **The compander** is modelled as a static in-loop soft-clip (a deliberate simplification of

@@ -18,7 +18,7 @@
 // T14 Memory Man circuit-grounded voicing (550 ms / 8192 stages / crossfade Blend)
 // T15 Memory Man master Level (Volume) + Chorus/Vibrato switch (LFO speed range)
 // T16 Memory Man revoice (2026-07-04): a PRESENCE peak at ~2.5 kHz (not a 650 Hz low-mid
-//     boost), delay-PROPORTIONAL modulation (±10% of the period), and bounded self-osc
+//     boost), a FIXED-depth modulation (constant pitch swing at every delay), and bounded self-osc
 #include "rig/PreDelayBlock.h"
 #include <cstdio>
 #include <cmath>
@@ -478,8 +478,9 @@ int main()
     // Factory calibration (Howard Davis/EHX 1978): the delay path is flat below ~900 Hz,
     // peaks ~+3 dB at ~2.5 kHz, and rolls off above ~3.3 kHz. So the wet must be LOUDER at
     // 2.5 kHz than at 500 Hz (a PRESENCE peak) — the OPPOSITE of the old +4 dB @ 650 Hz
-    // voicing, which would fail this. And the modulation is delay-PROPORTIONAL (clock warble
-    // = a % of the period), so the pitch swing scales with the delay time.
+    // voicing, which would fail this. And the modulation depth is a FIXED ms, so the echo's
+    // pitch/position swing is CONSTANT at every delay (delay-proportional depth made it a
+    // multi-octave warble at long delays — Robbie ear-fix 2026-07-04).
     {
         // (a) presence peak: wet-only steady-state RMS at 2.5 kHz vs 500 Hz.
         auto wetRmsAt = [](double hz) {
@@ -501,13 +502,14 @@ int main()
         PreDelayBlock v; v.setModel(PreDelayBlock::kMemoryMan); v.prepare({SR, BLK});
         const auto vc = v.currentVoicing();
         CHECK(vc.midDb == 0.0f && vc.bwQ > 1.0f && std::abs(vc.antiAliasHz - 3200.0f) < 1.0f
-                  && std::abs(vc.modDepthFrac - 0.10f) < 1e-4f,
-              "T16 Memory Man voicing pinned (mid %.0fdB, bwQ %.2f, aa %.0f, modFrac %.3f)",
-              vc.midDb, vc.bwQ, vc.antiAliasHz, vc.modDepthFrac);
+                  && std::abs(vc.modDepthMs - 2.5f) < 0.01f,
+              "T16 Memory Man voicing pinned (mid %.0fdB, bwQ %.2f, aa %.0f, modMs %.1f)",
+              vc.midDb, vc.bwQ, vc.antiAliasHz, vc.modDepthMs);
 
-        // (b) delay-proportional modulation: the MAX echo displacement (swept over the LFO
-        // cycle so we catch the peak, not a chance zero-crossing) scales with the delay time.
-        // Fixed-ms would give equal displacement; proportional gives ~5x from 100->500 ms.
+        // (b) FIXED-depth modulation: the MAX echo displacement (swept over the LFO cycle so we
+        // catch the peak, not a chance zero-crossing) is CONSTANT across delay times -> a musical,
+        // predictable chorus/vibrato. Delay-proportional depth would blow up ~5x from 100->500 ms
+        // (an unusable warble at long delays); fixed ms keeps the two within a hair.
         auto maxEchoDev = [](float timeMs) {
             const size_t nominal = (size_t)(timeMs * 0.001 * SR);
             double mx = 0.0;
@@ -525,9 +527,9 @@ int main()
             return mx;
         };
         const double dev100 = maxEchoDev(100.0f), dev500 = maxEchoDev(500.0f);
-        CHECK(dev100 > 50.0 && dev500 > dev100 * 2.5,
-              "T16 modulation is delay-proportional (maxdev100=%.0f maxdev500=%.0f, ratio %.1f)",
-              dev100, dev500, dev500 / std::max(1.0, dev100));
+        CHECK(dev100 > 50.0 && std::abs(dev500 - dev100) < 0.3 * dev100,
+              "T16 modulation depth is fixed/constant across delays (maxdev100=%.0f maxdev500=%.0f)",
+              dev100, dev500);
 
         // (c) the resonant reconstruction LP must keep self-oscillation bounded.
         PreDelayBlock osc;

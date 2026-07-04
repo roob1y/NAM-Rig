@@ -48,9 +48,9 @@
 //                         rolls off sharply — modeled as one RESONANT reconstruction LP
 //                         (antiAlias 3200, bwQ 1.30), no separate mid. That 2.5 kHz peak is why
 //                         it reads present/hi-fi where the Carbon Copy stays dark. Its signature
-//                         is a DEEP TRIANGLE-LFO modulation (Depth knob, delay-PROPORTIONAL
-//                         ±10% at max per the factory spec) through a TRUE CROSSFADE Blend —
-//                         full-wet = vibrato, mid = chorus — plus a low-Z (~100 kΩ inverting)
+//                         is a TRIANGLE-LFO modulation (Depth knob = a fixed musical depth, so the
+//                         chorus/vibrato is consistent at any delay) through a TRUE CROSSFADE Blend
+//                         — full-wet = vibrato, mid = chorus — plus a low-Z (~100 kΩ inverting)
 //                         loading input. Sings and washes; self-oscillates readily.
 //
 // Signal per sample (mono):
@@ -154,10 +154,10 @@ public:
         float midHz, midDb, midQ; // in-loop mid bump (0 dB = off; unused now the DMM uses bwQ)
         float satDrive, satAsym;  // companding/preamp soft-clip (cubic ADAA, in-loop); 0 = clean
         float presHz, presDb;     // output-once presence sheen (digital top); 0 dB = off
-        float modRateHz, modDepthMs; // digital (DD-7 Modulate) modulation: FIXED-ms chorus depth
-        float modDepthFrac; // BBD modulation: clock warble = a FRACTION of the delay time (the
-                            //   varicap pulls the clock, so pitch swing scales with time). Used
-                            //   when bbd; the DMM factory max is ~0.10 (±10% of the period).
+        float modRateHz, modDepthMs; // built-in modulation: a FIXED absolute ms depth (user Mod/
+                            //   Depth knob scales it). Fixed ms -> the pitch-mod swing is CONSTANT
+                            //   across delay settings (pitch dev = depthMs·4·rate, independent of
+                            //   the delay time) = a musical, predictable chorus/vibrato at any delay.
         float glideMs;      // time-change glide (BBD repitch swoop vs a quick digital move)
         float fbCeiling;    // feedback ceiling (analog can self-oscillate >1 — sat bounds it)
     };
@@ -182,12 +182,11 @@ public:
             // controlled-probe measurement. loopHpHz 100 = a gentle bass-runaway floor (the
             // M169 is warm/keeps lows). No mid bump, no presence, no tone control on the
             // M169. Input 1 MOhm / output 1 kOhm buffered stage in applyIo().
-            // Modulation is delay-PROPORTIONAL (BBD clock warble): modDepthFrac 0.006 is a
-            // SUBTLE ~0.6% swing (FLAGGED -- no published CC depth spec; only the 0.2-2.2 Hz
-            // rate range is in the M169 manual). bwQ 0.5 = a dark, NON-resonant LP (no presence
-            // peak -- the M169 has no Bright switch), which is why it reads darker than the DMM.
-            //       bbd    maxMs    stages   aa       bwQ    hp      midHz midDb midQ  sat    asym   presHz presDb modHz  modMs modFrac glide fbC
-            return { true,  600.0f,  8192.0f, 2600.0f, 0.50f, 100.0f, 0.0f, 0.0f, 0.7f, 0.50f, 0.06f, 0.0f,  0.0f,  1.20f, 1.3f, 0.006f, 70.0f, 1.18f };
+            // modDepthMs 1.3 with the fixed internal amount (kCarbonCopyMod 0.35) = a SUBTLE
+            // warble (the M169's mod is deliberately gentle). bwQ 0.5 = a dark, NON-resonant LP
+            // (no presence peak -- the M169 has no Bright switch), why it reads darker than the DMM.
+            //       bbd    maxMs    stages   aa       bwQ    hp      midHz midDb midQ  sat    asym   presHz presDb modHz  modMs glide fbC
+            return { true,  600.0f,  8192.0f, 2600.0f, 0.50f, 100.0f, 0.0f, 0.0f, 0.7f, 0.50f, 0.06f, 0.0f,  0.0f,  1.20f, 1.3f, 70.0f, 1.18f };
         case kMemoryMan:
             // Lush analog BBD — 2× MN3005 in SERIES = 8192 stages, 550 ms, CD4047 clock,
             // NE570/571 compander (docs/predelay/memory_man.md). REVOICED 2026-07-04 from the
@@ -199,15 +198,17 @@ public:
             // 1.30 -> +3.0 dB peak at ~2.5 kHz. NO separate mid bump (midDb 0): the old "+4 dB @
             // 650 Hz" was a mislocation of this 2.5 kHz filter resonance ~2 octaves too low. The
             // 2.5 kHz peak is what makes the DMM read "present/hi-fi" vs the Carbon Copy's dark,
-            // non-resonant LP. Gentle 80 Hz low-cut ("little bass cut"). Modulation is delay-
-            // PROPORTIONAL (varicap on the clock): modDepthFrac 0.10 = the factory ±10%-of-period
-            // swing at max Depth -> the lush long-delay wobble (a fixed ms wrongly vanished at long
-            // delays). DEEP TRIANGLE-LFO (Depth knob) + a true CROSSFADE Blend (full wet = vibrato,
+            // non-resonant LP. Gentle 80 Hz low-cut ("little bass cut"). Modulation = a TRIANGLE
+            // LFO on the delay (Depth knob = modDepthMs 2.5, a FIXED ms) -> a musical, delay-
+            // independent chorus/vibrato (~±70 cent vibrato @ Depth max, ~±15 cent chorus). NB the
+            // BBD clock warble is physically a % of the period, but realised that way the pitch
+            // swing scales with delay -> an unusable multi-octave warble at long delays (Robbie
+            // ear-fix 2026-07-04: fixed ms instead). A true CROSSFADE Blend (full wet = vibrato,
             // mid = chorus) + a low-Z loading input — all wired below. fbCeiling 1.06 self-
             // oscillates readily (a DMM feature; bounded by the in-loop compander sat + loopLimit).
             // Chorus rate ~0.85 Hz / Vibrato ~4 Hz (factory). No tone control on the DMM.
-            //       bbd    maxMs    stages   aa       bwQ    hp     midHz midDb midQ  sat    asym   presHz presDb modHz modMs modFrac glide  fbC
-            return { true,  550.0f,  8192.0f, 3200.0f, 1.30f, 80.0f, 0.0f, 0.0f, 0.80f, 0.45f, 0.06f, 0.0f,  0.0f,  1.60f, 3.0f, 0.10f, 80.0f, 1.06f };
+            //       bbd    maxMs    stages   aa       bwQ    hp     midHz midDb midQ  sat    asym   presHz presDb modHz modMs glide  fbC
+            return { true,  550.0f,  8192.0f, 3200.0f, 1.30f, 80.0f, 0.0f, 0.0f, 0.80f, 0.45f, 0.06f, 0.0f,  0.0f,  1.60f, 2.5f, 80.0f, 1.06f };
         case kDD7:
         default:
             // Boss DD-7 — VERIFIED from the 2008 Roland service notes (docs/predelay/dd7.md):
@@ -224,8 +225,8 @@ public:
             // as they slew (the authentic digital-delay time-sweep), not an instant jump.
             // fbCeiling 1.05: F.BACK builds into a self-oscillating swell at the top
             // ("Trick Sound") — the loopLimit backstop keeps it bounded.
-            //       bbd    maxMs     stages aa        bwQ    hp    midHz midDb midQ  sat   asym  presHz presDb modHz modMs modFrac glide fbC
-            return { false, 2000.0f, 0.0f,  19000.0f, 0.50f, 0.0f, 0.0f, 0.0f, 0.7f, 0.0f, 0.0f, 0.0f,  0.0f,  0.35f, 0.9f, 0.0f,   45.0f, 1.05f };
+            //       bbd    maxMs     stages aa        bwQ    hp    midHz midDb midQ  sat   asym  presHz presDb modHz modMs glide fbC
+            return { false, 2000.0f, 0.0f,  19000.0f, 0.50f, 0.0f, 0.0f, 0.0f, 0.7f, 0.0f, 0.0f, 0.0f,  0.0f,  0.35f, 0.9f, 45.0f, 1.05f };
         }
     }
 
@@ -347,12 +348,12 @@ public:
 
             const float dry = mono[i];
             const double lfo = (double)mLfo.value();
-            // BBD clock modulation is a PERCENTAGE of the delay period (the varicap pulls the
-            // clock), so the pitch warble scales with the delay time -> depth = frac * time.
-            // Digital (DD-7 Modulate) uses a fixed-ms chorus. (DMM factory: ~±10% at max Depth.)
-            const double depthMs = mVoicing.bbd ? ((double)mVoicing.modDepthFrac * mBaseZ)
-                                                : (double)mVoicing.modDepthMs;
-            const double modMs = (double)modAmt * depthMs * lfo;
+            // Modulation depth is a FIXED absolute ms (not a % of the delay). BBD clock warble is
+            // physically a % of the period, but realised that way the pitch swing scales with the
+            // delay time -> an unusable multi-octave warble at long delays (measured ~1.5 oct @
+            // 300 ms). A fixed ms gives CONSTANT pitch modulation at every delay (pitch dev =
+            // depthMs·4·rate) = a musical, predictable chorus/vibrato. (Robbie ear-fix 2026-07-04.)
+            const double modMs = (double)modAmt * (double)mVoicing.modDepthMs * lfo;
             const double tSamp = std::max(3.0, (mBaseZ + modMs) * fsK);
             float wet = reverse ? reverseRead(tSamp) : mLine.readFrac6(tSamp - 1.0); // REVERSE = grain playback
 
