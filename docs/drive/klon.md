@@ -57,12 +57,27 @@ soft-poly clips (3/4). Added to the **hard-clip path** (guarded so Black Rodent 
 - The clean is the **RAW input** (`xin`), full-range and flat, so it restores the
   lows the mid-focused clip drops — the Klon "big open" low end. It is at **input
   level** (never the gained signal → the crackle pitfall), then scaled by
-  **`kCleanScale 5→3.5`** so it sits at the clipped path's ±1 level (otherwise the
-  ×preGain clipped path swamps it and the "heavy" blend is inaudible). `cleanBlend
-  0.50` + `dynDepth 0.30` (touch). Tuned so worst-case |out| stays < 1.5 (T50).
-- **`shapeTrack 1`**: the mid hump + bass-cut **bloom with Drive**, so at low Drive
-  the pre-EQ is ~flat and the path barely clips → a **near-clean boost** (THD ~0.001
-  at Drive 0.1); it distorts more as Drive climbs (the Klon reputation). T48.
+  **`kCleanScale 5→3.5→3.0`** so it sits at the clipped path's ±1 level (otherwise the
+  ×preGain clipped path swamps it and the "heavy" blend is inaudible). The clean leg
+  is **level-constant** (the real behaviour) + `dynDepth 0.30` (touch). Tuned so
+  worst-case |out| stays < 1.5 (T50 = 1.41); `kCleanScale` was trimmed 3.5→3.0 when
+  the blend went dual-gang (below) because the higher low-Drive clean fraction lifted
+  peaks.
+- **DUAL-GANG blend (2026-07-04):** the real Klon Gain pot is *dual-ganged* — one gang
+  raises the dirty-path gain (`preGain`), the other **rebalances the clean/dirty sum**.
+  So the clean fraction **tracks Drive**: `cleanBlendLo 0.85` at MIN Drive (a near-clean
+  boost, clean dominates) → `cleanBlend 0.30` at MAX Drive (the dirty path dominates,
+  clean still filling underneath). Linearly interpolated by the Drive knob, then the
+  `dynDepth` envelope nudge rides on top. Because the clipped path saturates (bounded
+  ±1 regardless of `preGain`), the natural ratio-shift wouldn't happen on its own, so
+  the coefficient is moved explicitly. New zero-filled voicing field `cleanBlendLo`
+  (0 on every other model → the flat `cleanBlend` base, byte-exact). Replaces the old
+  fixed `cleanBlend 0.50` at every Drive (too dirty at low Gain, too polite at max).
+  T51b pins it (`cleanBlendLo > cleanBlend`; THD climbs smoothly across the sweep).
+- **`shapeTrack 1`**: the mid hump + bass-cut also **bloom with Drive**, reinforcing the
+  dual-gang blend — at low Drive the pre-EQ is ~flat and the path barely clips → a
+  **near-clean boost** (THD ~0.001 at Drive 0.1); it distorts more as Drive climbs (the
+  Klon reputation). T48.
 
 Measured character (humbucker): THD climbs 0.001 → 0.02 → 0.20 → 0.52 across the
 Drive sweep (cleaner than both Green Drive II and Super Drive at low/mid Drive — the
@@ -90,16 +105,21 @@ Super Drive).
   (New voicing field `trebleShelfDb`; 0 = the legacy tilt → every other model
   byte-exact. Panel labels this knob **Treble**.)
 
-Engine note: two small additions, both zero-fill/guarded so all other models stay
+Engine note: three small additions, all zero-fill/guarded so all other models stay
 byte-exact — (1) the hard-clip branch does an optional clean blend
-(`cleanBlend>0 || dynDepth>0`, raw input × `kCleanScale`), and (2) the
-`trebleShelfDb` active high-shelf tone. Tunable taste knobs by ear:
-`cleanBlend`/`kCleanScale` (transparency), `gMax` (gain), `outTrim` (level),
-`lowCut`/`midDb` (body vs hump), `trebleShelfDb`/`pivotHz` (treble shelf).
+(`cleanBlend>0 || dynDepth>0`, raw input × `kCleanScale`), (2) the
+`trebleShelfDb` active high-shelf tone, and (3) the `cleanBlendLo` dual-gang blend
+that makes the clean fraction track Drive. Tunable taste knobs by ear:
+`cleanBlendLo`/`cleanBlend` (dual-gang clean sweep), `kCleanScale` (clean-leg
+level/transparency), `gMax` (gain), `outTrim` (level), `lowCut`/`midDb` (body vs
+hump), `trebleShelfDb`/`pivotHz` (treble shelf).
 
 ## 5. Voicing row (DriveBlock.h `od[]`, model 2)
 
+`cleanBlend` is now the clean fraction at **max** Drive; `cleanBlendLo` (appended
+after the RAT `midMigrate`/`slewMax` zero-fills) is the fraction at **min** Drive.
+
 ```
-//  clip gMin gMax  lowCut midHz midDb midQ  lpHz   bias  pivot  outTrim shp post emphDb emphHz clean dyn  toneF adaa2 gate trebleShelfDb
-{ 1, 2.0f, 70.0f, 210.0f, 980.0f, 3.2f, 0.3f, 4700.0f, 0.00f, 408.0f, 0.95f, 1.0f, 0.0f, 0.0f, 700.0f, 0.50f, 0.30f, 0.0f, 1.0f, 0.0f, 18.0f }
+//  clip gMin gMax  lowCut midHz midDb midQ  lpHz   bias  pivot  outTrim shp post emphDb emphHz clean dyn  toneF adaa2 gate trebleShelfDb  muff muffLp muffIntLp midMigrate slewMax cleanBlendLo
+{ 1, 2.0f, 70.0f, 210.0f, 980.0f, 3.2f, 0.3f, 4700.0f, 0.00f, 408.0f, 0.95f, 1.0f, 0.0f, 0.0f, 700.0f, 0.30f, 0.30f, 0.0f, 1.0f, 0.0f, 18.0f,  0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.85f }
 ```

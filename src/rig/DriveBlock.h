@@ -217,6 +217,17 @@ public:
                              //     signal HF loss when cranked) -> level/rate dependent, so
                              //     it's invisible to the small-signal frequency response.
                              //     Applied in the hard-clip (adaa2) branch only. 0 = off.
+        // --- Klon DUAL-GANG clean/dirty balance; 0 = flat cleanBlend (every other model zero-fills) ---
+        float cleanBlendLo;  // >0: the clean-blend BASE tracks the Drive knob. The real Klon
+                             //     Gain pot is DUAL-GANGED -- it raises the dirty-path gain
+                             //     (preGain) AND rebalances the clean/dirty sum. This value =
+                             //     the clean fraction at MIN Drive (near-clean boost, clean
+                             //     dominates); cleanBlend = the fraction at MAX Drive (dirty
+                             //     path dominates, clean still fills underneath). Linearly
+                             //     interpolated by Drive, then the dynDepth envelope nudge
+                             //     rides on top. The clean leg stays LEVEL-CONSTANT either way
+                             //     (the real behaviour). 0 = the flat cleanBlend at every
+                             //     Drive (byte-exact; only the Klon hard-clip path uses it).
     };
 
     // A specific pedal MODEL inside a category (Type). A category can hold several
@@ -280,18 +291,22 @@ public:
             // RMS 0.14 dB) clipped by SYMMETRIC germanium (hard, clip 1 + 2nd-order ADAA),
             // then SUMMED with a big parallel CLEAN feedforward -> the "transparent
             // overdrive". We model the clean sum as a HEAVY clean blend taken from the RAW
-            // input (cleanBlend 0.50 + dynDepth 0.30): the mid-focused clipped path drops
-            // the lows (lowCut 210, hump 980) and the full-range clean restores them ->
-            // big open low end + dynamics. shapeTrack 1 = the hump BLOOMS with Drive, so
-            // at low Drive it is a near-clean boost (the Klon reputation), distorting more
-            // as Drive climbs. Bright/open top (lpHz 4700, the 27V headroom feel). Modest
+            // input (level-constant, + dynDepth 0.30 touch): the mid-focused clipped path
+            // drops the lows (lowCut 210, hump 980) and the full-range clean restores them
+            // -> big open low end + dynamics. The Klon Gain pot is DUAL-GANGED, so the
+            // clean/dirty BALANCE tracks Drive too: cleanBlendLo 0.85 (near-clean boost at
+            // min) -> cleanBlend 0.30 (dirty path dominates at max), the clean still filling
+            // underneath. shapeTrack 1 = the hump also BLOOMS with Drive, so at low Drive it
+            // is a near-clean boost (the Klon reputation), distorting more as Drive climbs.
+            // Bright/open top (lpHz 4700, the 27V headroom feel). Modest
             // gMin (genuinely clean min), moderate gMax (~the real 40 dB), lots of output
             // (outTrim -- it is also a boost). Tone = treble tilt ~450 Hz (the active
             // treble-shelf corner ~408 Hz, approximated by the engine tilt). Calibrated.
             // tone = ACTIVE treble shelf (trebleShelfDb 18 @ pivot 408 Hz): the real
             // Klon high-shelf (bass fixed, +18/-8 dB), noon = flat. NOT the engine tilt.
             {"Gold Horse", "Transparent Overdrive",
-             { 1, 2.0f, 70.0f, 210.0f,  980.0f, 3.2f, 0.3f, 4700.0f, 0.00f,  408.0f, 0.95f, 1.0f, 0.0f,  0.0f, 700.0f, 0.50f, 0.30f, 0.0f, 1.0f, 0.0f, 18.0f}, false},
+             { 1, 2.0f, 70.0f, 210.0f,  980.0f, 3.2f, 0.3f, 4700.0f, 0.00f,  408.0f, 0.95f, 1.0f, 0.0f,  0.0f, 700.0f, 0.30f, 0.30f, 0.0f, 1.0f, 0.0f, 18.0f,
+               /*muff*/0.0f, 0.0f, 0.0f, /*midMigrate*/0.0f, /*slewMax*/0.0f, /*cleanBlendLo*/0.85f}, false},
             // model 3: circuit-fit Marshall Bluesbreaker (the early-'90s pedal, the
             // King of Tone / Timmy / Morning Glory ancestor). A TL072 non-inverting
             // boost+filter (IC1A) into an INVERTING soft-clip stage (IC1B, 4x 1N914 in
@@ -754,7 +769,14 @@ public:
                         const float aenv = std::abs(xin);
                         env += (aenv > env ? envAtk : envRel) * (aenv - env);
                         const float envN = clamp01(env * invEnvRef);
-                        float bEff = v.cleanBlend + v.dynDepth * (0.5f - envN);
+                        // Klon DUAL-GANG balance: the clean/dirty BASE tracks the Drive knob
+                        // (cleanBlendLo at min -> cleanBlend at max), then the envelope nudge
+                        // rides on top. Models with cleanBlendLo 0 keep the flat cleanBlend
+                        // base (byte-exact; RAT skips this branch entirely, cleanBlend 0).
+                        const float bBase = (v.cleanBlendLo > 0.0f)
+                            ? v.cleanBlendLo + (v.cleanBlend - v.cleanBlendLo) * drv
+                            : v.cleanBlend;
+                        float bEff = bBase + v.dynDepth * (0.5f - envN);
                         bEff = bEff < 0.0f ? 0.0f : (bEff > 0.9f ? 0.9f : bEff);
                         // The clipped path is bounded ~+/-1, so the RAW input clean (xin)
                         // must be scaled up to a comparable level or the "heavy" blend is
@@ -835,7 +857,10 @@ public:
 private:
     static constexpr float kMaxTiltDb = 9.0f;
     static constexpr float kDcR = 0.9995f; // DC blocker pole (~4 Hz corner @ 48k)
-    static constexpr float kCleanScale = 3.5f; // raw-input clean -> clip-level gain (hard-clip clean blend, Klon)
+    static constexpr float kCleanScale = 3.0f; // raw-input clean -> clip-level gain (hard-clip clean blend, Klon).
+                                               // Trimmed 3.5->3.0 when the blend went dual-gang: the higher
+                                               // clean fraction at low Drive (cleanBlendLo 0.85) lifted peaks;
+                                               // this keeps the level-constant clean leg within headroom (T50).
     static constexpr float kMuffStage2Gain = 2.0f; // fixed inter-stage gain into the Big Muff's
                                                    // 2nd soft clip (the real circuit's ~+25 dB stage;
                                                    // drives clip-1's output into clip-2's knee -> the

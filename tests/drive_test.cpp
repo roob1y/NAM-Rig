@@ -989,7 +989,7 @@ int main()
             hp += hpC * (u - hp); { const float hipassed = u - hp; u += sAmt * (hipassed - u); }
             { const float m = mid.processSample(u); u += sAmt * (m - u); }
             float cc = (float)(u > 1.0 ? 1.0 : (u < -1.0 ? -1.0 : u)); // memoryless hard clip
-            float c = 0.5f * cc + 0.5f * in[i]; // cleanBlend 0.5 baseline (raw input)
+            float c = 0.7f * cc + 0.3f * in[i]; // Klon dual-gang: 0.30 clean base at max Drive (raw input)
             lpz += lpC * (c - lpz); c += sAmt * (lpz - c);
             const float dcOut = c - dcx + kDcR * dcy; dcx = c; dcy = dcOut; c = dcOut;
             naive[i] = c * v.outTrim;
@@ -1019,6 +1019,27 @@ int main()
         CHECK(trebUp > 6.0, "T51 Klon Treble boosts above the shelf: 3k +%.1f dB (CW vs noon)", trebUp);
         CHECK(trebUp > trebDn * 1.5,
               "T51 Klon treble shelf asymmetric (+18/-8): boost +%.1f dB >> cut +%.1f dB", trebUp, trebDn);
+    }
+
+    // ---- T51b: DUAL-GANG clean blend -- the clean/dirty base TRACKS Drive (Klon Gain pot) ----
+    // The real Klon Gain pot is dual-ganged: at min it's a near-clean boost (clean dominates),
+    // at max the dirty path dominates (clean still fills underneath). So the clean fraction
+    // FALLS as Drive rises -> THD climbs SMOOTHLY across the whole sweep (not just endpoints),
+    // and the voicing pins cleanBlendLo (min) > cleanBlend (max). Black Rodent, the other
+    // hard-clip model, is NOT dual-gang (flat base 0).
+    {
+        const auto vk = DriveBlock::voicingFor(Kind::Overdrive, 2);
+        CHECK(vk.cleanBlendLo > vk.cleanBlend,
+              "T51b Klon dual-gang: clean base falls with Drive (lo %.2f > hi %.2f)",
+              vk.cleanBlendLo, vk.cleanBlend);
+        auto thd = [&](float dr) {
+            return harmRatio(realSlotM(Kind::Overdrive, 2, dr, sine(220.0, 0.10f, 24000)), 220.0, 12);
+        };
+        const double t1 = thd(0.1f), t2 = thd(0.5f), t3 = thd(1.0f);
+        CHECK(t1 < t2 && t2 < t3,
+              "T51b Klon THD climbs smoothly across the dual-gang sweep: %.3f < %.3f < %.3f", t1, t2, t3);
+        CHECK(DriveBlock::voicingFor(Kind::Distortion, 0).cleanBlendLo == 0.0f,
+              "T51b Black Rodent keeps a flat clean base (not dual-gang)");
     }
 
     // ====== Violet Ram (Fuzz model 1): circuit-fit EHX Big Muff (Ram's Head) ======
