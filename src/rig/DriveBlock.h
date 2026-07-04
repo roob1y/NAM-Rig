@@ -99,7 +99,9 @@
 //     tone past noon) — like the real fixed tone stack. Only the clipping (gain
 //     + emphasis) scales with Drive; the floor gain (gMin) leaves it breaking up
 //     a little even at minimum, as the real circuit does.
-//   * LIFELIKE gain range (gMin 5 -> gMax 80, ~the real TS's 12..118): the clip
+//   * AUTHENTIC gain range (gMin 12 -> gMax 118 = the REAL TS: (51k + 500k pot)
+//     over 4k7 -- min Drive keeps +21.6 dB into the diodes, so a TS never fully
+//     cleans up; refit 2026-07-04, was the approximate 5..80): the clip
 //     threshold is FIXED, so distortion tracks the actual input LEVEL — hot
 //     pickups/DI drive harder than weak ones, exactly like the real pedal. It is
 //     voiced for the app's calibration reference (CalNorm kReferenceDbu): with
@@ -285,8 +287,17 @@ public:
         };
         static const Model od[] = {
             // model 0: the reworked feedback-clip TS808 (was "Green Drive II").
+            // 2026-07-04 AUTHENTIC REFIT (docs/drive/green-drive.md): gain range now the
+            // REAL 12..118 ((51k+500k)/4k7 -- min Drive keeps hair with a humbucker, a
+            // TS never fully cleans up); the clean base now TRACKS Drive via cleanBlendLo
+            // (0.35 min -> 0.12 max = the non-inverting topology's always-unity dry leg
+            // shrinking in PROPORTION as the clipped component grows -- the old flat 0.20
+            // was too small at low Drive, too big cranked). Noon RMS matched to the old
+            // voicing within 2% -> outTrim untouched; sweep now keeps growing to max
+            // instead of flat-lining past drive 0.75. T70.
             {"Green Drive", "Mid-Hump Overdrive",
-             { 3, 5.0f, 80.0f, 220.0f,  820.0f, 3.6f, 0.7f, 1900.0f, 0.00f, 1200.0f, 1.15f, 0.0f, 1.0f,  9.0f, 700.0f, 0.20f, 0.40f, 0.0f, 0.0f}, false},
+             { 3,12.0f,118.0f, 220.0f,  820.0f, 3.6f, 0.7f, 1900.0f, 0.00f, 1200.0f, 1.15f, 0.0f, 1.0f,  9.0f, 700.0f, 0.12f, 0.40f, 0.0f, 0.0f,
+               0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, /*cleanBlendLo*/0.35f}, false},
             // model 1: circuit-fit Boss SD-1 Super Overdrive (OD-1 lineage, uPC4558
             // feedback-clip). Small-signal voicing is ~the TS808 (fit sd1_response.py,
             // RMS 0.63 dB: same ~+5 dB hump @ 720-900 Hz, slightly fuller bass / a hair
@@ -733,7 +744,13 @@ public:
                     float aenv = std::abs(xin);
                     env += (aenv > env ? envAtk : envRel) * (aenv - env);
                     const float envN = clamp01(env * invEnvRef);
-                    float bEff = v.cleanBlend + v.dynDepth * (0.5f - envN); // soft picking -> more clean
+                    // Clean BASE tracks Drive when cleanBlendLo is set (Green Drive: the
+                    // TS's always-unity dry leg shrinks in PROPORTION as the clipped
+                    // component grows). cleanBlendLo 0 -> the flat base (byte-exact).
+                    const float bBase = (v.cleanBlendLo > 0.0f)
+                        ? v.cleanBlendLo + (v.cleanBlend - v.cleanBlendLo) * drv
+                        : v.cleanBlend;
+                    float bEff = bBase + v.dynDepth * (0.5f - envN); // soft picking -> more clean
                     bEff = bEff < 0.0f ? 0.0f : (bEff > 0.9f ? 0.9f : bEff);
 
                     // ---- Fuzz Face BIAS SAG (useSag): dig in past the calibrated picking

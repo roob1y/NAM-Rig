@@ -375,14 +375,16 @@ int main()
 
     // ---- T13: envelope dynamics -- soft picking cleans up, digging in bites ----
     // Tested at low-to-mid drive (0.15): with the lifelike high-gain range, the
-    // touch response lives here (a cranked TS compresses). v2 opens up far more
-    // between a quiet and a loud burst than v1 does.
+    // touch response lives here (a cranked TS compresses). Bound retuned 10x -> 6x
+    // for the 2026-07-04 authentic gain floor (gMin 12 = +21.6 dB into the diodes:
+    // even the quiet probe carries a little hair now, like the real pedal --
+    // measured spread 9.1x, still clearly touch-responsive).
     {
         auto quiet = sine(660.0, 0.03f, 24000), loud = sine(660.0, 0.40f, 24000);
         const double q = harmRatio(realSlotM(Kind::Overdrive, 0, 0.15f, quiet), 660.0, 8);
         const double l = harmRatio(realSlotM(Kind::Overdrive, 0, 0.15f, loud),  660.0, 8);
         const double spread = l / std::max(q, 1e-9);
-        CHECK(l > q * 10.0, "T13 Green Drive touch-responsive: loud/quiet harm spread %.1fx", spread);
+        CHECK(l > q * 6.0, "T13 Green Drive touch-responsive: loud/quiet harm spread %.1fx", spread);
     }
 
     // ---- T14: v2 is a midrange SHAPER even at DRIVE 0 (static TS voicing) ----
@@ -1444,6 +1446,33 @@ int main()
             CHECK(same && finite && worst < 1.5,
                   "T69 sag deterministic + bounded: worst |out| %.2f", worst);
         }
+    }
+
+    // ====== Green Drive authentic refit (real 12..118 gain + drive-tracked clean) ======
+
+    // ---- T70: the REAL TS gain range ((51k+500k)/4k7 = 12..118) + the structural
+    // unity path: the clean fraction falls with Drive (cleanBlendLo 0.35 -> 0.12),
+    // like the op-amp's always-unity dry leg shrinking in proportion as the clipped
+    // component grows. Min Drive keeps real hair with a humbucker (min gain +21.6 dB
+    // into the diodes: a TS never fully cleans up) while a single-coil stays much
+    // cleaner; THD grows monotonically across the sweep (no flat-line); SD-1/Breaker
+    // keep the flat clean base. Noon RMS matched to the old voicing within 2%. ----
+    {
+        const auto v = DriveBlock::voicingFor(Kind::Overdrive, 0);
+        CHECK(v.gMin == 12.0f && v.gMax == 118.0f, "T70 Green Drive REAL TS gain range 12..118");
+        CHECK(v.cleanBlendLo == 0.35f && v.cleanBlend == 0.12f,
+              "T70 Green Drive clean base tracks Drive (0.35 -> 0.12)");
+        CHECK(DriveBlock::voicingFor(Kind::Overdrive, 1).cleanBlendLo == 0.0f
+           && DriveBlock::voicingFor(Kind::Overdrive, 3).cleanBlendLo == 0.0f,
+              "T70 SD-1/Breaker keep the flat clean base (byte-exact)");
+        const double hbMin = harmRatio(realSlotM(Kind::Overdrive, 0, 0.0f, sine(220.0, 0.20f, 24000)), 220.0, 10);
+        const double scMin = harmRatio(realSlotM(Kind::Overdrive, 0, 0.0f, sine(220.0, 0.08f, 24000)), 220.0, 10);
+        CHECK(hbMin > 0.03, "T70 min Drive has real hair with a humbucker: THD %.3f", hbMin);
+        CHECK(scMin < hbMin * 0.6, "T70 single-coil much cleaner at min: %.3f << %.3f", scMin, hbMin);
+        const double t0 = harmRatio(realSlotM(Kind::Overdrive, 0, 0.0f, sine(220.0, 0.15f, 24000)), 220.0, 10);
+        const double t5 = harmRatio(realSlotM(Kind::Overdrive, 0, 0.5f, sine(220.0, 0.15f, 24000)), 220.0, 10);
+        const double t9 = harmRatio(realSlotM(Kind::Overdrive, 0, 1.0f, sine(220.0, 0.15f, 24000)), 220.0, 10);
+        CHECK(t0 < t5 && t5 < t9, "T70 THD grows across the sweep: %.3f < %.3f < %.3f", t0, t5, t9);
     }
 
     std::printf("\n%s (%d failure%s)\n", gFails ? "RESULT: FAIL" : "RESULT: ALL PASS", gFails, gFails == 1 ? "" : "s");
