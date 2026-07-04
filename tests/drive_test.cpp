@@ -49,6 +49,28 @@ static double rms(const std::vector<float> &x)
     double e = 0; for (float v : x) e += (double)v * v; return std::sqrt(e / x.size());
 }
 
+// The real engine's output level multiplier at a given Volume knob (default noon 0.5),
+// matching DriveBlock::process after the Volume-pot rework: Boost keeps its fixed voicing
+// makeup (outTrim); every other category is the per-model Volume pot (volFor/volPot). The
+// naive alias mirrors below scale by THIS (not raw outTrim) so they stay LEVEL-MATCHED to
+// the shipped engine (T4/T5/T12/T15c/T16/T35/T43/T50/T64 stay honest, not merely quieter).
+static float lvlOf(Kind k, int model, float knob = 0.5f)
+{
+    if (k == Kind::Boost) return DriveBlock::voicingFor(k, model).outTrim;
+    const auto vc = DriveBlock::volFor(k, model);
+    return std::pow(10.0f, vc.unityTrimDb * 0.05f) * DriveBlock::volPot(knob, vc);
+}
+// Output level (dB vs input) of a model at a Drive + Volume-knob setting: 220 Hz sine.
+static double driveOutGainDb(Kind k, int model, float drive, float knob, float amp)
+{
+    auto in = sine(220.0, amp, 24000);
+    DriveBlock d; d.setKind(0,(int)k); d.setModel(0,model);
+    d.setDrive(0,drive); d.setTone(0,0.5f); d.setLevel(0,knob); d.prepare({SR,BLK});
+    auto x = in; run(d, x);
+    std::vector<float> tail(x.begin()+8000, x.end());
+    return 20.0*std::log10(rms(tail)/std::max(rms(in),1e-12));
+}
+
 // Black Rodent (Distortion model 0 = circuit-fit ProCo RAT) authenticity constants,
 // mirroring the private DriveBlock kRat* (kept in sync here so the naive/ADAA mirrors
 // below reproduce the engine). The mid PEAK migrates DOWN with Drive (LM308 GBW
@@ -92,7 +114,7 @@ static std::vector<float> naiveSlot(Kind k, float drive, const std::vector<float
         if (useMid && midPost) { float m = mid.processSample(c); c += shapeAmt * (m - c); }
         if (useLp) { lpz += lpCoef * (c - lpz); c += shapeAmt * (lpz - c); }
         float dcOut = c - dcx + kDcR * dcy; dcx = c; dcy = dcOut; c = dcOut;
-        y[i] = c * v.outTrim; // tone flat, level 0 dB
+        y[i] = c * lvlOf(k, 0); // level-matched to the engine Volume pot (was outTrim)
     }
     io.processOut(y.data(), (int)y.size());
     return y;
@@ -101,7 +123,7 @@ static std::vector<float> naiveSlot(Kind k, float drive, const std::vector<float
 static std::vector<float> realSlot(Kind k, float drive, const std::vector<float> &in)
 {
     DriveBlock d;
-    d.setKind(0, (int)k); d.setDrive(0, drive); d.setTone(0, 0.5f); d.setLevelDb(0, 0.0f);
+    d.setKind(0, (int)k); d.setDrive(0, drive); d.setTone(0, 0.5f); d.setLevel(0, 0.5f);
     d.prepare({SR, BLK});
     auto x = in; run(d, x); return x;
 }
@@ -111,7 +133,7 @@ static std::vector<float> realSlotM(Kind k, int model, float drive, const std::v
 {
     DriveBlock d;
     d.setKind(0, (int)k); d.setModel(0, model); d.setDrive(0, drive);
-    d.setTone(0, 0.5f); d.setLevelDb(0, 0.0f);
+    d.setTone(0, 0.5f); d.setLevel(0, 0.5f);
     d.prepare({SR, BLK});
     auto x = in; run(d, x); return x;
 }
@@ -121,7 +143,7 @@ static std::vector<float> realSlotMT(Kind k, int model, float drive, float tone,
 {
     DriveBlock d;
     d.setKind(0, (int)k); d.setModel(0, model); d.setDrive(0, drive);
-    d.setTone(0, tone); d.setLevelDb(0, 0.0f);
+    d.setTone(0, tone); d.setLevel(0, 0.5f);
     d.prepare({SR, BLK});
     auto x = in; run(d, x); return x;
 }
@@ -134,7 +156,7 @@ static std::vector<float> naiveCubic(float drive, const std::vector<float> &in)
     const float pg = v.gMin * std::pow(v.gMax / v.gMin, drive);
     auto f = [](double x) { if (x > 1.0) return 2.0 / 3.0; if (x < -1.0) return -2.0 / 3.0; return x - x * x * x / 3.0; };
     std::vector<float> y(in.size());
-    for (size_t i = 0; i < in.size(); ++i) y[i] = (float)f((double)in[i] * pg);
+    for (size_t i = 0; i < in.size(); ++i) y[i] = (float)f((double)in[i] * pg) * lvlOf(Kind::Overdrive, 0);
     return y;
 }
 
@@ -174,7 +196,7 @@ static std::vector<float> naiveDistII(float drive, const std::vector<float> &in)
         float c = (float)(xb > 1.0 ? 1.0 : (xb < -1.0 ? -1.0 : xb)); // memoryless hard clip
         lpz += lpC * (c - lpz); c += sAmt * (lpz - c);
         const float dcOut = c - dcx + kDcR * dcy; dcx = c; dcy = dcOut; c = dcOut;
-        y[i] = c * v.outTrim;
+        y[i] = c * lvlOf(Kind::Distortion, 0);
     }
     return y;
 }
@@ -204,7 +226,7 @@ static std::vector<float> ratAdaaMirror(float drive, const std::vector<float> &i
         float c = (float)yv;
         lpz += lpC * (c - lpz); c += sAmt * (lpz - c);
         const float dcOut = c - dcx + kDcR * dcy; dcx = c; dcy = dcOut; c = dcOut;
-        low += toneC * (c - low); y[i] = low * v.outTrim;
+        low += toneC * (c - low); y[i] = low * lvlOf(Kind::Distortion, 0);
     }
     return y;
 }
@@ -214,7 +236,7 @@ static std::vector<float> realSlotMig(bool full, float drive, float tone, const 
 {
     DriveBlock d;
     d.setKind(0, (int)Kind::Distortion); d.setModel(0, 0); d.setDrive(0, drive);
-    d.setTone(0, tone); d.setLevelDb(0, 0.0f); d.setMigrateFull(0, full);
+    d.setTone(0, tone); d.setLevel(0, 0.5f); d.setMigrateFull(0, full);
     d.prepare({SR, BLK});
     auto x = in; run(d, x); return x;
 }
@@ -743,7 +765,7 @@ int main()
         auto in = sine(5000.0, 0.05f, 48000);
         std::vector<float> naive(in.size());
         float hp = 0;
-        for (size_t i = 0; i < in.size(); ++i) { float u = in[i] * pg; hp += hpC * (u - hp); u = u - hp; naive[i] = (float)asymF((double)u) * v.outTrim; }
+        for (size_t i = 0; i < in.size(); ++i) { float u = in[i] * pg; hp += hpC * (u - hp); u = u - hp; naive[i] = (float)asymF((double)u) * lvlOf(Kind::Fuzz, 0); }
         auto adaa = realSlotM(Kind::Fuzz, 0, 1.0f, in);
         const double a3 = goertzel(adaa, 3000.0), n3 = goertzel(naive, 3000.0);
         CHECK(a3 < n3 * 0.7, "T35 clip-4 ADAA2 cuts alias@3k: %.2e < naive %.2e", a3, n3);
@@ -881,7 +903,7 @@ int main()
         auto in = sine(5000.0, 0.05f, 48000);
         std::vector<float> naive(in.size());
         float hp = 0;
-        for (size_t i = 0; i < in.size(); ++i) { float u = in[i] * pg; hp += hpC * (u - hp); u = u - hp; naive[i] = (float)asymF((double)u) * v.outTrim; }
+        for (size_t i = 0; i < in.size(); ++i) { float u = in[i] * pg; hp += hpC * (u - hp); u = u - hp; naive[i] = (float)asymF((double)u) * lvlOf(Kind::Overdrive, 1); }
         auto adaa = realSlotM(Kind::Overdrive, 1, 1.0f, in);
         const double a3 = goertzel(adaa, 3000.0), n3 = goertzel(naive, 3000.0);
         CHECK(a3 < n3 * 0.7, "T43 clip-4 ADAA2 cuts alias@3k: %.2e < naive %.2e", a3, n3);
@@ -994,7 +1016,7 @@ int main()
             float c = 0.7f * cc + 0.3f * in[i]; // Klon dual-gang: 0.30 clean base at max Drive (raw input)
             lpz += lpC * (c - lpz); c += sAmt * (lpz - c);
             const float dcOut = c - dcx + kDcR * dcy; dcx = c; dcy = dcOut; c = dcOut;
-            naive[i] = c * v.outTrim;
+            naive[i] = c * lvlOf(Kind::Overdrive, 2);
         }
         auto adaa = realSlotM(Kind::Overdrive, 2, 1.0f, in);
         const double a3 = goertzel(adaa, 3000.0), n3 = goertzel(naive, 3000.0);
@@ -1252,7 +1274,7 @@ int main()
         auto cub = [](double x) { if (x > 1.0) return 2.0 / 3.0; if (x < -1.0) return -2.0 / 3.0; return x - x * x * x / 3.0; };
         std::vector<float> naive(in.size());
         float hp = 0;
-        for (size_t i = 0; i < in.size(); ++i) { float u = in[i] * pg; hp += hpC * (u - hp); u = u - hp; naive[i] = (float)cub((double)u) * v.outTrim; }
+        for (size_t i = 0; i < in.size(); ++i) { float u = in[i] * pg; hp += hpC * (u - hp); u = u - hp; naive[i] = (float)cub((double)u) * lvlOf(Kind::Overdrive, 3); }
         const double a3 = goertzel(adaa, 3000.0), n3 = goertzel(naive, 3000.0);
         CHECK(a3 < n3 * 0.5, "T64 Breaker ADAA2 cuts alias@3k: %.2e < naive %.2e", a3, n3);
         const double redDb = 20.0 * std::log10(n3 / std::max(a3, 1e-12));
@@ -1473,6 +1495,50 @@ int main()
         const double t5 = harmRatio(realSlotM(Kind::Overdrive, 0, 0.5f, sine(220.0, 0.15f, 24000)), 220.0, 10);
         const double t9 = harmRatio(realSlotM(Kind::Overdrive, 0, 1.0f, sine(220.0, 0.15f, 24000)), 220.0, 10);
         CHECK(t0 < t5 && t5 < t9, "T70 THD grows across the sweep: %.3f < %.3f < %.3f", t0, t5, t9);
+    }
+
+    // ---- T71: authentic per-model VOLUME POT (docs/drive/VOLUME_AUTHENTICITY_2026-07-04).
+    // The Level/Volume knob is a real per-model pot: a unity makeup cancels the internal
+    // drive gain so the knob reads as output-vs-input, then volPot() sweeps silence(0) ->
+    // noon(0.5) -> max(1). Verifies: reaches silence at min, boosts at max, UNITY is
+    // REACHABLE, noon is per-model authentic (TS/SD modest, Klon/RAT/Muff loud, BB/FF quiet),
+    // and more Drive = more output (not normalised). Fixes the "+7..+13 dB hot at noon" bug. ----
+    {
+        struct VM { Kind k; int m; const char *n; float noonLo, noonHi; };
+        const VM vs[] = {
+            {Kind::Overdrive,  0, "Green Drive",  0.0f,  4.0f}, // TS: modest
+            {Kind::Overdrive,  1, "Super Drive",  0.0f,  4.0f}, // SD-1: modest
+            {Kind::Overdrive,  2, "Gold Horse",   3.0f,  8.0f}, // Klon: loud
+            {Kind::Overdrive,  3, "Breaker Drive",-6.0f, 1.0f}, // BB: quiet
+            {Kind::Distortion, 0, "Black Rodent", 3.0f,  8.0f}, // RAT: loud
+            {Kind::Fuzz,       0, "Round Fuzz",  -6.0f,  1.0f}, // FF: quiet
+            {Kind::Fuzz,       1, "Violet Ram",   3.0f,  8.0f}, // Muff: loud
+        };
+        for (const auto &m : vs)
+        {
+            const double gmin  = driveOutGainDb(m.k, m.m, 0.5f, 0.0f, 0.2f);
+            const double gnoon = driveOutGainDb(m.k, m.m, 0.5f, 0.5f, 0.2f);
+            const double gmax  = driveOutGainDb(m.k, m.m, 0.5f, 1.0f, 0.2f);
+            CHECK(gmin < -40.0, "T71 %s reaches silence at min: %.1f dB", m.n, gmin);
+            CHECK(gmax > gnoon + 1.0, "T71 %s boost on tap (max>noon): %.1f > %.1f", m.n, gmax, gnoon);
+            CHECK(gmin < 0.0 && gmax > 0.0, "T71 %s unity is REACHABLE on the sweep", m.n);
+            CHECK(gnoon > m.noonLo && gnoon < m.noonHi,
+                  "T71 %s authentic noon %.1f dB in [%.0f,%.0f]", m.n, gnoon, m.noonLo, m.noonHi);
+        }
+        // relative loudness ordering: loud (Klon) > modest (TS) > quiet (BB) at noon
+        const double loud = driveOutGainDb(Kind::Overdrive, 2, 0.5f, 0.5f, 0.2f);
+        const double mod  = driveOutGainDb(Kind::Overdrive, 0, 0.5f, 0.5f, 0.2f);
+        const double quiet= driveOutGainDb(Kind::Overdrive, 3, 0.5f, 0.5f, 0.2f);
+        CHECK(loud > mod + 1.5 && mod > quiet + 1.5,
+              "T71 noon loudness ordering Klon %.1f > TS %.1f > BB %.1f", loud, mod, quiet);
+        // more Drive = more output (authentic; not normalised away)
+        const double d2 = driveOutGainDb(Kind::Overdrive, 0, 0.2f, 0.5f, 0.2f);
+        const double d8 = driveOutGainDb(Kind::Overdrive, 0, 0.8f, 0.5f, 0.2f);
+        CHECK(d8 > d2, "T71 more Drive = more output (Green): d0.8 %.1f > d0.2 %.1f", d8, d2);
+        // Boost has NO volume knob -> the level param is ignored (output invariant)
+        const double b0 = driveOutGainDb(Kind::Boost, 0, 0.5f, 0.0f, 0.2f);
+        const double b1 = driveOutGainDb(Kind::Boost, 0, 0.5f, 1.0f, 0.2f);
+        CHECK(std::fabs(b0 - b1) < 0.01, "T71 Boost has no volume knob (level ignored): %.2f == %.2f", b0, b1);
     }
 
     std::printf("\n%s (%d failure%s)\n", gFails ? "RESULT: FAIL" : "RESULT: ALL PASS", gFails, gFails == 1 ? "" : "s");

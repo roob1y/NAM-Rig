@@ -142,7 +142,7 @@ public:
     void setKind(int slot, int k)      { at(slot).kind.store(k); }
     void setDrive(int slot, float v)   { at(slot).drive.store(clamp01(v)); }
     void setTone(int slot, float v)    { at(slot).tone.store(clamp01(v)); }
-    void setLevelDb(int slot, float v) { at(slot).levelDb.store(v); }
+    void setLevel(int slot, float v) { at(slot).level01.store(clamp01(v)); } // Volume/Level KNOB 0..1 (per-model pot curve, see volFor/volPot)
     void setRange(int slot, int r) { at(slot).range.store(r); } // treble-boost cap switch: 0 Treble/1 Mid/2 Full
     void setOn(int slot, bool on) { at(slot).on.store(on); }            // footswitch (default on)
     void setModel(int slot, int m) { at(slot).model.store(m); }         // model within the category
@@ -508,6 +508,65 @@ public:
             io.setBuffered(a.inHpHz, a.outHpHz, a.inLpHz, a.outLevelDb);
     }
 
+    // ---- authentic Volume/Level POT per model (the output stage) ----
+    // Every drive category EXCEPT Boost has a Volume/Level/Output knob (the real
+    // Dallas Rangemaster + Echoplex EP-3 have no output pot, so Boost keeps its fixed
+    // voicing makeup). On the real pedals the pot is an attenuator from a HOT internal
+    // (clipped) signal down toward silence, so UNITY sits BELOW the top of the sweep and
+    // the amount of clean boost ON TAP varies enormously: Bluesbreaker + Fuzz Face barely
+    // reach unity even wide open, while Klon / RAT / Big Muff are very loud. The old design
+    // was a symmetric +/-12 dB trim sitting on a loudness-matched outTrim -> every model
+    // read ~+10..+13 dB at noon and the overdrives could not even reach unity (measured).
+    //
+    // We model the real pot as: a per-model UNITY MAKEUP (unityTrimDb) that cancels the
+    // model's internal drive gain so the knob reads directly as output-vs-input dB, THEN a
+    // pot curve (volPot) from silence (knob 0) through noonDb (knob 0.5, noon) up to maxDb
+    // (full CW). `taper` = the lower-half pot law: 1 = LINEAR pot, ~2 = AUDIO/LOG pot (more
+    // of the sweep spent fading to silence, so the usable range sits higher). Values are
+    // calibrated to the MEASURED internal gain (unityTrimDb) + the researched real pots
+    // (docs/drive/VOLUME_AUTHENTICITY_2026-07-04.md): TS/SD modest boost (unity ~11:00),
+    // Klon/RAT/Muff loud with unity below noon + big boost on tap, Bluesbreaker/Fuzz Face
+    // quiet with unity high (near max). STATIC per-model taper -- no reactive gain-riding.
+    struct VolCurve { float unityTrimDb, noonDb, maxDb, taper; };
+
+    static VolCurve volFor(Kind c, int model)
+    {
+        switch (c)
+        {
+        case Kind::Overdrive:
+            if (model == 0) return { -11.7f,  2.0f,  9.0f, 2.0f }; // Green Drive (TS808): 100k AUDIO, modest boost, unity ~11:00
+            if (model == 1) return { -11.4f,  2.0f,  9.0f, 1.0f }; // Super Drive (SD-1): 100k LINEAR, modest, unity ~11:00
+            if (model == 2) return { -13.0f,  5.0f, 18.0f, 1.3f }; // Gold Horse (Klon): 10k lin (network-shaped), LOUD, big boost on tap
+            return                 { -11.6f, -3.0f,  2.0f, 1.0f }; // Breaker Drive (Bluesbreaker): 100k LINEAR, low output, unity near max
+        case Kind::Distortion:
+            return                 { -16.6f,  5.0f, 16.0f, 2.0f }; // Black Rodent (RAT): 100k AUDIO, loud, unity ~10:00
+        case Kind::Fuzz:
+            if (model == 0) return { -10.9f, -2.0f,  2.0f, 2.0f }; // Round Fuzz (Fuzz Face): 500k AUDIO, deliberately quiet, unity near max
+            return                 {  -7.1f,  5.0f, 18.0f, 2.0f }; // Violet Ram (Big Muff): 100k LOG, very loud on tap, unity low
+        default:
+            return                 {   0.0f,  0.0f,  0.0f, 1.0f }; // Boost: no volume knob (unused)
+        }
+    }
+
+    // The pot curve: knob k in [0,1] -> a linear gain multiplier on the unity-referenced
+    // signal. Silence at k=0, 10^(noonDb/20) at noon (0.5), 10^(maxDb/20) at full CW (1).
+    // Top half is linear-in-dB (a gentle, musical boost on tap); the bottom half is a
+    // power-law amplitude taper down to TRUE silence (taper 1 = linear pot, ~2 = audio pot
+    // -> more sweep spent fading out, usable range higher). Continuous + monotonic at 0.5.
+    static float volPot(float k, const VolCurve &vc)
+    {
+        k = k < 0.0f ? 0.0f : (k > 1.0f ? 1.0f : k);
+        if (k >= 0.5f)
+        {
+            const float t = (k - 0.5f) * 2.0f;                 // 0..1 over the top half
+            const float db = vc.noonDb + t * (vc.maxDb - vc.noonDb);
+            return std::pow(10.0f, db * 0.05f);
+        }
+        const float noonLin = std::pow(10.0f, vc.noonDb * 0.05f);
+        const float frac = k * 2.0f;                           // 0..1 over the bottom half
+        return noonLin * std::pow(frac, vc.taper);
+    }
+
     // Treble-boost input-cap switch: larger cap (Mid/Full) lets more low-end
     // through and shifts the emphasis down (Treble = bright, Full = fat).
     static void applyRange(Voicing &v, int rng)
@@ -610,7 +669,19 @@ public:
             const double asym = (v.clip == 2) ? (double)v.bias : 0.0;     // type-2 rail
             const double inBias = (v.clip == 2 || v.clip == 4) ? 0.0 : (double)v.bias; // type 0/1/3 input bias (4 = in-shaper asym)
             const bool useGate = (v.gate > 0.0f) && s.gateOn.load(); // model has a gate AND it's switched on
-            float levelLin = std::pow(10.0f, s.levelDb.load() * 0.05f) * v.outTrim;
+            // ---- Volume/Level knob -> output gain. Boost has NO level pot (the real
+            // Rangemaster/EP-3 have none) so it keeps its fixed voicing makeup (outTrim);
+            // every other category is an authentic per-model VOLUME POT (volFor/volPot):
+            // a unity makeup that cancels the internal drive gain (so the knob reads as
+            // output-vs-input) times the pot curve (silence -> noon -> max, per-model taper).
+            float levelLin;
+            if (k == Kind::Boost)
+                levelLin = v.outTrim;                          // no volume knob (fixed makeup)
+            else
+            {
+                const VolCurve vc = volFor(k, model);
+                levelLin = std::pow(10.0f, vc.unityTrimDb * 0.05f) * volPot(s.level01.load(), vc);
+            }
 
             const float tilt = (s.tone.load() - 0.5f) * 2.0f;
             // Active treble shelf (Klon): bass FIXED, treble swings asymmetrically
@@ -962,7 +1033,7 @@ private:
         std::atomic<int> kind{(int)Kind::Off};
         std::atomic<float> drive{0.5f};
         std::atomic<float> tone{0.5f};
-        std::atomic<float> levelDb{0.0f};
+        std::atomic<float> level01{0.5f}; // Volume/Level knob position 0..1 (noon default)
         std::atomic<int> range{0};
         std::atomic<int> model{0};
         std::atomic<bool> on{true};

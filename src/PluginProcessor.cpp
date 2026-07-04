@@ -164,10 +164,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         params.push_back(std::make_unique<juce::AudioParameterFloat>(
             juce::ParameterID(pid + "oTone", 1), lbl + "OD Tone",
             juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+        // Level/Volume knobs are an authentic per-model VOLUME POT (0..1 rotation, shown
+        // 0..10 pedal-style; the engine maps rotation -> gain per model in DriveBlock::
+        // volFor/volPot, with per-pedal unity placement + audio/linear taper). Default 0.5
+        // = noon. See docs/drive/VOLUME_AUTHENTICITY_2026-07-04.md.
         params.push_back(std::make_unique<juce::AudioParameterFloat>(
             juce::ParameterID(pid + "oLevel", 1), lbl + "OD Level",
-            juce::NormalisableRange<float>(-12.0f, 12.0f, 0.1f), 0.0f,
-            juce::AudioParameterFloatAttributes().withLabel("dB")));
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
         // Distortion: Distortion / Filter / Volume.
         params.push_back(std::make_unique<juce::AudioParameterFloat>(
             juce::ParameterID(pid + "dDrive", 1), lbl + "Dist Drive",
@@ -177,8 +180,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
             juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
         params.push_back(std::make_unique<juce::AudioParameterFloat>(
             juce::ParameterID(pid + "dLevel", 1), lbl + "Dist Volume",
-            juce::NormalisableRange<float>(-12.0f, 12.0f, 0.1f), 0.0f,
-            juce::AudioParameterFloatAttributes().withLabel("dB")));
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f)); // Volume pot 0..1 (see volFor/volPot)
         params.push_back(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID(pid + "dMigrate", 1), lbl + "Dist Hump Range", false)); // RAT hump migration: false Tight / true Full
         // Fuzz: Fuzz / Volume (+ Tone, used only by the Big Muff model 2).
@@ -190,8 +192,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
             juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f)); // Muff Tone scoop (Round Fuzz models ignore it)
         params.push_back(std::make_unique<juce::AudioParameterFloat>(
             juce::ParameterID(pid + "fLevel", 1), lbl + "Fuzz Volume",
-            juce::NormalisableRange<float>(-12.0f, 12.0f, 0.1f), 0.0f,
-            juce::AudioParameterFloatAttributes().withLabel("dB")));
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f)); // Volume pot 0..1 (see volFor/volPot)
         params.push_back(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID(pid + "fGate", 1), lbl + "Fuzz Gate", true)); // bias-starved splat (Round Fuzz)
     }
@@ -1089,18 +1090,18 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
             mChain.drive.setDrive(s, g("bDrive"));
             mChain.drive.setRange(s, (int)g("bRange"));
             mChain.drive.setModel(s, (int)g("bModel"));
-            mChain.drive.setTone(s, 0.5f); mChain.drive.setLevelDb(s, 0.0f);
+            mChain.drive.setTone(s, 0.5f); mChain.drive.setLevel(s, 0.5f); // Boost has no volume knob (ignored)
             break;
         case 2: // Overdrive (4 models: 0 Green Drive (TS808) / 1 Super Drive (SD-1) / 2 Gold Horse (Klon) / 3 Breaker Drive (Bluesbreaker))
             mChain.drive.setDrive(s, g("oDrive"));
             mChain.drive.setTone(s, g("oTone"));
-            mChain.drive.setLevelDb(s, g("oLevel"));
+            mChain.drive.setLevel(s, g("oLevel"));
             mChain.drive.setRange(s, 0); mChain.drive.setModel(s, (int)g("bModel"));
             break;
         case 3: // Distortion (1 model: 0 Black Rodent = ProCo RAT)
             mChain.drive.setDrive(s, g("dDrive"));
             mChain.drive.setTone(s, g("dTone"));
-            mChain.drive.setLevelDb(s, g("dLevel"));
+            mChain.drive.setLevel(s, g("dLevel"));
             mChain.drive.setRange(s, 0); mChain.drive.setModel(s, (int)g("bModel"));
             mChain.drive.setMigrateFull(s, g("dMigrate") > 0.5f); // RAT hump range: Tight / Full
             break;
@@ -1109,7 +1110,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
             // Round Fuzz has no tone (pinned 0.5); the Big Muff (model 1)
             // exposes the Muff Tone scoop via fTone.
             mChain.drive.setTone(s, (int)g("bModel") == 1 ? g("fTone") : 0.5f);
-            mChain.drive.setLevelDb(s, g("fLevel"));
+            mChain.drive.setLevel(s, g("fLevel")); // Big Muff/Fuzz Volume pot
             mChain.drive.setRange(s, 0); mChain.drive.setModel(s, (int)g("bModel"));
             mChain.drive.setGateOn(s, g("fGate") > 0.5f); // bias-starved gate (Round Fuzz)
             break;
