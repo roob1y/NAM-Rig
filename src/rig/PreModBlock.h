@@ -190,17 +190,39 @@ public:
 
     const char *name() const override { return "Pre Mod"; }
 
+    // Per-lane state: everything that carries memory sample-to-sample. The mono
+    // process() uses mLaneL ONLY (so it stays bit-exact to the pre-stereo block);
+    // processStereo runs mLaneL at LFO phase 0 and mLaneR at phase 0.5·spread, both
+    // driven by the ONE mLfo clock + the shared smoothed params (so the two lanes can
+    // never drift out of phase-lock).
+    struct Lane
+    {
+        FracDelayLine line;                 // chorus/flanger delay line
+        float lpZ1 = 0.0f, lpZ2 = 0.0f;     // dark-wet 2-pole reconstruction LP state
+        float hpLp = 0.0f;                  // subsonic HP state
+        double nlX1 = 0.0, nlF1 = 0.0;      // BBD polynomial ADAA state (double: no cancellation noise)
+        float ap[kPhaserStages] = {0.0f, 0.0f, 0.0f, 0.0f}; // phaser / uni-vibe all-pass TPT states
+        float flFbState = 0.0f, flFbLp = 0.0f;              // flanger regen state + tone-shape
+        float tremG = 1.0f;                 // tremolo smoothed gain
+        float uniLamp = 0.5f;               // uni-vibe lamp thermal state
+        IoStage io;                         // authentic per-pedal input/output stage
+    };
+
     void prepare(const BlockContext &ctx) override
     {
         mFs = ctx.sampleRate;
         const double maxDelayMs = std::max(kDelayMaxMs + kModDepthMs, kFlMaxMs) + 2.0;
-        mLine.prepare((int)std::ceil(maxDelayMs * 0.001 * mFs));
+        const int lineLen = (int)std::ceil(maxDelayMs * 0.001 * mFs);
+        mLaneL.line.prepare(lineLen);
+        mLaneR.line.prepare(lineLen);
         mLfo.prepare(mFs);
         mSmoothK = 1.0f - std::exp((float)(-1.0 / (0.010 * mFs))); // 10 ms de-zip
         rbjLowpass(wetLpHzFor(mType), 0.70710678, mFs, mLpB0, mLpB1, mLpB2, mLpA1, mLpA2);
         mHpCoef = coefForHz(kWetHpHz, mFs);
-        mIo.prepare(mFs);
-        applyIo(mIo, ioFor(mType)); // authentic input/output stage for the current pedal
+        mLaneL.io.prepare(mFs);
+        mLaneR.io.prepare(mFs);
+        applyIo(mLaneL.io, ioFor(mType)); // authentic input/output stage (same config both lanes)
+        applyIo(mLaneR.io, ioFor(mType));
         mFlFbCoef = coefForHz(kFlFbLpHz, mFs);
         mTremCoef = coefForMs(kTremSlewMs, mFs);
         mUniHeatCoef = coefForMs(kUniLampHeatMs, mFs);
@@ -211,23 +233,31 @@ public:
 
     void reset() override
     {
-        mLine.reset();
         mLfo.reset();
-        mIo.reset();
-        mLpZ1 = mLpZ2 = 0.0f;
-        mHpLp = 0.0f;
-        mNlX1 = 0.0;
-        mNlF1 = 0.0;
-        for (float &s : mAp) s = 0.0f;
-        mFlFbState = 0.0f;
-        mFlFbLp = 0.0f;
-        mTremG = 1.0f; // start at unity (no chop on the first sample)
-        mUniLamp = 0.5f; // lamp at mid brightness (no startup snap)
+        resetLane(mLaneL);
+        resetLane(mLaneR);
         mDepthZ = mDepth;
         mMixZ = mMix;
         mFeedbackZ = mFeedback;
         mManualZ = mManual;
         mWaveZ = mWave;
+    }
+
+    // Reset one lane's memory. tremG starts at unity (no chop on the first sample);
+    // uniLamp at mid brightness (no startup snap) — mirrors the pre-stereo defaults.
+    static void resetLane(Lane &ln)
+    {
+        ln.line.reset();
+        ln.io.reset();
+        ln.lpZ1 = ln.lpZ2 = 0.0f;
+        ln.hpLp = 0.0f;
+        ln.nlX1 = 0.0;
+        ln.nlF1 = 0.0;
+        for (float &s : ln.ap) s = 0.0f;
+        ln.flFbState = 0.0f;
+        ln.flFbLp = 0.0f;
+        ln.tremG = 1.0f;
+        ln.uniLamp = 0.5f;
     }
 
     // ---- parameters (audio thread) ----
@@ -241,7 +271,8 @@ public:
             {
                 // per-type wet ceiling + the new pedal's authentic input/output stage
                 rbjLowpass(wetLpHzFor(mType), 0.70710678, mFs, mLpB0, mLpB1, mLpB2, mLpA1, mLpA2);
-                applyIo(mIo, ioFor(mType));
+                applyIo(mLaneL.io, ioFor(mType));
+                applyIo(mLaneR.io, ioFor(mType));
                 reset();
             }
         }
@@ -258,6 +289,10 @@ public:
     void setFeedback(float f) { mFeedback = f; } // phaser resonance / flanger regen
     void setManual(float m) { mManual = m; }     // flanger base/centre delay (0..1)
     void setWave(float w) { mWave = w; }         // tremolo shape morph: triangle (0) -> trapezoid (1)
+    // Stereo width for processStereo: 0 = both lanes in phase (dual-mono), 1 = the R
+    // lane's LFO read is 180° out of phase with L (widest swirl / anti-phase auto-pan
+    // for the tremolo). Read live per block (unsmoothed); mono process() ignores it.
+    void setSpread(float s) { mSpread = std::min(std::max(s, 0.0f), 1.0f); }
 
     float effectiveRateHz() const
     {
@@ -271,28 +306,70 @@ public:
         // front-end: coupling HP + impedance-loading shelf -> colours what the pedal
         // (and its LFO-swept filters/delays) sees, like the real input stage loading
         // the guitar.
-        mIo.processIn(mono, numSamples);
+        mLaneL.io.processIn(mono, numSamples);
         mLfo.setRateHz(effectiveRateHz());
         // Uni-Vibe's LFO is a sine (then the lamp lag skews it); the others use triangle.
         mLfo.setWaveform(mType == kUniVibe ? Lfo::Sine : Lfo::Triangle);
         for (int i = 0; i < numSamples; ++i)
         {
-            mDepthZ += mSmoothK * (mDepth - mDepthZ);
-            mMixZ += mSmoothK * (mMix - mMixZ);
-            mFeedbackZ += mSmoothK * (mFeedback - mFeedbackZ);
-            mManualZ += mSmoothK * (mManual - mManualZ);
-            mWaveZ += mSmoothK * (mWave - mWaveZ);
-            mono[i] = processSample(mono[i]);
+            advanceSmoothed();
+            mono[i] = voiceLane(mono[i], mLaneL, 0.0); // mono = the L lane at LFO phase 0
             mLfo.advance();
         }
-        mIo.processOut(mono, numSamples); // back-end: output coupling HP + level
-        flushDenormals();
+        mLaneL.io.processOut(mono, numSamples); // back-end: output coupling HP + level
+        flushDenormals(mLaneL);
+    }
+
+    // Mono-in / stereo-out front pedal: ONE LFO clock read at two phases so the two
+    // lanes are always sample-accurately phase-locked (the whole point of stereo
+    // chorus/flanger/vibe, and of anti-phase tremolo = auto-pan). L is the mono voice
+    // (phase 0); R is offset by 0.5·spread cycles (spread 1 -> 180°). Each lane keeps
+    // its OWN delay line / filter / regen / lamp state AND its own input+output stage,
+    // so it can modulate a DIFFERENT dry — e.g. the clean-tap (Amp A) vs the driven
+    // bus (Amp B) at the RigChain split — with a decorrelated sweep. The shared
+    // smoothed params advance ONCE per sample and feed both lanes.
+    void processStereo(float *L, float *R, int numSamples)
+    {
+        mLaneL.io.processIn(L, numSamples);
+        mLaneR.io.processIn(R, numSamples);
+        mLfo.setRateHz(effectiveRateHz());
+        mLfo.setWaveform(mType == kUniVibe ? Lfo::Sine : Lfo::Triangle);
+        const double phaseR = 0.5 * (double)mSpread; // cycles: 0..0.5 = 0..180°
+        for (int i = 0; i < numSamples; ++i)
+        {
+            advanceSmoothed();
+            L[i] = voiceLane(L[i], mLaneL, 0.0);
+            R[i] = voiceLane(R[i], mLaneR, phaseR);
+            mLfo.advance();
+        }
+        mLaneL.io.processOut(L, numSamples);
+        mLaneR.io.processOut(R, numSamples);
+        flushDenormals(mLaneL);
+        flushDenormals(mLaneR);
     }
 
     double latencySamples() const override { return 0.0; }
 
 private:
-    float processSample(float x)
+    // Advance the shared de-zippered params one sample. Called ONCE per sample by
+    // both process() and processStereo() (before the lane calls) so the two lanes
+    // always see identical smoothed values — kept in this exact order so the mono
+    // path stays bit-exact to the pre-stereo block.
+    void advanceSmoothed()
+    {
+        mDepthZ += mSmoothK * (mDepth - mDepthZ);
+        mMixZ += mSmoothK * (mMix - mMixZ);
+        mFeedbackZ += mSmoothK * (mFeedback - mFeedbackZ);
+        mManualZ += mSmoothK * (mManual - mManualZ);
+        mWaveZ += mSmoothK * (mWave - mWaveZ);
+    }
+
+    // Voice one sample for one lane. lanePhase is the extra LFO phase offset (cycles)
+    // for this lane's swept reads — 0 for the mono/L lane, 0.5·spread for R. All
+    // sample-to-sample state lives in `ln`; the LFO clock + smoothed params are shared
+    // (advanced once per sample by the caller). With lanePhase 0 and ln == mLaneL this
+    // is byte-identical to the old mono processSample().
+    float voiceLane(float x, Lane &ln, double lanePhase)
     {
         switch (mType)
         {
@@ -301,18 +378,18 @@ private:
             // Multi-tap chorus: kVoices taps at DIFFERENT fixed delay centres, each
             // swept a little at its own LFO phase (decorrelated), summed. The taps
             // sit at different comb positions -> ensemble shimmer, not one vibrato.
-            mLine.write(x);
+            ln.line.write(x);
             float wet = 0.0f;
             for (int v = 0; v < kVoices; ++v)
             {
                 const double frac = (kVoices > 1) ? (double)v / (double)(kVoices - 1) : 0.5;
                 const double baseMs = kDelayMinMs + (kDelayMaxMs - kDelayMinMs) * frac;
-                const float lv = mLfo.value((double)v / (double)kVoices); // spread phases (incl. anti-phase)
+                const float lv = mLfo.value((double)v / (double)kVoices + lanePhase); // spread phases (incl. anti-phase)
                 const double sweepMs = baseMs + (double)mDepthZ * kModDepthMs * (double)lv;
-                wet += mLine.readFrac6(std::max(3.0, sweepMs * 0.001 * mFs));
+                wet += ln.line.readFrac6(std::max(3.0, sweepMs * 0.001 * mFs));
             }
             wet *= 1.0f / (float)kVoices;
-            wet = bbdColor(wet);
+            wet = bbdColor(wet, ln);
             return (1.0f - mMixZ) * x + mMixZ * wet;
         }
         case kPhaser:
@@ -324,7 +401,7 @@ private:
             // chain collapses to y = A·u + B, so the NEGATIVE feedback loop (the
             // Phase-90 notch structure) resolves in closed form with no unit delay:
             //   u = (x - k·B)/(1 + k·A);  denom > 0 for all k >= 0 -> always stable.
-            const float lfo = mLfo.value(); // triangle [-1, 1]
+            const float lfo = mLfo.value(lanePhase); // triangle [-1, 1]
             // Authentic Phase 90 sweep: the JFET only ever RAISES the all-pass corner
             // above its rest value, so it sweeps UPWARD from kPhaserRestHz (notches
             // 58.5/340.8 Hz at rest) rather than symmetrically about a centre.
@@ -341,7 +418,7 @@ private:
             float B = 0.0f;
             for (int s = 0; s < kPhaserStages; ++s)
             {
-                beta[s] = 2.0f * (1.0f - G) * mAp[s];
+                beta[s] = 2.0f * (1.0f - G) * ln.ap[s];
                 B = alpha * B + beta[s]; // Horner: B = alpha^3·b0 + ... + b3
             }
             const float a2 = alpha * alpha;
@@ -354,8 +431,8 @@ private:
             for (int s = 0; s < kPhaserStages; ++s)
             {
                 const float out = alpha * in + beta[s]; // true stage output
-                const float v = (in - mAp[s]) * G;      // TPT integrator update
-                mAp[s] += 2.0f * v;
+                const float v = (in - ln.ap[s]) * G;    // TPT integrator update
+                ln.ap[s] += 2.0f * v;
                 in = out;
             }
             // Real Phase 90 / Small Stone mix dry + phased at a FIXED 50/50 (that's
@@ -372,17 +449,17 @@ private:
             // added at the delay INPUT so its loop delay is the tap itself (correct
             // + stable for fb < 1). Wet gets the BBD colour; feedback is low-passed
             // to keep high regen from turning to fizz.
-            const float lfo = mLfo.value(); // triangle [-1, 1]
+            const float lfo = mLfo.value(lanePhase); // triangle [-1, 1]
             // Manual sets the base/centre delay; Depth sweeps UP from there; clamp.
             const double base = kFlManualMinMs + (double)mManualZ * (kFlManualMaxMs - kFlManualMinMs);
             const double sweep = (double)mDepthZ * kFlSweepMs * (0.5 + 0.5 * (double)lfo);
             const double delayMs = std::min(kFlMaxMs, std::max(kFlManualMinMs, base + sweep));
             const float fb = kFlFbMax * mFeedbackZ;
-            mLine.write(x + fb * mFlFbState);
-            float wet = mLine.readFrac6(std::max(3.0, delayMs * 0.001 * mFs));
-            wet = bbdColor(wet);
-            mFlFbLp += mFlFbCoef * (wet - mFlFbLp);   // tone-shape the regen (tame fizz)
-            mFlFbState = std::tanh(mFlFbLp);          // soft-clip the loop -> self-limits at high regen
+            ln.line.write(x + fb * ln.flFbState);
+            float wet = ln.line.readFrac6(std::max(3.0, delayMs * 0.001 * mFs));
+            wet = bbdColor(wet, ln);
+            ln.flFbLp += mFlFbCoef * (wet - ln.flFbLp);   // tone-shape the regen (tame fizz)
+            ln.flFbState = std::tanh(ln.flFbLp);          // soft-clip the loop -> self-limits at high regen
                                                       // (near-linear at normal levels, so low regen is unchanged)
             // Classic flangers sit at a fixed ~50/50 for the deepest comb; expose Mix
             // as dry..50/50 so the knob spans dry -> deepest flange (can't over-wet
@@ -395,13 +472,13 @@ private:
             // Boss TR-2: VCA amplitude modulation. Wave morphs the triangle LFO to a
             // trapezoid (amplify + clamp -> steeper sides, flat top); the gain is
             // cut-only (peak unity, dips by Depth) and de-clicked with a short slew.
-            const float tri = mLfo.value();                       // triangle [-1, 1]
+            const float tri = mLfo.value(lanePhase);              // triangle [-1, 1]
             const float sharpen = 1.0f + mWaveZ * kTremWaveK;     // Wave -> trapezoid gain
             const float shaped = std::max(-1.0f, std::min(1.0f, tri * sharpen));
             const float sn = 0.5f * (shaped + 1.0f);              // -> [0, 1] (1 = loud)
             const float target = (1.0f - mDepthZ) + mDepthZ * sn; // cut-only: [1-depth, 1]
-            mTremG += mTremCoef * (target - mTremG);              // slew de-click
-            return x * mTremG;
+            ln.tremG += mTremCoef * (target - ln.tremG);          // slew de-click
+            return x * ln.tremG;
         }
         case kUniVibe:
         {
@@ -409,10 +486,10 @@ private:
             // The lamp has an asymmetric thermal lag (heats fast, cools slow) and the
             // LDR a power-law transfer -> the lopsided "throb". Stages use the real
             // staggered ratios (kUniMult) so the notches are uneven / non-harmonic.
-            const float lfo = mLfo.value(); // sine [-1, 1]
+            const float lfo = mLfo.value(lanePhase); // sine [-1, 1]
             const float drive = 0.5f + 0.5f * lfo; // -> lamp drive [0, 1]
-            mUniLamp += (drive > mUniLamp ? mUniHeatCoef : mUniCoolCoef) * (drive - mUniLamp);
-            const float cell = std::pow(std::max(0.0f, mUniLamp), kUniGamma); // LDR light [0,1]
+            ln.uniLamp += (drive > ln.uniLamp ? mUniHeatCoef : mUniCoolCoef) * (drive - ln.uniLamp);
+            const float cell = std::pow(std::max(0.0f, ln.uniLamp), kUniGamma); // LDR light [0,1]
             const float warp = cell * 2.0f - 1.0f;                            // sweep control [-1,1]
 
             // per-stage ZDF/TPT all-pass: gather G_i / alpha_i / beta_i, build the
@@ -428,7 +505,7 @@ private:
                 const double g = std::tan(3.14159265358979323846 * fc / mFs);
                 G[s] = (float)(g / (1.0 + g));
                 alpha[s] = 2.0f * G[s] - 1.0f;
-                beta[s] = 2.0f * (1.0f - G[s]) * mAp[s];
+                beta[s] = 2.0f * (1.0f - G[s]) * ln.ap[s];
                 A *= alpha[s];
                 B = alpha[s] * B + beta[s];
             }
@@ -438,8 +515,8 @@ private:
             for (int s = 0; s < 4; ++s)
             {
                 const float out = alpha[s] * in + beta[s];
-                const float v = (in - mAp[s]) * G[s];
-                mAp[s] += 2.0f * v;
+                const float v = (in - ln.ap[s]) * G[s];
+                ln.ap[s] += 2.0f * v;
                 in = out;
             }
             in *= 1.0f - kUniAmDepth * mDepthZ * cell;      // subtle photocell amplitude throb
@@ -454,21 +531,21 @@ private:
     // Bucket-brigade colour: the gentle level-independent BBD polynomial (ADAA'd),
     // then the dark reconstruction low-pass, then a subsonic trim. Order mirrors the
     // circuit (BBD distorts, reconstruction filter darkens, DC/subsonics removed).
-    float bbdColor(float wet)
+    float bbdColor(float wet, Lane &ln)
     {
         // --- BBD 3rd-order polynomial via exact first-order ADAA ---
         double u = (double)wet;
         u = std::min(1.5, std::max(-1.5, u)); // keep the cubic well-behaved
         const double Fc = bbdAntideriv(u);
-        const double du = u - mNlX1;
-        const double shaped = (std::abs(du) > 1.0e-7) ? (Fc - mNlF1) / du : bbdShape(mNlX1);
-        mNlX1 = u;
-        mNlF1 = Fc;
+        const double du = u - ln.nlX1;
+        const double shaped = (std::abs(du) > 1.0e-7) ? (Fc - ln.nlF1) / du : bbdShape(ln.nlX1);
+        ln.nlX1 = u;
+        ln.nlF1 = Fc;
         // --- dark reconstruction low-pass (2-pole ~6.6 kHz) ---
-        float y = biquadTDF2((float)shaped, mLpB0, mLpB1, mLpB2, mLpA1, mLpA2, mLpZ1, mLpZ2);
+        float y = biquadTDF2((float)shaped, mLpB0, mLpB1, mLpB2, mLpA1, mLpA2, ln.lpZ1, ln.lpZ2);
         // --- subsonic trim (also removes the polynomial's even-harmonic DC) ---
-        mHpLp += mHpCoef * (y - mHpLp);
-        return y - mHpLp;
+        ln.hpLp += mHpCoef * (y - ln.hpLp);
+        return y - ln.hpLp;
     }
     // f(x) = x - a·x² - b·x³   (gentle, level-independent BBD colour)
     static double bbdShape(double x) { return x - kBbdA * x * x - kBbdB * x * x * x; }
@@ -479,14 +556,14 @@ private:
         return 0.5 * x2 - (kBbdA / 3.0) * x2 * x - (kBbdB / 4.0) * x2 * x2;
     }
 
-    void flushDenormals()
+    static void flushDenormals(Lane &ln)
     {
-        for (float *p : {&mLpZ1, &mLpZ2, &mHpLp})
+        for (float *p : {&ln.lpZ1, &ln.lpZ2, &ln.hpLp})
             if (std::abs(*p) < 1.0e-30f) *p = 0.0f;
-        for (float &s : mAp)
+        for (float &s : ln.ap)
             if (std::abs(s) < 1.0e-30f) s = 0.0f;
-        if (std::abs(mFlFbState) < 1.0e-30f) mFlFbState = 0.0f;
-        if (std::abs(mFlFbLp) < 1.0e-30f) mFlFbLp = 0.0f;
+        if (std::abs(ln.flFbState) < 1.0e-30f) ln.flFbState = 0.0f;
+        if (std::abs(ln.flFbLp) < 1.0e-30f) ln.flFbLp = 0.0f;
     }
 
     static float coefForHz(double hz, double fs)
@@ -521,18 +598,16 @@ private:
 
     double mFs = 48000.0;
     Type mType = kChorus;
-    Lfo mLfo;
-    FracDelayLine mLine;
-    // dark wet: 2-pole reconstruction low-pass + subsonic high-pass
+    Lfo mLfo; // single shared LFO clock; the stereo lanes read it at a phase offset
+    Lane mLaneL, mLaneR;
+
+    // Shared, read-only per sample: dark-wet biquad coeffs + one-pole coefficients.
     float mLpB0 = 1.0f, mLpB1 = 0.0f, mLpB2 = 0.0f, mLpA1 = 0.0f, mLpA2 = 0.0f;
-    float mLpZ1 = 0.0f, mLpZ2 = 0.0f;
-    float mHpCoef = 1.0f, mHpLp = 0.0f;
-    double mNlX1 = 0.0, mNlF1 = 0.0; // BBD polynomial ADAA state (double: no float-cancellation noise)
-    float mAp[kPhaserStages] = {0.0f, 0.0f, 0.0f, 0.0f}; // phaser all-pass TPT integrator states
-    float mFlFbState = 0.0f, mFlFbLp = 0.0f, mFlFbCoef = 1.0f; // flanger regen state + tone-shape
-    float mTremG = 1.0f, mTremCoef = 1.0f;                     // tremolo smoothed gain + de-click coef
-    float mUniLamp = 0.5f, mUniHeatCoef = 1.0f, mUniCoolCoef = 1.0f; // uni-vibe lamp thermal state + coeffs
-    IoStage mIo; // authentic per-pedal input/output stage (impedance loading + coupling caps)
+    float mHpCoef = 1.0f;                            // subsonic HP one-pole
+    float mFlFbCoef = 1.0f;                          // flanger feedback tone-shape one-pole
+    float mTremCoef = 1.0f;                          // tremolo de-click slew
+    float mUniHeatCoef = 1.0f, mUniCoolCoef = 1.0f;  // uni-vibe lamp heat/cool
+    float mSpread = 0.5f; // stereo L/R LFO phase offset: 0 = dual-mono, 1 = 180° anti-phase
 
     float mDepth = 0.5f, mMix = 0.5f, mFeedback = 0.0f, mManual = 0.15f, mWave = 0.3f;
     float mDepthZ = 0.5f, mMixZ = 0.5f, mFeedbackZ = 0.0f, mManualZ = 0.15f, mWaveZ = 0.3f, mSmoothK = 0.01f;

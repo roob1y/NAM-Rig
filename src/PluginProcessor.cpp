@@ -783,6 +783,17 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::ParameterID("driveSend", 1), "Drive Send",
         juce::StringArray{"Amp A", "Amp B", "Both"}, 2));
 
+    // Stereo front-mod: in Dual, the (post-drive) pre-amp mod becomes mono-in /
+    // stereo-out — L lane -> Amp A, R lane -> Amp B, one LFO read at two phases for a
+    // chorus/flanger/vibe spread across both amps (anti-phase tremolo = auto-pan).
+    // Off by default so existing presets are unchanged. Spread sets the L/R LFO phase
+    // offset (0 = dual-mono, 1 = 180°). Appended last for automation-index stability.
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("premodStereo", 1), "Pre Mod Stereo", false));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("premodSpread", 1), "Pre Mod Spread",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f)); // 0.5 ~ 90° (mono-safe default)
+
     return {params.begin(), params.end()};
 }
 
@@ -1160,6 +1171,8 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         mChain.premod.setMix(pt == 4 ? mix : (pt == 2 ? 1.0f : 0.5f));
         mChain.premod.setBypassed(apvts.getRawParameterValue("premodOn")->load() < 0.5f);
         mChain.setPremodPreDrive((int)apvts.getRawParameterValue("premodPos")->load() == 1);
+        mChain.setPremodStereo(apvts.getRawParameterValue("premodStereo")->load() >= 0.5f);
+        mChain.setPremodSpread(apvts.getRawParameterValue("premodSpread")->load());
     }
 
     // Pre-amp delay pedal (mono, front-of-amp). Per-model voice; free/sync time.

@@ -3,8 +3,8 @@
 //
 // ALL FIVE types are voiced (Chorus CE-2 / Phaser Phase 90 / Flanger EVH117 /
 // Tremolo TR-2 / Uni-Vibe Shin-ei) — none is a passthrough stub. A T<n> denotes
-// one scenario and may carry several check() lines (e.g. T1 has three). 34
-// checks across T1-T24:
+// one scenario and may carry several check() lines (e.g. T1 has three). T1-T24
+// cover the mono pedal; T25-T28 cover the stereo (mono-in/stereo-out) front-mod:
 //
 //   T1  chorus finite, bounded, non-silent, and audibly differs from dry
 //   T2  Mix = 0 settles to the IoStage-processed dry (no wet added)
@@ -30,6 +30,10 @@
 //   T22 Uni-Vibe 69k input loads down the top (treble-suck shelf)
 //   T23 TR-2 1M FET input is flat (transparent)
 //   T24 IoStage anchors: Uni-Vibe loaded (shelf) vs TR-2 buffered (no shelf)
+//   T25 stereo spread 0 == dual-mono AND bit-exact to mono process()
+//   T26 stereo spread 1 decorrelates L/R (wide)
+//   T27 split-block == one-shot (shared LFO + lane state continuous across blocks)
+//   T28 anti-phase mono fold-down combs the wet (documented trade-off)
 
 #include "rig/PreModBlock.h"
 
@@ -374,6 +378,86 @@ int main()
         check(PreModBlock::ioFor(PreModBlock::kUniVibe).shelfCutDb < 0.0f
                   && PreModBlock::ioFor(PreModBlock::kTremolo).shelfCutDb == 0.0f,
               "T24 anchors: Uni-Vibe loaded (shelf) vs TR-2 buffered (no shelf)");
+    }
+
+    // ================= stereo front-mod (mono-in / stereo-out) =================
+    // processStereo runs the ONE LFO clock at two phases (L at 0, R at 0.5·spread),
+    // each on its own lane state. These verify: the dual-mono invariant (spread 0 is
+    // bit-exact to mono, L==R), decorrelation at spread 1, phase-lock continuity
+    // across block boundaries, and the anti-phase mono-fold comb.
+    auto runStereo = [&](double fsr, auto setup, std::vector<float> &L, std::vector<float> &R) {
+        PreModBlock pm;
+        pm.prepare({fsr, (int)x.size()});
+        setup(pm);
+        L = x; R = x;
+        pm.processStereo(L.data(), R.data(), (int)L.size());
+    };
+
+    // T25: spread 0 -> both lanes read the same phase; L must equal R AND be
+    // bit-exact to the mono process() (so turning stereo on at 0 width changes nothing).
+    {
+        auto setup = [](PreModBlock &pm) {
+            pm.setType(PreModBlock::kChorus); pm.setRateHz(1.3f);
+            pm.setDepth(0.7f); pm.setMix(0.5f); pm.setSpread(0.0f);
+        };
+        auto mono = run(x, fs, setup);
+        std::vector<float> L, R; runStereo(fs, setup, L, R);
+        bool lrEq = (L.size() == R.size()), lmEq = (L.size() == mono.size());
+        for (size_t i = 0; i < L.size(); ++i) { if (L[i] != R[i]) lrEq = false; if (L[i] != mono[i]) lmEq = false; }
+        check(lrEq, "T25 spread 0: L == R (dual-mono)");
+        check(lmEq, "T25 spread 0: stereo L bit-exact to mono process()");
+    }
+
+    // T26: spread 1 (180°) -> the two lanes' swept combs decorrelate (wide image).
+    {
+        std::vector<float> L, R;
+        runStereo(fs, [](PreModBlock &pm) {
+            pm.setType(PreModBlock::kChorus); pm.setRateHz(2.0f);
+            pm.setDepth(0.8f); pm.setMix(1.0f); pm.setSpread(1.0f);
+        }, L, R);
+        check(allFinite(L) && allFinite(R), "T26 stereo output finite");
+        check(rmsDiff(L, R) > 1.0e-3, "T26 spread 1 decorrelates L/R (wide)");
+    }
+
+    // T27: block-boundary continuity — one call vs two half-block calls must be
+    // identical (the shared LFO + both lane states carry across blocks, so the L/R
+    // phase-lock never resets at a buffer edge).
+    {
+        auto setup = [](PreModBlock &pm) {
+            pm.setType(PreModBlock::kFlanger); pm.setRateHz(1.7f);
+            pm.setDepth(0.8f); pm.setMix(0.5f); pm.setFeedback(0.5f); pm.setSpread(0.6f);
+        };
+        std::vector<float> L1, R1; runStereo(fs, setup, L1, R1);
+        PreModBlock pm; pm.prepare({fs, (int)x.size()}); setup(pm);
+        std::vector<float> L2 = x, R2 = x;
+        const int h = (int)x.size() / 2;
+        pm.processStereo(L2.data(), R2.data(), h);
+        pm.processStereo(L2.data() + h, R2.data() + h, (int)x.size() - h);
+        bool sameL = true, sameR = true;
+        for (size_t i = 0; i < L1.size(); ++i) { if (L1[i] != L2[i]) sameL = false; if (R1[i] != R2[i]) sameR = false; }
+        check(sameL && sameR, "T27 split-block == one-shot (LFO/lane state continuous across blocks)");
+    }
+
+    // T28: mono fold-down. Full-wet chorus so the fold is PURE wet: at spread 0 the
+    // two lanes sum in phase; at spread 1 (anti-phase) the wet partially cancels ->
+    // less energy (the documented mono comb). Reported so the trade-off is visible.
+    {
+        auto foldEnergy = [&](float spread) {
+            std::vector<float> L, R;
+            runStereo(fs, [spread](PreModBlock &pm) {
+                pm.setType(PreModBlock::kChorus); pm.setRateHz(1.5f);
+                pm.setDepth(0.8f); pm.setMix(1.0f); pm.setSpread(spread);
+            }, L, R);
+            double e = 0.0; bool fin = allFinite(L) && allFinite(R);
+            for (size_t i = 0; i < L.size(); ++i) { const double m = 0.5 * (L[i] + R[i]); e += m * m; }
+            return std::make_pair(e, fin);
+        };
+        const auto [e0, fin0] = foldEnergy(0.0f);
+        const auto [e1, fin1] = foldEnergy(1.0f);
+        check(fin0 && fin1, "T28 mono fold finite");
+        check(e1 <= e0 * 1.001, "T28 anti-phase mono fold combs the wet (no energy gain vs in-phase)");
+        std::printf("  [info] mono-fold wet energy: spread0=%.4e spread1=%.4e (%.1f%% retained)\n",
+                    e0, e1, e0 > 0.0 ? 100.0 * e1 / e0 : 0.0);
     }
 
     std::printf("%s (%d failures)\n", g_fail == 0 ? "ALL PASS" : "FAILURES", g_fail);

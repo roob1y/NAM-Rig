@@ -6091,10 +6091,20 @@ public:
         mPosAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
             apvts, "premodPos", mPos);
 
+        // Mono vs Stereo front-mod. In Dual, Stereo makes the pedal mono-in/stereo-out:
+        // L lane -> Amp A, R lane -> Amp B (one LFO read at two phases). The Spread knob
+        // (shown only in Stereo) sets the L/R phase offset. No effect in Solo/pre-drive.
+        mStereo.addItemList({"Mono", "Stereo"}, 1);
+        addAndMakeVisible(mStereo);
+        mStereoAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, "premodStereo", mStereo);
+        mStereo.onChange = [this] { refresh(); };
+
         const std::pair<const char *, const char *> defs[] = {
             {"premodRate", "Rate"}, {"premodDepth", "Depth"},
             {"premodMix", "Mix"}, {"premodFeedback", "Feedback"},
-            {"premodManual", "Manual"}, {"premodWave", "Wave"}};
+            {"premodManual", "Manual"}, {"premodWave", "Wave"},
+            {"premodSpread", "Spread"}};
         for (const auto &[id, caption] : defs)
         {
             mKnobs.push_back(std::make_unique<LabeledKnob>(apvts, id, caption));
@@ -6115,16 +6125,19 @@ public:
         const int t = (int)mApvts.getRawParameterValue("premodType")->load();
         static const char *const kNames[] = {"Chorus", "Phaser", "Flanger", "Tremolo", "Uni-Vibe"};
         setHeaderRight(kNames[juce::jlimit(0, 4, t)]);
-        if (t == mLastType)
-            return; // control set only changes with the pedal type
+        const bool stereoOn = (int)mApvts.getRawParameterValue("premodStereo")->load() > 0;
+        if (t == mLastType && stereoOn == mLastStereo)
+            return; // control set only changes with the pedal type / stereo toggle
         mLastType = t;
+        mLastStereo = stereoOn;
         auto show = [&](int i, bool v) { if ((int)mKnobs.size() > i) mKnobs[(size_t)i]->setVisible(v); };
-        show(0, true);          // Rate  : all pedals
-        show(1, t != 1);        // Depth : all except the phaser (fixed sweep)
-        show(2, t == 4);        // Mix   : Uni-Vibe only (Chorus <-> Vibrato)
+        show(0, true);          // Rate    : all pedals
+        show(1, t != 1);        // Depth   : all except the phaser (fixed sweep)
+        show(2, t == 4);        // Mix     : Uni-Vibe only (Chorus <-> Vibrato)
         show(3, t == 2);        // Feedback/Regen : flanger only
-        show(4, false);         // Manual: never (fixed sweet spot)
-        show(5, t == 3);        // Wave  : tremolo only
+        show(4, false);         // Manual  : never (fixed sweet spot)
+        show(5, t == 3);        // Wave    : tremolo only
+        show(6, stereoOn);      // Spread  : stereo (Dual) only
         resized();              // re-centre the now-visible knobs
     }
 
@@ -6135,12 +6148,14 @@ public:
         // Top row: Type + Sync + Position pickers side by side.
         auto pickers = area.removeFromTop(30);
         const int gap = 12;
-        const int w = (pickers.getWidth() - 2 * gap) / 3;
+        const int w = (pickers.getWidth() - 3 * gap) / 4;
         mType.setBounds(pickers.removeFromLeft(w));
         pickers.removeFromLeft(gap);
         mSync.setBounds(pickers.removeFromLeft(w));
         pickers.removeFromLeft(gap);
         mPos.setBounds(pickers.removeFromLeft(w));
+        pickers.removeFromLeft(gap);
+        mStereo.setBounds(pickers.removeFromLeft(w));
 
         area.removeFromTop(16);
 
@@ -6158,10 +6173,11 @@ public:
 
 private:
     juce::AudioProcessorValueTreeState &mApvts;
-    juce::ComboBox mType, mSync, mPos;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt, mSyncAtt, mPosAtt;
+    juce::ComboBox mType, mSync, mPos, mStereo;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt, mSyncAtt, mPosAtt, mStereoAtt;
     std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
     int mLastType = -1;
+    bool mLastStereo = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PremodPanel)
 };

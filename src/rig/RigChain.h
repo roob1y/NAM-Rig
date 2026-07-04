@@ -115,6 +115,10 @@ public:
     void setInputCal(float g) { mInputCal = g; } // global, pre-everything
     // Pre-amp mod pedal position: true = BEFORE the drive rack, false = AFTER it (default).
     void setPremodPreDrive(bool b) { mPremodPreDrive = b; }
+    // Stereo front-mod: in Dual, the post-drive premod becomes mono-in / stereo-out
+    // (L lane -> Amp A, R lane -> Amp B). Off/Solo/pre-drive keep the mono premod.
+    void setPremodStereo(bool b) { mPremodStereo = b; }
+    void setPremodSpread(float s) { premod.setSpread(s); } // 0 = dual-mono, 1 = 180°
     // Pre-amp delay pedal position: true = BEFORE the drive rack, false = AFTER it (default).
     void setPredelayPreDrive(bool b) { mPredelayPreDrive = b; }
     // Envelope filter position: false = BEFORE the drive rack (default, classic
@@ -287,9 +291,16 @@ public:
         if (needCleanTap)
             std::memcpy(clean, ch0, (size_t)numSamples * sizeof(float));
 
+        // Stereo front-mod engages only in Dual with an active POST-drive premod: the
+        // pedal is deferred to a per-voice, mono-in/stereo-out pass AFTER the split
+        // (below) so its L feeds Amp A and R feeds Amp B. Solo / pre-drive / bypassed
+        // keep the mono premod on ch0 here, so those paths stay bit-exact.
+        const bool stereoActive = mPremodStereo && (mMode == Dual)
+                                  && !mPremodPreDrive && !premod.isBypassed();
+
         if (!drive.isBypassed())
             { drive.process(ch0, numSamples); heal(drive, ch0, numSamples); }
-        if (!mPremodPreDrive && !premod.isBypassed())
+        if (!mPremodPreDrive && !premod.isBypassed() && !stereoActive)
             { premod.process(ch0, numSamples); heal(premod, ch0, numSamples); }
         if (!mPredelayPreDrive && !predelay.isBypassed())
             { predelay.process(ch0, numSamples); heal(predelay, ch0, numSamples); }
@@ -312,6 +323,18 @@ public:
         std::memcpy(vA, aDriven ? ch0 : clean, (size_t)numSamples * sizeof(float));
         if (runB)
             std::memcpy(vB, bDriven ? ch0 : clean, (size_t)numSamples * sizeof(float));
+
+        // Stereo front-mod pass: one LFO read at two phases so the L/R sweeps stay
+        // phase-locked. L modulates Amp A's source (clean tap or driven bus), R
+        // modulates Amp B's — a decorrelated chorus/flanger/vibe (or anti-phase
+        // tremolo = auto-pan) spread ACROSS the two amps, before they process. Both
+        // voices are always filled here (stereoActive implies Dual -> runA && runB).
+        if (stereoActive)
+        {
+            premod.processStereo(vA, vB, numSamples);
+            heal(premod, vA, numSamples);
+            heal(premod, vB, numSamples);
+        }
 
         double compA = 0.0, compB = 0.0;
         if (mMode == Dual)
@@ -661,6 +684,7 @@ private:
     float mPolA = 1.0f, mPolB = 1.0f;  // polarity (+1 / -1)
     float mInputCal = 1.0f; // global input calibration (pre-split)
     bool mPremodPreDrive = false; // pre-amp mod pedal: before (true) / after (false) the drive rack
+    bool mPremodStereo = false;   // Dual + post-drive: premod is mono-in/stereo-out (L->Amp A, R->Amp B)
     bool mPredelayPreDrive = false; // pre-amp delay pedal: before (true) / after (false) the drive rack
     bool mEnvFilterPostDrive = false; // env filter: before (false, default) / after (true) the drive rack
     float mInTrimA = 1.0f, mInTrimB = 1.0f;

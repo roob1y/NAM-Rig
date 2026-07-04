@@ -11,6 +11,9 @@
 //    SoloA == SoloB == Dual PDC == the manual block sum.
 // T9 drive-send routing: the shared drive rack can feed Amp A / Amp B / Both; the
 //    un-targeted amp gets the pre-drive clean tap. Both is bit-exact to shared.
+// T10 stereo front-mod: in Dual the post-drive premod is mono-in/stereo-out (L->Amp
+//    A, R->Amp B). spread0 == stereo-off (bit-exact no-op), spread1 decorrelates the
+//    amps, SendB modulates the clean A branch, and SoloA ignores stereo (regression).
 
 #include "rig/RigChain.h"
 
@@ -71,6 +74,13 @@ int main(int argc, char **argv)
         chain.mod.setBypassed(true);
         chain.delay.setBypassed(true);
         chain.reverb.setBypassed(true);
+        // The pre-amp pedals default to ACTIVE (mBypassed=false) and colour the signal
+        // (e.g. premod's IoStage), but the reference below runs only amp+eq — so they
+        // must be bypassed here for the bit-exact regression to hold.
+        chain.envfilter.setBypassed(true);
+        chain.premod.setBypassed(true);
+        chain.predelay.setBypassed(true);
+        chain.drive.setBypassed(true);
         chain.setMode(RigChain::SoloA);
 
         // New path: SoloA on a stereo buffer.
@@ -257,8 +267,14 @@ int main(int argc, char **argv)
         RigChain chain;
         chain.prepare(48000.0, n);
         // All blocks bypassed -> each voice is the raw input; isolates align+pol.
+        // Includes the pre-amp pedals, which default to ACTIVE (mBypassed=false) and
+        // would otherwise colour the "raw" input before the polarity/align stage.
         chain.gate.setBypassed(true);
         chain.comp.setBypassed(true);
+        chain.envfilter.setBypassed(true);
+        chain.premod.setBypassed(true);
+        chain.predelay.setBypassed(true);
+        chain.drive.setBypassed(true);
         chain.amp.setBypassed(true);
         chain.ampB.setBypassed(true);
         chain.eq.setBypassed(true);
@@ -445,6 +461,100 @@ int main(int argc, char **argv)
         runSolo(RigChain::SoloB, RigChain::SendB, bOnB); // B targeted -> driven
         CHECK(approxArr(bOnA.data(), x.data(), n, 1e-6f),        "T9 Send B -> Amp A is clean");
         CHECK(approxArr(bOnB.data(), drivenB.data(), n, 1e-6f), "T9 Send B -> Amp B is driven");
+    }
+
+    // ===================== T10: stereo front-mod (mono-in/stereo-out) =========
+    // In Dual, the post-drive premod becomes stereo: L lane -> Amp A, R lane -> Amp
+    // B. amps/eq/cabs/post bypassed so (under the default hard L/R pan) L == the Amp
+    // A voice and R == the Amp B voice. Drive (Boost) + a chorus premod are active.
+    {
+        RigChain chain;
+        chain.prepare(48000.0, n);
+        chain.gate.setBypassed(true);
+        chain.comp.setBypassed(true);
+        chain.envfilter.setBypassed(true);
+        chain.predelay.setBypassed(true);
+        chain.amp.setBypassed(true);
+        chain.ampB.setBypassed(true);
+        chain.eq.setBypassed(true);
+        chain.eqB.setBypassed(true);
+        chain.cab.setBypassed(true);
+        chain.cabB.setBypassed(true);
+        chain.mod.setBypassed(true);
+        chain.delay.setBypassed(true);
+        chain.reverb.setBypassed(true);
+        chain.drive.setKind(0, 1); // Boost
+        chain.drive.setOn(0, true);
+        chain.drive.setDrive(0, 0.9f);
+        chain.drive.setBypassed(false);
+        // Tremolo: instantaneous AM (no delay line), so it modulates cleanly even in
+        // this short 256-sample buffer — the anti-phase L/R gains at spread 1 give a
+        // robust decorrelation signal (a chorus's ~10 ms delay would barely fill here).
+        chain.premod.setType(3); // Tremolo
+        chain.premod.setRateHz(6.0f);
+        chain.premod.setDepth(0.8f);
+        chain.premod.setBypassed(false);
+        chain.setPremodPreDrive(false); // post-drive (required for stereo)
+
+        auto run = [&](int mode, int send, bool stereo, float spread,
+                       std::vector<float> &L, std::vector<float> &R) {
+            chain.reset();
+            chain.setDriveSend(send);
+            chain.setMode(mode);
+            chain.setLevelA(1.0f);
+            chain.setLevelB(1.0f);
+            chain.setPremodStereo(stereo);
+            chain.setPremodSpread(spread);
+            juce::AudioBuffer<float> buf(2, n);
+            std::memcpy(buf.getWritePointer(0), x.data(), (size_t)n * sizeof(float));
+            buf.clear(1, 0, n);
+            chain.process(buf);
+            L.assign(buf.getReadPointer(0), buf.getReadPointer(0) + n);
+            R.assign(buf.getReadPointer(1), buf.getReadPointer(1) + n);
+        };
+        auto differs = [&](const std::vector<float> &a, const std::vector<float> &b) {
+            for (int i = 0; i < n; ++i)
+                if (std::fabs(a[(size_t)i] - b[(size_t)i]) > 1.0e-4f) return true;
+            return false;
+        };
+
+        // SendBoth: stereo spread 0 is a bit-exact no-op vs stereo off (guards the
+        // SendBoth default regression), and both amps are identical (dual-mono).
+        std::vector<float> offL, offR, s0L, s0R, s1L, s1R;
+        run(RigChain::Dual, RigChain::SendBoth, false, 0.5f, offL, offR);
+        run(RigChain::Dual, RigChain::SendBoth, true, 0.0f, s0L, s0R);
+        CHECK(approxArr(offL.data(), s0L.data(), n, 0.0f) && approxArr(offR.data(), s0R.data(), n, 0.0f),
+              "T10 SendBoth: stereo spread0 == stereo off (bit-exact no-op)");
+        // Voices are bit-identical at spread 0; L/R differ only by the equal-power
+        // pan's float rounding (~4e-8: sin(0)=0 exactly but cos(pi/2)!=0), so compare
+        // at the same 1e-6 tol the T2 hard-pan checks use, not bit-exact.
+        CHECK(approxArr(s0L.data(), s0R.data(), n, 1.0e-6f), "T10 SendBoth spread0: L == R (dual-mono)");
+        // Spread 1 decorrelates the two amps (wide).
+        run(RigChain::Dual, RigChain::SendBoth, true, 1.0f, s1L, s1R);
+        CHECK(differs(s1L, s1R), "T10 SendBoth spread1: Amp A (L) != Amp B (R) (wide)");
+
+        // SendB (DeLonge config): Amp A = clean tap, Amp B = driven. Stereo now
+        // modulates the clean A branch, so Amp A differs from the stereo-off dry A.
+        std::vector<float> bOffL, bOffR, bOnL, bOnR;
+        run(RigChain::Dual, RigChain::SendB, false, 0.5f, bOffL, bOffR);
+        run(RigChain::Dual, RigChain::SendB, true, 0.5f, bOnL, bOnR);
+        CHECK(differs(bOffL, bOnL), "T10 SendB: stereo modulates the clean Amp A branch");
+        bool finite = true, nonsilent = false;
+        for (int i = 0; i < n; ++i)
+        {
+            if (!std::isfinite(bOnL[(size_t)i]) || !std::isfinite(bOnR[(size_t)i])) finite = false;
+            if (std::fabs(bOnR[(size_t)i]) > 1.0e-4f) nonsilent = true;
+        }
+        CHECK(finite, "T10 SendB stereo output finite");
+        CHECK(nonsilent, "T10 SendB Amp B (R) non-silent");
+
+        // SoloA IGNORES stereo (single amp -> mono path) -> bit-exact either way,
+        // so the SoloA regression gate is never touched by the stereo feature.
+        std::vector<float> soloOffL, soloOffR, soloOnL, soloOnR;
+        run(RigChain::SoloA, RigChain::SendBoth, false, 0.5f, soloOffL, soloOffR);
+        run(RigChain::SoloA, RigChain::SendBoth, true, 1.0f, soloOnL, soloOnR);
+        CHECK(approxArr(soloOffL.data(), soloOnL.data(), n, 0.0f),
+              "T10 SoloA ignores premod stereo (regression bit-exact)");
     }
 
     std::printf("\n%s (%d failure%s)\n", gFails == 0 ? "ALL PASS" : "FAILURES",
