@@ -1960,6 +1960,12 @@ public:
             mPedals[(size_t)s] = std::make_unique<DrivePedal>(apvts, s);
             addAndMakeVisible(*mPedals[(size_t)s]);
         }
+        // Rack-wide send routing: which amp(s) the driven rack feeds. The amp
+        // that isn't targeted gets the clean pre-drive signal (dirty + clean amp
+        // off one rack). "Both" (default) is the classic shared-drive behavior.
+        mSend = std::make_unique<SegmentedControl>(
+            apvts, "driveSend", juce::StringArray{"Amp A", "Amp B", "Both"});
+        addAndMakeVisible(*mSend);
     }
 
     void refresh()
@@ -1975,11 +1981,27 @@ public:
         g.setColour(juce::Colour(0xff3a414c));
         for (auto &c : mJoiners)
             g.fillRect(c);
+        // "SEND ->" caption to the left of the routing selector.
+        if (mSend)
+        {
+            g.setColour(colors::caption);
+            g.setFont(fonts::archivo(9.5f, fonts::SemiBold, 0.6f));
+            g.drawText("SEND TO", mSend->getX() - 74, mSend->getY(), 66, mSend->getHeight(),
+                       juce::Justification::centredRight);
+        }
     }
 
     void resized() override
     {
-        auto area = bodyArea().reduced(26, 24);
+        auto full = bodyArea().reduced(26, 24);
+        // Reserve a top strip for the rack-wide send selector (right-aligned).
+        auto top = full.removeFromTop(26);
+        if (mSend)
+        {
+            const int sw = mSend->idealWidth();
+            mSend->setBounds(top.getRight() - sw, top.getY(), sw, 26);
+        }
+        auto area = full.withTrimmedTop(14);
         const int n = nam_rig::DriveBlock::kSlots;
         const int joiner = 40;
         const int pedalW = juce::jmin(268, (area.getWidth() - joiner * (n - 1)) / n);
@@ -2001,6 +2023,7 @@ public:
 
 private:
     std::array<std::unique_ptr<DrivePedal>, (size_t)nam_rig::DriveBlock::kSlots> mPedals;
+    std::unique_ptr<SegmentedControl> mSend; // rack-wide Amp A / Amp B / Both send
     std::vector<juce::Rectangle<float>> mJoiners;
 };
 

@@ -57,6 +57,11 @@ class RigChain
 {
 public:
     enum Mode { SoloA = 0, SoloB = 1, Dual = 2 };
+    // Which amp(s) the driven signal is sent to. The amp that ISN'T targeted
+    // receives the pre-drive ("clean") tap instead, so you can run one dirty
+    // amp + one clean amp off the single shared drive rack. Both (default) sends
+    // the driven bus to both amps -> bit-exact to the old shared-drive behavior.
+    enum DriveSend { SendA = 0, SendB = 1, SendBoth = 2 };
     static constexpr int kMaxAlignSamples = 4096; // ~85 ms at 48k
 
     void prepare(double sampleRate, int maxBlockSize)
@@ -68,6 +73,7 @@ public:
             b->prepare(ctx);
         mVoiceA.assign((size_t)juce::jmax(1, maxBlockSize), 0.0f);
         mVoiceB.assign((size_t)juce::jmax(1, maxBlockSize), 0.0f);
+        mCleanTap.assign((size_t)juce::jmax(1, maxBlockSize), 0.0f);
         mFdlA.prepare(kMaxAlignSamples);
         mFdlB.prepare(kMaxAlignSamples);
         mMaxBlock = juce::jmax(1, maxBlockSize);
@@ -90,6 +96,9 @@ public:
     // ---- mixer controls (message thread; cheap scalars) ----
     void setMode(int mode) { mMode = juce::jlimit(0, 2, mode); }
     int mode() const { return mMode; }
+    // Drive-send routing (SendA / SendB / SendBoth). Default Both.
+    void setDriveSend(int s) { mDriveSend = juce::jlimit(0, 2, s); }
+    int driveSend() const { return mDriveSend; }
     void setLevelA(float linear) { mLevelA = linear; }
     void setLevelB(float linear) { mLevelB = linear; }
     void setPanA(float pan) { mPanA = juce::jlimit(-1.0f, 1.0f, pan); }
@@ -265,6 +274,19 @@ public:
         // from the post-cab stereo DelayBlock. Default chain: drive -> premod -> predelay.
         if (mPredelayPreDrive && !predelay.isBypassed())
             { predelay.process(ch0, numSamples); heal(predelay, ch0, numSamples); }
+        // Clean (drive-bypassed) tap for the drive-send routing. When the send
+        // selector routes drive to only ONE amp, the OTHER amp gets this pre-drive
+        // signal — everything up to here (gate/comp/env-pre/pre-mod-pre/pre-delay-
+        // pre) but NOT the drive rack or any post-drive-positioned pedal. Captured
+        // only when it's actually needed (send != Both AND drive is running); the
+        // Both path never reads it, so it stays bit-exact to the shared-drive chain.
+        // All four pre-amp pedals report zero latency, so this tap is sample-aligned
+        // with the driven bus below — no realignment needed.
+        const bool needCleanTap = (mDriveSend != SendBoth) && !drive.isBypassed();
+        float *clean = mCleanTap.data();
+        if (needCleanTap)
+            std::memcpy(clean, ch0, (size_t)numSamples * sizeof(float));
+
         if (!drive.isBypassed())
             { drive.process(ch0, numSamples); heal(drive, ch0, numSamples); }
         if (!mPremodPreDrive && !premod.isBypassed())
@@ -277,13 +299,19 @@ public:
             { envfilter.process(ch0, numSamples); heal(envfilter, ch0, numSamples); }
 
         // ---- split into the two voice buffers ----
+        // Per the drive-send selector, each voice is fed either the driven bus
+        // (ch0) or the clean pre-drive tap. Both -> both driven (default, bit-
+        // exact). SendA -> only A driven, B clean; SendB -> only B driven, A clean.
+        // When needCleanTap is false (send=Both or drive bypassed) both are driven.
         float *vA = mVoiceA.data();
         float *vB = mVoiceB.data();
-        std::memcpy(vA, ch0, (size_t)numSamples * sizeof(float));
         const bool runB = (mMode != SoloA);
         const bool runA = (mMode != SoloB);
+        const bool aDriven = !needCleanTap || (mDriveSend != SendB);
+        const bool bDriven = !needCleanTap || (mDriveSend != SendA);
+        std::memcpy(vA, aDriven ? ch0 : clean, (size_t)numSamples * sizeof(float));
         if (runB)
-            std::memcpy(vB, ch0, (size_t)numSamples * sizeof(float));
+            std::memcpy(vB, bDriven ? ch0 : clean, (size_t)numSamples * sizeof(float));
 
         double compA = 0.0, compB = 0.0;
         if (mMode == Dual)
@@ -627,6 +655,7 @@ private:
     std::array<const StereoBlock *, 3> stereoBlocks() const { return {&mod, &delay, &reverb}; }
 
     int mMode = SoloA;
+    int mDriveSend = SendBoth; // which amp(s) the drive rack feeds (default both)
     float mLevelA = 1.0f, mLevelB = 1.0f;
     float mPanA = -1.0f, mPanB = 1.0f; // default hard L / hard R for Dual
     float mPolA = 1.0f, mPolB = 1.0f;  // polarity (+1 / -1)
@@ -639,6 +668,7 @@ private:
     double mAlignA = 0.0, mAlignB = 0.0; // fractional align delay (samples)
     FracDelayLine mFdlA, mFdlB;
     std::vector<float> mVoiceA, mVoiceB;
+    std::vector<float> mCleanTap; // pre-drive signal for the drive-send routing
     int mMaxBlock = 512; // prepared block size (probe render chunk size)
     double mSampleRate = 48000.0; // for the level-measurement band-limit filters
     bool mPrepared = false;

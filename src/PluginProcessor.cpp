@@ -775,6 +775,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::ParameterID("spaceTapeDrive", 1), "Space Tape Drive",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f, knob10(0.0f, 1.0f)));
 
+    // Drive-send routing: which amp(s) the single drive rack feeds (Amp A / Amp B
+    // / Both). The un-targeted amp gets the pre-drive clean tap, so one rack can
+    // run a dirty amp + a clean amp. Default "Both" (index 2) is bit-exact to the
+    // old shared-drive behavior. Appended last for automation-index stability.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("driveSend", 1), "Drive Send",
+        juce::StringArray{"Amp A", "Amp B", "Both"}, 2));
+
     return {params.begin(), params.end()};
 }
 
@@ -1119,6 +1127,9 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     }
     mChain.drive.setBypassed(apvts.getRawParameterValue("driveOn")->load() < 0.5f
                              || !mChain.drive.anyActive());
+    // Route the driven signal to Amp A / Amp B / Both (the un-targeted amp gets
+    // the pre-drive clean tap). Choice index maps directly to RigChain::DriveSend.
+    mChain.setDriveSend((int)apvts.getRawParameterValue("driveSend")->load());
 
     // Pre-amp modulation pedal (mono, front-of-amp). Sits between the drive rack
     // and the amp split (see RigChain). FOOL-PROOF voicing: each pedal exposes only

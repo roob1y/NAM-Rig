@@ -9,6 +9,8 @@
 // T3 pan law endpoints/centre.
 // T4 latency invariant: with one shared AA factor the two voices are equal, so
 //    SoloA == SoloB == Dual PDC == the manual block sum.
+// T9 drive-send routing: the shared drive rack can feed Amp A / Amp B / Both; the
+//    un-targeted amp gets the pre-drive clean tap. Both is bit-exact to shared.
 
 #include "rig/RigChain.h"
 
@@ -380,6 +382,69 @@ int main(int argc, char **argv)
         }
         const auto r = nam_rig::PhaseAlign::measure(oL.data(), oR.data(), N, 256);
         CHECK(std::fabs(r.lagSamples) < 2.0, "T8 comp aligns the two voices (L/R lag %.2f)", r.lagSamples);
+    }
+
+    // ===================== T9: drive-send routing =====================
+    // One active drive slot (Boost), everything else bypassed so each SoloX
+    // output IS the signal routed into that amp. Verify: Both -> both amps get
+    // the driven bus (identical); Send A -> A driven, B clean; Send B -> A clean,
+    // B driven. "Clean" == the raw input x (drive is the only active block, and
+    // the un-targeted branch taps the signal BEFORE it).
+    {
+        RigChain chain;
+        chain.prepare(48000.0, n);
+        chain.gate.setBypassed(true);
+        chain.comp.setBypassed(true);
+        chain.amp.setBypassed(true);
+        chain.ampB.setBypassed(true);
+        chain.eq.setBypassed(true);
+        chain.eqB.setBypassed(true);
+        chain.cab.setBypassed(true);
+        chain.cabB.setBypassed(true);
+        chain.mod.setBypassed(true);
+        chain.delay.setBypassed(true);
+        chain.reverb.setBypassed(true);
+        // Activate slot 0 as a Boost and un-bypass the rack.
+        chain.drive.setKind(0, 1); // Boost
+        chain.drive.setOn(0, true);
+        chain.drive.setDrive(0, 0.9f);
+        chain.drive.setBypassed(false);
+
+        auto runSolo = [&](int mode, int send, std::vector<float> &out)
+        {
+            chain.reset();
+            chain.setDriveSend(send);
+            chain.setMode(mode);
+            chain.setLevelA(1.0f);
+            chain.setLevelB(1.0f);
+            juce::AudioBuffer<float> buf(2, n);
+            std::memcpy(buf.getWritePointer(0), x.data(), (size_t)n * sizeof(float));
+            buf.clear(1, 0, n);
+            chain.process(buf);
+            out.assign(buf.getReadPointer(0), buf.getReadPointer(0) + n);
+        };
+
+        std::vector<float> drivenA, drivenB, aOnA, aOnB, bOnA, bOnB;
+        runSolo(RigChain::SoloA, RigChain::SendBoth, drivenA); // A gets driven bus
+        runSolo(RigChain::SoloB, RigChain::SendBoth, drivenB); // B gets driven bus
+
+        // Drive is actually doing something (driven != clean input).
+        bool changed = false;
+        for (int i = 0; i < n; ++i)
+            if (std::fabs(drivenA[(size_t)i] - x[(size_t)i]) > 1e-4f) { changed = true; break; }
+        CHECK(changed, "T9 drive alters the signal (driven != clean)");
+        CHECK(approxArr(drivenA.data(), drivenB.data(), n, 1e-6f),
+              "T9 Both -> Amp A and Amp B get the same driven bus");
+
+        runSolo(RigChain::SoloA, RigChain::SendA, aOnA); // A targeted -> driven
+        runSolo(RigChain::SoloB, RigChain::SendA, aOnB); // B not -> clean
+        CHECK(approxArr(aOnA.data(), drivenA.data(), n, 1e-6f), "T9 Send A -> Amp A is driven");
+        CHECK(approxArr(aOnB.data(), x.data(), n, 1e-6f),        "T9 Send A -> Amp B is clean");
+
+        runSolo(RigChain::SoloA, RigChain::SendB, bOnA); // A not -> clean
+        runSolo(RigChain::SoloB, RigChain::SendB, bOnB); // B targeted -> driven
+        CHECK(approxArr(bOnA.data(), x.data(), n, 1e-6f),        "T9 Send B -> Amp A is clean");
+        CHECK(approxArr(bOnB.data(), drivenB.data(), n, 1e-6f), "T9 Send B -> Amp B is driven");
     }
 
     std::printf("\n%s (%d failure%s)\n", gFails == 0 ? "ALL PASS" : "FAILURES",
