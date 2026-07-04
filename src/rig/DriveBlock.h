@@ -39,9 +39,9 @@
 //                  threshold ratio -> persistent even harmonics (a 2nd-harmonic
 //                  "crunch"). Built on clip type 4 (asym cubic) so the asymmetry
 //                  survives at high gain; bias 0.35 (kn 0.65) = the soft feedback
-//                  knee softened from the literal 2:1. Noticeably hotter than GD2
+//                  knee softened from the literal 2:1. Noticeably hotter than Green Drive
 //                  (gMin 6/gMax 120) + a touch more output. Same feedback-clip
-//                  pre/de-emphasis feel as GD2. See docs/drive/sd1.md.
+//                  pre/de-emphasis feel as Green Drive. See docs/drive/sd1.md.
 //   Gold Horse   : the Klon Centaur (TL072 + germanium diodes-to-ground). NOT a TS:
 //                  a ~1 kHz BAND-PASS op-amp gain stage, SYMMETRIC germanium HARD clip
 //                  (clip 1 + 2nd-order ADAA), SUMMED with a big parallel CLEAN path =
@@ -260,7 +260,7 @@ public:
             // model 0: the reworked feedback-clip TS808 (was "Green Drive II").
             {"Green Drive", "Mid-Hump Overdrive",
              { 3, 5.0f, 80.0f, 220.0f,  820.0f, 3.6f, 0.7f, 1900.0f, 0.00f, 1200.0f, 1.15f, 0.0f, 1.0f,  9.0f, 700.0f, 0.20f, 0.40f, 0.0f, 0.0f}, false},
-            // model 2: circuit-fit Boss SD-1 Super Overdrive (OD-1 lineage, uPC4558
+            // model 1: circuit-fit Boss SD-1 Super Overdrive (OD-1 lineage, uPC4558
             // feedback-clip). Small-signal voicing is ~the TS808 (fit sd1_response.py,
             // RMS 0.63 dB: same ~+5 dB hump @ 720-900 Hz, slightly fuller bass / a hair
             // brighter -- the SD-1's "more open" reputation, confirmed by the circuit).
@@ -269,13 +269,13 @@ public:
             // gain (a symmetric clip + DC bias would just square up symmetrically). Real
             // ratio 2:1 = bias 0.50, softened to bias 0.35 (kn 0.65) for the diodes'
             // soft FEEDBACK-loop knee -- clearly asymmetric (h2/h1 ~0.04-0.075), milder
-            // than the fuzz. Noticeably hotter than GD2 (gMin 6/gMax 120, the 1M drive
+            // than the fuzz. Noticeably hotter than Green Drive (gMin 6/gMax 120, the 1M drive
             // pot + 0.9V 1S2473 diodes) + a touch more output (outTrim 1.25). Same
-            // feedback-clip feel as GD2: pre/de-emphasis (bass clips least), small clean
+            // feedback-clip feel as Green Drive: pre/de-emphasis (bass clips least), small clean
             // blend + touch dynamics. Static (shapeTrack 0), mid post-clip, calibrated.
             {"Super Drive", "Asymmetric Overdrive",
              { 4, 6.0f,120.0f, 160.0f,  900.0f, 5.0f, 0.5f, 2000.0f, 0.35f, 1200.0f, 1.25f, 0.0f, 1.0f, 10.0f, 700.0f, 0.15f, 0.40f, 0.0f, 0.0f}, false},
-            // model 3: circuit-fit Klon Centaur (TL072 + germanium diodes-to-ground).
+            // model 2: circuit-fit Klon Centaur (TL072 + germanium diodes-to-ground).
             // NOT a TS: the op-amp gain stage is a ~1 kHz BAND-PASS (fit klon_response.py,
             // RMS 0.14 dB) clipped by SYMMETRIC germanium (hard, clip 1 + 2nd-order ADAA),
             // then SUMMED with a big parallel CLEAN feedforward -> the "transparent
@@ -292,7 +292,7 @@ public:
             // Klon high-shelf (bass fixed, +18/-8 dB), noon = flat. NOT the engine tilt.
             {"Gold Horse", "Transparent Overdrive",
              { 1, 2.0f, 70.0f, 210.0f,  980.0f, 3.2f, 0.3f, 4700.0f, 0.00f,  408.0f, 0.95f, 1.0f, 0.0f,  0.0f, 700.0f, 0.50f, 0.30f, 0.0f, 1.0f, 0.0f, 18.0f}, false},
-            // model 4: circuit-fit Marshall Bluesbreaker (the early-'90s pedal, the
+            // model 3: circuit-fit Marshall Bluesbreaker (the early-'90s pedal, the
             // King of Tone / Timmy / Morning Glory ancestor). A TL072 non-inverting
             // boost+filter (IC1A) into an INVERTING soft-clip stage (IC1B, 4x 1N914 in
             // the feedback loop: high 1.2V threshold + a 6k8 series R -> SOFT, warm),
@@ -306,11 +306,11 @@ public:
             // Drive pot and essentially FULL from noon up), so a fixed shelf matches the
             // usable range far better than a linear bloom -- and the "clean till you push
             // it" feel comes from the low gMin + soft clip, not the EQ. SYMMETRIC cubic soft
-            // clip (bias 0) -- gentler than GD2/SD-1: softer knee, MILDER pre/de-emphasis
+            // clip (bias 0) -- gentler than Green Drive/SD-1: softer knee, MILDER pre/de-emphasis
             // (emphDb, frequency-selective clip; cancels in the linear path so it doesn't
             // touch the small-signal fit) + a touch more clean blend (0.22) + touch (0.45)
             // since the BB famously keeps guitar timbre/dynamics. LOWER, softer gain range
-            // than GD2 (gMin/gMax) -- clean till pushed, "fairly low output, breaks up late"
+            // than Green Drive (gMin/gMax) -- clean till pushed, "fairly low output, breaks up late"
             // (the real pedal). Treble-shelf tone (bass fixed, soft-poly path), pivot 1200.
             // Calibration-referenced. See docs/drive/bluesbreaker.md.
             {"Breaker Drive", "Soft Low-Gain Overdrive",
@@ -349,17 +349,20 @@ public:
             // The Muff is NOT a single shaper -- it is TWO consecutive SOFT-clip stages
             // (silicon 1N914 back-to-back diodes in each transistor's collector->base
             // FEEDBACK loop, ~+/-0.6 V), so we run a real 2-stage cubic CASCADE
-            // (muffStages 2): each stage has the Miller-cap low-pass (muffLpHz 1300)
-            // BEFORE it -> the dark, smooth, no-fizz voice (clipping a low-passed signal
-            // sounds smoother) and the dense, compressed double-clip "wall" a single clip
-            // can't make. A fixed inter-stage gain (kMuffStage2Gain) drives stage 1's
-            // output into stage 2's knee. Pre-clip low-cut 80 Hz tightens the lows (clip
-            // stages HP 55/94 Hz); gentle post LP 1600 keeps it dark. The famous passive
-            // tone-stack mid SCOOP is a static post-clip notch FIT to ElectroSmash's
-            // MEASURED tone-noon response (midHz 1000, Q 0.80, -6.5 dB = the 1 kHz notch
-            // 6.5 dB below the shelves; big_muff_response.py). Tone = the engine see-saw
-            // tilt @ 1 kHz (the real Muff bass/treble blend) -- UNLIKE the other fuzzes,
-            // the Muff exposes a Tone knob (the Fuzz panel shows it only for this model).
+            // (muffStages 2): distinct per-stage Miller-cap low-passes BEFORE each clip
+            // (muffLpHz 1200 pre stage 1, muffInterLpHz 1780 pre stage 2) -> the dark,
+            // smooth, no-fizz voice (clipping a low-passed signal sounds smoother) and the
+            // dense, compressed double-clip "wall" a single clip can't make. A fixed
+            // inter-stage gain (kMuffStage2Gain) drives stage 1's output into stage 2's
+            // knee. Pre-clip low-cut 70 Hz (+ an inter-stage HP off the same lowCutHz)
+            // tightens the lows; gentle post LP 1170 keeps it dark. TONE = the REAL PASSIVE
+            // Big Muff tone stack (a treble high-pass + bass low-pass blended by the Tone
+            // pot), a 2nd-order nodal network bilinear-discretised, recomputed per block
+            // (the `cascade` branch below ~L603; T56 asserts it): PASSIVE, so it can only
+            // ATTENUATE -- CCW full/dark, CW thin/bright, noon scooped ~1 kHz, peak ~250 Hz.
+            // midDb 0: the old static post-clip notch AND the see-saw tone tilt were BOTH
+            // removed in the tone-stack rework -- do NOT restore them. The Muff is the only
+            // fuzz with a Tone knob (the Fuzz panel shows it only for this model).
             // bias 0 (symmetric clipping). MODERATE default / HIGH-gain ceiling: gMin 3 =
             // controllable crunch at low Sustain, gMax 55 + the inter-stage gain = the
             // full saturated wall + max sustain at the top. Calibration-referenced.

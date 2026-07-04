@@ -1,8 +1,8 @@
 # Violet Ram — EHX Big Muff Pi (Ram's Head '73)
 
 Worked example of the [building-drives playbook](building-drives-playbook.md) for the
-**first cascaded-clipping** drive in the rack. Added as **Fuzz model 2**
-(`Violet Ram`), alongside Round Fuzz models 0/1. (The Muff is technically a diode
+**first cascaded-clipping** drive in the rack. Added as **Fuzz model 1**
+(`Violet Ram`), alongside Round Fuzz model 0. (The Muff is technically a diode
 *distortion*, but it is marketed/perceived as a fuzz — Robbie's call to file it under
 Fuzz.) Companion derivation script: [`big_muff_response.py`](big_muff_response.py).
 
@@ -169,7 +169,7 @@ The `fTone` param is new (unreleased dev branch, so no preset drift).
 
 ## 6. Tests (drive_test.cpp T52–T57) + build
 
-- **T52** existing Fuzz models byte-exact; Fuzz holds 3 / Distortion back to 2; cascade
+- **T52** existing Fuzz models byte-exact; Fuzz holds 2 / Distortion holds 1; cascade
   enabled (muffStages 2); scoop is in the tone stack, not a static notch (midDb 0).
 - **T53** the Muff voice: full lows, ~10 dB mid scoop, ~25 dB-dark top.
 - **T54** the cascade **compresses**: input ×8 → output ×1.13.

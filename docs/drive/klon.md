@@ -1,4 +1,4 @@
-# Gold Horse — the Klon Centaur (Overdrive model 3)
+# Gold Horse — the Klon Centaur (Overdrive model 2)
 
 A worked example of the [playbook](building-drives-playbook.md). The Klon is the
 first model whose identity is **not** the clipper but the **parallel clean sum** —
@@ -97,7 +97,7 @@ byte-exact — (1) the hard-clip branch does an optional clean blend
 `cleanBlend`/`kCleanScale` (transparency), `gMax` (gain), `outTrim` (level),
 `lowCut`/`midDb` (body vs hump), `trebleShelfDb`/`pivotHz` (treble shelf).
 
-## 5. Voicing row (DriveBlock.h `od[]`, model 3)
+## 5. Voicing row (DriveBlock.h `od[]`, model 2)
 
 ```
 //  clip gMin gMax  lowCut midHz midDb midQ  lpHz   bias  pivot  outTrim shp post emphDb emphHz clean dyn  toneF adaa2 gate trebleShelfDb

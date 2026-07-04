@@ -81,7 +81,7 @@ ours (fit):    lowCut 15, midHz 5000, midQ 0.35, midDb 4.1
 
 ## Verification (`drive_test.cpp` T26–T29)
 
-- **T26** model 1 (EP Boost) preserved; Boost now has 4 models.
+- **T26** model 1 (EP Boost) preserved; Boost now has 2 models.
 - **T27** full-range + presence: 80 Hz ~unchanged vs 200 Hz, +3 dB by 5 kHz, and it
   passes 4.5× more bass than the Rangemaster's high-pass.
 - **T28** stays clean at noon (THD 0.018, less than half the Rangemaster's) with

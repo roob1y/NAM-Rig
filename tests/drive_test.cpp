@@ -347,9 +347,9 @@ int main()
               "T10 Dist@drive1 tightens vs drive0: 100Hz %.1f dB (vs 1k), %.1f at drive0", lo1, lo0);
     }
 
-    // ====== Green Drive II (Overdrive model 1): reworked feedback-clip OD ======
+    // ====== Green Drive (Overdrive model 0): reworked feedback-clip TS808 OD ======
 
-    // ---- T11: model 0 (tanh) byte-for-byte unchanged; category now has 3 models ----
+    // ---- T11: model 0 byte-for-byte unchanged; category now has 4 models ----
     {
         auto in = sine(220.0, 0.2f, 8192);
         auto m0 = realSlotM(Kind::Overdrive, 0, 0.7f, in);
@@ -516,7 +516,7 @@ int main()
               "T20 RAT input-dependent: humbucker THD %.2f > single-coil %.2f (drives harder)", humbk, single);
     }
 
-    // ====== Range '65 II (Boost model 2): circuit-fit Dallas Rangemaster ======
+    // ====== Range '65 (Boost model 0): circuit-fit Dallas Rangemaster ======
 
     // small-signal magnitude of a specific Boost MODEL + RANGE at one freq (linear).
     auto boostG = [&](int model, int rng, double f, float drive) {
@@ -527,7 +527,7 @@ int main()
         return goertzel(x, f) / goertzel(in, f);
     };
 
-    // ---- T21: models 0 & 1 byte-for-byte unchanged; category now has 3 models ----
+    // ---- T21: model 0 (Range '65) byte-for-byte unchanged; category holds 2 models ----
     {
         auto in = sine(220.0, 0.2f, 8192);
         auto m0 = realSlotM(Kind::Boost, 0, 0.7f, in);
@@ -543,7 +543,7 @@ int main()
     {
         const double hi = boostG(0, 0, 3000.0, 0.3f);   // treble passband
         const double lo = boostG(0, 0, 150.0, 0.3f);    // below the corner (cut)
-        CHECK(hi > lo * 4.0, "T22 Range '65 II treble-boost: 3k %.3e >> 150Hz %.3e (%.1fx)", hi, lo, hi / lo);
+        CHECK(hi > lo * 4.0, "T22 Range '65 treble-boost: 3k %.3e >> 150Hz %.3e (%.1fx)", hi, lo, hi / lo);
         // Range switch: Full (47nF, ~282 Hz corner) passes far more low end than Treble (5nF, ~2.6 kHz)
         const double full300 = boostG(0, 2, 300.0, 0.3f);
         const double treb300 = boostG(0, 0, 300.0, 0.3f);
@@ -552,7 +552,7 @@ int main()
     }
 
     // ---- T23: germanium ASYMMETRY -- the off-centre bias gives even harmonics ----
-    // model 2 (bias 0.30, the Rangemaster's deliberately off-centre operating point)
+    // model 0 (bias 0.30, the Rangemaster's deliberately off-centre operating point)
     // sits clearly above the gentler original stand-in (bias 0.20). Tested in the
     // passband (1.5 kHz) where the treble booster has full gain.
     {
@@ -565,7 +565,7 @@ int main()
     }
 
     // ---- T24: the gain range is the REAL Gv (~80), so it drives much harder than the stand-in ----
-    // The stand-in's gMax 20 was ~4x too low (the early-TS bug); model 2's gMax 80 = gm*Rc.
+    // The stand-in's gMax 20 was ~4x too low (the early-TS bug); model 0's gMax 80 = gm*Rc.
     // Also input-level dependent: hotter pickups drive the fixed soft-clip threshold harder.
     {
         auto thd = [&](int model, float drive, float amp) {
@@ -578,7 +578,7 @@ int main()
               "T24 input-dependent: humbucker THD %.3f > single-coil %.3f (drives harder)", humbk, single);
     }
 
-    // ---- T25: model 2 never spikes across a full-scale sweep (all drives, all ranges) ----
+    // ---- T25: model 0 never spikes across a full-scale sweep (all drives, all ranges) ----
     {
         double worst = 0.0;
         for (int rng = 0; rng <= 2; ++rng)
@@ -590,24 +590,24 @@ int main()
                     auto y = sine(f, 0.5f, 8192); run(d, y);
                     for (float v : y) worst = std::max(worst, (double)std::fabs(v));
                 }
-        CHECK(worst < 1.5, "T25 Range '65 II no spikes across full-scale sweep: worst |out| %.2f", worst);
+        CHECK(worst < 1.5, "T25 Range '65 no spikes across full-scale sweep: worst |out| %.2f", worst);
     }
 
-    // ====== EP Boost II (Boost model 3): Echoplex EP-3 / Xotic EP Booster ======
+    // ====== Plex Boost (Boost model 1): Echoplex EP-3 / Xotic EP Booster ======
 
-    // ---- T26: model 1 (EP Boost) byte-for-byte unchanged; category now has 4 models ----
+    // ---- T26: model 1 (Plex Boost) byte-for-byte unchanged; category holds 2 models ----
     {
         auto in = sine(220.0, 0.2f, 8192);
         auto m1 = realSlotM(Kind::Boost, 1, 0.7f, in);
         bool finite = true;
         for (float v : m1) finite = finite && std::isfinite(v);
-        CHECK(finite, "T26 Boost model 1 (EP Boost) renders cleanly (stand-in preserved)");
+        CHECK(finite, "T26 Boost model 1 (Plex Boost) renders cleanly");
         CHECK(DriveBlock::modelCount(Kind::Boost) == 2,
               "T26 Boost holds 2 models (Range '65 / EP Boost)");
     }
 
-    // ---- T27: EP Boost II is FULL-RANGE with a gentle presence lift (NOT a treble HP) ----
-    // Unlike the Rangemaster (model 2), the EP keeps its bass and only gently lifts the
+    // ---- T27: Plex Boost is FULL-RANGE with a gentle presence lift (NOT a treble HP) ----
+    // Unlike the Rangemaster (model 0), the EP keeps its bass and only gently lifts the
     // presence -> 80 Hz ~unchanged vs 200 Hz, a few dB up by 5 kHz; and at 80 Hz it passes
     // FAR more than the Rangemaster's high-pass.
     {
@@ -635,7 +635,7 @@ int main()
         CHECK(h2h1 > 0.01, "T28 EP JFET even-harmonic warmth: h2/h1 %.3f", h2h1);
     }
 
-    // ---- T29: model 3 never spikes across a full-scale sweep (all drives) ----
+    // ---- T29: model 1 never spikes across a full-scale sweep (all drives) ----
     {
         double worst = 0.0;
         for (float dr = 0.0f; dr <= 1.001f; dr += 0.25f)
@@ -644,10 +644,10 @@ int main()
                 auto y = realSlotM(Kind::Boost, 1, dr, sine(f, 0.5f, 8192));
                 for (float v : y) worst = std::max(worst, (double)std::fabs(v));
             }
-        CHECK(worst < 1.5, "T29 EP Boost II no spikes across full-scale sweep: worst |out| %.2f", worst);
+        CHECK(worst < 1.5, "T29 Plex Boost no spikes across full-scale sweep: worst |out| %.2f", worst);
     }
 
-    // ====== Round Fuzz II (Fuzz model 1): germanium Fuzz Face (clip 4 asym cubic) ======
+    // ====== Round Fuzz (Fuzz model 0): germanium Fuzz Face (clip 4 asym cubic) ======
 
     // helpers: a decaying pluck, and windowed RMS (for the gate test)
     auto pluck = [&](double f, float a, double tau, int n) {
@@ -670,13 +670,13 @@ int main()
         CHECK(DriveBlock::modelCount(Kind::Fuzz) == 2, "T30 Fuzz holds 2 models (Round Fuzz + Violet Ram)");
     }
 
-    // ---- T31: Round Fuzz II is a heavy ASYMMETRIC fuzz, bright with a sub-bass trim ----
+    // ---- T31: Round Fuzz is a heavy ASYMMETRIC fuzz, bright with a sub-bass trim ----
     {
         auto y = realSlotM(Kind::Fuzz, 0, 0.6f, sine(220.0, 0.2f, 24000));
         const double thd = harmRatio(y, 220.0, 12);
         const double h2h1 = goertzel(y, 440.0) / (goertzel(y, 220.0) + 1e-9);
         CHECK(thd > 0.5 && h2h1 > 0.005,
-              "T31 Round Fuzz II heavy asym fuzz: THD %.2f, h2/h1 %.3f", thd, h2h1);
+              "T31 Round Fuzz heavy asym fuzz: THD %.2f, h2/h1 %.3f", thd, h2h1);
         // Authentic Fuzz Face I/O: the ~5-8k input impedance DAMPS the guitar's
         // pickup resonance, so the small-signal top is tamed -- the midband body
         // (300Hz) now sits ABOVE both the trimmed sub-bass (60Hz) and the
@@ -727,7 +727,7 @@ int main()
                 auto y = realSlotM(Kind::Fuzz, 0, dr, sine(f, 0.5f, 8192));
                 for (float v : y) worst = std::max(worst, (double)std::fabs(v));
             }
-        CHECK(worst < 1.5, "T35 Round Fuzz II no spikes across full-scale sweep: worst |out| %.2f", worst);
+        CHECK(worst < 1.5, "T35 Round Fuzz no spikes across full-scale sweep: worst |out| %.2f", worst);
 
         // naive memoryless asym cubic sharing the voicing (preGain + low-cut + outTrim) -> alias baseline
         const auto v = DriveBlock::voicingFor(Kind::Fuzz, 0);
@@ -781,10 +781,10 @@ int main()
               "T37 onset passes clean at any level: quiet %.2f, loud %.2f (gate only chokes the decay)", quiet, loud);
     }
 
-    // ====== Super Drive (Overdrive model 2): circuit-fit Boss SD-1 (clip 4 asym cubic) ======
+    // ====== Super Drive (Overdrive model 1): circuit-fit Boss SD-1 (clip 4 asym cubic) ======
 
-    // ---- T38: models 0 & 1 preserved; OD now has 3 models; GD2 still renders ----
-    // The emphasis-pair condition was widened to clip 3 OR 4; GD2 (clip 3, emphDb 9)
+    // ---- T38: models 0 & 1 preserved; OD now has 4 models; Super Drive still renders ----
+    // The emphasis-pair condition was widened to clip 3 OR 4; Green Drive (clip 3, emphDb 9)
     // is unaffected (same biquads), so its behavioral tests (T11-T14) still hold.
     {
         auto in = sine(220.0, 0.2f, 8192);
@@ -793,9 +793,9 @@ int main()
         bool same = true;
         for (size_t i = 0; i < in.size(); ++i) same = same && (m0[i] == def[i]);
         CHECK(same, "T38 OD model 0 still byte-exact after adding Super Drive");
-        auto m1 = realSlotM(Kind::Overdrive, 0, 0.7f, in);
+        auto m1 = realSlotM(Kind::Overdrive, 1, 0.7f, in);
         bool finite = true; for (float v : m1) finite = finite && std::isfinite(v);
-        CHECK(finite, "T38 OD model 1 (Green Drive II) still renders cleanly");
+        CHECK(finite, "T38 OD model 1 (Super Drive) still renders cleanly");
         CHECK(DriveBlock::modelCount(Kind::Overdrive) == 4, "T38 Overdrive holds 4 models");
     }
 
@@ -818,7 +818,7 @@ int main()
         CHECK(bassDb < -3.0, "T39 emphasis active (bass below the hump when driven): 100Hz %.1f dB vs 820Hz", bassDb);
     }
 
-    // ---- T40: SD-1 is ASYMMETRIC -- clear even harmonics, unlike the symmetric GD2 ----
+    // ---- T40: SD-1 is ASYMMETRIC -- clear even harmonics, unlike the symmetric Green Drive ----
     {
         auto h2h1 = [&](int model, float dr) {
             auto y = realSlotM(Kind::Overdrive, model, dr, sine(220.0, 0.10f, 24000));
@@ -826,13 +826,13 @@ int main()
         };
         const double sd = h2h1(1, 0.5f), gd = h2h1(0, 0.5f);
         CHECK(sd > 0.01 && sd > gd * 3.0,
-              "T40 Super Drive asymmetric vs symmetric GD2: h2/h1 %.3f > %.3f", sd, gd);
+              "T40 Super Drive asymmetric vs symmetric Green Drive: h2/h1 %.3f > %.3f", sd, gd);
     }
 
     // ---- T41: the asymmetry PERSISTS at high gain (clip 4, not cubic+DC-bias) ----
     // A symmetric shaper + input bias washes out to a symmetric square when cranked;
     // the asym-cubic keeps a tilted shape, so even harmonics taper with Drive but stay
-    // FAR above the symmetric GD2 (~14x even at max) instead of vanishing. Probed at a
+    // FAR above the symmetric Green Drive (~14x even at max) instead of vanishing. Probed at a
     // cranked-but-not-maxed Drive where the SD-1 crunch is clearest.
     {
         auto h2h1 = [&](int model, float dr) {
@@ -841,16 +841,16 @@ int main()
         };
         const double sd = h2h1(1, 0.7f), gd = h2h1(0, 0.7f);
         CHECK(sd > 0.008 && sd > gd * 5.0,
-              "T41 asymmetry persists cranked: Super Drive h2/h1 %.4f >> GD2 %.4f", sd, gd);
+              "T41 asymmetry persists cranked: Super Drive h2/h1 %.4f >> Green Drive %.4f", sd, gd);
     }
 
-    // ---- T42: noticeably hotter than GD2, and input-level dependent ----
+    // ---- T42: noticeably hotter than Green Drive, and input-level dependent ----
     {
         auto thd = [&](int model, float dr, float amp) {
             return harmRatio(realSlotM(Kind::Overdrive, model, dr, sine(220.0, amp, 24000)), 220.0, 12);
         };
         const double sd = thd(1, 0.7f, 0.10f), gd = thd(0, 0.7f, 0.10f);
-        CHECK(sd > gd * 1.2, "T42 Super Drive hotter than GD2: THD %.2f > %.2f", sd, gd);
+        CHECK(sd > gd * 1.2, "T42 Super Drive hotter than Green Drive: THD %.2f > %.2f", sd, gd);
         const double single = thd(1, 0.2f, 0.08f), humbk = thd(1, 0.2f, 0.20f);
         CHECK(humbk > single * 1.8,
               "T42 input-dependent: humbucker THD %.2f > single-coil %.2f (drives harder)", humbk, single);
@@ -885,19 +885,19 @@ int main()
         CHECK(a3 < n3 * 0.7, "T43 clip-4 ADAA2 cuts alias@3k: %.2e < naive %.2e", a3, n3);
     }
 
-    // ---- T44: A/B level-match -- "a touch more output" than GD2, not wildly louder ----
+    // ---- T44: A/B level-match -- "a touch more output" than Green Drive, not wildly louder ----
     {
         auto noonRms = [&](int model) {
             return rms(realSlotM(Kind::Overdrive, model, 0.5f, sine(220.0, 0.10f, 24000)));
         };
         const double ratio = noonRms(1) / std::max(noonRms(0), 1e-9);
         CHECK(ratio > 0.9 && ratio < 1.8,
-              "T44 Super Drive a touch hotter, A/B-fair: noon RMS %.2fx GD2", ratio);
+              "T44 Super Drive a touch hotter, A/B-fair: noon RMS %.2fx Green Drive", ratio);
     }
 
-    // ====== Gold Horse (Overdrive model 3): circuit-fit Klon Centaur (hard clip + clean blend) ======
+    // ====== Gold Horse (Overdrive model 2): circuit-fit Klon Centaur (hard clip + clean blend) ======
 
-    // ---- T45: models 0-2 preserved; OD now has 4 models (fills bModel 0..3) ----
+    // ---- T45: models 0-1 preserved; Gold Horse added as model 2 (OD holds 4) ----
     {
         auto in = sine(220.0, 0.2f, 8192);
         auto m0 = realSlotM(Kind::Overdrive, 0, 0.7f, in);
@@ -905,22 +905,22 @@ int main()
         bool same = true;
         for (size_t i = 0; i < in.size(); ++i) same = same && (m0[i] == def[i]);
         CHECK(same, "T45 OD model 0 still byte-exact after adding Gold Horse");
-        auto m3 = realSlotM(Kind::Overdrive, 2, 0.7f, in);
-        bool finite = true; for (float v : m3) finite = finite && std::isfinite(v);
-        CHECK(finite, "T45 OD model 3 (Gold Horse) renders cleanly");
+        auto m2 = realSlotM(Kind::Overdrive, 2, 0.7f, in);
+        bool finite = true; for (float v : m2) finite = finite && std::isfinite(v);
+        CHECK(finite, "T45 OD model 2 (Gold Horse) renders cleanly");
         CHECK(DriveBlock::modelCount(Kind::Overdrive) == 4, "T45 Overdrive holds 4 models");
     }
 
-    // ---- T46: Black Rodent II (the OTHER hard-clip+ADAA model) stays byte-exact ----
+    // ---- T46: Black Rodent (the OTHER hard-clip+ADAA model) stays byte-exact ----
     // The clean-blend code added to the hard-clip path must be a no-op when
-    // cleanBlend==0 && dynDepth==0 (Black Rodent II) -- A/B + zero preset drift.
+    // cleanBlend==0 && dynDepth==0 (Black Rodent) -- A/B + zero preset drift.
     {
         auto in = sine(220.0, 0.2f, 8192);
         auto m1 = realSlotM(Kind::Distortion, 0, 0.7f, in);
         auto m1b = realSlotM(Kind::Distortion, 0, 0.7f, in);
         bool same = true;
         for (size_t i = 0; i < in.size(); ++i) same = same && (m1[i] == m1b[i]);
-        CHECK(same, "T46 Black Rodent II deterministic + unchanged by the hard-clip clean-blend path");
+        CHECK(same, "T46 Black Rodent deterministic + unchanged by the hard-clip clean-blend path");
     }
 
     // ---- T47: the heavy clean blend RESTORES low end at PLAYING level (transparency) ----
@@ -953,7 +953,7 @@ int main()
 
     // ---- T49: symmetric clip (germanium to ground) -- low even-harmonic content ----
     // Unlike the asymmetric Super Drive, the Klon's back-to-back diodes are symmetric,
-    // so the 2nd harmonic stays low (odd-dominant), like the symmetric GD2.
+    // so the 2nd harmonic stays low (odd-dominant), like the symmetric Green Drive.
     {
         auto y = realSlotM(Kind::Overdrive, 2, 0.8f, sine(220.0, 0.20f, 24000));
         const double h2h1 = goertzel(y, 440.0) / (goertzel(y, 220.0) + 1e-9);
@@ -1021,12 +1021,12 @@ int main()
               "T51 Klon treble shelf asymmetric (+18/-8): boost +%.1f dB >> cut +%.1f dB", trebUp, trebDn);
     }
 
-    // ====== Violet Ram (Distortion model 2): circuit-fit EHX Big Muff (Ram's Head) ======
+    // ====== Violet Ram (Fuzz model 1): circuit-fit EHX Big Muff (Ram's Head) ======
 
     // ---- T52: the Muff is filed under FUZZ; existing Fuzz models stay byte-exact ----
     // Big Muff = a diode distortion but marketed/perceived as a fuzz, so it lives in the
-    // Fuzz category (model 2). The new 2-stage CASCADE + scoop fields zero-fill, so the
-    // Round Fuzz models 0/1 are untouched.
+    // Fuzz category (model 1). The new 2-stage CASCADE + scoop fields zero-fill, so the
+    // the Round Fuzz model 0 is untouched.
     {
         auto in = sine(220.0, 0.2f, 8192);
         auto m0 = realSlotM(Kind::Fuzz, 0, 0.7f, in);
@@ -1108,11 +1108,11 @@ int main()
         CHECK(hb > sc + 0.05, "T57 Violet Ram humbucker drives harder: THD %.3f (HB) > %.3f (SC)", hb, sc);
     }
 
-    // ====== Breaker Drive (Overdrive model 4): circuit-fit Marshall Bluesbreaker ======
+    // ====== Breaker Drive (Overdrive model 3): circuit-fit Marshall Bluesbreaker ======
 
-    // ---- T58: model 4 added; OD models 0-3 byte-exact; Breaker renders cleanly ----
-    // Purely additive (a new od[] row + the Overdrive count 4->5 + the bModel param
-    // widened 0..3 -> 0..4), so every shipped model is untouched.
+    // ---- T58: Breaker added as OD model 3 (the 4th model); models 0-2 byte-exact ----
+    // Purely additive (a new od[] row; the Overdrive count is now 4, bModel range 0..3),
+    // so every shipped model is untouched.
     {
         auto in = sine(220.0, 0.2f, 8192);
         auto m0 = realSlotM(Kind::Overdrive, 0, 0.7f, in);
@@ -1120,9 +1120,9 @@ int main()
         bool same = true;
         for (size_t i = 0; i < in.size(); ++i) same = same && (m0[i] == def[i]);
         CHECK(same, "T58 OD model 0 still byte-exact after adding Breaker Drive");
-        auto m4 = realSlotM(Kind::Overdrive, 3, 0.7f, in);
-        bool finite = true; for (float v : m4) finite = finite && std::isfinite(v);
-        CHECK(finite, "T58 OD model 4 (Breaker Drive) renders only finite samples");
+        auto m3 = realSlotM(Kind::Overdrive, 3, 0.7f, in);
+        bool finite = true; for (float v : m3) finite = finite && std::isfinite(v);
+        CHECK(finite, "T58 OD model 3 (Breaker Drive) renders only finite samples");
         const auto v = DriveBlock::voicingFor(Kind::Overdrive, 3);
         CHECK(v.clip == 3 && v.bias == 0.0f, "T58 Breaker = symmetric cubic soft clip (clip %d, bias %.2f)", v.clip, v.bias);
     }
@@ -1130,7 +1130,7 @@ int main()
     // ---- T59: the Bluesbreaker VOICE -- WIDE-OPEN lows (NOT a TS bass cut) + a gentle
     // bright presence shelf, and a TS-style treble-shelf Tone (bass fixed). ----
     // Small-signal probe (amp tiny -> the soft clip stays ~linear). The defining
-    // contrast with the TS-family GD2 is the LOW END: the BB barely touches it
+    // contrast with the TS-family Green Drive is the LOW END: the BB barely touches it
     // (input HPF ~16 Hz) where the TS cuts ~8 dB; and a mild upper-treble lift.
     {
         auto g = [&](int model, double f, float dr, float tone) {
@@ -1141,7 +1141,7 @@ int main()
         const double tsLows   = 20.0 * std::log10(g(0, 50.0, 0.0f, 0.5f) / g(0, 200.0, 0.0f, 0.5f)); // Green Drive (TS) bass cut
         CHECK(openLows > -3.0, "T59 Breaker open low end: 50Hz %.1f dB re 200 (barely cut)", openLows);
         CHECK(openLows > tsLows + 4.0,
-              "T59 Breaker far more open than the TS: lows %.1f dB vs GD2 %.1f dB", openLows, tsLows);
+              "T59 Breaker far more open than the TS: lows %.1f dB vs Green Drive %.1f dB", openLows, tsLows);
         const double presence = 20.0 * std::log10(g(3, 3000.0, 0.0f, 0.5f) / g(3, 200.0, 0.0f, 0.5f));
         CHECK(presence > 2.0, "T59 Breaker gentle presence shelf: 3kHz +%.1f dB re 200", presence);
         // static voicing (shapeTrack 0): the small-signal shape is drive-independent.
@@ -1169,17 +1169,17 @@ int main()
         CHECK(sd > bb * 5.0, "T60 vs the asymmetric SD-1: Breaker %.4f << Super Drive %.4f", bb, sd);
     }
 
-    // ---- T61: SOFTER / gentler than a TS -- less THD than GD2, far less than SD-1 ----
+    // ---- T61: SOFTER / gentler than a TS -- less THD than Green Drive, far less than SD-1 ----
     // The BB is the mildest overdrive in the rack: a high diode threshold (1.2 V) + the
     // 6k8 series R = a soft knee, and a lower gain range. At noon (and matched input) it
-    // is cleaner than Green Drive II, which is itself cleaner than the hot SD-1.
+    // is cleaner than Green Drive, which is itself cleaner than the hot SD-1.
     {
         auto thd = [&](int model) {
             return harmRatio(realSlotM(Kind::Overdrive, model, 0.5f, sine(220.0, 0.20f, 24000)), 220.0, 12);
         };
         const double bb = thd(3), gd = thd(0), sd = thd(1);
         CHECK(bb < gd && gd < sd,
-              "T61 Breaker is the gentlest OD: noon THD %.3f (BB) < %.3f (GD2) < %.3f (SD-1)", bb, gd, sd);
+              "T61 Breaker is the gentlest OD: noon THD %.3f (BB) < %.3f (Green Drive) < %.3f (SD-1)", bb, gd, sd);
     }
 
     // ---- T62: never spikes -- maxabs sweep. Suite convention (T17/T43) = Tone NOON. ----

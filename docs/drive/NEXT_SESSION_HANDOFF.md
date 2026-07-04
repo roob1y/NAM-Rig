@@ -4,6 +4,19 @@ Everything a fresh chat needs to start improving the drive pedals cold. Written
 2026-06-28. Companion to the existing drive docs (read those too); this file is
 the "where we are, what to do next" layer on top.
 
+> **2026-07-04 — two updates.** (1) `MODEL_REVIEW_2026-07-04.md` is the current
+> ground-truth pass over all 8 models; its inventory table supersedes the stale
+> "Current model inventory" line further down (the real counts are **Boost 2 /
+> Overdrive 4 / Distortion 1 / Fuzz 2** — the v1 stand-ins were deleted and the "II"
+> reworks slid down to fill the holes, so most "model N"/"II" labels in the docs are
+> off by one; see the review for the full list). (2) **Black Rodent (RAT)** got the
+> two P2 fidelity items done — a **migrating hump** (Tight/Full toggle) and an **LM308
+> slew limit** — see `proco-rat.md`. New reusable engine bits: per-block migrating
+> peaking biquad (`Biquad::copyCoeffsFrom`, state-preserving), the `midMigrate`/
+> `slewMax` Voicing fields, `setMigrateFull`/`modelHasMigrate`, and the generalized
+> knob-row "extra toggle" slot in `Panels.h` (gate OR migrate). **UNCOMMITTED** —
+> offline drive_test all green; needs the Windows build + Robbie's play-test.
+
 ---
 
 ## 0. Start here (orientation order)
@@ -18,7 +31,7 @@ the "where we are, what to do next" layer on top.
 4. [`circuit-accuracy.md`](circuit-accuracy.md) — how we fit a voicing to a
    schematic (the TS808 worked example, RMS 0.66 dB).
 5. [`proco-rat.md`](proco-rat.md) — a full second worked example end-to-end
-   (RAT → Black Rodent II).
+   (RAT → Black Rodent).
 
 ---
 
@@ -102,14 +115,14 @@ stay byte-for-byte; there are regression tests asserting model 0 == legacy).
 
 ## 4. What's DONE (two full circuit-fit reworks)
 
-- **Green Drive II** (Overdrive model 1, TS808): cubic soft-clip, 2nd-order ADAA,
+- **Green Drive** (Overdrive model 0, TS808): cubic soft-clip, 2nd-order ADAA,
   pre/de-emphasis, clean blend, envelope dynamics; voicing fit to the schematic
   (RMS 0.66 dB), `gMin 5 / gMax 80` (~real TS 12..118). Tests T11–T14.
-- **Black Rodent II** (Distortion model 1, ProCo RAT): LM308 gain-stage EQ fit
+- **Black Rodent** (Distortion model 0, ProCo RAT): LM308 gain-stage EQ fit
   pre-clip (blooms with Drive — bass clips least), hard clip on 2nd-order ADAA
   (+~12 dB alias cut vs 1st-order), "Filter" sweepable LP tone, `gMin 4/gMax 150`.
   Tests T15–T20.
-- **Range '65 II** (Boost model 2, Dallas Rangemaster): the whole audio-band
+- **Range '65** (Boost model 0, Dallas Rangemaster): the whole audio-band
   voicing is the 5nF input cap into the ~12k input Z = a 1st-order high-pass at
   ~2.65 kHz, flat above (fit to RMS 0.01 dB, `rangemaster_response.py`). It's a
   TREBLE booster — stays bright, no top roll. Real `Gv = gm·Rc ≈ 80` (38 dB) →
@@ -120,7 +133,7 @@ stay byte-for-byte; there are regression tests asserting model 0 == legacy).
   worked example in [`rangemaster.md`](rangemaster.md). **UNCOMMITTED** — offline
   build green (drive_test 42 CHECKs all pass), pending commit on Windows + play-test.
 
-- **EP Boost II** (Boost model 3, Echoplex EP-3 / Xotic EP Booster): the pure EP-3
+- **Plex Boost** (Boost model 1, Echoplex EP-3 / Xotic EP Booster): the pure EP-3
   JFET common-source stage measures ~FLAT across audio (fit `ep3_response.py`) — its
   character is clean headroom + very high input Z + JFET 2nd-harmonic, FULL-RANGE
   (opposite of the Rangemaster). Voiced as the Xotic EP Booster: full bass
@@ -132,7 +145,7 @@ stay byte-for-byte; there are regression tests asserting model 0 == legacy).
   pending commit on Windows + play-test. Voiced to the **Xotic** flavor by choice
   (Robbie's call); the pure-EP-3 flat alternative is noted in the doc if he wants it.
 
-- **Round Fuzz II** (Fuzz model 1, germanium Fuzz Face): the first rework that
+- **Round Fuzz** (Fuzz model 0, germanium Fuzz Face): the first rework that
   needed new engine DSP. Voicing is just a bass trim (one-pole low-cut ~50 Hz,
   bright, no top roll, fit `fuzz_face_response.py`). NEW **clip type 4 = asymmetric
   cubic**: positive knee at 1 (rail +2/3), negative knee at `kn = 1−bias` (rail
@@ -158,7 +171,7 @@ stay byte-for-byte; there are regression tests asserting model 0 == legacy).
   placed in the glyph area. Test T36 covers the toggle. The Panels.h/processor
   param edits are UNTESTED in a build (JUCE can't compile offline) — Robbie builds.
 
-- **Super Drive** (Overdrive model 2, Boss SD-1) — the first *new* model (not a
+- **Super Drive** (Overdrive model 1, Boss SD-1) — the first *new* model (not a
   rework). The SD-1 is OD-1/TS lineage, so the small-signal voicing fits ~the
   TS808 (fit `sd1_response.py`, RMS 0.63 dB: same ~+5 dB hump @ 720–900 Hz,
   slightly fuller bass / a hair brighter — the SD-1's "more open" reputation,
@@ -179,13 +192,13 @@ stay byte-for-byte; there are regression tests asserting model 0 == legacy).
   0 failures**), pending commit on Windows + play-test. UI just works (the Overdrive
   case already reads `bModel`; menu is generic; `bModel` 0..3 covers model 2).
 
-- **Gold Horse** (Overdrive model 3, Klon Centaur) — the first model whose identity
+- **Gold Horse** (Overdrive model 2, Klon Centaur) — the first model whose identity
   is the **parallel clean sum**, not the clipper. NOT a TS: the op-amp gain stage is
   a ~1 kHz **band-pass** (fit `klon_response.py`, RMS 0.14 dB) clipped by a
-  **symmetric** germanium hard clip (clip 1 + 2nd-order ADAA, like Black Rodent II),
+  **symmetric** germanium hard clip (clip 1 + 2nd-order ADAA, like Black Rodent),
   then summed with a big parallel **clean** path = the "transparent overdrive".
   **Engine change:** the clean-blend path (previously soft-poly only) was added to
-  the **hard-clip branch**, guarded so Black Rodent II (`cleanBlend 0`) stays
+  the **hard-clip branch**, guarded so Black Rodent (`cleanBlend 0`) stays
   byte-exact (regression T46). The clean is the **RAW input** (full-range, restores
   the lows the mid-focused clip drops), at input level (no crackle), scaled by the
   new constant **`kCleanScale 3.5`** to the clip's ±1 level so `cleanBlend 0.50` is
@@ -212,22 +225,21 @@ stay byte-for-byte; there are regression tests asserting model 0 == legacy).
   circuit's +0.25 dB). An earlier low/high-*blend* shelf leaked ~+6 dB into the lows
   and was replaced. Asymmetric +18/−8 dB (cut = 0.44× boost), noon = flat, and a
   *boost* shelf so Treble-up raises level (+11.7 dB broadband, authentic, vs a tilt's
-  ~neutral). Gold Horse = `trebleShelfDb 18 @ pivot 408`. Test T51. Tone audit of the other drives: GD II (TS) + Super Drive (SD-1) already use a
+  ~neutral). Gold Horse = `trebleShelfDb 18 @ pivot 408`. Test T51. Tone audit of the other drives: Green Drive (TS) + Super Drive (SD-1) use a
   proper treble shelf (the cubic/asym-cubic `softPoly` path forces bass-fixed); Black
-  Rodent II = the RAT "Filter" LP (its real tone); Boost/Fuzz have no tone control;
-  the v1 legacy stand-ins (Green Drive 0, Black Rodent 0) keep the symmetric tilt by
-  design (byte-exact A/B refs). So tone is now circuit-modelled on every shipped "II"/
-  new model.
+  Rodent = the RAT "Filter" LP (its real tone); Boost/Fuzz have no tone control;
+  Violet Ram uses the passive Muff tone stack. So tone is now circuit-modelled on
+  every shipped model.
 
-Current model inventory: Boost (4: Range '65, EP Boost, Range '65 II, EP Boost II),
-Overdrive (**5**: Green Drive, Green Drive II, **Super Drive**, **Gold Horse**,
-**Breaker Drive**), Distortion (2: Black Rodent, Black Rodent II), Fuzz (**3**: Round
-Fuzz, Round Fuzz II, **Violet Ram**).
-**NB: `bModel` was widened `0,3` → `0,4` for Breaker Drive** (the shared per-slot model
-index across all drive categories; the menu clamps to each category's `modelCount`). So
-Overdrive now holds 5 (0..4), Boost is full at 0..3 (room for 1 more at index 4 now the
-param allows it), Distortion has room (2/5), Fuzz has room (3/5) — no further param
-widening needed for the next several models. The widening was a **one-line**
+Current model inventory (the v1 tanh stand-ins were DELETED and the circuit-fit
+reworks slid down to fill index 0 — exactly ONE model per pedal, no "II" duplicates):
+Boost (**2**: Range '65 = model 0, Plex Boost = model 1), Overdrive (**4**: Green
+Drive 0, Super Drive 1, Gold Horse 2, Breaker Drive 3), Distortion (**1**: Black
+Rodent 0), Fuzz (**2**: Round Fuzz 0, Violet Ram 1).
+**`bModel` range is `0..3`** (the shared per-slot model index across all drive
+categories; the menu clamps to each category's `modelCount`). So Overdrive is full at
+0..3, Boost uses 0..1, Distortion 0, Fuzz 0..1 — the param has headroom for more models
+in the smaller categories with no further widening. The Breaker widening was a **one-line**
 PluginProcessor.cpp change; the Panels.h model menu is fully generic (built from
 `modelCount`/`modelName`), so no menu IDs needed editing. New engine bits available for
 reuse: **clip type 4 (asym cubic + 2nd-order ADAA)** — with optional pre/de-emphasis —
@@ -240,30 +252,27 @@ parallel clean/dirty sums.
 
 Pick one and run the §1 playbook workflow on it.
 
-**Reworks** (existing simple stand-ins → give them the GD2/Black Rodent II
-treatment):
+**Reworks** — all five simple v1 stand-ins were circuit-fit; the stand-ins were then
+DELETED so each reworked model now sits at the pedal's own index (no "II" duplicates):
 
-All four stand-in reworks are now **DONE**:
+| Reworked pedal | Current model index |
+|----------------|---------------------|
+| Green Drive (TS808, the original worked example) | Overdrive model 0 |
+| Range '65 (Dallas Rangemaster) | Boost model 0 |
+| Plex Boost (Echoplex EP-3 / Xotic EP Booster) | Boost model 1 |
+| Black Rodent (ProCo RAT) | Distortion model 0 |
+| Round Fuzz (germanium Fuzz Face) | Fuzz model 0 |
 
-| Stand-in | Reworked as | Model |
-|----------|-------------|-------|
-| Range '65 (Boost) | **Range '65 II** (Dallas Rangemaster) | Boost model 2 |
-| EP Boost (Boost) | **EP Boost II** (Echoplex EP-3 / Xotic EP Booster) | Boost model 3 |
-| Black Rodent (Distortion) | **Black Rodent II** (ProCo RAT) | Distortion model 1 |
-| Round Fuzz (Fuzz) | **Round Fuzz II** (germanium Fuzz Face) | Fuzz model 1 |
-
-(Green Drive → Green Drive II was the original worked example.) Boost's `bModel`
-slots (0..3) are now full. Remaining drive work is **new models** (§ below), not
-reworks.
+Remaining drive work is **new models** (§ below), not reworks.
 
 **New models** to add alongside (add, don't replace):
 
 | Pedal | Topology delta | Engine knobs |
 |-------|---------------|--------------|
-| ~~**SD-1**~~ | **DONE — Super Drive** (Overdrive model 2, [sd1.md](sd1.md)) | clip 4 asym cubic (bias 0.35), TS-fit EQ, gMin 6/gMax 120, outTrim 1.25; emphasis now enabled on clip 4 |
-| ~~**Klon**~~ | **DONE — Gold Horse** (Overdrive model 3, [klon.md](klon.md)) | clip 1 hard + 2nd-order ADAA + heavy raw-input clean blend (new hard-clip blend path, `kCleanScale`), ~1 kHz band-pass, shapeTrack bloom; fills bModel 0..3 |
-| ~~**Blues Breaker**~~ | **DONE — Breaker Drive** (Overdrive model 4, [bluesbreaker.md](bluesbreaker.md)) | symmetric cubic soft clip (bias 0), OPEN lows (lowCut 20, ~16 Hz input HPF — not a TS bass cut), gentle bright presence shelf (midHz 4000/+4.7, static shapeTrack 0), mild emphasis (emphDb 5), soft range gMin 3/gMax 48 (the gentlest OD), outTrim 1.15. Fit RMS 0.71 dB end-to-end. **Widened `bModel` 0,3→0,4** (one-liner; menu is generic) |
-| ~~**Big Muff**~~ | **DONE — Violet Ram** (**Fuzz** model 2, [big-muff.md](big-muff.md)) | new 2-stage soft-clip CASCADE (`muffStages` + `muffLpHz` + `kMuffStage2Gain`), cubic ×2, circuit-fit −6.5 dB scoop, moderate-default/hot-ceiling range, see-saw Tone. Filed under FUZZ (Robbie's call) → needed a new `fTone` param + the Fuzz panel shows Sustain/Tone/Volume only for the Muff. Fuzz now 3/4 |
+| ~~**SD-1**~~ | **DONE — Super Drive** (Overdrive model 1, [sd1.md](sd1.md)) | clip 4 asym cubic (bias 0.35), TS-fit EQ, gMin 6/gMax 120, outTrim 1.25; emphasis now enabled on clip 4 |
+| ~~**Klon**~~ | **DONE — Gold Horse** (Overdrive model 2, [klon.md](klon.md)) | clip 1 hard + 2nd-order ADAA + heavy raw-input clean blend (new hard-clip blend path, `kCleanScale`), ~1 kHz band-pass, shapeTrack bloom; fills bModel 0..3 |
+| ~~**Blues Breaker**~~ | **DONE — Breaker Drive** (Overdrive model 3, [bluesbreaker.md](bluesbreaker.md)) | symmetric cubic soft clip (bias 0), OPEN lows (lowCut 20, ~16 Hz input HPF — not a TS bass cut), gentle bright presence shelf (midHz 4000/+4.7, static shapeTrack 0), mild emphasis (emphDb 5), soft range gMin 3/gMax 48 (the gentlest OD), outTrim 1.15. Fit RMS 0.71 dB end-to-end. **Widened `bModel` 0,3→0,4** (one-liner; menu is generic) |
+| ~~**Big Muff**~~ | **DONE — Violet Ram** (**Fuzz** model 1, [big-muff.md](big-muff.md)) | new 2-stage soft-clip CASCADE (`muffStages` + `muffLpHz` + `kMuffStage2Gain`), cubic ×2, circuit-fit −6.5 dB scoop, moderate-default/hot-ceiling range, see-saw Tone. Filed under FUZZ (Robbie's call) → needed a new `fTone` param + the Fuzz panel shows Sustain/Tone/Volume only for the Muff. Fuzz now holds 2 models |
 
 ---
 

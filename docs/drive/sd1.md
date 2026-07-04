@@ -1,4 +1,4 @@
-# Super Drive — the Boss SD-1 Super Overdrive (Overdrive model 2)
+# Super Drive — the Boss SD-1 Super Overdrive (Overdrive model 1)
 
 A worked example of the [playbook](building-drives-playbook.md), built end-to-end
 the same way as [Green Drive II](circuit-accuracy.md) (TS808). The SD-1 is the
@@ -113,7 +113,7 @@ Engine note: the pre/de-emphasis pair was previously enabled only for clip 3; it
 now enabled for clip 3 **or 4** when `emphDb > 0` (Round Fuzz II has `emphDb 0`, so
 it is unaffected and stays byte-exact). No other shipped model changes.
 
-## 5. Voicing row (DriveBlock.h `od[]`, model 2)
+## 5. Voicing row (DriveBlock.h `od[]`, model 1)
 
 ```
 //  clip gMin  gMax  lowCut  midHz midDb midQ  lpHz   bias  pivot  outTrim shp post emphDb emphHz clean dyn  toneF adaa2 gate

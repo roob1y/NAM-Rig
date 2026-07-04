@@ -1,4 +1,4 @@
-# Breaker Drive — the Marshall Bluesbreaker (Overdrive model 4)
+# Breaker Drive — the Marshall Bluesbreaker (Overdrive model 3)
 
 A worked example of the [playbook](building-drives-playbook.md), built end-to-end the
 same way as [Green Drive II](circuit-accuracy.md) (TS808) and [Super Drive](sd1.md)
@@ -131,7 +131,7 @@ End-to-end check: a small-signal Goertzel sweep of the **actual engine** (not th
 pieces) lands on the circuit target to **RMS 0.71 dB** over 40 Hz–6 kHz, with the open
 lows (−0.7 dB @ 50 Hz) and the presence rise (+3.4 dB @ 3 kHz) where the schematic says.
 
-## 5. Voicing row (DriveBlock.h `od[]`, model 4)
+## 5. Voicing row (DriveBlock.h `od[]`, model 3)
 
 ```
 //  clip gMin  gMax  lowCut  midHz midDb midQ  lpHz   bias  pivot  outTrim shp post emphDb emphHz clean dyn  toneF adaa2
@@ -148,13 +148,13 @@ categories ignore the extra index). Everything else is generic and required **no
 changes: the Type menu / model dropdown are built from `modelCount`/`modelName`
 (Panels.h), the processor's Overdrive case already reads `bModel`, and the per-model
 caption branch keys on `model == 3` (Gold Horse → Gain/Treble/Output), so Breaker Drive
-(model 4) correctly falls through to the standard **Drive / Tone / Level**.
+(model 3) correctly falls through to the standard **Drive / Tone / Level**.
 
 ## 7. Tests + build
 
-`drive_test.cpp` **T58–T64** (and the `modelCount(Overdrive) == 5` bumps in T11/T38/T45):
+`drive_test.cpp` **T58–T64** (and the `modelCount(Overdrive) == 4` bumps in T11/T38/T45):
 
-- **T58** OD model 0 byte-exact after adding Breaker; model 4 finite; symmetric cubic.
+- **T58** OD model 0 byte-exact after adding Breaker; model 3 finite; symmetric cubic.
 - **T59** the voice: open lows (−0.7 dB @ 50 vs GD2 −10), presence shelf (+3.4 dB @ 3k),
   static across Drive, treble-shelf Tone (3k moves, 100 Hz fixed).
 - **T60** symmetric (h2/h1 0.0009) vs the asymmetric SD-1 (0.021).

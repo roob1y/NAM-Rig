@@ -1,6 +1,14 @@
-# Current `DriveBlock` — pre-rework baseline (June 2026)
+# `DriveBlock` — pre-rework baseline (June 2026) — SUPERSEDED
 
-What the engine does *today*, before the Option A overdrive rework. Source:
+> **Historical snapshot — do not read as current state.** This documents the
+> June-2026 *pre-rework* engine (a single `tanh` Green Drive plus simple stand-ins).
+> It no longer reflects the shipped models. For the CURRENT inventory and voicings
+> see [`MODEL_REVIEW_2026-07-04.md`](MODEL_REVIEW_2026-07-04.md) and
+> [`NEXT_SESSION_HANDOFF.md`](NEXT_SESSION_HANDOFF.md). The real counts today are
+> **Boost 2 / Overdrive 4 / Distortion 1 / Fuzz 2** (one circuit-fit model per
+> pedal; the v1 stand-ins were deleted).
+
+What the engine did in June 2026, before the Option A overdrive rework. Source:
 `src/rig/DriveBlock.h` + `tests/drive_test.cpp`.
 
 ## Structure

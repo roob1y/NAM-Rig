@@ -89,7 +89,7 @@ The corners were already right in the stand-in. The substance of the rework:
 
 ## Verification (`drive_test.cpp` T21–T25)
 
-- **T21** models 0 (Range '65) byte-for-byte unchanged; category now has 3 models.
+- **T21** model 0 (Range '65) byte-for-byte unchanged; category now has 2 models.
 - **T22** treble-boost high-pass (3 k ≫ 150 Hz, 9.6×) + Range switch moves the
   corner (300 Hz: Full 7× louder than Treble).
 - **T23** germanium asymmetry: h2/h1 0.113 > the original's 0.045.
