@@ -2841,6 +2841,20 @@ public:
         repaint();
     }
 
+    // Grey out the Dynamic Cab controls (the three macro knobs + the preset
+    // dropdown) when the lane's Dyn enable is off. The Dyn pill itself stays live
+    // so it can be switched back on.
+    void setDynEnabled(bool en)
+    {
+        if (en == mDynOn) return;
+        mDynOn = en;
+        mAge->setEnabled(en);
+        mThump->setEnabled(en);
+        mSize->setEnabled(en);
+        mPreset.setEnabled(en);
+        repaint();
+    }
+
     void refresh()
     {
         const bool loaded = mProc.isIrLoaded(mRig);
@@ -3014,6 +3028,7 @@ private:
     juce::Rectangle<int> mNameRect, mRespRect;
     bool mLoaded = false;
     bool mDim = false;
+    bool mDynOn = true;   // Dynamic Cab enable mirror (greys knobs+preset when off)
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(CabPanel)
 };

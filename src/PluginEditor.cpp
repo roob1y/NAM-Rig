@@ -355,6 +355,9 @@ void NamRigEditor::timerCallback()
     const bool cabBOff = bOut || off("cabOnB");
     mCabPanel.cabA().setBypassed(cabAOff);
     mCabPanel.cabB().setBypassed(cabBOff);
+    // Grey the Dynamic Cab knobs + preset dropdown when that lane's Dyn is off.
+    mCabPanel.cabA().setDynEnabled(!off("cabDynOn"));
+    mCabPanel.cabB().setDynEnabled(!off("cabDynOnB"));
     // Whole-panel "BYPASSED" veil only when BOTH cabs are actually disabled by the
     // user. Use the raw enable params, NOT cabAOff/cabBOff: those fold in the solo-
     // out state, so in Solo A (bOut) turning cab A off would falsely veil the whole
