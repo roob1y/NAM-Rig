@@ -205,9 +205,19 @@ public:
         mHb.design();
         buildGtable();
 
+        // Stage C subsonic high-pass on the wet enclosure output (see processPost).
+        mEncHp = Biquad::highpass(mFs, std::min((double)kEncSubHpHz, 0.45 * mFs));
+
         // Stage C: two archetype networks, prime delays (<10 ms) scaled to fs.
-        static const int a48[3] = {113, 179, 251};  // tight 1x12 open-back
-        static const int b48[3] = {211, 331, 461};  // big 4x12 closed-back
+        // Retuned DOWN from the original {113,179,251}/{211,331,461}: those put the
+        // box resonance at ~35 Hz (A) / ~14 Hz (B) — too subsonic to be musical
+        // (measured in Plugin Doctor + offline probe). These land the summed box
+        // bump at ~93 Hz (A, tight) and ~61 Hz (B, big) WITH the subsonic HP in
+        // path, so Cab Size sweeps a musical ~60-90 Hz box tuning (bigger box =
+        // lower). Calibrated with the HP enabled — its phase shifts the dry+wet
+        // interference peak, so delays were tuned against the real signal path.
+        static const int a48[3] = {43, 71, 97};    // tight 1x12 open-back  (~93 Hz)
+        static const int b48[3] = {47, 73, 101};   // big 4x12 closed-back  (~61 Hz)
         const double sc = mFs / 48000.0;
         for (int i = 0; i < 3; ++i)
         {
@@ -352,7 +362,11 @@ public:
             float a = x, b = x;
             for (int k = 0; k < 3; ++k) a = mApA[k].process(a, gA);
             for (int k = 0; k < 3; ++k) b = mApB[k].process(b, gB);
-            const float net = (1.0f - mSizeSm) * a + mSizeSm * b;
+            float net = (1.0f - mSizeSm) * a + mSizeSm * b;
+            // subsonic high-pass on the WET enclosure output only: the diffusion
+            // loops build up sub-30 Hz energy (box resonance sits low), so trim it
+            // to keep the delta as "air", not rumble. Dry path stays bit-exact.
+            net = mEncHp.processSample(net);
 
             buf[i] = x + mEncMixSm * net;
         }
@@ -367,6 +381,19 @@ public:
     float dbgLowCompDb() const { return mLowCompDb; } // current B3 low-shelf gain (dB)
     float dbgEnvPre() const { return mEnvPre; }
     double sampleRate() const { return mFs; }
+
+    // Test-only: re-prepare the Stage C allpass delays (base-48k samples, scaled to
+    // fs) so an offline probe can sweep delay sets and read the box-resonance peak
+    // without recompiling the header. Not used by the plugin.
+    void dbgSetEncDelays(const int a48[3], const int b48[3])
+    {
+        const double sc = mFs / 48000.0;
+        for (int i = 0; i < 3; ++i)
+        {
+            mApA[i].prepare(std::max(2, (int)std::lround(a48[i] * sc)), kDampA_Hz, mFs);
+            mApB[i].prepare(std::max(2, (int)std::lround(b48[i] * sc)), kDampB_Hz, mFs);
+        }
+    }
 
 private:
     // ------------------------------- helpers -------------------------------
@@ -464,6 +491,7 @@ private:
         mEnvPost  = 0.0f;
         mEncMixSm = 0.0f;
         for (int i = 0; i < 3; ++i) { mApA[i].reset(); mApB[i].reset(); }
+        mEncHp.reset();
     }
 
     bool preActive() const
@@ -498,6 +526,8 @@ private:
             mApA[i].flushDenormals(); // one-pole damping + recursive delay line
             mApB[i].flushDenormals();
         }
+        if (std::fabs(mEncHp.z1) < 1.0e-30f) mEncHp.z1 = 0.0f;
+        if (std::fabs(mEncHp.z2) < 1.0e-30f) mEncHp.z2 = 0.0f;
         if (std::fabs(mEnvPost) < 1.0e-30f) mEnvPost = 0.0f;
         if (std::fabs(mEncMixSm) < 1.0e-30f) mEncMixSm = 0.0f;
     }
@@ -521,6 +551,7 @@ private:
     static constexpr float kEncMax   = 0.12f;
     static constexpr float kGsetA = 0.50f, kGsetB = 0.62f, kGthump = 0.10f, kGmaxHard = 0.72f;
     static constexpr double kDampA_Hz = 6000.0, kDampB_Hz = 3000.0;
+    static constexpr int   kEncSubHpHz = 30;  // subsonic HP on the wet enclosure output
 
     // -------------------------------- state --------------------------------
     double mFs = 48000.0;
@@ -557,6 +588,7 @@ private:
 
     // Stage C
     DampAllpass mApA[3], mApB[3];
+    Biquad mEncHp;          // subsonic high-pass on the wet enclosure output
     float mEncMixSm = 0.0f;
 };
 
