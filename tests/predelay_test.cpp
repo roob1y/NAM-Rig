@@ -546,62 +546,52 @@ int main()
               "T16 Memory Man self-osc sustains + bounded (tail peak %.2f)", pk);
     }
 
-    // ---- T17-T19: stereo front-delay (mono-in / stereo-out; L -> Amp A, R -> Amp B) ----
+    // ---- T17-T18: stereo PING-PONG (mono-in / stereo-out; repeats bounce Amp A/L <-> Amp B/R) ----
     {
-        auto stereoRun = [](PreDelayBlock &d, std::vector<float> &L, std::vector<float> &R, int blk) {
+        auto ppRun = [](PreDelayBlock &d, std::vector<float> &L, std::vector<float> &R, int blk) {
             for (size_t p = 0; p < L.size(); p += (size_t)blk)
                 d.processStereo(L.data() + p, R.data() + p,
                                 (int)std::min<size_t>((size_t)blk, L.size() - p));
         };
 
-        // T17: at Spread 0 the L lane is BIT-EXACT to the mono process(), and L == R
-        // (dual-mono). Guards the mono/SoloA regression: the refactor to two lanes must
-        // not change the single-lane path by a single bit.
-        PreDelayBlock a;
-        a.setModel(PreDelayBlock::kDD7); a.setDd7Mode(PreDelayBlock::kMode800);
-        a.setTimeMs(200.0f); a.setFeedback(0.4f); a.setMix(0.5f); a.prepare({SR, BLK});
-        PreDelayBlock b;
-        b.setModel(PreDelayBlock::kDD7); b.setDd7Mode(PreDelayBlock::kMode800);
-        b.setTimeMs(200.0f); b.setFeedback(0.4f); b.setMix(0.5f); b.setSpread(0.0f);
-        b.prepare({SR, BLK});
-        std::vector<float> mono((size_t)SR, 0.0f), sl((size_t)SR, 0.0f), sr((size_t)SR, 0.0f);
-        for (int k = 0; k < 200; ++k) { mono[(size_t)k] = 0.3f; sl[(size_t)k] = 0.3f; sr[(size_t)k] = 0.3f; }
-        run(a, mono);
-        stereoRun(b, sl, sr, BLK);
-        bool bitExact = true, lrEqual = true;
-        for (size_t i = 0; i < mono.size(); ++i)
-        { if (sl[i] != mono[i]) bitExact = false; if (sl[i] != sr[i]) lrEqual = false; }
-        CHECK(bitExact, "T17 stereo L lane BIT-EXACT to mono process()");
-        CHECK(lrEqual, "T17 Spread 0 -> L == R (dual-mono)");
+        // T17: band-limited 1 kHz "note" burst, DD-7 300 ms fb 0.5. TRUE alternating ping-pong:
+        // taps keep the MONO spacing (300/600/900/1200 ms) but alternate L, R, L, R (NOT doubled
+        // — no in-between taps). Equal-level pairs: tap1 L@300 == tap2 R@600; tap3 L@900 == tap4
+        // R@1200 a step quieter (fb=0.5 per pair). Each tap hard-panned (opposite side ~silent).
+        PreDelayBlock d;
+        d.setModel(PreDelayBlock::kDD7); d.setDd7Mode(PreDelayBlock::kMode800);
+        d.setTimeMs(300.0f); d.setFeedback(0.5f); d.setMix(1.0f);
+        d.prepare({SR, BLK});
+        const size_t imp = (size_t)(0.05 * SR);
+        std::vector<float> L((size_t)SR * 2, 0.0f), R((size_t)SR * 2, 0.0f);
+        for (int k = 0; k < (int)(0.008 * SR); ++k)
+        { const float v = 0.5f * (float)std::sin(2.0 * 3.14159265358979323846 * 1000.0 * k / SR);
+          L[imp + (size_t)k] = v; R[imp + (size_t)k] = v; }
+        ppRun(d, L, R, BLK);
+        auto tapPk = [&](std::vector<float> &v, double sec) {
+            const size_t c = imp + (size_t)(sec * SR); double m = 0.0;
+            for (size_t i = c - (size_t)(0.006 * SR); i < c + (size_t)(0.012 * SR); ++i)
+                m = std::max(m, (double)std::abs(v[i]));
+            return m; };
+        const double L1 = tapPk(L, 0.300), R1 = tapPk(R, 0.300); // tap 1 (LEFT) + R silent there
+        const double R2 = tapPk(R, 0.600), L2 = tapPk(L, 0.600); // tap 2 (RIGHT) + L silent there
+        const double L3 = tapPk(L, 0.900), R4 = tapPk(R, 1.200); // tap 3 (LEFT) & tap 4 (RIGHT)
+        CHECK(L1 > 0.20 && R1 < 0.05, "T17 tap 1 hard-LEFT (L=%.3f R=%.3f)", L1, R1);
+        CHECK(R2 > 0.20 && L2 < 0.05, "T17 tap 2 hard-RIGHT (R=%.3f L=%.3f)", R2, L2);
+        CHECK(std::abs(L1 - R2) < 0.05 * L1, "T17 tap 1 & 2 EQUAL volume (L1=%.3f R2=%.3f)", L1, R2);
+        CHECK(L3 < 0.9 * L1 && std::abs(L3 - R4) < 0.06 * L3,
+              "T17 tap 3 & 4 equal + a step quieter (L3=%.3f R4=%.3f L1=%.3f)", L3, R4, L1);
 
-        // T18: at Spread 1 the R lane runs at half the L time, so the R echo lands ~halfway
-        // to the L echo -> a genuine L/R time decorrelation (the Edge/AVA long+short). Settle
-        // the glide with 300 ms of silence first, then probe with an impulse.
-        PreDelayBlock c;
-        c.setModel(PreDelayBlock::kDD7); c.setDd7Mode(PreDelayBlock::kMode800);
-        c.setTimeMs(400.0f); c.setFeedback(0.0f); c.setMix(1.0f); c.setSpread(1.0f);
-        c.prepare({SR, BLK});
-        const size_t imp = (size_t)(0.30 * SR);
-        std::vector<float> cl((size_t)SR, 0.0f), cr((size_t)SR, 0.0f);
-        cl[imp] = 1.0f; cr[imp] = 1.0f;
-        stereoRun(c, cl, cr, BLK);
-        const size_t lAt = peakNear(cl, imp + (size_t)(0.400 * SR), 4000);
-        const size_t rAt = peakNear(cr, imp + (size_t)(0.200 * SR), 4000);
-        CHECK(lAt > rAt + 2000, "T18 Spread 1: R echo earlier than L (L=%zu R=%zu)", lAt, rAt);
-        CHECK(std::llabs((long long)rAt - (long long)(imp + (size_t)(0.200 * SR))) < 1500
-              && std::llabs((long long)lAt - (long long)(imp + (size_t)(0.400 * SR))) < 1500,
-              "T18 L~400ms / R~200ms (R at half the L time)");
-
-        // T19: block-split == one-shot in stereo (lane + LFO state stays continuous across
-        // block boundaries) — run the same input in 512- and 37-sample chunks and compare.
-        auto runFresh = [](int blk, std::vector<float> &L, std::vector<float> &R) {
-            PreDelayBlock d;
-            d.setModel(PreDelayBlock::kMemoryMan);
-            d.setTimeMs(180.0f); d.setFeedback(0.5f); d.setMix(0.6f); d.setMod(1.0f); d.setSpread(0.7f);
-            d.prepare({SR, BLK});
-            for (size_t p = 0; p < L.size(); p += (size_t)blk)
-                d.processStereo(L.data() + p, R.data() + p,
-                                (int)std::min<size_t>((size_t)blk, L.size() - p));
+        // T18: block-split == one-shot in stereo (lane + LFO state continuous across blocks) —
+        // run the same input in 512- and 37-sample chunks and compare.
+        auto runFresh = [](int blk, std::vector<float> &Lv, std::vector<float> &Rv) {
+            PreDelayBlock e;
+            e.setModel(PreDelayBlock::kMemoryMan);
+            e.setTimeMs(180.0f); e.setFeedback(0.5f); e.setMix(0.6f); e.setMod(1.0f);
+            e.prepare({SR, BLK});
+            for (size_t p = 0; p < Lv.size(); p += (size_t)blk)
+                e.processStereo(Lv.data() + p, Rv.data() + p,
+                                (int)std::min<size_t>((size_t)blk, Lv.size() - p));
         };
         std::vector<float> bl((size_t)SR, 0.0f), br((size_t)SR, 0.0f);
         std::vector<float> ml((size_t)SR, 0.0f), mr((size_t)SR, 0.0f);
@@ -612,36 +602,7 @@ int main()
         double md = 0.0;
         for (size_t i = 0; i < bl.size(); ++i)
         { md = std::max(md, (double)std::abs(bl[i] - ml[i])); md = std::max(md, (double)std::abs(br[i] - mr[i])); }
-        CHECK(md < 1.0e-5, "T19 stereo block-split == one-shot (max diff %.2e)", md);
-    }
-
-    // ---- T20: shared-feedback stereo BALANCE ----
-    // Two independent feedback delays at different times are two comb filters that
-    // resonate at different frequencies -> a sustained signal leans several dB to one
-    // side (measured up to +7 dB before the fix). The stereo path feeds BOTH lanes the
-    // mono-summed wet (one shared comb), so a chord stays L/R balanced. Identical input
-    // to both lanes (mimics effects-off / driveSend=Both) isolates the delay itself.
-    {
-        PreDelayBlock d;
-        d.setModel(PreDelayBlock::kDD7); d.setDd7Mode(PreDelayBlock::kMode800);
-        d.setTimeMs(350.0f); d.setFeedback(0.5f); d.setMix(0.5f); d.setSpread(0.5f);
-        d.prepare({SR, BLK});
-        const size_t N = (size_t)(SR * 3.0);
-        std::vector<float> L(N, 0.0f), R(N, 0.0f);
-        const double freqs[5] = {110.0, 165.0, 220.0, 277.0, 330.0}; // a 5-note chord
-        for (size_t i = 0; i < N; ++i)
-        {
-            double s = 0.0;
-            for (double f : freqs) s += std::sin(2.0 * 3.14159265358979323846 * f * (double)i / SR);
-            s *= 0.18 / 5.0;
-            L[i] = (float)s; R[i] = (float)s;
-        }
-        for (size_t p = 0; p < N; p += BLK)
-            d.processStereo(L.data() + p, R.data() + p, (int)std::min<size_t>(BLK, N - p));
-        double eL = 0.0, eR = 0.0; size_t sk = (size_t)(SR * 0.5), c = 0;
-        for (size_t i = sk; i < N; ++i) { eL += (double)L[i] * L[i]; eR += (double)R[i] * R[i]; ++c; }
-        const double db = 20.0 * std::log10(std::sqrt(eL / (double)c) / std::sqrt(eR / (double)c));
-        CHECK(std::abs(db) < 3.0, "T20 shared-feedback: chord L/R balanced within 3 dB (%.2f dB)", db);
+        CHECK(md < 1.0e-5, "T18 ping-pong block-split == one-shot (max diff %.2e)", md);
     }
 
     std::printf("\n%s (%d failures)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);

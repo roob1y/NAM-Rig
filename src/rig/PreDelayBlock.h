@@ -6,14 +6,20 @@
 // SPECIFIC real delay pedals rather than the tape/clean characters of the stereo
 // unit. Same per-model-fit ethos as DriveBlock's pedal models.
 //
-// MONO by default (process()), but in the dual-amp rig it can run MONO-IN /
-// STEREO-OUT (processStereo(): L lane -> Amp A, R lane -> Amp B) so the front delay
-// spreads across the two amps — L repeats coloured by Amp A, R repeats by Amp B.
-// The two lanes are INDEPENDENT delays (no cross-feed / ping-pong) whose only
-// difference is the delay TIME: R = ratio·L, ratio = 1 - 0.5·spread (spread 0 =
-// dual-mono, spread 1 = R at half of L). This is the Edge/AVA "long one side, short
-// the other" stereo. process() drives mLaneL ONLY so it stays BIT-EXACT to the
-// pre-stereo block (the SoloA / mono regression gate).
+// MONO by default (process() drives mLaneL only -> BIT-EXACT to the single-lane block).
+// In the dual-amp rig it can run MONO-IN / STEREO-OUT (processStereo()) as a TRUE alternating
+// PING-PONG: the taps keep the MONO spacing (D, 2D, 3D, ...) but alternate hard L / hard R —
+// tap 1 -> Amp A (L), tap 2 -> Amp B (R), tap 3 -> L, ... — so the repeat RATE is the same as
+// the mono delay (NOT doubled: there are no extra in-between taps). The dry note stays CENTRED
+// (feeds both amps). Cross-coupled at UNITY on the L->R hop with the feedback decay on the
+// R->L return, so each L/R pair is equal level (taps 1&2 same, 3&4 same a step quieter, ...),
+// the decay happening once per PAIR. Both lanes share the ONE delay time, so there is no comb
+// mismatch and no precedence/Haas lean (the flaw in the removed per-amp "Spread" stereo, where
+// two DIFFERENT-time lanes pulled the image to one side). NO spread control — the ping-pong is
+// fixed. (An impulse shows the R tap a hair under its L partner from one extra bandwidth-LP
+// pass on the bounce; real guitar-band audio barely sees it.)
+//
+// Each amp still gets its OWN dry (a driveSend clean/driven split keeps its per-amp character).
 //
 // The three models (Robbie's pick), each grounded in how the real unit actually
 // makes sound (BBD stage/clock physics, companding, converter bandwidth, preamp):
@@ -316,9 +322,6 @@ public:
     void setMod(float m) { mModAmt = std::clamp(m, 0.0f, 1.0f); }        // scales the built-in mod depth
     void setLevel(float l) { mLevel = std::clamp(l, 0.0f, 1.0f); }       // Memory Man master Volume/Level (unity at 1)
     void setChorusVib(int m) { mChorusVib = std::clamp(m, 0, 1); }       // Memory Man 0=Chorus (slow) 1=Vibrato (fast)
-    // Stereo L/R time spread (only read by processStereo): 0 = dual-mono (R time == L),
-    // 1 = R at half of L. Default 0.5 -> R = 0.75·L (a dotted-eighth-ish long/short pair).
-    void setSpread(float s) { mStereoSpread = std::clamp(s, 0.0f, 1.0f); }
     void setToneHz(float hz)
     {
         if (hz != mToneHz) { mToneHz = hz; if (mPrepared) { rebuildTone(mLaneL); rebuildTone(mLaneR); } }
@@ -342,23 +345,13 @@ public:
         processLane(mono, numSamples, mLaneL, currentTimeMs());
     }
 
-    // STEREO (mono-in / stereo-out): L lane reads at the base time -> Amp A; R lane at
-    // ratio·base (ratio = 1 - 0.5·spread) -> Amp B. The width comes from the L/R read-time
-    // difference (Edge/AVA long+short).
-    //
-    // SHARED FEEDBACK (2026-07-05 fix): both lanes recirculate the MONO SUM of the two wets,
-    // not their own. Two INDEPENDENT feedback delays at different times are two comb filters
-    // that resonate at different frequencies, so a sustained note lands on one lane's peak and
-    // the other's notch -> several dB of L/R level imbalance (measured up to +7 dB left, worst
-    // at high feedback; the resonance is the amplifier). Feeding both lanes one common
-    // feedback signal makes a SINGLE shared comb both taps read, so the levels stay balanced
-    // while the different read times still give the stereo width. At spread 0 the two wets are
-    // identical so the sum is a no-op -> still bit-exact to the mono/dual-mono path.
+    // STEREO PING-PONG (mono-in / stereo-out): taps keep the MONO spacing (D, 2D, 3D...) but
+    // alternate hard L / hard R (same repeat rate as mono, no extra taps). Cross-coupled unity
+    // L->R hop + feedback on the R->L return -> equal-level L/R pairs (1&2, 3&4, ...). Dry
+    // centred; each amp keeps its OWN dry. No spread — the ping-pong is fixed.
     void processStereo(float *left, float *right, int numSamples)
     {
-        const float tL = currentTimeMs();
-        const float ratio = 1.0f - 0.5f * mStereoSpread; // 1.0 (dual-mono) .. 0.5
-        const float tR = std::max(kMinTimeMs, tL * ratio);
+        const float t = currentTimeMs(); // one delay time, both lanes (same repeat rate as mono)
 
         mLaneL.io.processIn(left, numSamples);
         mLaneR.io.processIn(right, numSamples);
@@ -374,22 +367,23 @@ public:
         const float fb = hold ? 1.0f : (mFeedback * mVoicing.fbCeiling);
         const float modAmt = modulate ? kModulateDepth
                            : (mModel == kCarbonCopy ? kCarbonCopyMod : mModAmt);
-        updateBandwidth(mLaneL, tL);
-        updateBandwidth(mLaneR, tR);
+        updateBandwidth(mLaneL, t);
+        updateBandwidth(mLaneR, t);
         const double fsK = 0.001 * mFs;
 
         for (int i = 0; i < numSamples; ++i)
         {
             const float dryL = left[i], dryR = right[i];
             float outwL = 0.0f, outwR = 0.0f;
-            const float wetL = laneRecirc(mLaneL, dryL, reverse, analog, modAmt, fsK, tL, outwL);
-            const float wetR = laneRecirc(mLaneR, dryR, reverse, analog, modAmt, fsK, tR, outwR);
-            // Shared feedback: both lanes recirculate the same mono-summed wet -> one common
-            // comb (balanced L/R) instead of two resonances fighting. Each lane still injects
-            // its OWN dry, so a clean/driven split (driveSend) keeps its per-amp character.
-            const float fbWet = 0.5f * (wetL + wetR);
-            mLaneL.line.write(loopLimit(hold ? (fb * fbWet) : (dryL + fb * fbWet)));
-            mLaneR.line.write(loopLimit(hold ? (fb * fbWet) : (dryR + fb * fbWet)));
+            const float wetL = laneRecirc(mLaneL, dryL, reverse, analog, modAmt, fsK, t, outwL);
+            const float wetR = laneRecirc(mLaneR, dryR, reverse, analog, modAmt, fsK, t, outwR);
+            // TRUE alternating ping-pong: dry enters L; L bounces to R at UNITY (so the R tap
+            // matches the L tap it came from), R feeds back to L scaled by the feedback knob.
+            // The taps stay at the MONO spacing (D, 2D, 3D, ...) but alternate L, R, L, R — same
+            // repeat rate as mono, no extra in-between taps. Each L/R pair is equal level (1&2,
+            // 3&4, ...), decaying once per pair. Dry stays centred; each amp keeps its own dry.
+            mLaneL.line.write(loopLimit(hold ? (fb * wetR) : (dryL + fb * wetR)));
+            mLaneR.line.write(loopLimit(wetL));
             left[i]  = mixLaw(mLaneL, dryL, outwL);
             right[i] = mixLaw(mLaneR, dryR, outwR);
             mLaneL.lfo.advance();
@@ -410,10 +404,10 @@ public:
     float currentLoopLpHz() const { return mLaneL.loopLpHzBuilt; } // effective in-loop bandwidth corner (L lane)
 
 private:
-    // One delay lane = a full independent mono delay (line + feedback loop + filters +
-    // modulation + I/O). process() uses mLaneL only (bit-exact mono); processStereo uses
-    // both. Each lane owns its LFO so the two lanes can run at different times without
-    // any shared state — mono stays byte-identical to the pre-stereo single-lane block.
+    // One delay lane = a full mono delay (line + feedback loop + filters + modulation +
+    // I/O). process() uses mLaneL only (bit-exact mono); processStereo runs BOTH lanes as a
+    // ping-pong. Each lane owns its LFO/filters/sat state so the two can recirculate
+    // independently — mono stays byte-identical to the single-lane block.
     struct Lane
     {
         FracDelayLine line;
@@ -434,8 +428,7 @@ private:
     // the wet at the (modulated) delay time, run the in-loop filters/sat, and compute the
     // output-once presence wet. Returns the RECIRCULATING (filtered) wet to feed back and
     // sets `outwOut` (the presence-shaped wet for the output mix). Does NOT write the line
-    // or advance the LFO — the caller owns the feedback write (so mono uses its own wet and
-    // the stereo path can feed both lanes a SHARED/summed wet). Byte-identical maths to the
+    // or advance the LFO — the caller owns the feedback write. Byte-identical maths to the
     // former inline loop, so mono stays bit-exact.
     float laneRecirc(Lane &ln, float dry, bool reverse, bool analog, float modAmt,
                      double fsK, float baseTarget, float &outwOut)
@@ -735,7 +728,7 @@ private:
     Model mModel = kDD7;
     Voicing mVoicing = voicingFor(kDD7);
 
-    Lane mLaneL, mLaneR; // L = mono / Amp A; R = Amp B (processStereo only)
+    Lane mLaneL, mLaneR; // L = mono / Amp A; R = Amp B (ping-pong, processStereo only)
 
     int mMode = kMode3200;               // DD-7 MODE rotary (default = widest range, full Time range)
     static constexpr double kDcBlockR = 0.9995; // ~3.8 Hz one-pole DC blocker
@@ -745,7 +738,6 @@ private:
     float mLevel = 1.0f;                  // Memory Man master Volume/Level (unity default)
     int mChorusVib = 0;                  // Memory Man Chorus(0)/Vibrato(1) switch
     int mSyncIndex = 0;
-    float mStereoSpread = 0.5f;           // processStereo L/R time spread (0 = dual-mono)
 
     float mGlideK = 0.01f;   // glide smoother coefficient (per model)
     float mSmoothK = 0.01f;  // 10 ms Mix/Level de-zip coefficient

@@ -794,15 +794,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::ParameterID("premodSpread", 1), "Pre Mod Spread",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f)); // 0.5 ~ 90° (mono-safe default)
 
-    // Stereo front-delay: in Dual, the (post-drive) pre-amp delay becomes mono-in /
-    // stereo-out — L lane -> Amp A, R lane -> Amp B, independent delays whose R time =
-    // (1 - 0.5·Spread)·L for the Edge/AVA long+short spread. Off by default so existing
-    // presets are unchanged. Appended last for automation-index stability.
+    // Stereo front-delay: in Dual, the (post-drive) pre-amp delay becomes a mono-in /
+    // stereo-out PING-PONG — dry centred, wet repeats bounce Amp A (L) / Amp B (R) at equal
+    // time (balanced, no per-repeat lean). Hardcoded ping-pong, no spread control. Off by
+    // default so existing presets are unchanged. Appended last for automation-index stability.
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID("predelayStereo", 1), "Pre Delay Stereo", false));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("predelaySpread", 1), "Pre Delay Spread",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f)); // 0.5 -> R = 0.75·L
 
     return {params.begin(), params.end()};
 }
@@ -1200,7 +1197,6 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         mChain.predelay.setBypassed(apvts.getRawParameterValue("predelayOn")->load() < 0.5f);
         mChain.setPredelayPreDrive((int)apvts.getRawParameterValue("predelayPos")->load() == 1);
         mChain.setPredelayStereo(apvts.getRawParameterValue("predelayStereo")->load() >= 0.5f);
-        mChain.setPredelaySpread(apvts.getRawParameterValue("predelaySpread")->load());
     }
 
     // Graphic EQ band gains (Rig A; zero latency; chain bypass via eqOn is safe).
