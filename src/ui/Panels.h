@@ -2799,6 +2799,16 @@ public:
         addAndMakeVisible(mOn);
         mOnAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             mProc.apvts, rig == 0 ? "cabOn" : "cabOnB", mOn);
+
+        // Dynamic Cab macros (level-dependent delta on the static IR). Per-lane
+        // params; all default 0 = bit-exact bypass. See rig/CabDynamicsBlock.h.
+        auto pid = [rig](const char *a, const char *b) { return juce::String(rig == 0 ? a : b); };
+        mAge   = std::make_unique<LabeledKnob>(mProc.apvts, pid("cabDynAge",   "rigBcabDynAge"),   "Age");
+        mThump = std::make_unique<LabeledKnob>(mProc.apvts, pid("cabDynThump", "rigBcabDynThump"), "Thump");
+        mSize  = std::make_unique<LabeledKnob>(mProc.apvts, pid("cabDynSize",  "rigBcabDynSize"),  "Size");
+        addAndMakeVisible(*mAge);
+        addAndMakeVisible(*mThump);
+        addAndMakeVisible(*mSize);
     }
 
     // Dim the IR graph when the cab's convolution is bypassed or its rig is out.
@@ -2846,7 +2856,15 @@ public:
         mNameRect = top;
 
         area.removeFromTop(6);
+        // Bottom row: the three Dynamic Cab macro knobs (Age / Thump / Size); the
+        // IR response well fills the rest of the lane above them.
+        auto knobRow = area.removeFromBottom(58);
+        area.removeFromBottom(6);
         mRespRect = area.withTrimmedBottom(4);
+        const int kw = knobRow.getWidth() / 3;
+        mAge->setBounds(knobRow.removeFromLeft(kw));
+        mThump->setBounds(knobRow.removeFromLeft(kw));
+        mSize->setBounds(knobRow);
     }
 
     void paint(juce::Graphics &g) override
@@ -2939,6 +2957,7 @@ private:
     juce::String mCharacter; // auto tone descriptor (e.g. "Dark, thick")
     juce::ToggleButton mOn;                  // per-cab bypass (cabOn / cabOnB)
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mOnAtt;
+    std::unique_ptr<LabeledKnob> mAge, mThump, mSize; // Dynamic Cab macros
     juce::Rectangle<int> mNameRect, mRespRect;
     bool mLoaded = false;
     bool mDim = false;

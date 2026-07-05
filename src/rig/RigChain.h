@@ -36,6 +36,7 @@
 #include "AmpBlock.h"
 #include "EqBlock.h"
 #include "CabBlock.h"
+#include "CabDynamicsBlock.h"
 #include "ModBlock.h"
 #include "DelayBlock.h"
 #include "ReverbBlock.h"
@@ -71,6 +72,10 @@ public:
             b->prepare(ctx);
         for (auto *b : stereoBlocks())
             b->prepare(ctx);
+        // Dynamic Cab is a non-MonoBlock delta wrapper (JUCE-free core), so it is
+        // prepared explicitly rather than via allMonoBlocks().
+        cabDyn.prepare(sampleRate, maxBlockSize);
+        cabDynB.prepare(sampleRate, maxBlockSize);
         mVoiceA.assign((size_t)juce::jmax(1, maxBlockSize), 0.0f);
         mVoiceB.assign((size_t)juce::jmax(1, maxBlockSize), 0.0f);
         mCleanTap.assign((size_t)juce::jmax(1, maxBlockSize), 0.0f);
@@ -87,6 +92,8 @@ public:
             b->reset();
         for (auto *b : stereoBlocks())
             b->reset();
+        cabDyn.reset();
+        cabDynB.reset();
         mFdlA.reset();
         mFdlB.reset();
     }
@@ -368,7 +375,13 @@ public:
             if (mInTrimA != 1.0f) scale(vA, numSamples, mInTrimA);
             if (!amp.isBypassed()) { amp.process(vA, numSamples); heal(amp, vA, numSamples); }
             if (!eq.isBypassed())  { eq.process(vA, numSamples);  heal(eq, vA, numSamples); }
+            // Dynamic Cab wraps the IR convolution: pre-conv deltas (reactive
+            // impedance + cone breakup) -> static IR -> post-conv delta (enclosure
+            // air). All macros at 0 = bit-exact bypass, so SoloA stays byte-exact.
+            cabDyn.processPre(vA, numSamples);
             if (!cab.isBypassed()) { cab.process(vA, numSamples); heal(cab, vA, numSamples); }
+            cabDyn.processPost(vA, numSamples);
+            healDyn(cabDyn, vA, numSamples);
             if (mOutTrimA != 1.0f) scale(vA, numSamples, mOutTrimA);
             alignVoice(mFdlA, vA, numSamples, compA + mAlignA, mPolA);
         }
@@ -377,7 +390,10 @@ public:
             if (mInTrimB != 1.0f) scale(vB, numSamples, mInTrimB);
             if (!ampB.isBypassed()) { ampB.process(vB, numSamples); heal(ampB, vB, numSamples); }
             if (!eqB.isBypassed())  { eqB.process(vB, numSamples);  heal(eqB, vB, numSamples); }
+            cabDynB.processPre(vB, numSamples);
             if (!cabB.isBypassed()) { cabB.process(vB, numSamples); heal(cabB, vB, numSamples); }
+            cabDynB.processPost(vB, numSamples);
+            healDyn(cabDynB, vB, numSamples);
             if (mOutTrimB != 1.0f) scale(vB, numSamples, mOutTrimB);
             alignVoice(mFdlB, vB, numSamples, compB + mAlignB, mPolB);
         }
@@ -455,9 +471,11 @@ public:
     AmpBlock amp;   // Rig A
     EqBlock eq;
     CabBlock cab;
+    CabDynamicsBlock cabDyn;   // Dynamic Cab (level-dependent delta wrapping cab): Rig A
     AmpBlock ampB;  // Rig B
     EqBlock eqB;
     CabBlock cabB;
+    CabDynamicsBlock cabDynB;  // Dynamic Cab: Rig B
     ModBlock mod;   // shared post
     DelayBlock delay;
     ReverbBlock reverb;
@@ -526,6 +544,15 @@ private:
         std::fill(l, l + n, 0.0f);
         std::fill(r, r + n, 0.0f);
         recordTrip(b.name());
+    }
+    // Dynamic Cab isn't a MonoBlock (JUCE-free core), so it gets its own heal.
+    void healDyn(CabDynamicsBlock &b, float *buf, int n)
+    {
+        if (!hasNonFinite(buf, n))
+            return;
+        b.reset();
+        std::fill(buf, buf + n, 0.0f);
+        recordTrip("Cab Dynamics");
     }
 
     void alignVoice(FracDelayLine &fdl, float *v, int n, double delay, float pol)

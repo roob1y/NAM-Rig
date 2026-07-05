@@ -46,29 +46,43 @@ g++ -std=c++17 -O2 -Wall -Wextra -Isrc tests/cabdyn_test.cpp -o cabdyn_test && .
 
 ---
 
-## Wired vs NOT wired
+## Wired IN (this session) — needs a local build to confirm
 
-- **NOT wired into RigChain / PluginProcessor / UI** — intentional, per the brief
-  ("prove the block standalone first"). No APVTS params, no UI, no chain call yet.
-- **Standalone + tested** — the class, its two process stages, and the offline
-  harness are complete and passing.
-- **Not added to CMakeLists** — the test builds with the one-line g++ command
-  above (same as how the other block tests are verified offline). Adding a
-  `cabdyn_test` CMake target is a trivial follow-up if you want it in CTest.
+The block is now integrated per lane. **These are JUCE-side edits that could NOT be
+compiled in the offline sandbox — build locally once to confirm before relying on
+it.** The standalone DSP core + `cabdyn_test` still pass (22/22), unchanged.
 
-### Integration sketch (for when you say go)
-
-Two instances (Cab A / Cab B). In the cab section, per lane:
+**`src/rig/RigChain.h`** — `#include "CabDynamicsBlock.h"`; members `cabDyn` /
+`cabDynB` next to `cab` / `cabB`; `prepare()`/`reset()` call them explicitly (they
+aren't `MonoBlock`s, so not in `allMonoBlocks()`); the per-voice loop wraps the
+convolver:
 
 ```cpp
-cabDyn.processPre(buf, n);   // before CabBlock::process
-cabBlock.process(buf, n);    // existing static IR convolution
-cabDyn.processPost(buf, n);  // after
+cabDyn.processPre(vA, numSamples);                         // impedance + cone breakup
+if (!cab.isBypassed()) { cab.process(vA, n); heal(cab, vA, n); }   // static IR
+cabDyn.processPost(vA, numSamples);                        // enclosure air
+healDyn(cabDyn, vA, numSamples);                           // NaN self-heal for the wrapper
 ```
 
-`latencySamples() == 0` (dry path is undelayed; only the added harmonic delta
-carries the oversampler's ~0.67 ms group delay, which is inaudible and does not
-affect PDC). Three APVTS floats 0..1 → `setAgeDrive / setThump / setCabSize`.
+`latencySamples() == 0`, so PDC is unchanged (the wrapper is deliberately left out
+of the LA/LB latency sums — revisit only if it ever gains latency). All macros at
+0 = bit-exact bypass, so **SoloA stays byte-exact**.
+
+**`src/PluginProcessor.cpp`** — 6 APVTS floats (0..1, default 0):
+`cabDynAge / cabDynThump / cabDynSize` and `rigBcabDyn*`, pushed each block to
+`mChain.cabDyn` / `mChain.cabDynB` via `setAgeDrive / setThump / setCabSize`.
+
+**`src/ui/Panels.h`** — three `LabeledKnob`s (Age / Thump / Size) added to each
+`CabPanel` lane, in a 58 px row along the bottom (the IR response well takes the
+space above). ⚠️ **Eyeball this layout** — blind edit; if the cab lane is short the
+response well may get cramped. Tunable: the `58` / `6` px in `CabPanel::resized()`.
+
+### Build-check checklist (local)
+1. Compile the plugin — the three files above are the only changes.
+2. Confirm the 6 new params appear; **all default 0 ⇒ output unchanged** (SoloA
+   still bit-exact) — the fastest proof that bypass survived integration.
+3. Open the Cab panel: three knobs per lane, wired and labelled.
+4. Then ear-test (Stage C first — see risk ranking below).
 
 ---
 

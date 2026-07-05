@@ -221,6 +221,18 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::NormalisableRange<float>(2000.0f, 20000.0f, 10.0f, 0.5f), 20000.0f,
         juce::AudioParameterFloatAttributes().withLabel("Hz")));
 
+    // --- Dynamic Cab (rig/CabDynamicsBlock.h): level-dependent delta on the static
+    // IR. Three macros, all default 0 = bit-exact bypass. See docs/cabdyn/. Rig A. ---
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("cabDynAge", 1), "Cab Age/Drive",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("cabDynThump", 1), "Cab Thump",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("cabDynSize", 1), "Cab Size",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.0f));
+
     // --- Pre-amp modulation pedal (mono, front-of-amp): rig/PreModBlock.h,
     // premod_test.cpp. Sits after the drive rack and before the amp split, so it
     // feeds the amp like a real stompbox — distinct from the post-cab stereo mod
@@ -648,6 +660,17 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::ParameterID("rigBcabLpf", 1), "Rig B Cab High Cut",
         juce::NormalisableRange<float>(2000.0f, 20000.0f, 10.0f, 0.5f), 20000.0f,
         juce::AudioParameterFloatAttributes().withLabel("Hz")));
+
+    // --- Dynamic Cab (Rig B) ---
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("rigBcabDynAge", 1), "Rig B Cab Age/Drive",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("rigBcabDynThump", 1), "Rig B Cab Thump",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("rigBcabDynSize", 1), "Rig B Cab Size",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.0f));
 
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("oversampleB", 1), "Rig B Oversampling",
@@ -1215,6 +1238,10 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     // cabOn bypasses only the IR convolution; the Low/High cuts always run, so
     // they stay usable with a baked-in-speaker NAM (no IR).
     mChain.cab.setConvBypassed(apvts.getRawParameterValue("cabOn")->load() < 0.5f);
+    // Dynamic Cab macros (Rig A). All 0 = bit-exact bypass.
+    mChain.cabDyn.setAgeDrive(apvts.getRawParameterValue("cabDynAge")->load());
+    mChain.cabDyn.setThump(apvts.getRawParameterValue("cabDynThump")->load());
+    mChain.cabDyn.setCabSize(apvts.getRawParameterValue("cabDynSize")->load());
 
     // ---- Rig B voice (independent amp AA + EQ + cab cuts; see oversampleB) ----
     {
@@ -1228,6 +1255,10 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.cabB.setHpfHz(apvts.getRawParameterValue("rigBcabHpf")->load());
     mChain.cabB.setLpfHz(apvts.getRawParameterValue("rigBcabLpf")->load());
     mChain.cabB.setConvBypassed(apvts.getRawParameterValue("cabOnB")->load() < 0.5f);
+    // Dynamic Cab macros (Rig B).
+    mChain.cabDynB.setAgeDrive(apvts.getRawParameterValue("rigBcabDynAge")->load());
+    mChain.cabDynB.setThump(apvts.getRawParameterValue("rigBcabDynThump")->load());
+    mChain.cabDynB.setCabSize(apvts.getRawParameterValue("rigBcabDynSize")->load());
 
     // ---- Dual-rig mixer (mode / per-rig level + pan + polarity + align) ----
     mChain.setLevelA(juce::Decibels::decibelsToGain(apvts.getRawParameterValue("rigLevelA")->load()));
