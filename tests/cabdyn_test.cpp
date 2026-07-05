@@ -13,6 +13,8 @@
 // T6  envelope-driven, not static EQ — loud passage deviates A1, quiet barely does
 // T7  modulation ceilings — measured A1/A2/enc/drive stay within the stated caps
 // T8  engage->disengage is click-free and returns to bit-exact bypass
+// T9  Stage B is comb-free — the level-dependent fundamental response is smooth (no
+//     crossover phase-cancellation: no >0 dB bumps, adjacent-bin ripple < 1 dB)
 #include "rig/CabDynamicsBlock.h"
 #include <cstdio>
 #include <cmath>
@@ -63,6 +65,22 @@ static double goertzelW(const std::vector<float> &x, size_t start, size_t N, dou
 static double goertzel(const std::vector<float> &x, size_t start, size_t N, double f)
 {
     return goertzelW(x, start, N, f, SR);
+}
+
+// Level-dependent fundamental gain of Stage B at frequency f: process a sine of
+// amplitude `amp` with the given macros, return output-fundamental / amp. Comparing
+// a hard vs a near-linear drive reveals any crossover phase-cancellation comb.
+static double fundGain(double f, double amp, float age, float thump)
+{
+    CabDynamicsBlock d;
+    d.prepare(SR, BLK);
+    d.setAgeDrive(age);
+    d.setThump(thump);
+    const size_t N = (size_t)(SR * 0.5);
+    std::vector<float> m(N);
+    for (size_t n = 0; n < N; ++n) m[n] = (float)(amp * std::sin(2.0 * kPi * f * (double)n / SR));
+    runPre(d, m);
+    return goertzel(m, N / 2, N / 4, f) / amp;
 }
 
 int main()
@@ -274,6 +292,29 @@ int main()
         runPre(d, fresh);
         CHECK(std::memcmp(fresh.data(), in.data(), in.size() * sizeof(float)) == 0,
               "T8b returns to bit-exact bypass after disengage");
+    }
+
+    // ---------- T9: Stage B is comb-free (phase-alignment / describing-function) ----------
+    {
+        // The level-dependent fundamental response must be SMOOTH. A harmonics-only
+        // exciter may compress the mids a little, but must NOT produce phase-
+        // cancellation comb (alternating >0 dB bumps and deep dips) near the 800 /
+        // 3800 Hz crossover corners. This is the regression guard for the Stage B1
+        // describing-function fundamental cancellation.
+        double prev = 0.0, worstRipple = 0.0, worstBump = -100.0;
+        bool first = true;
+        for (double f = 500.0; f <= 4500.0; f += 100.0)
+        {
+            const double gh = fundGain(f, 0.9, 1.0f, 0.0f);   // hard drive
+            const double gs = fundGain(f, 0.02, 1.0f, 0.0f);  // near-linear
+            const double ld = 20.0 * std::log10(gh / gs);     // level-dependent gain
+            if (ld > worstBump) worstBump = ld;
+            if (!first) worstRipple = std::max(worstRipple, std::fabs(ld - prev));
+            prev = ld;
+            first = false;
+        }
+        CHECK(worstRipple < 1.0, "T9a no crossover comb (max adjacent ripple %.3f dB < 1.0)", worstRipple);
+        CHECK(worstBump < 0.5, "T9b compressive exciter never boosts fundamental (max %.3f dB < 0.5)", worstBump);
     }
 
     std::printf("\n%s (%d failure%s)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails, gFails == 1 ? "" : "s");

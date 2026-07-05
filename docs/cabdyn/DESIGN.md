@@ -153,7 +153,7 @@ level-dependent odd-harmonic grit in the **~1–4 kHz** midrange. The IR capture
 this cone at *one* small-signal level, so its breakup is frozen. This stage adds
 the **level-dependent** part.
 
-### B1 — parallel delta, band-limited drive
+### B1 — harmonics-only parallel delta, band-limited drive
 
 Cone breakup is a **midrange** phenomenon, not a broadband or extreme-top one.
 The driven band is isolated with a Linkwitz-Riley-style crossover HP at ~800 Hz
@@ -163,20 +163,51 @@ plus a gentle LP at ~3.8 kHz (the low band stays perfectly linear, as required):
 band = LP_3800( HP_800(x) )              LR2 sections (Butterworth, Q = 0.707)
 ```
 
-The nonlinearity is applied as a **parallel delta** so the low band and the dry
-full-range signal are untouched and bypass is bit-exact by construction:
+The nonlinearity is applied as a **parallel delta** added to the un-filtered dry
+`x`, so the low band and full-range dry are untouched and bypass is bit-exact:
 
 ```
-nl    = softclip( band · drive ) / drive       unit small-signal slope
-delta = nl − band                               harmonic content only
-y     = x + Wb · delta                          Wb = smoothed Age engage (0 at rest)
+δ  = nl(band) − G(A)·band                        HARMONICS ONLY (see below)
+y  = x + Wb · δ                                   Wb = smoothed Age engage (0 at rest)
+nl(u) = tanh(u·drive) / drive                     odd, unit slope at 0, compressive
 ```
 
-- `softclip(u) = tanh(u)` — odd, unit slope at 0, compressive. Using
-  `tanh(band·drive)/drive` keeps **small-signal gain = 1 for any drive**, so the
-  onset from Age = 0 is smooth and the delta is purely the added harmonics.
-- At `Age = 0`, `Wb = 0` ⇒ stage skipped ⇒ bit-exact. "At default drive the
-  nonlinearity is exactly unity."
+- `tanh(band·drive)/drive` keeps **small-signal gain = 1 for any drive**, so the
+  onset from Age = 0 is smooth.
+- At `Age = 0`, `Wb = 0` ⇒ stage skipped ⇒ bit-exact.
+
+#### The crossover phase-alignment trap (and why `G(A)` is there)
+
+A naïve `δ = nl(band) − band` is **not** purely harmonic under hard drive. A
+compressive nonlinearity has describing-function gain `G(A) < 1` at large
+amplitude `A`, so `nl(band)` contains a *reduced* fundamental: `nl(band) ≈
+G(A)·band + harmonics`. The naïve delta therefore carries a residual
+fundamental-frequency term `(G(A)−1)·band` **at `band`'s crossover-shifted
+phase**. Added to the un-shifted `x`, that residual **combs** near the 800 Hz and
+3.8 kHz corners — a level-dependent ±3 dB / −6 dB ripple (measured on the naïve
+version), which would violate "never impose a fixed EQ colour / alter the IR
+tonality". Any band-limited (minimum-phase) level change combs this way; it is
+intrinsic, not a tuning bug.
+
+The fix makes the delta **literally harmonics-only** by cancelling that
+fundamental. `G(A)·band` *is* the fundamental component of `nl(band)`, so:
+
+```
+δ = nl(band) − G(A)·band  =  harmonics only        (the fundamental cancels)
+```
+
+`G(A)` is the **tanh describing function** at the current band envelope `A`:
+
+```
+G(A) = g(β)/β,   β = drive·A,   g(β) = (2/π) ∫₀^π tanh(β·sin t)·sin t dt
+```
+
+`g(β)` is tabulated at `prepare()` (numerical integration, 257-point lookup) and
+`A` tracked by a fast band-envelope follower (5 ms / 40 ms). With the residual
+fundamental removed, adding `δ` to `x` cannot cancel `x`'s fundamental, so **there
+is no comb** regardless of the crossover phase. Measured level-dependent ripple
+drops from **2.9 dB → 0.30 dB**, with no gain bumps above +0.2 dB. This is a
+regression-guarded invariant — test **T9**.
 
 ### B2 — oversampling and the aliasing budget
 
@@ -203,16 +234,19 @@ test **T2** (swept sine through the driven clipper, alias-band energy measured).
 ### B3 — low-band cone power compression (part of Age)
 
 At high power a real cone **compresses** — thermal + suspension losses reduce
-low-end output a couple of dB. Modelled as a slow, envelope-driven
-gain-*reduction* on the sub-crossover band (no makeup):
+low-end output a couple of dB. This is a genuine *magnitude* change, so it is
+implemented as a **series dynamic low-shelf** (not a parallel delta — a parallel
+low-band delta would comb near its corner exactly like the naïve B1 above). A
+shelf's magnitude response is smooth, so it cannot comb:
 
 ```
-low   = LP_180(x)
 grDb  = −( AGE_COMP · Age  +  ENV_COMP · Age · push )     clamp ≥ −2.0
-y    += Wb · (10^(grDb/20) − 1) · low                     AGE_COMP = 0.6, ENV_COMP = 1.8
+shelf = RBJ low-shelf( 200 Hz, grDb )                     AGE_COMP = 0.6, ENV_COMP = 1.8
+s     = shelf(s)                                          rebuilt at control rate
 ```
 
-Ceiling **−2 dB**. Level only ever drops; at `Age = 0` the term is 0.
+Ceiling **−2 dB**. `grDb = 0 ⇒` identity biquad (bit-exact); level only ever
+drops, never restored (no makeup).
 
 **Deliberately NOT modelled** (already in the IR): the static cone-breakup notch
 structure, the fixed presence peak, the mic comb. Stage B adds only the
@@ -358,3 +392,4 @@ the playing dynamics ask it to.
 | **T6** | envelope-driven, not static EQ — a loud passage deviates, a −40 dB passage barely does |
 | **T7** | modulation ceilings — measured A1/A2/C swings stay within the stated caps |
 | **T8** | engage/disengage is click-free (macro 0→x→0 leaves no residual, returns to bit-exact) |
+| **T9** | Stage B is comb-free — level-dependent fundamental response is smooth (no crossover phase-cancellation: no >0 dB bumps, adjacent-bin ripple < 1 dB) |

@@ -183,13 +183,18 @@ public:
         mEnvRel = onePoleK(0.160);
         mEnvAtkPost = mEnvAtk;
         mEnvRelPost = mEnvRel;
+        // Band-envelope follower for describing-function fundamental cancellation
+        // (Stage B1) — fast enough to track note dynamics, slow enough to stay
+        // program-dependent (no audio-rate modulation of G).
+        mBandAtk = onePoleK(0.005);
+        mBandRel = onePoleK(0.040);
 
         // Stage B fixed crossover (isolate the driven midband) + low-comp band.
         mHp800  = Biquad::highpass(mFs, std::min(800.0, 0.45 * mFs));
         mLp3800 = Biquad::lowpass(mFs, std::min(3800.0, 0.45 * mFs));
-        mLp180  = Biquad::lowpass(mFs, std::min(180.0, 0.45 * mFs));
 
         mHb.design();
+        buildGtable();
 
         // Stage C: two archetype networks, prime delays (<10 ms) scaled to fs.
         static const int a48[3] = {113, 179, 251};  // tight 1x12 open-back
@@ -209,12 +214,13 @@ public:
     {
         mAgeSm = mThumpSm = mSizeSm = 0.0f;
         mEnvPre = mEnvPost = 0.0f;
+        mBandEnv = 0.0f;
         mEncMixSm = 0.0f;
         mA1.reset();
         mA2.reset();
+        mLowShelf.reset();
         mHp800.reset();
         mLp3800.reset();
-        mLp180.reset();
         mHb.reset();
         for (int i = 0; i < 3; ++i) { mApA[i].reset(); mApB[i].reset(); }
         mCtrl = 0;
@@ -254,35 +260,38 @@ public:
 
             // ---- Stage A: series impedance-delta filters (identity at rest) ----
             float s = mA2.processSample(mA1.processSample(x));
+            // ---- Stage B3: dynamic low-band cone POWER COMPRESSION as a clean series
+            // magnitude low-shelf (identity at rest; a shelf can't comb the dry path) ----
+            s = mLowShelf.processSample(s);
 
-            // ---- Stage B: band-limited cone breakup (parallel delta) ----
+            // ---- Stage B1: band-limited cone breakup as a HARMONICS-ONLY exciter ----
             const float Wb = mAgeSm; // engage = Age (0 at rest)
             if (mAgeTarget > 0.0f || Wb > 1.0e-6f)
             {
                 const float drive = 1.0f + mAgeSm * (1.0f + kDriveEnv * push);
                 mDriveDbg = drive;
-                // isolate driven midband (low band stays perfectly linear)
+                // isolate the driven midband (low band stays perfectly linear)
                 const float band = mLp3800.processSample(mHp800.processSample(s));
-                // form the harmonic delta at 2x, band-limit on the way down
+                // band amplitude envelope -> describing-function fundamental gain G
+                const float ab = std::fabs(band);
+                mBandEnv += (ab > mBandEnv ? mBandAtk : mBandRel) * (ab - mBandEnv);
+                const float G = describingG(mBandEnv, drive);
+                // HARMONICS-ONLY delta at 2x: nl(band) - G*band cancels the (phase-
+                // shifted) fundamental, so adding it to the un-shifted dry path cannot
+                // comb near the 800 Hz / 3.8 kHz crossover corners. Band-limit on the
+                // way down.
                 float b0, b1;
                 mHb.up(band, b0, b1);
                 const float invd = 1.0f / drive;
-                const float n0 = std::tanh(b0 * drive) * invd - b0;
-                const float n1 = std::tanh(b1 * drive) * invd - b1;
+                const float n0 = std::tanh(b0 * drive) * invd - G * b0;
+                const float n1 = std::tanh(b1 * drive) * invd - G * b1;
                 const float db = mHb.down(n0, n1);
-                // low-band cone power compression (gain reduction only, <= -2 dB)
-                float grDb = -(kAgeComp * mAgeSm + kEnvComp * mAgeSm * push);
-                grDb = std::max(grDb, -2.0f);
-                const float gLin = dbToLin(grDb);
-                const float low = mLp180.processSample(s);
-                s = s + Wb * db + Wb * (gLin - 1.0f) * low;
+                s = s + Wb * db;
             }
             else
             {
-                // keep the crossover/low-comp filter states warm so re-engaging is
-                // click-free (advance them with the current signal, discard output).
+                // keep the crossover states warm so re-engaging is click-free.
                 mLp3800.processSample(mHp800.processSample(s));
-                mLp180.processSample(s);
             }
 
             buf[i] = s;
@@ -335,6 +344,7 @@ public:
     float dbgA2Db()   const { return mA2Db; }   // last-built 2 kHz shelf gain (dB)
     float dbgEncMix() const { return mEncMixSm; } // current enclosure wet mix
     float dbgDrive()  const { return mDriveDbg; } // current Stage B drive multiplier
+    float dbgLowCompDb() const { return mLowCompDb; } // current B3 low-shelf gain (dB)
     float dbgEnvPre() const { return mEnvPre; }
     double sampleRate() const { return mFs; }
 
@@ -349,6 +359,40 @@ private:
     {
         const float p = (env - kEnvLo) / (kEnvHi - kEnvLo);
         return p < 0.0f ? 0.0f : (p > 1.0f ? 1.0f : p);
+    }
+
+    // Describing-function fundamental gain of the soft clipper nl(u)=tanh(u*d)/d for a
+    // band envelope A: G = g(beta)/beta, beta = d*A, with
+    //   g(beta) = (2/pi) INT_0^pi tanh(beta*sin t) sin t dt   (the tanh describing fn).
+    // Subtracting G*band from nl(band) removes the (phase-shifted) fundamental so the
+    // Stage B delta is HARMONICS ONLY and cannot comb against the un-filtered dry path.
+    void buildGtable()
+    {
+        constexpr double kPi = 3.14159265358979323846;
+        const int P = 2048;
+        for (int i = 0; i < kGN; ++i)
+        {
+            const double beta = (double)kGBetaMax * (double)i / (double)(kGN - 1);
+            double acc = 0.0;
+            for (int p = 0; p < P; ++p)
+            {
+                const double th = kPi * ((double)p + 0.5) / (double)P;
+                acc += std::tanh(beta * std::sin(th)) * std::sin(th);
+            }
+            mGtab[i] = (float)((2.0 / kPi) * acc * (kPi / (double)P));
+        }
+    }
+    float describingG(float A, float d) const
+    {
+        const float beta = d * A;
+        if (beta < 1.0e-4f) return 1.0f;                          // small signal -> unity
+        constexpr double kPi = 3.14159265358979323846;
+        if (beta >= kGBetaMax) return (float)(4.0 / kPi) / beta;  // g(inf) = 4/pi
+        const float xr = beta / kGBetaMax * (float)(kGN - 1);
+        const int i = (int)xr;
+        const float f = xr - (float)i;
+        const float g = mGtab[i] * (1.0f - f) + mGtab[i + 1] * f;
+        return g / beta;
     }
 
     // Stage A biquads from the current push (+ static Age HF ease). gain 0 => identity.
@@ -369,6 +413,15 @@ private:
         const Biquad n2 = Biquad::highshelf(mFs, std::min(2000.0, 0.45 * mFs), (double)g2, 0.7);
         mA2.copyCoeffsFrom(n2);
         mA2Db = g2;
+
+        // B3: dynamic low-band cone POWER COMPRESSION as a clean magnitude low-shelf
+        // (series filter, NOT a parallel delta -> no phase-comb). Gain reduction only,
+        // floored at -2 dB. Identity at rest (grDb 0).
+        float grDb = -(kAgeComp * mAgeSm + kEnvComp * mAgeSm * push);
+        grDb = std::max(grDb, -2.0f);
+        const Biquad n3 = Biquad::lowshelf(mFs, std::min(200.0, 0.45 * mFs), (double)grDb, 0.7);
+        mLowShelf.copyCoeffsFrom(n3);
+        mLowCompDb = grDb;
     }
 
     bool preActive() const
@@ -388,7 +441,7 @@ private:
 
     void flushDenormalsPre()
     {
-        for (Biquad *b : {&mA1, &mA2, &mHp800, &mLp3800, &mLp180})
+        for (Biquad *b : {&mA1, &mA2, &mLowShelf, &mHp800, &mLp3800})
         {
             if (std::fabs(b->z1) < 1.0e-30f) b->z1 = 0.0f;
             if (std::fabs(b->z2) < 1.0e-30f) b->z2 = 0.0f;
@@ -408,6 +461,8 @@ private:
 
     // ------------------------------- constants -------------------------------
     static constexpr int   kCtrl = 32;      // Stage A coeff recompute period
+    static constexpr int   kGN = 257;       // tanh describing-function table size
+    static constexpr float kGBetaMax = 12.0f;
     static constexpr float kSettle = 1.0e-6f;
     static constexpr float kEnvLo = 0.03f, kEnvHi = 0.50f; // push knee (~ -30 .. -6 dBFS)
     // Stage A depths
@@ -439,14 +494,16 @@ private:
     // envelopes
     float mEnvPre = 0.0f, mEnvPost = 0.0f;
 
-    // Stage A
-    Biquad mA1, mA2;
+    // Stage A + B3 low-shelf
+    Biquad mA1, mA2, mLowShelf;
     int mCtrl = 0;
-    float mA1Db = 0.0f, mA2Db = 0.0f, mDriveDbg = 1.0f;
+    float mA1Db = 0.0f, mA2Db = 0.0f, mLowCompDb = 0.0f, mDriveDbg = 1.0f;
 
     // Stage B
-    Biquad mHp800, mLp3800, mLp180;
+    Biquad mHp800, mLp3800;
     Halfband mHb;
+    float mBandEnv = 0.0f, mBandAtk = 0.02f, mBandRel = 0.005f;
+    float mGtab[kGN] = {0}; // tanh describing-function g(beta) lookup
 
     // Stage C
     DampAllpass mApA[3], mApB[3];

@@ -26,7 +26,7 @@ behaviour a static IR cannot contain.
 
 ### Verification — all green (offline g++, no JUCE)
 
-`tests/cabdyn_test.cpp`, 20 numbered checks, **ALL PASS**:
+`tests/cabdyn_test.cpp`, 22 numbered checks, **ALL PASS**:
 
 ```
 g++ -std=c++17 -O2 -Wall -Wextra -Isrc tests/cabdyn_test.cpp -o cabdyn_test && ./cabdyn_test
@@ -39,6 +39,7 @@ g++ -std=c++17 -O2 -Wall -Wextra -Isrc tests/cabdyn_test.cpp -o cabdyn_test && .
 - **T4** Cab-Size sweep artifact-free (max sample step 0.014, no zipper).
 - **T5** deterministic. **T6** envelope-driven (loud blooms A1 +3 dB, quiet 0.0 dB).
 - **T7** all modulation ceilings held. **T8** disengage click-free, returns bit-exact.
+- **T9** Stage B comb-free — level-dependent fundamental ripple 0.30 dB, no bumps > +0.2 dB.
 
 *(The sandbox repo mount is a stale snapshot — the block was compiled/verified in
 `/tmp` from the exact file bytes written here. Recompile locally to re-confirm.)*
@@ -129,6 +130,16 @@ Everything above is a named constant at the bottom of the header — easy to swe
 - **No loudness compensation anywhere** (per your repeated rejection of auto-level
   — see the Drive Auto Gain memory). The only gain move is cone power
   *compression* (level drops when pushed, never restored).
+- **Stage B is a harmonics-ONLY exciter (phase-comb fix).** A naïve band-limited
+  `nl(band) − band` delta combs against the dry path near the crossover corners
+  under hard drive (a compressive nonlinearity's fundamental gain `G(A) < 1`
+  leaves a phase-shifted residual fundamental — measured ±3/−6 dB ripple). Fixed
+  by cancelling that fundamental with the **tanh describing function**:
+  `δ = nl(band) − G(A)·band` (257-point `g(β)` lookup + a band-envelope follower).
+  Ripple → 0.30 dB, guarded by **T9**. Consequence: Stage B no longer compresses
+  the mid *fundamental* (it's a clean exciter); the intended low-band power
+  compression now lives in a separate **series low-shelf** (B3), which can't comb.
+  Credit: this was flagged by an external review pass before it shipped.
 - **Oversampling, not ADAA, for Stage B** — the brief mandated explicit halfband/
   polyphase code. The rest of the rig uses ADAA (`Saturation.h`); this block is
   the exception, by request. If you'd prefer ADAA here later to match the house
