@@ -2809,6 +2809,26 @@ public:
         addAndMakeVisible(*mAge);
         addAndMakeVisible(*mThump);
         addAndMakeVisible(*mSize);
+
+        // Per-lane Dynamic Cab enable ("Dyn" pill, next to the cab On pill). Off
+        // fades the delta out click-free and passes bit-exact; knobs are kept.
+        mDyn.setButtonText("Dyn");
+        mDyn.getProperties().set("pill", true);
+        addAndMakeVisible(mDyn);
+        mDynAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            mProc.apvts, rig == 0 ? "cabDynOn" : "cabDynOnB", mDyn);
+
+        // Rig presets: pick a popular amp->cab pairing to set this lane's three
+        // Dynamic Cab macros. Item 1 = "Custom" (no-op); items 2.. are the factory
+        // presets from CabDynamicsBlock. (Selection is a recall action; moving a
+        // knob afterwards doesn't auto-flip the label back to Custom.)
+        mPreset.addItem("Custom", 1);
+        for (int i = 0; i < nam_rig::CabDynamicsBlock::numPresets(); ++i)
+            mPreset.addItem(nam_rig::CabDynamicsBlock::presets()[i].name, i + 2);
+        mPreset.setSelectedId(1, juce::dontSendNotification);
+        mPreset.setTextWhenNothingSelected("Preset");
+        mPreset.onChange = [this] { applyPreset(mPreset.getSelectedId()); };
+        addAndMakeVisible(mPreset);
     }
 
     // Dim the IR graph when the cab's convolution is bypassed or its rig is out.
@@ -2852,13 +2872,20 @@ public:
         auto area = getLocalBounds().reduced(14, 10);
         auto top = area.removeFromTop(24);
         mOn.setBounds(top.removeFromRight(46).withSizeKeepingCentre(46, 20));
+        top.removeFromRight(6);
+        mDyn.setBounds(top.removeFromRight(46).withSizeKeepingCentre(46, 20));
         top.removeFromRight(8);
         mNameRect = top;
 
         area.removeFromTop(6);
-        // Bottom row: the three Dynamic Cab macro knobs (Age / Thump / Size); the
-        // IR response well fills the rest of the lane above them.
+        // Bottom: the three Dynamic Cab macro knobs (Age / Thump / Size), with a
+        // slim rig-preset dropdown just above them; the IR response well fills the
+        // rest of the lane. (Blind layout edit — eyeball that the well isn't too
+        // cramped; the 58/22 px below are the knobs of it.)
         auto knobRow = area.removeFromBottom(58);
+        area.removeFromBottom(4);
+        auto presetRow = area.removeFromBottom(22);
+        mPreset.setBounds(presetRow);
         area.removeFromBottom(6);
         mRespRect = area.withTrimmedBottom(4);
         const int kw = knobRow.getWidth() / 3;
@@ -2955,8 +2982,34 @@ private:
     int mRig = 0;
     juce::String mIrName{juce::String::fromUTF8("No IR \xC2\xB7 amp runs direct")};
     juce::String mCharacter; // auto tone descriptor (e.g. "Dark, thick")
+    // Apply a rig preset's three macro values to this lane's params. comboId 1 =
+    // "Custom" (no-op); 2.. index into CabDynamicsBlock::presets().
+    void applyPreset(int comboId)
+    {
+        if (comboId < 2) return;
+        const int i = comboId - 2;
+        if (i < 0 || i >= nam_rig::CabDynamicsBlock::numPresets()) return;
+        const auto &p = nam_rig::CabDynamicsBlock::presets()[i];
+        const bool a = (mRig == 0);
+        setMacroParam(a ? "cabDynAge"   : "rigBcabDynAge",   p.age);
+        setMacroParam(a ? "cabDynThump" : "rigBcabDynThump", p.thump);
+        setMacroParam(a ? "cabDynSize"  : "rigBcabDynSize",  p.size);
+    }
+    void setMacroParam(const char *id, float v)
+    {
+        if (auto *prm = mProc.apvts.getParameter(id))
+        {
+            prm->beginChangeGesture();
+            prm->setValueNotifyingHost(prm->convertTo0to1(v));
+            prm->endChangeGesture();
+        }
+    }
+
     juce::ToggleButton mOn;                  // per-cab bypass (cabOn / cabOnB)
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mOnAtt;
+    juce::ToggleButton mDyn;                 // Dynamic Cab enable (cabDynOn / cabDynOnB)
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mDynAtt;
+    juce::ComboBox mPreset;                  // rig preset picker (sets the 3 macros)
     std::unique_ptr<LabeledKnob> mAge, mThump, mSize; // Dynamic Cab macros
     juce::Rectangle<int> mNameRect, mRespRect;
     bool mLoaded = false;

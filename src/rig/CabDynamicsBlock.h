@@ -255,6 +255,37 @@ public:
     void setThump(float v)    { mThumpTarget = clamp01(v); }
     void setCabSize(float v)  { mSizeTarget  = clamp01(v); }
 
+    // Whole-block bypass. Independent of the macros (which stay at their set
+    // values, so the UI knobs are remembered). When bypassed, the effective
+    // targets read as 0, so the existing smoother ramps every stage down to the
+    // transparent edge click-free and the active-gate then early-returns -> the
+    // buffer is byte-identical to input, exactly like all-macros-0.
+    void setBypassed(bool b) { mBypassed = b; }
+    bool isBypassed() const  { return mBypassed; }
+
+    // ---- Factory rig presets (0..1 macro triples) --------------------------
+    // Physically-motivated starting points, one per popular amp->cab pairing.
+    // Age tracks SPEAKER WEAR (vintage / broken-in cone), NOT preamp gain: modern
+    // hi-fi cabs (fresh, tight) get LOW Age; old broken-in cabs get HIGH Age.
+    // Thump = low-end bloom; Size = enclosure box (tight -> big). These set the
+    // plugin macros only; the loaded IR still supplies the cab's static voicing.
+    struct Preset { const char *name; float age, thump, size; };
+    static const Preset *presets()          // array of numPresets() entries
+    {
+        static const Preset kP[] = {
+            { "Recto 4x12",   0.20f, 0.50f, 1.00f }, // modern, tight, fresh V30 - low wear
+            { "Dumble 2x12",  0.30f, 0.30f, 0.45f }, // boutique, lightly broken-in
+            { "Twin 2x12",    0.35f, 0.25f, 0.40f }, // clean but vintage cones
+            { "Deluxe 1x12",  0.45f, 0.20f, 0.15f }, // old, well-worn small open-back
+            { "Bassman 4x10", 0.45f, 0.35f, 0.55f }, // old, loose, broken-in
+            { "JCM800 4x12",  0.50f, 0.40f, 0.90f }, // 80s, breaks up, moderately aged
+            { "AC30 2x12",    0.55f, 0.25f, 0.35f }, // alnico Blue, early breakup, vintage
+            { "Plexi 4x12",   0.60f, 0.45f, 0.85f }, // worn Greenbacks, earliest breakup
+        };
+        return kP;
+    }
+    static int numPresets() { return 8; }
+
     double latencySamples() const { return 0.0; } // dry path undelayed
 
     // ============================ pre-conv processing ============================
@@ -273,8 +304,8 @@ public:
 
             // ---- smoothers + envelope (per sample; pre owns its OWN macro state so
             // running both stages can't double-step the de-zip) ----
-            mAgeSmPre   += mMacroK * (mAgeTarget - mAgeSmPre);
-            mThumpSmPre += mMacroK * (mThumpTarget - mThumpSmPre);
+            mAgeSmPre   += mMacroK * (ageTgt()   - mAgeSmPre);
+            mThumpSmPre += mMacroK * (thumpTgt() - mThumpSmPre);
             const float r = std::fabs(x);
             mEnvPre += (r > mEnvPre ? mEnvAtk : mEnvRel) * (r - mEnvPre);
             const float push = pushOf(mEnvPre);
@@ -291,7 +322,7 @@ public:
 
             // ---- Stage B1: band-limited cone breakup as a HARMONICS-ONLY exciter ----
             const float Wb = mAgeSmPre; // engage = Age (0 at rest)
-            if (mAgeTarget > 0.0f || Wb > 1.0e-6f)
+            if (ageTgt() > 0.0f || Wb > 1.0e-6f)
             {
                 const float drive = 1.0f + mAgeSmPre * (1.0f + kDriveEnv * push);
                 mDriveDbg = drive;
@@ -340,9 +371,9 @@ public:
             const float x = buf[i];
 
             // post owns its OWN Age/Thump smoother state (see processPre note)
-            mSizeSm      += mMixK   * (mSizeTarget - mSizeSm);
-            mThumpSmPost += mMacroK * (mThumpTarget - mThumpSmPost);
-            mAgeSmPost   += mMacroK * (mAgeTarget - mAgeSmPost);
+            mSizeSm      += mMixK   * (sizeTgt()  - mSizeSm);
+            mThumpSmPost += mMacroK * (thumpTgt() - mThumpSmPost);
+            mAgeSmPost   += mMacroK * (ageTgt()   - mAgeSmPost);
             const float r = std::fabs(x);
             mEnvPost += (r > mEnvPost ? mEnvAtkPost : mEnvRelPost) * (r - mEnvPost);
             const float push = pushOf(mEnvPost);
@@ -398,6 +429,11 @@ public:
 private:
     // ------------------------------- helpers -------------------------------
     static float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
+    // effective macro targets: forced to 0 while bypassed so the smoother/gate
+    // fade the block out click-free and then leave the path (bit-exact).
+    float ageTgt()   const { return mBypassed ? 0.0f : mAgeTarget; }
+    float thumpTgt() const { return mBypassed ? 0.0f : mThumpTarget; }
+    float sizeTgt()  const { return mBypassed ? 0.0f : mSizeTarget; }
     float onePoleK(double tauSec) const { return (float)(1.0 - std::exp(-1.0 / (tauSec * mFs))); }
     static float dbToLin(float db) { return std::pow(10.0f, db / 20.0f); }
 
@@ -496,16 +532,16 @@ private:
 
     bool preActive() const
     {
-        return mAgeTarget > 0.0f || mThumpTarget > 0.0f
-               || std::fabs(mAgeSmPre - mAgeTarget) > kSettle
-               || std::fabs(mThumpSmPre - mThumpTarget) > kSettle;
+        return ageTgt() > 0.0f || thumpTgt() > 0.0f
+               || std::fabs(mAgeSmPre - ageTgt()) > kSettle
+               || std::fabs(mThumpSmPre - thumpTgt()) > kSettle;
     }
     bool postActive() const
     {
-        return mThumpTarget > 0.0f || mAgeTarget > 0.0f
-               || std::fabs(mThumpSmPost - mThumpTarget) > kSettle
-               || std::fabs(mAgeSmPost - mAgeTarget) > kSettle
-               || std::fabs(mSizeSm - mSizeTarget) > kSettle
+        return thumpTgt() > 0.0f || ageTgt() > 0.0f
+               || std::fabs(mThumpSmPost - thumpTgt()) > kSettle
+               || std::fabs(mAgeSmPost - ageTgt()) > kSettle
+               || std::fabs(mSizeSm - sizeTgt()) > kSettle
                || mEncMixSm > kSettle;
     }
 
@@ -562,6 +598,7 @@ private:
     // the de-zip is a true ~25 ms no matter which stages are active (previously both
     // stages stepped the same members -> ~12.5 ms, and rate-dependent on the mix).
     float mAgeTarget = 0.0f, mThumpTarget = 0.0f, mSizeTarget = 0.0f;
+    bool  mBypassed = false;   // whole-block bypass (macros retained; see setBypassed)
     float mAgeSmPre = 0.0f, mThumpSmPre = 0.0f;
     float mAgeSmPost = 0.0f, mThumpSmPost = 0.0f;
     float mSizeSm = 0.0f;

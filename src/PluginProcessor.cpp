@@ -69,6 +69,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         juce::ParameterID("eqOnB", 1), "EQ B Enable", true));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID("cabOnB", 1), "Cab B Enable", true));
+    // Dynamic Cab (level-dependent delta) enable, per lane. Default on; when off
+    // the block fades out click-free and passes bit-exact (macros are retained).
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("cabDynOn", 1), "Dynamic Cab A Enable", true));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("cabDynOnB", 1), "Dynamic Cab B Enable", true));
     // Master enable for the drive rack (on top of the per-pedal footswitches).
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID("driveOn", 1), "Drive Enable", true));
@@ -1242,6 +1248,8 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.cabDyn.setAgeDrive(apvts.getRawParameterValue("cabDynAge")->load());
     mChain.cabDyn.setThump(apvts.getRawParameterValue("cabDynThump")->load());
     mChain.cabDyn.setCabSize(apvts.getRawParameterValue("cabDynSize")->load());
+    // Whole-block Dynamic Cab bypass (macros retained; fades out click-free).
+    mChain.cabDyn.setBypassed(apvts.getRawParameterValue("cabDynOn")->load() < 0.5f);
 
     // ---- Rig B voice (independent amp AA + EQ + cab cuts; see oversampleB) ----
     {
@@ -1259,6 +1267,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.cabDynB.setAgeDrive(apvts.getRawParameterValue("rigBcabDynAge")->load());
     mChain.cabDynB.setThump(apvts.getRawParameterValue("rigBcabDynThump")->load());
     mChain.cabDynB.setCabSize(apvts.getRawParameterValue("rigBcabDynSize")->load());
+    mChain.cabDynB.setBypassed(apvts.getRawParameterValue("cabDynOnB")->load() < 0.5f);
 
     // ---- Dual-rig mixer (mode / per-rig level + pan + polarity + align) ----
     mChain.setLevelA(juce::Decibels::decibelsToGain(apvts.getRawParameterValue("rigLevelA")->load()));
