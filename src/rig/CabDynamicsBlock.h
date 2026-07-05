@@ -157,6 +157,15 @@ public:
             pos = 0;
             lp = 0.0f;
         }
+        // Flush denormals from BOTH the damping one-pole AND the recursive delay
+        // line (the line feeds back through process(), so a denormal there keeps
+        // recirculating in the offline g++ harness that has no ScopedNoDenormals).
+        void flushDenormals()
+        {
+            if (std::fabs(lp) < 1.0e-30f) lp = 0.0f;
+            for (float &v : buf)
+                if (std::fabs(v) < 1.0e-30f) v = 0.0f;
+        }
         inline float process(float x, float g)
         {
             float d = buf[(size_t)pos];
@@ -212,7 +221,8 @@ public:
 
     void reset()
     {
-        mAgeSm = mThumpSm = mSizeSm = 0.0f;
+        mAgeSmPre = mThumpSmPre = mAgeSmPost = mThumpSmPost = mSizeSm = 0.0f;
+        mPreWasActive = mPostWasActive = false;
         mEnvPre = mEnvPost = 0.0f;
         mBandEnv = 0.0f;
         mEncMixSm = 0.0f;
@@ -241,15 +251,20 @@ public:
     // Stage A (reactive impedance delta) + Stage B (band-limited cone breakup).
     void processPre(float *buf, int numSamples)
     {
-        if (!preActive()) return; // bit-exact bypass (buffer untouched)
+        if (!mPrepared) return;   // halfband undesigned / G-table zero before prepare()
+        if (!preActive()) { mPreWasActive = false; return; } // bit-exact bypass
+
+        if (!mPreWasActive) resetPreState(); // inactive->active edge: no stale env/filters
+        mPreWasActive = true;
 
         for (int i = 0; i < numSamples; ++i)
         {
             const float x = buf[i];
 
-            // ---- smoothers + envelope (per sample) ----
-            mAgeSm   += mMacroK * (mAgeTarget - mAgeSm);
-            mThumpSm += mMacroK * (mThumpTarget - mThumpSm);
+            // ---- smoothers + envelope (per sample; pre owns its OWN macro state so
+            // running both stages can't double-step the de-zip) ----
+            mAgeSmPre   += mMacroK * (mAgeTarget - mAgeSmPre);
+            mThumpSmPre += mMacroK * (mThumpTarget - mThumpSmPre);
             const float r = std::fabs(x);
             mEnvPre += (r > mEnvPre ? mEnvAtk : mEnvRel) * (r - mEnvPre);
             const float push = pushOf(mEnvPre);
@@ -265,10 +280,10 @@ public:
             s = mLowShelf.processSample(s);
 
             // ---- Stage B1: band-limited cone breakup as a HARMONICS-ONLY exciter ----
-            const float Wb = mAgeSm; // engage = Age (0 at rest)
+            const float Wb = mAgeSmPre; // engage = Age (0 at rest)
             if (mAgeTarget > 0.0f || Wb > 1.0e-6f)
             {
-                const float drive = 1.0f + mAgeSm * (1.0f + kDriveEnv * push);
+                const float drive = 1.0f + mAgeSmPre * (1.0f + kDriveEnv * push);
                 mDriveDbg = drive;
                 // isolate the driven midband (low band stays perfectly linear)
                 const float band = mLp3800.processSample(mHp800.processSample(s));
@@ -304,28 +319,33 @@ public:
     // panels are excited by the driver's ACOUSTIC output = the post-conv signal.
     void processPost(float *buf, int numSamples)
     {
-        if (!postActive()) return; // bit-exact bypass (buffer untouched)
+        if (!mPrepared) return;
+        if (!postActive()) { mPostWasActive = false; return; } // bit-exact bypass
+
+        if (!mPostWasActive) resetPostState(); // inactive->active edge: no stale env/AP state
+        mPostWasActive = true;
 
         for (int i = 0; i < numSamples; ++i)
         {
             const float x = buf[i];
 
-            mSizeSm  += mMixK * (mSizeTarget - mSizeSm);
-            mThumpSm += mMacroK * (mThumpTarget - mThumpSm);
-            mAgeSm   += mMacroK * (mAgeTarget - mAgeSm);
+            // post owns its OWN Age/Thump smoother state (see processPre note)
+            mSizeSm      += mMixK   * (mSizeTarget - mSizeSm);
+            mThumpSmPost += mMacroK * (mThumpTarget - mThumpSmPost);
+            mAgeSmPost   += mMacroK * (mAgeTarget - mAgeSmPost);
             const float r = std::fabs(x);
             mEnvPost += (r > mEnvPost ? mEnvAtkPost : mEnvRelPost) * (r - mEnvPost);
             const float push = pushOf(mEnvPost);
 
             // wet mix: level-dependent, bounded <= 0.12; default 0
-            float encTarget = kEncBase * (0.5f * mThumpSm + 0.5f * mThumpSm * push
-                                          + 0.25f * mAgeSm * push);
+            float encTarget = kEncBase * (0.5f * mThumpSmPost + 0.5f * mThumpSmPost * push
+                                          + 0.25f * mAgeSmPost * push);
             encTarget = std::min(encTarget, kEncMax);
             mEncMixSm += mMixK * (encTarget - mEncMixSm);
 
             // enclosure feedback scaled by Thump (bounded)
-            const float gA = std::min(kGmaxHard, kGsetA + kGthump * mThumpSm);
-            const float gB = std::min(kGmaxHard, kGsetB + kGthump * mThumpSm);
+            const float gA = std::min(kGmaxHard, kGsetA + kGthump * mThumpSmPost);
+            const float gB = std::min(kGmaxHard, kGsetB + kGthump * mThumpSmPost);
 
             // two parallel diffusion networks, crossfaded by Cab Size (artifact-free:
             // we crossfade OUTPUTS, never delay times -> no pitch warble)
@@ -399,16 +419,16 @@ private:
     void rebuildStageA(float push)
     {
         // A1: 90 Hz Fs resonance peak — deviates with Thump*envelope, ceiling +3 dB.
-        const float f0 = 90.0f * (1.0f - 0.12f * mThumpSm);
-        const float Q  = 0.9f + 0.9f * mThumpSm;
-        float g1 = kDepthA1 * mThumpSm * push;
+        const float f0 = 90.0f * (1.0f - 0.12f * mThumpSmPre);
+        const float Q  = 0.9f + 0.9f * mThumpSmPre;
+        float g1 = kDepthA1 * mThumpSmPre * push;
         g1 = std::min(g1, 3.0f);
         const Biquad n1 = Biquad::peaking(mFs, std::min((double)f0, 0.45 * mFs), (double)Q, (double)g1);
         mA1.copyCoeffsFrom(n1);
         mA1Db = g1;
 
         // A2: 2 kHz Le inductance shelf — dynamic droop (env) + static Age ease. -3 dB floor.
-        float g2 = -(kDepthA2 * push + kHfEase * mAgeSm);
+        float g2 = -(kDepthA2 * push + kHfEase * mAgeSmPre);
         g2 = std::max(g2, -3.0f);
         const Biquad n2 = Biquad::highshelf(mFs, std::min(2000.0, 0.45 * mFs), (double)g2, 0.7);
         mA2.copyCoeffsFrom(n2);
@@ -417,24 +437,46 @@ private:
         // B3: dynamic low-band cone POWER COMPRESSION as a clean magnitude low-shelf
         // (series filter, NOT a parallel delta -> no phase-comb). Gain reduction only,
         // floored at -2 dB. Identity at rest (grDb 0).
-        float grDb = -(kAgeComp * mAgeSm + kEnvComp * mAgeSm * push);
+        float grDb = -(kAgeComp * mAgeSmPre + kEnvComp * mAgeSmPre * push);
         grDb = std::max(grDb, -2.0f);
         const Biquad n3 = Biquad::lowshelf(mFs, std::min(200.0, 0.45 * mFs), (double)grDb, 0.7);
         mLowShelf.copyCoeffsFrom(n3);
         mLowCompDb = grDb;
     }
 
+    // inactive->active edge: clear the frozen stage state (envelopes + filter/AP
+    // memory) so re-engage starts from the transparent edge. DESIGN.md §0 says the
+    // gate covers smoothers/envelope; this makes the code honour that. The macro
+    // smoothers are intentionally left alone — they ramp from ~0 and scale every
+    // delta, so this reset is inaudible (guarded by T8's click-free re-engage).
+    void resetPreState()
+    {
+        mEnvPre  = 0.0f;
+        mBandEnv = 0.0f;
+        mA1.reset(); mA2.reset(); mLowShelf.reset();
+        mHp800.reset(); mLp3800.reset();
+        mHb.reset();
+        mCtrl = 0;
+        rebuildStageA(0.0f); // identity coeffs at the transparent edge
+    }
+    void resetPostState()
+    {
+        mEnvPost  = 0.0f;
+        mEncMixSm = 0.0f;
+        for (int i = 0; i < 3; ++i) { mApA[i].reset(); mApB[i].reset(); }
+    }
+
     bool preActive() const
     {
         return mAgeTarget > 0.0f || mThumpTarget > 0.0f
-               || std::fabs(mAgeSm - mAgeTarget) > kSettle
-               || std::fabs(mThumpSm - mThumpTarget) > kSettle;
+               || std::fabs(mAgeSmPre - mAgeTarget) > kSettle
+               || std::fabs(mThumpSmPre - mThumpTarget) > kSettle;
     }
     bool postActive() const
     {
         return mThumpTarget > 0.0f || mAgeTarget > 0.0f
-               || std::fabs(mThumpSm - mThumpTarget) > kSettle
-               || std::fabs(mAgeSm - mAgeTarget) > kSettle
+               || std::fabs(mThumpSmPost - mThumpTarget) > kSettle
+               || std::fabs(mAgeSmPost - mAgeTarget) > kSettle
                || std::fabs(mSizeSm - mSizeTarget) > kSettle
                || mEncMixSm > kSettle;
     }
@@ -447,13 +489,14 @@ private:
             if (std::fabs(b->z2) < 1.0e-30f) b->z2 = 0.0f;
         }
         if (std::fabs(mEnvPre) < 1.0e-30f) mEnvPre = 0.0f;
+        if (std::fabs(mBandEnv) < 1.0e-30f) mBandEnv = 0.0f; // Stage B1 band follower
     }
     void flushDenormalsPost()
     {
         for (int i = 0; i < 3; ++i)
         {
-            if (std::fabs(mApA[i].lp) < 1.0e-30f) mApA[i].lp = 0.0f;
-            if (std::fabs(mApB[i].lp) < 1.0e-30f) mApB[i].lp = 0.0f;
+            mApA[i].flushDenormals(); // one-pole damping + recursive delay line
+            mApB[i].flushDenormals();
         }
         if (std::fabs(mEnvPost) < 1.0e-30f) mEnvPost = 0.0f;
         if (std::fabs(mEncMixSm) < 1.0e-30f) mEncMixSm = 0.0f;
@@ -483,9 +526,16 @@ private:
     double mFs = 48000.0;
     bool mPrepared = false;
 
-    // macro targets + smoothers
+    // macro targets + smoothers. Pre and post keep SEPARATE Age/Thump smoother
+    // state: the shared macros are stepped once in each stage's per-sample loop, so
+    // the de-zip is a true ~25 ms no matter which stages are active (previously both
+    // stages stepped the same members -> ~12.5 ms, and rate-dependent on the mix).
     float mAgeTarget = 0.0f, mThumpTarget = 0.0f, mSizeTarget = 0.0f;
-    float mAgeSm = 0.0f, mThumpSm = 0.0f, mSizeSm = 0.0f;
+    float mAgeSmPre = 0.0f, mThumpSmPre = 0.0f;
+    float mAgeSmPost = 0.0f, mThumpSmPost = 0.0f;
+    float mSizeSm = 0.0f;
+    // inactive->active edge trackers (see resetPreState/resetPostState)
+    bool mPreWasActive = false, mPostWasActive = false;
 
     // smoothing coefficients
     float mMacroK = 0.02f, mMixK = 0.02f;
