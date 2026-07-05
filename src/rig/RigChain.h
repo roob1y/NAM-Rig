@@ -121,6 +121,11 @@ public:
     void setPremodSpread(float s) { premod.setSpread(s); } // 0 = dual-mono, 1 = 180°
     // Pre-amp delay pedal position: true = BEFORE the drive rack, false = AFTER it (default).
     void setPredelayPreDrive(bool b) { mPredelayPreDrive = b; }
+    // Stereo front-delay: in Dual, the post-drive predelay becomes mono-in / stereo-out
+    // (L lane -> Amp A, R lane -> Amp B) — independent delays whose R time = ratio·L for
+    // the Edge/AVA long+short spread. Off/Solo/pre-drive keep the mono predelay.
+    void setPredelayStereo(bool b) { mPredelayStereo = b; }
+    void setPredelaySpread(float s) { predelay.setSpread(s); } // 0 = dual-mono, 1 = R at half of L
     // Envelope filter position: false = BEFORE the drive rack (default, classic
     // auto-wah-into-drive), true = AFTER the drive rack (wah on the driven signal).
     void setEnvFilterPostDrive(bool b) { mEnvFilterPostDrive = b; }
@@ -297,12 +302,17 @@ public:
         // keep the mono premod on ch0 here, so those paths stay bit-exact.
         const bool stereoActive = mPremodStereo && (mMode == Dual)
                                   && !mPremodPreDrive && !premod.isBypassed();
+        // Same deal for the front delay: in Dual with an active post-drive predelay it is
+        // deferred to a per-voice mono-in/stereo-out pass after the split (below), so its
+        // L feeds Amp A and R feeds Amp B. Solo / pre-drive / bypassed keep the mono pass.
+        const bool predStereoActive = mPredelayStereo && (mMode == Dual)
+                                      && !mPredelayPreDrive && !predelay.isBypassed();
 
         if (!drive.isBypassed())
             { drive.process(ch0, numSamples); heal(drive, ch0, numSamples); }
         if (!mPremodPreDrive && !premod.isBypassed() && !stereoActive)
             { premod.process(ch0, numSamples); heal(premod, ch0, numSamples); }
-        if (!mPredelayPreDrive && !predelay.isBypassed())
+        if (!mPredelayPreDrive && !predelay.isBypassed() && !predStereoActive)
             { predelay.process(ch0, numSamples); heal(predelay, ch0, numSamples); }
         // Env filter POST-drive branch: sweep the already-driven signal (fatter,
         // cocked-wah/synthy). Still mono, still before the amp split. Zero latency.
@@ -334,6 +344,18 @@ public:
             premod.processStereo(vA, vB, numSamples);
             heal(premod, vA, numSamples);
             heal(premod, vB, numSamples);
+        }
+        // Stereo front-delay pass, AFTER the stereo mod (preserves the mono chain's
+        // premod -> predelay order). Independent per-lane delays: L (Amp A) at the base
+        // time, R (Amp B) at ratio·base -> the Edge/AVA long+short spread, each repeat
+        // then coloured by its own amp. Both voices are filled (predStereoActive implies
+        // Dual). Doing predelay here also restores the intended order that the mono
+        // pre-split predelay inverted when only the premod was stereo.
+        if (predStereoActive)
+        {
+            predelay.processStereo(vA, vB, numSamples);
+            heal(predelay, vA, numSamples);
+            heal(predelay, vB, numSamples);
         }
 
         double compA = 0.0, compB = 0.0;
@@ -686,6 +708,7 @@ private:
     bool mPremodPreDrive = false; // pre-amp mod pedal: before (true) / after (false) the drive rack
     bool mPremodStereo = false;   // Dual + post-drive: premod is mono-in/stereo-out (L->Amp A, R->Amp B)
     bool mPredelayPreDrive = false; // pre-amp delay pedal: before (true) / after (false) the drive rack
+    bool mPredelayStereo = false;   // Dual + post-drive: predelay is mono-in/stereo-out (L->Amp A, R->Amp B)
     bool mEnvFilterPostDrive = false; // env filter: before (false, default) / after (true) the drive rack
     float mInTrimA = 1.0f, mInTrimB = 1.0f;
     float mOutTrimA = 1.0f, mOutTrimB = 1.0f;

@@ -6214,6 +6214,15 @@ public:
         mPosAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
             apvts, "predelayPos", mPos);
 
+        // Mono vs Stereo front-delay. In Dual, Stereo makes the pedal mono-in/stereo-out:
+        // L lane -> Amp A, R lane -> Amp B (independent delays, R time = ratio·L). The
+        // Spread knob (shown only in Stereo) sets the L/R time offset. No effect in Solo/pre-drive.
+        mStereo.addItemList({"Mono", "Stereo"}, 1);
+        addAndMakeVisible(mStereo);
+        mStereoAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, "predelayStereo", mStereo);
+        mStereo.onChange = [this] { refresh(); };
+
         // Memory Man CHORUS/VIBRATO switch (shown only for that model) — selects the LFO
         // speed range (chorus = slow, vibrato = fast), like the EH7850's toggle.
         mChorusVib.addItemList({"Chorus", "Vibrato"}, 1);
@@ -6238,7 +6247,8 @@ public:
         const std::pair<const char *, const char *> defs[] = {
             {"predelayTime", "Time"}, {"predelayFeedback", "Feedback"},
             {"predelayMix", "Mix"}, {"predelayMod", "Mod"}, {"predelayTone", "Tone"},
-            {"predelayLevel", "Level"}}; // index 5 = Memory Man master Volume (DMM only)
+            {"predelayLevel", "Level"}, // index 5 = Memory Man master Volume (DMM only)
+            {"predelaySpread", "Spread"}}; // index 6 = stereo L/R time spread (Stereo only)
         for (const auto &[id, caption] : defs)
         {
             mKnobs.push_back(std::make_unique<LabeledKnob>(apvts, id, caption));
@@ -6254,9 +6264,11 @@ public:
         const int m = (int)mApvts.getRawParameterValue("predelayModel")->load();
         static const char *const kNames[] = {"Boss DD-7", "Carbon Copy", "Memory Man"};
         setHeaderRight(kNames[juce::jlimit(0, 2, m)]);
-        if (m == mLastModel)
-            return; // control set only changes with the pedal model
+        const bool stereoOn = (int)mApvts.getRawParameterValue("predelayStereo")->load() > 0;
+        if (m == mLastModel && stereoOn == mLastStereo)
+            return; // control set only changes with the pedal model / stereo toggle
         mLastModel = m;
+        mLastStereo = stereoOn;
         if (mModeKnob) mModeKnob->setVisible(m == 0); // the MODE rotary is a DD-7 control only
         mChorusVib.setVisible(m == 2);                // Chorus/Vibrato switch is a Memory Man control only
         // AUTHENTIC per-pedal control set + legends (like PremodPanel shows only the
@@ -6298,6 +6310,8 @@ public:
             set(3, true, "Mod"); set(4, true, "Tone"); set(5, false, "");
             break;
         }
+        // Stereo Spread (index 6) — independent of model; shown only in Stereo (Dual).
+        set(6, stereoOn, "Spread");
         resized(); // re-centre the now-visible knobs
     }
 
@@ -6305,15 +6319,17 @@ public:
     {
         auto area = bodyArea().reduced(24, 14);
 
-        // Top row: Model + Sync + Position pickers side by side.
+        // Top row: Model + Sync + Position + Mono/Stereo pickers side by side.
         auto pickers = area.removeFromTop(30);
         const int gap = 12;
-        const int w = (pickers.getWidth() - 2 * gap) / 3;
+        const int w = (pickers.getWidth() - 3 * gap) / 4;
         mModel.setBounds(pickers.removeFromLeft(w));
         pickers.removeFromLeft(gap);
         mSync.setBounds(pickers.removeFromLeft(w));
         pickers.removeFromLeft(gap);
         mPos.setBounds(pickers.removeFromLeft(w));
+        pickers.removeFromLeft(gap);
+        mStereo.setBounds(pickers.removeFromLeft(w));
 
         area.removeFromTop(16);
 
@@ -6342,11 +6358,12 @@ public:
 
 private:
     juce::AudioProcessorValueTreeState &mApvts;
-    juce::ComboBox mModel, mSync, mPos, mChorusVib; // mChorusVib = Memory Man Chorus/Vibrato switch
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mModelAtt, mSyncAtt, mPosAtt, mChorusVibAtt;
+    juce::ComboBox mModel, mSync, mPos, mStereo, mChorusVib; // mChorusVib = Memory Man Chorus/Vibrato switch
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mModelAtt, mSyncAtt, mPosAtt, mStereoAtt, mChorusVibAtt;
     std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
     std::unique_ptr<LabeledKnob> mModeKnob; // DD-7 MODE rotary (choice param, hardware-style)
     int mLastModel = -1;
+    bool mLastStereo = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PreDelayPanel)
 };

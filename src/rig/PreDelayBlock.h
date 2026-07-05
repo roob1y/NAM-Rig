@@ -1,10 +1,19 @@
 #pragma once
-// PreDelayBlock — a MONO delay pedal that sits IN FRONT OF THE AMP, in the shared
-// pre section (after the drive rack, before the A/B split — the classic pedalboard
+// PreDelayBlock — a delay pedal that sits IN FRONT OF THE AMP, in the shared pre
+// section (after the drive rack, before the A/B split — the classic pedalboard
 // "delay into the amp" spot). Deliberately DISTINCT from the post-cab STEREO
-// DelayBlock: this one is coloured by the amp downstream, is mono, and is voiced
-// after three SPECIFIC real delay pedals rather than the tape/clean characters of
-// the stereo unit. Same per-model-fit ethos as DriveBlock's pedal models.
+// DelayBlock: this one is coloured by the amp downstream and is voiced after three
+// SPECIFIC real delay pedals rather than the tape/clean characters of the stereo
+// unit. Same per-model-fit ethos as DriveBlock's pedal models.
+//
+// MONO by default (process()), but in the dual-amp rig it can run MONO-IN /
+// STEREO-OUT (processStereo(): L lane -> Amp A, R lane -> Amp B) so the front delay
+// spreads across the two amps — L repeats coloured by Amp A, R repeats by Amp B.
+// The two lanes are INDEPENDENT delays (no cross-feed / ping-pong) whose only
+// difference is the delay TIME: R = ratio·L, ratio = 1 - 0.5·spread (spread 0 =
+// dual-mono, spread 1 = R at half of L). This is the Edge/AVA "long one side, short
+// the other" stereo. process() drives mLaneL ONLY so it stays BIT-EXACT to the
+// pre-stereo block (the SoloA / mono regression gate).
 //
 // The three models (Robbie's pick), each grounded in how the real unit actually
 // makes sound (BBD stage/clock physics, companding, converter bandwidth, preamp):
@@ -53,7 +62,7 @@
 //                         — full-wet = vibrato, mid = chorus — plus a low-Z (~100 kΩ inverting)
 //                         loading input. Sings and washes; self-oscillates readily.
 //
-// Signal per sample (mono):
+// Signal per sample (mono, one lane):
 //   dry = x
 //   wet = line.read(delay + mod)           // fractional read, wow/chorus modulated
 //   wet = in-loop low-cut (HP)             // controls bass build-up in the feedback
@@ -238,37 +247,43 @@ public:
         // Ring sized for TWICE the full Time range: REVERSE mode reads backward through
         // the buffer at 2x the write rate, so a T-length reverse grain spans 2T of line.
         const int maxDelay = (int)std::ceil((2.0f * kMaxTimeMs + 20.0f) * 0.001f * (float)mFs);
-        mLine.prepare(maxDelay);
-        mLfo.prepare(mFs);
-        mLfo.setWaveform(lfoWaveFor()); // per-model LFO waveform (Memory Man triangle, else sine)
         mSmoothK = 1.0f - std::exp((float)(-1.0 / (0.010 * mFs))); // 10 ms de-zip on mix
         updateGlide();
-        mIo.prepare(mFs);
-        applyIo();
-        mAnalogLp = Biquad::lowpass(mFs, std::min(kAnalogLpHz, 0.45 * mFs), 0.5); // DD-7 Analog (DM-2) darkening
-        rebuildFixed(true);
+        for (Lane *ln : {&mLaneL, &mLaneR})
+        {
+            ln->line.prepare(maxDelay);
+            ln->lfo.prepare(mFs);
+            ln->lfo.setWaveform(lfoWaveFor()); // per-model LFO waveform (Memory Man triangle, else sine)
+            ln->io.prepare(mFs);
+            applyIo(*ln);
+            ln->analogLp = Biquad::lowpass(mFs, std::min(kAnalogLpHz, 0.45 * mFs), 0.5); // DD-7 Analog (DM-2) darkening
+            rebuildFixed(*ln, true);
+        }
         reset();
         mPrepared = true;
     }
 
     void reset() override
     {
-        mLine.reset();
-        mLfo.reset();
-        mIo.reset();
-        mLoopHp.reset();
-        mLoopLp.reset();
-        mMid.reset();
-        mTone.reset();
-        mPres.reset();
-        mAnalogLp.reset();
-        mSatX1 = mSatX2 = 0.0;
-        mDcX1 = mDcY1 = 0.0;
-        mASatX1 = mASatX2 = mADcX1 = mADcY1 = 0.0;
-        mRevPhase = 0.0;
-        mBaseZ = (double)currentTimeMs();
-        mMixZ = mMix;
-        mLevelZ = mLevel;
+        for (Lane *ln : {&mLaneL, &mLaneR})
+        {
+            ln->line.reset();
+            ln->lfo.reset();
+            ln->io.reset();
+            ln->loopHp.reset();
+            ln->loopLp.reset();
+            ln->mid.reset();
+            ln->tone.reset();
+            ln->pres.reset();
+            ln->analogLp.reset();
+            ln->satX1 = ln->satX2 = 0.0;
+            ln->dcX1 = ln->dcY1 = 0.0;
+            ln->aSatX1 = ln->aSatX2 = ln->aDcX1 = ln->aDcY1 = 0.0;
+            ln->revPhase = 0.0;
+            ln->baseZ = (double)currentTimeMs();
+            ln->mixZ = mMix;
+            ln->levelZ = mLevel;
+        }
     }
 
     // ---- parameters (audio thread) ----
@@ -279,8 +294,17 @@ public:
         {
             mModel = mm;
             mVoicing = voicingFor(mm);
-            if (mPrepared) { updateGlide(); applyIo(); rebuildFixed(true); mLfo.setRateHz(mVoicing.modRateHz);
-                             mLfo.setWaveform(lfoWaveFor()); }
+            if (mPrepared)
+            {
+                updateGlide();
+                for (Lane *ln : {&mLaneL, &mLaneR})
+                {
+                    applyIo(*ln);
+                    rebuildFixed(*ln, true);
+                    ln->lfo.setRateHz(mVoicing.modRateHz);
+                    ln->lfo.setWaveform(lfoWaveFor());
+                }
+            }
         }
     }
     void setDd7Mode(int m) { mMode = std::clamp(m, 0, (int)kNumDd7Modes - 1); }
@@ -292,9 +316,12 @@ public:
     void setMod(float m) { mModAmt = std::clamp(m, 0.0f, 1.0f); }        // scales the built-in mod depth
     void setLevel(float l) { mLevel = std::clamp(l, 0.0f, 1.0f); }       // Memory Man master Volume/Level (unity at 1)
     void setChorusVib(int m) { mChorusVib = std::clamp(m, 0, 1); }       // Memory Man 0=Chorus (slow) 1=Vibrato (fast)
+    // Stereo L/R time spread (only read by processStereo): 0 = dual-mono (R time == L),
+    // 1 = R at half of L. Default 0.5 -> R = 0.75·L (a dotted-eighth-ish long/short pair).
+    void setSpread(float s) { mStereoSpread = std::clamp(s, 0.0f, 1.0f); }
     void setToneHz(float hz)
     {
-        if (hz != mToneHz) { mToneHz = hz; if (mPrepared) rebuildTone(); }
+        if (hz != mToneHz) { mToneHz = hz; if (mPrepared) { rebuildTone(mLaneL); rebuildTone(mLaneR); } }
     }
 
     // Effective (sync-resolved) base delay, clamped to the model's real maximum.
@@ -309,9 +336,156 @@ public:
         return std::clamp(t, kMinTimeMs, maxMs);
     }
 
+    // MONO: drive the L lane ONLY at the base time -> BIT-EXACT to the pre-stereo block.
     void process(float *mono, int numSamples) override
     {
-        mIo.processIn(mono, numSamples); // input buffer / coupling stage (colours dry + delay input)
+        processLane(mono, numSamples, mLaneL, currentTimeMs());
+    }
+
+    // STEREO (mono-in / stereo-out): L lane reads at the base time -> Amp A; R lane at
+    // ratio·base (ratio = 1 - 0.5·spread) -> Amp B. The width comes from the L/R read-time
+    // difference (Edge/AVA long+short).
+    //
+    // SHARED FEEDBACK (2026-07-05 fix): both lanes recirculate the MONO SUM of the two wets,
+    // not their own. Two INDEPENDENT feedback delays at different times are two comb filters
+    // that resonate at different frequencies, so a sustained note lands on one lane's peak and
+    // the other's notch -> several dB of L/R level imbalance (measured up to +7 dB left, worst
+    // at high feedback; the resonance is the amplifier). Feeding both lanes one common
+    // feedback signal makes a SINGLE shared comb both taps read, so the levels stay balanced
+    // while the different read times still give the stereo width. At spread 0 the two wets are
+    // identical so the sum is a no-op -> still bit-exact to the mono/dual-mono path.
+    void processStereo(float *left, float *right, int numSamples)
+    {
+        const float tL = currentTimeMs();
+        const float ratio = 1.0f - 0.5f * mStereoSpread; // 1.0 (dual-mono) .. 0.5
+        const float tR = std::max(kMinTimeMs, tL * ratio);
+
+        mLaneL.io.processIn(left, numSamples);
+        mLaneR.io.processIn(right, numSamples);
+
+        const int mode = (mModel == kDD7) ? mMode : (int)kMode800;
+        const bool hold = (mode == kHold), reverse = (mode == kReverse);
+        const bool analog = (mode == kAnalog), modulate = (mode == kModulate);
+        float lfoRate = mVoicing.modRateHz;
+        if (mModel == kDD7 && modulate)  lfoRate = kModulateRateHz;
+        else if (mModel == kMemoryMan)   lfoRate = mChorusVib ? kDmmVibratoRateHz : kDmmChorusRateHz;
+        mLaneL.lfo.setRateHz(lfoRate);
+        mLaneR.lfo.setRateHz(lfoRate);
+        const float fb = hold ? 1.0f : (mFeedback * mVoicing.fbCeiling);
+        const float modAmt = modulate ? kModulateDepth
+                           : (mModel == kCarbonCopy ? kCarbonCopyMod : mModAmt);
+        updateBandwidth(mLaneL, tL);
+        updateBandwidth(mLaneR, tR);
+        const double fsK = 0.001 * mFs;
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float dryL = left[i], dryR = right[i];
+            float outwL = 0.0f, outwR = 0.0f;
+            const float wetL = laneRecirc(mLaneL, dryL, reverse, analog, modAmt, fsK, tL, outwL);
+            const float wetR = laneRecirc(mLaneR, dryR, reverse, analog, modAmt, fsK, tR, outwR);
+            // Shared feedback: both lanes recirculate the same mono-summed wet -> one common
+            // comb (balanced L/R) instead of two resonances fighting. Each lane still injects
+            // its OWN dry, so a clean/driven split (driveSend) keeps its per-amp character.
+            const float fbWet = 0.5f * (wetL + wetR);
+            mLaneL.line.write(loopLimit(hold ? (fb * fbWet) : (dryL + fb * fbWet)));
+            mLaneR.line.write(loopLimit(hold ? (fb * fbWet) : (dryR + fb * fbWet)));
+            left[i]  = mixLaw(mLaneL, dryL, outwL);
+            right[i] = mixLaw(mLaneR, dryR, outwR);
+            mLaneL.lfo.advance();
+            mLaneR.lfo.advance();
+        }
+
+        mLaneL.io.processOut(left, numSamples);
+        mLaneR.io.processOut(right, numSamples);
+        flushDenormals(mLaneL);
+        flushDenormals(mLaneR);
+    }
+
+    double latencySamples() const override { return 0.0; }
+
+    // ---- verification hooks ----
+    Model model() const { return mModel; }
+    Voicing currentVoicing() const { return mVoicing; }
+    float currentLoopLpHz() const { return mLaneL.loopLpHzBuilt; } // effective in-loop bandwidth corner (L lane)
+
+private:
+    // One delay lane = a full independent mono delay (line + feedback loop + filters +
+    // modulation + I/O). process() uses mLaneL only (bit-exact mono); processStereo uses
+    // both. Each lane owns its LFO so the two lanes can run at different times without
+    // any shared state — mono stays byte-identical to the pre-stereo single-lane block.
+    struct Lane
+    {
+        FracDelayLine line;
+        Lfo lfo;
+        IoStage io; // per-lane input+output stage (impedance/coupling/buffer)
+        Biquad loopHp, loopLp, mid, tone, pres, analogLp;
+        bool loopHpOn = false, loopLpOn = true, midOn = false, toneOn = false, presOn = false;
+        float loopLpHzBuilt = -1.0f; // last-built in-loop bandwidth corner (BBD tracks time)
+        double revPhase = 0.0;       // Reverse-mode grain phase
+        double aSatX1 = 0.0, aSatX2 = 0.0, aDcX1 = 0.0, aDcY1 = 0.0; // Analog-mode sat state
+        double satX1 = 0.0, satX2 = 0.0;   // cubic ADAA history
+        double dcX1 = 0.0, dcY1 = 0.0;     // even-harmonic DC blocker
+        double baseZ = 350.0;              // glided base delay (ms)
+        float mixZ = 0.28f, levelZ = 1.0f; // smoothed Mix / Level
+    };
+
+    // Per-sample core for ONE lane: advance the Mix/Level smoothers + delay glide, read
+    // the wet at the (modulated) delay time, run the in-loop filters/sat, and compute the
+    // output-once presence wet. Returns the RECIRCULATING (filtered) wet to feed back and
+    // sets `outwOut` (the presence-shaped wet for the output mix). Does NOT write the line
+    // or advance the LFO — the caller owns the feedback write (so mono uses its own wet and
+    // the stereo path can feed both lanes a SHARED/summed wet). Byte-identical maths to the
+    // former inline loop, so mono stays bit-exact.
+    float laneRecirc(Lane &ln, float dry, bool reverse, bool analog, float modAmt,
+                     double fsK, float baseTarget, float &outwOut)
+    {
+        (void)dry; // dry is the caller's; kept in the signature for symmetry/readability
+        ln.mixZ += mSmoothK * (mMix - ln.mixZ);
+        ln.levelZ += mSmoothK * (mLevel - ln.levelZ);
+        // Glide the base delay toward the target (analog = slow pitch swoop; digital =
+        // quick, click-free). Snap when within a hair to kill one-pole crawl.
+        ln.baseZ += (double)mGlideK * ((double)baseTarget - ln.baseZ);
+        if (std::abs((double)baseTarget - ln.baseZ) < 1.0e-4) ln.baseZ = baseTarget;
+
+        const double lfo = (double)ln.lfo.value();
+        // Modulation depth is a FIXED absolute ms (not a % of the delay) -> constant musical
+        // pitch mod at every delay (pitch dev = depthMs·4·rate). (Robbie ear-fix 2026-07-04.)
+        const double modMs = (double)modAmt * (double)mVoicing.modDepthMs * lfo;
+        const double tSamp = std::max(3.0, (ln.baseZ + modMs) * fsK);
+        float wet = reverse ? reverseRead(ln, tSamp) : ln.line.readFrac6(tSamp - 1.0); // REVERSE = grain playback
+
+        // In-loop tone (recirculates -> compounds per repeat = analog "repeats darken"):
+        if (ln.loopHpOn) wet = ln.loopHp.processSample(wet); // low-cut
+        if (ln.loopLpOn) wet = ln.loopLp.processSample(wet); // bandwidth (BBD Nyquist / converter)
+        if (ln.midOn)    wet = ln.mid.processSample(wet);    // Memory Man mid bump
+        if (ln.toneOn)   wet = ln.tone.processSample(wet);   // user high-cut
+        if (analog) { wet = ln.analogLp.processSample(wet); wet = analogSat(ln, wet); } // DD-7 ANALOG
+        // Companding / preamp soft-clip (cubic ADAA, in-loop): BBD compander knee.
+        if (mVoicing.satDrive > 0.0f) wet = loopSat(ln, wet);
+
+        // Output-once presence sheen (not recirculated -> shapes timbre without compounding).
+        float outw = wet;
+        if (ln.presOn) outw = ln.pres.processSample(outw);
+        outwOut = outw;
+        return wet;
+    }
+
+    // Output blend for one lane. DD-7 / Carbon Copy ADD the wet on top of a unity dry;
+    // Memory Man BLEND is a TRUE CROSSFADE (full wet = vibrato, mid = chorus) + master Level.
+    float mixLaw(Lane &ln, float dry, float outw) const
+    {
+        const bool crossfade = (mModel == kMemoryMan);
+        const float blended = crossfade ? ((1.0f - ln.mixZ) * dry + ln.mixZ * outw)
+                                        : (dry + ln.mixZ * outw);
+        return (mModel == kMemoryMan) ? (blended * ln.levelZ) : blended;
+    }
+
+    // Process one lane in place at the given (pre-glide) base delay time. This is the
+    // former mono process() loop, now parameterised on the lane + its target time.
+    void processLane(float *buf, int numSamples, Lane &ln, float baseTarget)
+    {
+        ln.io.processIn(buf, numSamples); // input buffer / coupling stage (colours dry + delay input)
         // DD-7 MODE (other models behave as a plain digital delay = kMode800):
         const int mode = (mModel == kDD7) ? mMode : (int)kMode800;
         const bool hold = (mode == kHold), reverse = (mode == kReverse);
@@ -321,8 +495,7 @@ public:
         float lfoRate = mVoicing.modRateHz;
         if (mModel == kDD7 && modulate)  lfoRate = kModulateRateHz;
         else if (mModel == kMemoryMan)   lfoRate = mChorusVib ? kDmmVibratoRateHz : kDmmChorusRateHz;
-        mLfo.setRateHz(lfoRate);
-        const float baseTarget = currentTimeMs();
+        ln.lfo.setRateHz(lfoRate);
         // Feedback: knob (0..1) scaled by the model ceiling; HOLD locks it to 1 (freeze).
         // Analog models push past unity (self-oscillation) — the in-loop companding
         // soft-clip + loopLimit bound the level so it never runs away.
@@ -334,77 +507,24 @@ public:
         // BBD bandwidth tracks the clock: recompute the in-loop LP corner for this
         // block from the target time (cheap — once per block, not per sample). Digital
         // models keep their fixed converter bandwidth.
-        updateBandwidth(baseTarget);
+        updateBandwidth(ln, baseTarget);
         const double fsK = 0.001 * mFs;
 
         for (int i = 0; i < numSamples; ++i)
         {
-            mMixZ += mSmoothK * (mMix - mMixZ);
-            mLevelZ += mSmoothK * (mLevel - mLevelZ);
-            // Glide the base delay toward the target (analog = slow pitch swoop; digital
-            // = quick, click-free). Snap when within a hair to kill one-pole crawl.
-            mBaseZ += (double)mGlideK * ((double)baseTarget - mBaseZ);
-            if (std::abs((double)baseTarget - mBaseZ) < 1.0e-4) mBaseZ = baseTarget;
-
-            const float dry = mono[i];
-            const double lfo = (double)mLfo.value();
-            // Modulation depth is a FIXED absolute ms (not a % of the delay). BBD clock warble is
-            // physically a % of the period, but realised that way the pitch swing scales with the
-            // delay time -> an unusable multi-octave warble at long delays (measured ~1.5 oct @
-            // 300 ms). A fixed ms gives CONSTANT pitch modulation at every delay (pitch dev =
-            // depthMs·4·rate) = a musical, predictable chorus/vibrato. (Robbie ear-fix 2026-07-04.)
-            const double modMs = (double)modAmt * (double)mVoicing.modDepthMs * lfo;
-            const double tSamp = std::max(3.0, (mBaseZ + modMs) * fsK);
-            float wet = reverse ? reverseRead(tSamp) : mLine.readFrac6(tSamp - 1.0); // REVERSE = grain playback
-
-            // In-loop tone (recirculates -> compounds per repeat, the authentic
-            // "repeats get darker each pass" of an analog delay):
-            if (mLoopHpOn) wet = mLoopHp.processSample(wet); // low-cut
-            if (mLoopLpOn) wet = mLoopLp.processSample(wet); // bandwidth (BBD Nyquist / converter)
-            if (mMidOn)    wet = mMid.processSample(wet);    // Memory Man mid bump
-            if (mToneOn)   wet = mTone.processSample(wet);   // user high-cut
-            if (analog) { wet = mAnalogLp.processSample(wet); wet = analogSat(wet); } // DD-7 ANALOG = DM-2 dark + warm
-
-            // Companding / preamp soft-clip (cubic 2nd-order ADAA, in-loop). Stands in for
-            // the BBD compander's compression knee (Carbon Copy SA571 / Memory Man NE570/571):
-            // near-transparent at normal level, bends only on overload. Bounds the feedback loop.
-            if (mVoicing.satDrive > 0.0f) wet = loopSat(wet);
-
-            // Record input into the line; HOLD mutes the input so the buffer freezes/loops.
-            mLine.write(loopLimit(hold ? (fb * wet) : (dry + fb * wet)));
-
-            // Output-once presence sheen (not recirculated -> shapes timbre without
-            // compounding down the tail): a digital top-end lift.
-            float outw = wet;
-            if (mPresOn) outw = mPres.processSample(outw);
-
-            // Mix law. DD-7 / Carbon Copy: the DRY stays at unity (a fixed analog
-            // through-path) and the WET is ADDED on top (E.LEVEL/Mix scales the wet) —
-            // NOT a crossfade. Memory Man: the BLEND knob is a TRUE CROSSFADE (100% dry ->
-            // equal at centre -> 100% wet), which is how full-wet gives vibrato (wet only)
-            // and a mid setting gives chorus (wet beating against dry). The feedback write
-            // above is unchanged (the delay input is always dry + fb·wet), so only the
-            // output blend differs per model.
-            const bool crossfade = (mModel == kMemoryMan);
-            const float blended = crossfade ? ((1.0f - mMixZ) * dry + mMixZ * outw)
-                                            : (dry + mMixZ * outw);
-            // The Memory Man has a master Volume/Level knob (unity at 1); the other pedals
-            // have no such control, so their output is the blend unscaled.
-            mono[i] = (mModel == kMemoryMan) ? (blended * mLevelZ) : blended;
-            mLfo.advance();
+            const float dry = buf[i];
+            float outw = 0.0f;
+            // Read + in-loop-filter this lane's recirculating wet (no line write yet).
+            const float wet = laneRecirc(ln, dry, reverse, analog, modAmt, fsK, baseTarget, outw);
+            // Mono / own-lane feedback: the delay input is dry + fb·its OWN wet.
+            ln.line.write(loopLimit(hold ? (fb * wet) : (dry + fb * wet)));
+            buf[i] = mixLaw(ln, dry, outw);
+            ln.lfo.advance();
         }
-        mIo.processOut(mono, numSamples); // output buffer / coupling stage (per model)
-        flushDenormals();
+        ln.io.processOut(buf, numSamples); // output buffer / coupling stage (per model)
+        flushDenormals(ln);
     }
 
-    double latencySamples() const override { return 0.0; }
-
-    // ---- verification hooks ----
-    Model model() const { return mModel; }
-    Voicing currentVoicing() const { return mVoicing; }
-    float currentLoopLpHz() const { return mLoopLpHzBuilt; } // effective in-loop bandwidth corner
-
-private:
     // Loop safety/headroom limiter: TRANSPARENT below ±kLoopLin so normal repeats are
     // bit-clean (critical for the clean digital models), soft-limiting above so that at
     // max feedback the loop SWELLS and SUSTAINS to a bounded drone — the DD-7's digital-
@@ -424,22 +544,22 @@ private:
     // (shared kernel, Saturation.h), plus an optional even-harmonic (cosh) term for
     // the asymmetric BBD/preamp warmth, DC-blocked so nothing accumulates in the
     // loop. Same construction as DelayBlock's tape saturation, single channel.
-    float loopSat(float x)
+    float loopSat(Lane &ln, float x)
     {
         const double drive = (double)mVoicing.satDrive;
         const double asym  = (double)mVoicing.satAsym;
         const double xb = (double)x * drive;
-        const double y = sat::cubicADAA2(xb, mSatX1, mSatX2);
-        mSatX2 = mSatX1;
-        mSatX1 = xb;
+        const double y = sat::cubicADAA2(xb, ln.satX1, ln.satX2);
+        ln.satX2 = ln.satX1;
+        ln.satX1 = xb;
         double yb = (drive > 1.0e-9) ? y / drive : (double)x;
         if (asym != 0.0)
         {
             const double xc = (double)x > 1.0 ? 1.0 : ((double)x < -1.0 ? -1.0 : (double)x);
             const double in = yb + asym * (std::cosh(kEvenShape * xc) - 1.0);
-            yb = in - mDcX1 + kDcBlockR * mDcY1; // one-pole DC blocker
-            mDcX1 = in;
-            mDcY1 = yb;
+            yb = in - ln.dcX1 + kDcBlockR * ln.dcY1; // one-pole DC blocker
+            ln.dcX1 = in;
+            ln.dcY1 = yb;
         }
         const float out = (float)yb;
         return std::isfinite(out) ? out : 0.0f;
@@ -451,38 +571,38 @@ private:
     // the buffer at 2x the write rate: absolute read = A - phase*T, i.e. newest-to-oldest).
     // The two half-offset grains use a sin^2 window that sums to unity, and the window is
     // 0 at the 2T->0 wrap, so the grain boundary doesn't click.
-    float reverseRead(double tSamp)
+    float reverseRead(Lane &ln, double tSamp)
     {
         const double T = std::max(64.0, tSamp);
         float out = 0.0f;
         for (int g = 0; g < 2; ++g)
         {
-            double ph = mRevPhase + 0.5 * (double)g;
+            double ph = ln.revPhase + 0.5 * (double)g;
             ph -= std::floor(ph);
-            const float s = mLine.readFrac6(std::max(2.0, 2.0 * ph * T)); // 2x sweep = true reverse
+            const float s = ln.line.readFrac6(std::max(2.0, 2.0 * ph * T)); // 2x sweep = true reverse
             const float win = 0.5f * (1.0f - std::cos(2.0 * 3.14159265358979323846 * ph));
             out += s * win;
         }
-        mRevPhase += 1.0 / T;
-        if (mRevPhase >= 1.0) mRevPhase -= 1.0;
+        ln.revPhase += 1.0 / T;
+        if (ln.revPhase >= 1.0) ln.revPhase -= 1.0;
         return out;
     }
 
     // DD-7 ANALOG mode warmth: a light asymmetric cubic soft-clip (its own ADAA state,
     // fixed drive) so the DM-2 model rounds/compresses the darkened repeats.
-    float analogSat(float x)
+    float analogSat(Lane &ln, float x)
     {
         const double drive = (double)kAnalogSatDrive, asym = (double)kAnalogSatAsym;
         const double xb = (double)x * drive;
-        const double y = sat::cubicADAA2(xb, mASatX1, mASatX2);
-        mASatX2 = mASatX1;
-        mASatX1 = xb;
+        const double y = sat::cubicADAA2(xb, ln.aSatX1, ln.aSatX2);
+        ln.aSatX2 = ln.aSatX1;
+        ln.aSatX1 = xb;
         double yb = y / drive;
         const double xc = (double)x > 1.0 ? 1.0 : ((double)x < -1.0 ? -1.0 : (double)x);
         const double in = yb + asym * (std::cosh(kEvenShape * xc) - 1.0);
-        yb = in - mADcX1 + kDcBlockR * mADcY1;
-        mADcX1 = in;
-        mADcY1 = yb;
+        yb = in - ln.aDcX1 + kDcBlockR * ln.aDcY1;
+        ln.aDcX1 = in;
+        ln.aDcY1 = yb;
         const float out = (float)yb;
         return std::isfinite(out) ? out : 0.0f;
     }
@@ -497,7 +617,6 @@ private:
     // LFO waveform per model: Memory Man = triangle; everything else = sine.
     int lfoWaveFor() const { return (mModel == kMemoryMan) ? (int)Lfo::Triangle : (int)Lfo::Sine; }
 
-
     // Per-model INPUT+OUTPUT stage (impedance loading / coupling / buffer), reusing
     // IoStage.h like DriveBlock. Each model's I/O is now set from its researched circuit
     // doc: DD-7 (2008 Roland service notes, dd7.md) = 2SK880 JFET buffer, 1 MΩ in = the DI
@@ -508,12 +627,12 @@ private:
     // "dark dry" gotcha) -> a gentle high-shelf cut. Only impedances/behaviour are anchored;
     // exact coupling-cap values are schematic-gated (bot-blocked images) so the couplings are
     // modeled as subsonic HPs. Never guessed.
-    void applyIo()
+    void applyIo(Lane &ln)
     {
         switch (mModel)
         {
         case kDD7:
-            mIo.setBuffered(2.0f, 1.6f, 0.0f, 0.0f); // subsonic in/out coupling HPs; else transparent
+            ln.io.setBuffered(2.0f, 1.6f, 0.0f, 0.0f); // subsonic in/out coupling HPs; else transparent
             break;
         case kCarbonCopy:
             // VERIFIED from the Dunlop M169 manual (docs/predelay/carbon_copy.md): 1 MΩ
@@ -521,7 +640,7 @@ private:
             // Coupling-cap values are schematic-gated/unverified -> modeled as subsonic
             // high-passes like the DD-7. No output HF smoothing: the darkness is the
             // in-loop reconstruction LP, not the output buffer.
-            mIo.setBuffered(2.0f, 1.6f, 0.0f, 0.0f);
+            ln.io.setBuffered(2.0f, 1.6f, 0.0f, 0.0f);
             break;
         case kMemoryMan:
             // Vintage DMM (docs/predelay/memory_man.md): a LOW ~100 kΩ INVERTING input that
@@ -529,54 +648,54 @@ private:
             // Copy 1 MΩ buffers. Modeled as a gentle high-shelf CUT (mostly relevant with a
             // high-Z guitar; subtle here since the predelay sits after the buffered drive).
             // ~300 Ω buffered output (Nano spec). Exact coupling caps schematic-gated -> subsonic HPs.
-            mIo.setLoaded(7.0f, 3000.0f, -1.5f, -0.5f, 2.0f, 0.0f);
+            ln.io.setLoaded(7.0f, 3000.0f, -1.5f, -0.5f, 2.0f, 0.0f);
             break;
         default:
-            mIo.setTransparent(); // default (all three models set their I/O above)
+            ln.io.setTransparent(); // default (all three models set their I/O above)
             break;
         }
     }
 
-    // Build the FIXED (time-independent) filters for the current model: low-cut, mid
-    // bump, presence, and the digital bandwidth LP. The BBD bandwidth LP is (re)built
-    // per block by updateBandwidth(); force=true also seeds it here.
-    void rebuildFixed(bool force)
+    // Build the FIXED (time-independent) filters for the current model on one lane: low-
+    // cut, mid bump, presence, and the digital bandwidth LP. The BBD bandwidth LP is
+    // (re)built per block by updateBandwidth(); force=true also seeds it here.
+    void rebuildFixed(Lane &ln, bool force)
     {
-        mLoopHpOn = mVoicing.loopHpHz > 0.0f;
-        if (mLoopHpOn)
-            mLoopHp = Biquad::highpass(mFs, std::min((double)mVoicing.loopHpHz, 0.45 * mFs), 0.5);
+        ln.loopHpOn = mVoicing.loopHpHz > 0.0f;
+        if (ln.loopHpOn)
+            ln.loopHp = Biquad::highpass(mFs, std::min((double)mVoicing.loopHpHz, 0.45 * mFs), 0.5);
 
-        mMidOn = mVoicing.midDb != 0.0f && mVoicing.midHz > 0.0f;
-        if (mMidOn)
-            mMid = Biquad::peaking(mFs, std::min((double)mVoicing.midHz, 0.45 * mFs),
-                                   (double)mVoicing.midQ, (double)mVoicing.midDb);
+        ln.midOn = mVoicing.midDb != 0.0f && mVoicing.midHz > 0.0f;
+        if (ln.midOn)
+            ln.mid = Biquad::peaking(mFs, std::min((double)mVoicing.midHz, 0.45 * mFs),
+                                     (double)mVoicing.midQ, (double)mVoicing.midDb);
 
-        mPresOn = mVoicing.presDb != 0.0f && mVoicing.presHz > 0.0f;
-        if (mPresOn)
-            mPres = Biquad::peaking(mFs, std::min((double)mVoicing.presHz, 0.45 * mFs),
-                                    0.7, (double)mVoicing.presDb);
+        ln.presOn = mVoicing.presDb != 0.0f && mVoicing.presHz > 0.0f;
+        if (ln.presOn)
+            ln.pres = Biquad::peaking(mFs, std::min((double)mVoicing.presHz, 0.45 * mFs),
+                                      0.7, (double)mVoicing.presDb);
 
-        rebuildTone();
+        rebuildTone(ln);
 
         if (force && !mVoicing.bbd)
         {
             // Digital: fixed converter bandwidth, build once.
-            mLoopLpHzBuilt = std::min(mVoicing.antiAliasHz, (float)(0.45 * mFs));
-            mLoopLp = Biquad::lowpass(mFs, mLoopLpHzBuilt, mVoicing.bwQ);
-            mLoopLpOn = true;
+            ln.loopLpHzBuilt = std::min(mVoicing.antiAliasHz, (float)(0.45 * mFs));
+            ln.loopLp = Biquad::lowpass(mFs, ln.loopLpHzBuilt, mVoicing.bwQ);
+            ln.loopLpOn = true;
         }
         else if (force && mVoicing.bbd)
         {
-            mLoopLpHzBuilt = -1.0f; // force a rebuild on the next updateBandwidth()
-            updateBandwidth(currentTimeMs());
+            ln.loopLpHzBuilt = -1.0f; // force a rebuild on the next updateBandwidth()
+            updateBandwidth(ln, currentTimeMs());
         }
     }
 
-    void rebuildTone()
+    void rebuildTone(Lane &ln)
     {
-        mToneOn = mToneHz < 20000.0f;
-        if (mToneOn)
-            mTone = Biquad::lowpass(mFs, std::min((double)mToneHz, 0.45 * mFs));
+        ln.toneOn = mToneHz < 20000.0f;
+        if (ln.toneOn)
+            ln.tone = Biquad::lowpass(mFs, std::min((double)mToneHz, 0.45 * mFs));
     }
 
     // BBD bandwidth = the clock's Nyquist, which falls as the delay lengthens:
@@ -585,62 +704,52 @@ private:
     // the fixed reconstruction/anti-alias filter, and floored so it never collapses.
     // Digital models are fixed and skip this. Only rebuilds when the corner really
     // moves (>~3%), so a steady setting costs nothing.
-    void updateBandwidth(float timeMs)
+    void updateBandwidth(Lane &ln, float timeMs)
     {
         if (!mVoicing.bbd) return;
         const float tSec = std::max(0.005f, timeMs * 0.001f);
         const float nyq = 0.85f * mVoicing.bbdStages / (4.0f * tSec);
         const float corner = std::min(mVoicing.antiAliasHz, std::max(700.0f, nyq));
-        if (mLoopLpHzBuilt < 0.0f || std::abs(corner - mLoopLpHzBuilt) > 0.03f * mLoopLpHzBuilt)
+        if (ln.loopLpHzBuilt < 0.0f || std::abs(corner - ln.loopLpHzBuilt) > 0.03f * ln.loopLpHzBuilt)
         {
-            const float z1 = mLoopLp.z1, z2 = mLoopLp.z2; // keep state across a coefficient swap
-            mLoopLp = Biquad::lowpass(mFs, std::min((double)corner, 0.45 * mFs), mVoicing.bwQ);
-            mLoopLp.z1 = z1;
-            mLoopLp.z2 = z2;
-            mLoopLpHzBuilt = corner;
-            mLoopLpOn = true;
+            const float z1 = ln.loopLp.z1, z2 = ln.loopLp.z2; // keep state across a coefficient swap
+            ln.loopLp = Biquad::lowpass(mFs, std::min((double)corner, 0.45 * mFs), mVoicing.bwQ);
+            ln.loopLp.z1 = z1;
+            ln.loopLp.z2 = z2;
+            ln.loopLpHzBuilt = corner;
+            ln.loopLpOn = true;
         }
     }
 
-    void flushDenormals()
+    void flushDenormals(Lane &ln)
     {
-        for (Biquad *b : {&mLoopHp, &mLoopLp, &mMid, &mTone, &mPres})
+        for (Biquad *b : {&ln.loopHp, &ln.loopLp, &ln.mid, &ln.tone, &ln.pres})
         {
             if (std::abs(b->z1) < 1.0e-30f) b->z1 = 0.0f;
             if (std::abs(b->z2) < 1.0e-30f) b->z2 = 0.0f;
         }
-        if (std::abs(mDcY1) < 1.0e-30) mDcY1 = 0.0;
+        if (std::abs(ln.dcY1) < 1.0e-30) ln.dcY1 = 0.0;
     }
 
     double mFs = 48000.0, mBpm = 120.0;
     Model mModel = kDD7;
     Voicing mVoicing = voicingFor(kDD7);
 
-    FracDelayLine mLine;
-    Lfo mLfo;
-    IoStage mIo; // per-model input+output stage (impedance/coupling/buffer)
-    Biquad mLoopHp, mLoopLp, mMid, mTone, mPres, mAnalogLp;
-    bool mLoopHpOn = false, mLoopLpOn = true, mMidOn = false, mToneOn = false, mPresOn = false;
-    float mLoopLpHzBuilt = -1.0f; // last-built in-loop bandwidth corner (BBD tracks time)
+    Lane mLaneL, mLaneR; // L = mono / Amp A; R = Amp B (processStereo only)
 
-    // companding/preamp soft-clip state (double: ADAA subtraction needs the precision)
     int mMode = kMode3200;               // DD-7 MODE rotary (default = widest range, full Time range)
-    double mRevPhase = 0.0;              // Reverse-mode grain phase
-    double mASatX1 = 0.0, mASatX2 = 0.0, mADcX1 = 0.0, mADcY1 = 0.0; // Analog-mode sat state
-    double mSatX1 = 0.0, mSatX2 = 0.0;   // cubic ADAA history
-    double mDcX1 = 0.0, mDcY1 = 0.0;     // even-harmonic DC blocker
     static constexpr double kDcBlockR = 0.9995; // ~3.8 Hz one-pole DC blocker
     static constexpr double kEvenShape = 2.0;   // cosh even-harmonic richness
 
     float mTimeMs = 350.0f, mFeedback = 0.35f, mMix = 0.28f, mModAmt = 0.25f, mToneHz = 20000.0f;
-    float mLevel = 1.0f, mLevelZ = 1.0f; // Memory Man master Volume/Level (unity default)
+    float mLevel = 1.0f;                  // Memory Man master Volume/Level (unity default)
     int mChorusVib = 0;                  // Memory Man Chorus(0)/Vibrato(1) switch
     int mSyncIndex = 0;
+    float mStereoSpread = 0.5f;           // processStereo L/R time spread (0 = dual-mono)
 
-    double mBaseZ = 350.0;   // glided base delay (ms)
     float mGlideK = 0.01f;   // glide smoother coefficient (per model)
-    float mMixZ = 0.28f, mSmoothK = 0.01f;
+    float mSmoothK = 0.01f;  // 10 ms Mix/Level de-zip coefficient
     bool mPrepared = false;
-};
+}; // class PreDelayBlock
 
 } // namespace nam_rig
