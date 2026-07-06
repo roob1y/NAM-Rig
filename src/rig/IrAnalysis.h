@@ -4,6 +4,7 @@
 // tag. Used by CabBlock (the loaded IR's graph) AND the IR-library tag cache, so
 // a file shows the SAME tag in the browser as it does once loaded.
 
+#include "LfResonance.h"                    // per-cab LF resonance estimator (PHYSICS_UPGRADE §4)
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_dsp/juce_dsp.h>
 #include <array>

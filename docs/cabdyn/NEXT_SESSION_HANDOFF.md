@@ -1,5 +1,43 @@
 # Dynamic Cab — NEXT SESSION HANDOFF
 
+## PHYSICS UPGRADE shipped (2026-07-06) — needs local build + ear-test
+
+The block moved from broadband-envelope-driven to **cone-displacement-driven**
+per `docs/cabdyn/PHYSICS_UPGRADE.md` (spec written before the code; read it
+first). All roadmap items landed:
+
+1. **Excursion model** — RBJ LP2 at the box resonance on the pre-conv input →
+   `xd/xs/dispPush`; A1 bloom, B3 compression and B1 drive now key on
+   DISPLACEMENT (a loud 2 kHz bend no longer fattens the 90 Hz peak — T10/T17).
+2. **LF→HF intermodulation** — Bl(x) AM + Doppler FM as a sidebands-only
+   two-tap delta on the shared HP800 band. Exactly zero when the cone isn't
+   moving (T12), sidebands −21.6 dBc on a slammed two-tone (T11), alias-clean at
+   base rate (T13, −75 dBc off-grid).
+3. **Per-cab Fs** — `src/rig/LfResonance.h` estimates the captured LF resonance
+   from the existing IR analysis curve; plumbed CabBlock→RigChain→CabDynamics
+   via atomics (`setSpeakerResonance`). Invalid/failed IR falls back to 90 Hz.
+4. **Thermal voice-coil sag** — multi-second series compression (τ 3.5 s,
+   ≤1.5 dB, Age-scaled, reduction only; T14 measured 1.23 dB @ 6 s, recovers).
+5. **Modal exciter shaping** — the harmonics-only breakup delta is filtered
+   through two bending-wave peaks + fizz shelf (can't re-comb — no fundamental
+   in the delta; T9/T16 confirm).
+
+**Verification: 40/40 checks pass** (T1–T17, zero warnings, offline g++ from the
+exact repo bytes). Bit-exact bypass, click-free disengage, determinism, all
+ceilings held. `kDriveEnv` rebalanced 1.2→0.9 (natural 3.7× max, monotone under
+the 3.8× clamp).
+
+**Not yet done:** local Windows build (JUCE-side edits — CabBlock/RigChain/
+PluginProcessor/IrAnalysis — could not be compiled offline; they are small and
+hand-reviewed). Stage C untouched this pass. New [EAR] constants to audition,
+in priority order: IM depth (`kAMsym/kAMasym/kDopUs`), excursion calibration
+(`kXCal`, `kDispLo/Hi` — sets how hard you must dig in), modal centers/gains,
+thermal depth (`kThermDb`), A1 excursion modifiers (`kA1FsShift/QDroop/PromQ`).
+
+---
+
+# Previous handoff (pre-physics-upgrade, still-relevant context)
+
 Status as of this session. Read alongside `docs/cabdyn/DESIGN.md` (the physics /
 math) and the code: `src/rig/CabDynamicsBlock.h`, `tests/cabdyn_test.cpp`.
 
@@ -90,6 +128,16 @@ response well may get cramped. Tunable: the `58` / `6` px in `CabPanel::resized(
 
 I cannot hear any of this. These are physically-motivated numbers, not confirmed
 tones. Most likely to need tuning, in order:
+
+> **Measured in Plugin Doctor (this session, flat baseline, delta):** with Thump
+> up, the enclosure's low resonance sits at **~35 Hz (Size 0) and moves to ~14 Hz
+> (Size max)** — correct direction (bigger box = lower), but **too subsonic to be
+> musical**. Action for next session: shorten the Stage C delay lines so the box
+> resonance lands ~**60–120 Hz**, and add a subsonic high-pass on the enclosure
+> output so sub-20 Hz doesn't build up. Also confirmed: the A1 79 Hz thump peak is
+> real but small under a multitone probe (envelope only ~1/5 driven) — it reaches
+> the full +3 dB only under a sustained loud note, so ear-test with real playing,
+> not analyzer sweeps.
 
 1. **Stage C enclosure (highest risk of sounding artificial).** The whole
    "diffuse air" idea is the least certain. Guesses: wet ceiling `kEncMax = 0.12`,

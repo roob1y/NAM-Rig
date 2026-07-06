@@ -1533,7 +1533,19 @@ void NamRigProcessor::loadIr(const juce::File &irFile, int rig)
         // Cache the source bytes so presets can embed the IR (single-file rigs).
         irFile.loadFileAsData(mIrBytes[rig]);
         mIrBaseName[rig] = irFile.getFileNameWithoutExtension();
+        // Push the new cab's per-cab LF resonance to the matching lane's Dynamic Cab
+        // (PHYSICS_UPGRADE §4). This is the single funnel every IR-load path routes
+        // through (editor, presets, Panels, and the state-restore calls below), so the
+        // Dynamic Cab always keys on the loaded cab's captured resonance. Invalid
+        // estimate -> the helper clears back to the 90 Hz default.
+        mChain.pushCabResonance(rig == 1);
         updateLatency();
+    }
+    else
+    {
+        // Load failed: fall the lane's Dynamic Cab back to the generic default so a
+        // stale per-cab tuning from a previously-loaded IR never lingers.
+        mChain.pushCabResonance(rig == 1); // cab->lfResonance() is invalid on a failed load
     }
 }
 

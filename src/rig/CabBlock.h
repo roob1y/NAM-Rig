@@ -66,6 +66,13 @@ public:
         return true;
     }
 
+    // Per-cab LF resonance from the loaded IR's magnitude curve (PHYSICS_UPGRADE §4).
+    // Computed once on the message thread inside loadIr() (right after the response
+    // curve); {90 Hz, 0 dB, invalid} until an IR loads. RigChain pushes this to the
+    // matching lane's CabDynamicsBlock so the excursion/thump model keys on the real
+    // captured resonance instead of the generic 90 Hz default. Trivially copyable POD.
+    nam_rig::ir::LfEstimate lfResonance() const { return mLfRes; }
+
     // Load a cab IR (wav/aiff), resampled to the current rate by JUCE.
     // Normalised to UNITY ENERGY (1/sqrt(sum(ir^2))) — a unit impulse stays a
     // unit impulse and overall loudness is consistent across IRs. (JUCE's
@@ -74,6 +81,10 @@ public:
     // Returns false if the file doesn't exist or can't be read.
     bool loadIr(const juce::File &irFile)
     {
+        // Invalidate the per-cab resonance up front so ANY failure path below leaves
+        // it invalid (the caller then clears the Dynamic Cab back to the 90 Hz default
+        // rather than keeping a stale estimate from a previously-loaded IR).
+        mLfRes = nam_rig::ir::LfEstimate{};
         if (!irFile.existsAsFile())
             return false;
 
@@ -94,6 +105,11 @@ public:
             ir.applyGain((float)(1.0 / std::sqrt(energy)));
 
         computeResponse(ir, reader->sampleRate); // capture the curve before the move
+        // Per-cab LF resonance from the freshly-computed response (PHYSICS_UPGRADE §4).
+        // Message-thread only; RigChain::pushCabResonance forwards it to the lane's
+        // CabDynamicsBlock. mResDb is the mean-centred 1/6-oct grid over kResFLo..kResFHi.
+        mLfRes = nam_rig::ir::estimateLfResonance(mResDb.data(), kResPts,
+                                                  (float)kResFLo, (float)kResFHi);
 
         mConv.loadImpulseResponse(std::move(ir), reader->sampleRate,
                                   juce::dsp::Convolution::Stereo::no,
@@ -150,6 +166,7 @@ private:
     CutFilters mCuts;
     std::array<float, kResPts> mResDb{};   // IR magnitude curve (message thread)
     std::atomic<bool> mResValid{false};
+    nam_rig::ir::LfEstimate mLfRes{};      // per-cab LF resonance (message thread; PHYSICS_UPGRADE §4)
     std::atomic<float> mHpfHz{20.0f};    // <= 20 = off
     std::atomic<float> mLpfHz{20000.0f}; // >= 20k = off
     std::atomic<bool> mConvBypass{false}; // bypass IR convolution only (cuts stay)

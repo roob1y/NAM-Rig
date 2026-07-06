@@ -480,6 +480,23 @@ public:
     DelayBlock delay;
     ReverbBlock reverb;
 
+    // Forward the loaded cab's per-cab LF resonance (PHYSICS_UPGRADE §4) to the
+    // MATCHING lane's Dynamic Cab. Kept here (not at the call sites) so the A->cabDyn
+    // / B->cabDynB pairing lives in one place and can't be mismatched. A valid
+    // estimate retunes the excursion/thump model; an invalid or cleared IR falls the
+    // block back to the generic 90 Hz default so a stale per-cab tuning never lingers.
+    // Message thread only (CabBlock::lfResonance and the CabDynamicsBlock atomics).
+    void pushCabResonance(bool laneB)
+    {
+        CabBlock &c = laneB ? cabB : cab;
+        CabDynamicsBlock &d = laneB ? cabDynB : cabDyn;
+        const nam_rig::ir::LfEstimate e = c.lfResonance();
+        if (e.valid)
+            d.setSpeakerResonance(e.fsHz, e.promDb);
+        else
+            d.clearSpeakerResonance();
+    }
+
 private:
     // Fractional align delay + polarity on one voice. delay 0 & polarity +1 ->
     // untouched (keeps SoloA bit-exact). Integer delays are exact (Hermite at

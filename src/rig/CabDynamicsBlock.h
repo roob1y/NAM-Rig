@@ -6,7 +6,15 @@
 // cannot: LEVEL-DEPENDENT and TIME-VARIANT deviation. Every stage is a delta on
 // top of the IR and collapses to nothing at rest.
 //
-// Full derivation: docs/cabdyn/DESIGN.md (written before this code).
+// Full derivation: docs/cabdyn/DESIGN.md (written before this code), upgraded
+// by docs/cabdyn/PHYSICS_UPGRADE.md which pushes the block from broadband-
+// envelope-driven to CONE-DISPLACEMENT-driven and adds the couplings a real
+// speaker has that a static IR cannot: a shared excursion model (RBJ LP2 at
+// the box resonance -> xd/xs/dispPush) re-drives A1/B3/B1; an LF->HF
+// intermodulation delta (Bl(x) AM + Doppler FM, sidebands-only two-tap, base
+// rate); per-cab Fs from the IR (setSpeakerResonance, LfResonance.h); thermal
+// voice-coil compression (multi-second sag); and modal shaping of the breakup
+// exciter. All additive-delta, all bit-exact at rest (T1/T8 unchanged).
 //
 // Signal flow (the block owns NO convolver — it wraps the engine already in the
 // codebase via two process stages):
@@ -30,15 +38,16 @@
 // (low-band cone power compression) drops level when pushed and never adds it back.
 //
 // Modulation ceilings (all small, all bounded): A1 90Hz resonance +3 dB; A2 2kHz
-// inductance shelf -3 dB; B midband drive <=3.2x (band 0.8-3.8 kHz); B low-band
+// inductance shelf -3 dB; B midband drive <=3.8x (band 0.8-3.8 kHz); B low-band
 // compression -2 dB; C diffuse air wet mix <=0.12 (~ -18 dB).
 //
 // JUCE-free core (Biquad.h only) so it compiles in a plain offline g++ harness,
 // verified by tests/cabdyn_test.cpp. Zero added latency on the dry path (deltas
-// are ADDED; dry passes straight through). Not wired into RigChain yet.
+// are ADDED; dry passes straight through).
 
 #include "Biquad.h"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <vector>
@@ -202,6 +211,26 @@ public:
         mHp800  = Biquad::highpass(mFs, std::min(800.0, 0.45 * mFs));
         mLp3800 = Biquad::lowpass(mFs, std::min(3800.0, 0.45 * mFs));
 
+        // ---- PHYSICS UPGRADE prepare (docs/cabdyn/PHYSICS_UPGRADE.md) ----
+        // Excursion follower (§1): 3 ms attack / 100 ms release on |xd|.
+        mDEnvAtk = onePoleK(0.003);
+        mDEnvRel = onePoleK(0.100);
+        // Thermal integrator (§5): tau = 3.5 s, attack = release.
+        mThermK  = onePoleK((double)kThermTau);
+        // Intermodulation ring (§3): kDop = fs * 10.2 us (samples); integer
+        // center tap tauC = ceil(kDop)+2 (Hermite needs +/-2 guard); ring is
+        // the next pow2 >= tauC + kDop + 4 (16 @ 48k).
+        mImKDop = (float)(mFs * kDopUs);
+        mImTauC = (int)std::ceil((double)mImKDop) + 2;
+        int need = mImTauC + (int)std::ceil((double)mImKDop) + 4;
+        int rlen = 1;
+        while (rlen < need) rlen <<= 1;
+        mImRing.assign((size_t)rlen, 0.0f);
+        mImMask = rlen - 1;
+        // Excursion LP2 + per-cab-tuned filters from the default resonance; the
+        // control-rate boundary retunes them when an IR estimate arrives.
+        retuneResonance(kFsDefault, /*force*/ true);
+
         mHb.design();
         buildGtable();
 
@@ -246,7 +275,15 @@ public:
         mHb.reset();
         for (int i = 0; i < 3; ++i) { mApA[i].reset(); mApB[i].reset(); mApC[i].reset(); }
         mCtrl = 0;
-        rebuildStageA(0.0f); // identity at rest
+        // PHYSICS UPGRADE: consume the current resonance target (re-tune from cold) and
+        // clear all new state so a re-prepare/reset starts transparent (cold coil).
+        mPromN = clamp01(mPromTarget.load(std::memory_order_relaxed) / 8.0f);
+        retuneResonance(mFsTarget.load(std::memory_order_relaxed), /*force*/ true);
+        mDEnv = 0.0f; mDispPush = 0.0f; mXs = 0.0f;
+        mPwr = 0.0f; mThermGain = 1.0f; mThermDbg = 0.0f;
+        mImPos = 0; mImWet = 0.0f;
+        std::fill(mImRing.begin(), mImRing.end(), 0.0f);
+        rebuildStageA(0.0f, 0.0f); // identity at rest
         mA1Db = mA2Db = 0.0f;
         mDriveDbg = 1.0f;
     }
@@ -264,6 +301,23 @@ public:
     // buffer is byte-identical to input, exactly like all-macros-0.
     void setBypassed(bool b) { mBypassed = b; }
     bool isBypassed() const  { return mBypassed; }
+
+    // Per-cab LF resonance from the IR analysis (docs/cabdyn/PHYSICS_UPGRADE.md §4).
+    // Called from the MESSAGE thread on IR load (rare); the audio thread consumes
+    // these atomics at the control-rate boundary and retunes the excursion LP2, the
+    // A1/B3 base tunings and the modal centers state-preservingly. clear() falls the
+    // block back to the generic 90 Hz / 0 dB default (an IR that failed/estimate
+    // invalid must clear so a stale per-cab tuning never lingers).
+    void setSpeakerResonance(float fsHz, float promDb)
+    {
+        mFsTarget.store(fsHz, std::memory_order_relaxed);
+        mPromTarget.store(promDb, std::memory_order_relaxed);
+    }
+    void clearSpeakerResonance()
+    {
+        mFsTarget.store(kFsDefault, std::memory_order_relaxed);
+        mPromTarget.store(0.0f, std::memory_order_relaxed);
+    }
 
     // ---- Factory rig presets (0..1 macro triples) --------------------------
     // Physically-motivated starting points, one per popular amp->cab pairing.
@@ -324,44 +378,104 @@ public:
             mEnvPre += (r > mEnvPre ? mEnvAtk : mEnvRel) * (r - mEnvPre);
             const float push = pushOf(mEnvPre);
 
-            // ---- Stage A coefficients at control rate (env moves slowly) ----
-            if (mCtrl == 0) rebuildStageA(push);
+            // ---- Excursion model (PHYSICS_UPGRADE §1): cone displacement is a 2nd-
+            // order resonant LP of the pre-conv INPUT at the box resonance. xd is the
+            // calibrated displacement, xs=tanh(xd) the signed bounded excursion that
+            // drives the IM stage; dEnv (3ms/100ms) -> dispPush drives coefficients. ----
+            const float xd = kXCal * mExcLp.processSample(x);
+            mXs = std::tanh(xd);
+            const float axd = std::fabs(xd);
+            mDEnv += (axd > mDEnv ? mDEnvAtk : mDEnvRel) * (axd - mDEnv);
+            {
+                const float dp = (mDEnv - kDispLo) / (kDispHi - kDispLo);
+                mDispPush = dp < 0.0f ? 0.0f : (dp > 1.0f ? 1.0f : dp);
+            }
+
+            // ---- control-rate block: consume the per-cab resonance atomics, rebuild
+            // Stage A from (push, dispPush), and recompute the thermal series gain.
+            // env/dispPush/pwr all move slowly so the coeffs step in tiny increments. ----
+            if (mCtrl == 0)
+            {
+                const float fsT = mFsTarget.load(std::memory_order_relaxed);
+                mPromN = clamp01(mPromTarget.load(std::memory_order_relaxed) / 8.0f);
+                retuneResonance(fsT, /*force*/ false); // state-preserving on change only
+                rebuildStageA(push, mDispPush);
+                // Thermal droop (§5): -1.5 dB * clamp01(pwr/0.5) * Age, reduction only.
+                // Age=0 -> droopDb=0 -> gain exactly 1.0f (bit-exact bypass preserved).
+                const float pwrN = clamp01(mPwr / kThermFull);
+                mThermDbg = -kThermDb * pwrN * mAgeSmPre;
+                mThermGain = (mThermDbg == 0.0f) ? 1.0f : dbToLin(mThermDbg);
+            }
             if (++mCtrl >= kCtrl) mCtrl = 0;
+
+            // ---- thermal power integrator (§5): one-pole on the INPUT x^2 (terminal-
+            // voltage proxy), tau=3.5 s. Reads the pre-delta input, NOT the block's
+            // own output -> no self-feedback path by construction. ----
+            mPwr += mThermK * (x * x - mPwr);
 
             // ---- Stage A: series impedance-delta filters (identity at rest) ----
             float s = mA2.processSample(mA1.processSample(x));
+            // thermal voice-coil sag: broadband series gain (can't comb), folded in
+            // BEFORE the band split so breakup sees the sagged drive (motor droops).
+            s *= mThermGain;
             // ---- Stage B3: dynamic low-band cone POWER COMPRESSION as a clean series
             // magnitude low-shelf (identity at rest; a shelf can't comb the dry path) ----
             s = mLowShelf.processSample(s);
 
-            // ---- Stage B1: band-limited cone breakup as a HARMONICS-ONLY exciter ----
+            // ---- shared HP800 (PHYSICS_UPGRADE §3): hp feeds both the B1 breakup band
+            // (band = LP3800(hp)) and the IM ring. Run every sample while active so the
+            // crossover/ring states stay warm (re-engage click-free). ----
+            const float hp = mHp800.processSample(s);
+            const float band = mLp3800.processSample(hp);
+
+            // ---- Stage B1: band-limited cone breakup as a HARMONICS-ONLY exciter,
+            // then MODAL-shaped (§6). The delta has no fundamental, so series-filtering
+            // it shapes the 'cry' spectrum without re-combing the dry path. ----
             const float Wb = mAgeSmPre; // engage = Age (0 at rest)
             if (ageTgt() > 0.0f || Wb > 1.0e-6f)
             {
-                const float drive = 1.0f + mAgeSmPre * (1.0f + kDriveEnv * push);
+                // breakup drive gains an excursion term (§2): rebalanced env + dispPush,
+                // ceiling 3.8x. Midband level (push) still drives it; excursion adds LF
+                // stiffening of the cone edge (earlier/harder breakup) + free LF->mid IMD.
+                float drive = 1.0f + mAgeSmPre * (1.0f + kDriveEnv * push + kDriveDisp * mDispPush);
+                drive = std::min(drive, kDriveMax);
                 mDriveDbg = drive;
-                // isolate the driven midband (low band stays perfectly linear)
-                const float band = mLp3800.processSample(mHp800.processSample(s));
                 // band amplitude envelope -> describing-function fundamental gain G
                 const float ab = std::fabs(band);
                 mBandEnv += (ab > mBandEnv ? mBandAtk : mBandRel) * (ab - mBandEnv);
                 const float G = describingG(mBandEnv, drive);
                 // HARMONICS-ONLY delta at 2x: nl(band) - G*band cancels the (phase-
-                // shifted) fundamental, so adding it to the un-shifted dry path cannot
-                // comb near the 800 Hz / 3.8 kHz crossover corners. Band-limit on the
-                // way down.
+                // shifted) fundamental. Band-limit on the way down.
                 float b0, b1;
                 mHb.up(band, b0, b1);
                 const float invd = 1.0f / drive;
                 const float n0 = std::tanh(b0 * drive) * invd - G * b0;
                 const float n1 = std::tanh(b1 * drive) * invd - G * b1;
-                const float db = mHb.down(n0, n1);
+                float db = mHb.down(n0, n1);
+                // modal shaping of the exciter (§6): two paper-cone bending-wave peaks
+                // + a polite fizz shelf. Applied at base rate after the halfband down().
+                db = mModHs.processSample(mModM2.processSample(mModM1.processSample(db)));
                 s = s + Wb * db;
             }
-            else
+
+            // ---- LF->HF intermodulation (§3): Bl(x) force-factor droop (AM) + Doppler
+            // (FM) couple loud lows into the highs — neither is elsewhere in the block.
+            // Sidebands-only two-tap: difference a Doppler-modulated Hermite tap against
+            // a clean integer tap of the SAME delay line, so at rest (xs=0, gAM=0) the
+            // delta is EXACTLY 0 (no static comb) and only the modulation products add.
+            // Runs at base rate (xs is band-limited <~500 Hz; products don't fold). ----
+            const float Wim = clamp01(kImAge * mAgeSmPre + kImThump * mThumpSmPre);
+            mImWet = Wim;
+            if (Wim > 1.0e-6f)
             {
-                // keep the crossover states warm so re-engaging is click-free.
-                mLp3800.processSample(mHp800.processSample(s));
+                mImRing[(size_t)mImPos] = hp;                         // write shared HP800(s)
+                const float clean = mImRing[(size_t)((mImPos - mImTauC) & mImMask)]; // integer tap
+                const float mod   = imRead((float)mImTauC + mImKDop * mXs);          // Doppler tap
+                // Bl(x) droop: symmetric x^2 term + Age-scaled asymmetric x term.
+                const float gAM = kAMsym * mXs * mXs + kAMasym * mAgeSmPre * mXs;
+                const float dIM = (1.0f - gAM) * mod - clean;        // sidebands-only
+                s = s + Wim * dIM;
+                mImPos = (mImPos + 1) & mImMask;
             }
 
             buf[i] = s;
@@ -431,6 +545,13 @@ public:
     float dbgLowCompDb() const { return mLowCompDb; } // current B3 low-shelf gain (dB)
     float dbgEnvPre() const { return mEnvPre; }
     double sampleRate() const { return mFs; }
+    // PHYSICS UPGRADE hooks (docs/cabdyn/PHYSICS_UPGRADE.md §9).
+    float dbgDispPush()   const { return mDispPush; }   // slow displacement push [0,1]
+    float dbgXs()         const { return mXs; }         // signed instantaneous excursion
+    float dbgThermDb()    const { return mThermDbg; }   // current thermal droop (dB, <=0)
+    float dbgFsEst()      const { return mFsEst; }      // consumed per-cab resonance (Hz)
+    double dbgA1CenterHz()const { return mA1CenterDbg; }// last-built A1 center (Hz)
+    float dbgImWet()      const { return mImWet; }      // current IM engage Wim
 
     // Test-only: re-prepare the Stage C allpass delays (base-48k samples, scaled to
     // fs) so an offline probe can sweep delay sets and read the box-resonance peak
@@ -456,6 +577,29 @@ private:
     float sizeTgt()  const { return mBypassed ? 0.0f : mSizeTarget; }
     float onePoleK(double tauSec) const { return (float)(1.0 - std::exp(-1.0 / (tauSec * mFs))); }
     static float dbToLin(float db) { return std::pow(10.0f, db / 20.0f); }
+
+    // 4-point (cubic) Hermite interpolation. Horner form so that at frac=0 it
+    // returns y1 BIT-EXACTLY (every frac factor is 0) — this is what makes the IM
+    // two-tap delta vanish exactly at rest (docs/cabdyn/PHYSICS_UPGRADE.md §3).
+    static inline float hermite4(float frac, float y0, float y1, float y2, float y3)
+    {
+        return y1 + 0.5f * frac * (y2 - y0
+               + frac * (2.0f * y0 - 5.0f * y1 + 4.0f * y2 - y3
+               + frac * (3.0f * (y1 - y2) + y3 - y0)));
+    }
+    // Read the IM ring at a fractional delay d (samples behind the write cursor)
+    // with 4-pt Hermite. d in [1, len-2] so the +/-1 guard taps stay in range.
+    inline float imRead(float d) const
+    {
+        const int di = (int)d;               // integer part
+        const float fr = d - (float)di;      // fractional part in [0,1)
+        const int base = (mImPos - di) & mImMask; // sample at delay di
+        const float y1 = mImRing[(size_t)base];
+        const float y0 = mImRing[(size_t)((base + 1) & mImMask)];       // one newer (delay di-1)
+        const float y2 = mImRing[(size_t)((base - 1) & mImMask)];       // one older (delay di+1)
+        const float y3 = mImRing[(size_t)((base - 2) & mImMask)];       // two older (delay di+2)
+        return hermite4(fr, y0, y1, y2, y3);
+    }
 
     // env -> push in [0,1] with a soft knee (quiet barely modulates, loud pushes)
     static float pushOf(float env)
@@ -498,17 +642,47 @@ private:
         return g / beta;
     }
 
-    // Stage A biquads from the current push (+ static Age HF ease). gain 0 => identity.
-    void rebuildStageA(float push)
+    // Consume a new per-cab resonance (§4): set FsEst/promN, retune the excursion
+    // LP2 and the modal centers state-preservingly (copyCoeffsFrom keeps the running
+    // z-state so an IR swap doesn't click). A1/B3 key on mFsEst and are rebuilt every
+    // control block by rebuildStageA, so setting mFsEst here is enough for them.
+    // mScale: a bass cab (low Fs -> bigger cone) has lower breakup modes.
+    void retuneResonance(float fsHz, bool force)
     {
-        // A1: 90 Hz Fs resonance peak — deviates with Thump*envelope, ceiling +3 dB.
-        const float f0 = 90.0f * (1.0f - 0.12f * mThumpSmPre);
-        const float Q  = 0.9f + 0.9f * mThumpSmPre;
-        float g1 = kDepthA1 * mThumpSmPre * push;
+        fsHz = std::max(45.0f, std::min(200.0f, fsHz));
+        if (!force && fsHz == mFsApplied) return;
+        mFsEst = fsHz;
+        // Excursion LP2 at the box resonance, Q = Qtc (state-preserving unless forced).
+        const Biquad exc = Biquad::lowpass(mFs, std::min((double)fsHz, 0.45 * mFs), (double)kXQ);
+        if (force) { mExcLp = exc; mExcLp.reset(); } else mExcLp.copyCoeffsFrom(exc);
+        // Modal exciter peaks + fizz shelf (fixed except on FsEst change).
+        const float mScale = (fsHz < 65.0f) ? 0.75f : 1.0f;
+        const Biquad m1 = Biquad::peaking(mFs, std::min((double)(kModM1Hz * mScale), 0.45 * mFs), (double)kModM1Q, (double)kModM1Db);
+        const Biquad m2 = Biquad::peaking(mFs, std::min((double)(kModM2Hz * mScale), 0.45 * mFs), (double)kModM2Q, (double)kModM2Db);
+        const Biquad hs = Biquad::highshelf(mFs, std::min((double)kModHsHz, 0.45 * mFs), (double)kModHsDb, 0.7);
+        if (force) { mModM1 = m1; mModM2 = m2; mModHs = hs; mModM1.reset(); mModM2.reset(); mModHs.reset(); }
+        else { mModM1.copyCoeffsFrom(m1); mModM2.copyCoeffsFrom(m2); mModHs.copyCoeffsFrom(hs); }
+        mFsApplied = fsHz;
+    }
+
+    // Stage A biquads from the current envelope push AND cone-displacement dispPush
+    // (docs/cabdyn/PHYSICS_UPGRADE.md §2). All identity at rest. A1 now blooms from
+    // DISPLACEMENT, not the broadband envelope, so a loud HF bend no longer fattens
+    // the 90 Hz resonance (guarded by T10/T17).
+    void rebuildStageA(float push, float dispPush)
+    {
+        // A1: Fs resonance peak. Gain keys on Thump*dispPush (ceiling +3 dB). At large
+        // excursion the suspension stiffens (Fs shifts UP +6% max via kA1FsShift) and
+        // gets lossier (Q DROOPS -20% max via kA1QDroop); promN couples the IR's box-
+        // bump prominence into the base Q (a resonant capture => a high-Qtc box).
+        const float f0 = mFsEst * (1.0f - 0.12f * mThumpSmPre) * (1.0f + kA1FsShift * dispPush);
+        const float Q  = (0.9f + 0.9f * mThumpSmPre) * (1.0f - kA1QDroop * dispPush) * (1.0f + kA1PromQ * mPromN);
+        float g1 = kDepthA1 * mThumpSmPre * dispPush;
         g1 = std::min(g1, 3.0f);
         const Biquad n1 = Biquad::peaking(mFs, std::min((double)f0, 0.45 * mFs), (double)Q, (double)g1);
         mA1.copyCoeffsFrom(n1);
         mA1Db = g1;
+        mA1CenterDbg = std::min((double)f0, 0.45 * mFs);
 
         // A2: 2 kHz Le inductance shelf — dynamic droop (env) + static Age ease. -3 dB floor.
         float g2 = -(kDepthA2 * push + kHfEase * mAgeSmPre);
@@ -518,11 +692,14 @@ private:
         mA2Db = g2;
 
         // B3: dynamic low-band cone POWER COMPRESSION as a clean magnitude low-shelf
-        // (series filter, NOT a parallel delta -> no phase-comb). Gain reduction only,
-        // floored at -2 dB. Identity at rest (grDb 0).
-        float grDb = -(kAgeComp * mAgeSmPre + kEnvComp * mAgeSmPre * push);
+        // (series filter, NOT a parallel delta -> no phase-comb). Now excursion-driven
+        // (dispPush) — excursion compression IS displacement-driven by definition. The
+        // shelf corner tracks the cab: clamp(2.2*FsEst,140,260) (FsEst=90 -> ~198 Hz,
+        // ~ the old fixed 200). Gain reduction only, floored at -2 dB; identity at rest.
+        float grDb = -(kAgeComp * mAgeSmPre + kEnvComp * mAgeSmPre * dispPush);
         grDb = std::max(grDb, -2.0f);
-        const Biquad n3 = Biquad::lowshelf(mFs, std::min(200.0, 0.45 * mFs), (double)grDb, 0.7);
+        const float fShelf = std::max(140.0f, std::min(260.0f, 2.2f * mFsEst));
+        const Biquad n3 = Biquad::lowshelf(mFs, std::min((double)fShelf, 0.45 * mFs), (double)grDb, 0.7);
         mLowShelf.copyCoeffsFrom(n3);
         mLowCompDb = grDb;
     }
@@ -540,7 +717,16 @@ private:
         mHp800.reset(); mLp3800.reset();
         mHb.reset();
         mCtrl = 0;
-        rebuildStageA(0.0f); // identity coeffs at the transparent edge
+        // PHYSICS UPGRADE pre-state: excursion LP2, displacement follower/push, IM
+        // ring, thermal power, and modal biquads all return to the transparent edge
+        // (re-engage = cold coil, no stale displacement/comb/heat).
+        mExcLp.reset();
+        mDEnv = 0.0f; mDispPush = 0.0f; mXs = 0.0f;
+        mImPos = 0; mImWet = 0.0f;
+        std::fill(mImRing.begin(), mImRing.end(), 0.0f);
+        mPwr = 0.0f; mThermGain = 1.0f; mThermDbg = 0.0f;
+        mModM1.reset(); mModM2.reset(); mModHs.reset();
+        rebuildStageA(0.0f, 0.0f); // identity coeffs at the transparent edge
     }
     void resetPostState()
     {
@@ -567,13 +753,17 @@ private:
 
     void flushDenormalsPre()
     {
-        for (Biquad *b : {&mA1, &mA2, &mLowShelf, &mHp800, &mLp3800})
+        // includes the excursion LP2 and the three modal exciter biquads (§1/§6).
+        for (Biquad *b : {&mA1, &mA2, &mLowShelf, &mHp800, &mLp3800,
+                          &mExcLp, &mModM1, &mModM2, &mModHs})
         {
             if (std::fabs(b->z1) < 1.0e-30f) b->z1 = 0.0f;
             if (std::fabs(b->z2) < 1.0e-30f) b->z2 = 0.0f;
         }
         if (std::fabs(mEnvPre) < 1.0e-30f) mEnvPre = 0.0f;
         if (std::fabs(mBandEnv) < 1.0e-30f) mBandEnv = 0.0f; // Stage B1 band follower
+        if (std::fabs(mDEnv) < 1.0e-30f) mDEnv = 0.0f;       // displacement follower (§1)
+        if (std::fabs(mPwr)  < 1.0e-30f) mPwr  = 0.0f;       // thermal power integrator (§5)
     }
     void flushDenormalsPost()
     {
@@ -600,7 +790,10 @@ private:
     static constexpr float kDepthA2 = 2.0f; // 2 kHz dynamic droop scale
     static constexpr float kHfEase  = 1.5f; // static Age HF ease (into the -3 dB shelf)
     // Stage B
-    static constexpr float kDriveEnv = 1.2f; // envelope contribution to drive
+    static constexpr float kDriveEnv = 0.9f; // envelope contribution to drive (rebalanced
+                                             // from 1.2 for the excursion term, §2: natural
+                                             // max 3.7x keeps the response monotone below
+                                             // the 3.8x clamp instead of flat-topping)
     static constexpr float kAgeComp  = 0.6f; // static low-comp from Age
     static constexpr float kEnvComp  = 1.8f; // dynamic low-comp from Age*env
     // Stage C
@@ -610,6 +803,41 @@ private:
     static constexpr float kGthump = 0.10f, kGmaxHard = 0.74f;
     static constexpr double kDampA_Hz = 6000.0, kDampB_Hz = 3000.0, kDampC_Hz = 2200.0;
     static constexpr int   kEncSubHpHz = 22;  // subsonic HP on wet enclosure out (low, for bass reach)
+
+    // ---- PHYSICS UPGRADE constants (docs/cabdyn/PHYSICS_UPGRADE.md) ----
+    // Excursion model (§1): displacement x(t) = 2nd-order resonant LP of the
+    // pre-conv input at the box resonance Fc=FsEst, Q=Qtc. RBJ LP gain at Fc is Q,
+    // so kXCal calibrates xs->+/-1 only when the cab is truly slammed AT resonance.
+    static constexpr float kFsDefault = 90.0f; // default box resonance (no IR estimate)
+    static constexpr float kXQ    = 0.9f;  // generic sealed-ish guitar-cab Qtc
+    static constexpr float kXCal  = 1.25f; // excursion calibration -> |xs|~1 at Xmax  [EAR]
+    static constexpr float kDispLo = 0.08f, kDispHi = 0.50f; // dispPush knee (disp env)
+    // A1 excursion modifiers (§2): stiffening Kms(x) shifts Fs up +6% max and drops
+    // effective Q -20% max; promN couples the IR box-bump prominence into base Q.
+    static constexpr float kA1FsShift = 0.06f; // Fs up with excursion (Kms stiffening)  [EAR]
+    static constexpr float kA1QDroop  = 0.20f; // Q down with excursion (Rms lossier)    [EAR]
+    static constexpr float kA1PromQ   = 0.15f; // IR-prominence -> higher base Q         [EAR]
+    // B1 breakup drive (§2): rebalanced env term + new excursion term, ceiling 3.8x.
+    static constexpr float kDriveDisp = 0.8f;  // excursion contribution to breakup drive
+    static constexpr float kDriveMax  = 3.8f;  // breakup drive ceiling (was 3.2x)
+    // Intermodulation stage (§3): LF->HF coupling the block otherwise lacks.
+    // Doppler: instantaneous HF delay tau(t)=x(t)/c; 3.5 mm @ |xs|=1 -> 10.2 us swing.
+    static constexpr double kDopUs = 10.2e-6; // Doppler delay swing at |xs|=1 (=3.5mm/c) [EAR]
+    static constexpr float kAMsym  = 0.22f;   // Bl(x) symmetric droop (~-2.2 dB at |xs|=1)[EAR]
+    static constexpr float kAMasym = 0.12f;   // Age-scaled asymmetric (worn/offset) droop [EAR]
+    static constexpr float kImAge   = 0.6f;   // IM engage from Age
+    static constexpr float kImThump = 0.5f;   // IM engage from Thump
+    // Thermal voice-coil compression (§5): Re rises with dissipated power (tau~sec),
+    // sensitivity droops a couple dB; compression only, never restored. Scaled by Age.
+    static constexpr float kThermTau = 3.5f;  // voice-coil thermal time constant (s)
+    static constexpr float kThermFull = 0.5f; // full-scale-sine steady-state power (x^2)
+    static constexpr float kThermDb  = 1.5f;  // max broadband droop at full power       [EAR]
+    // Modal shaping of the harmonics-only breakup exciter (§6): real cone breakup
+    // hits discrete bending-wave modes (~1-4 kHz), so the 'cry' has structure. Safe
+    // because delta has no fundamental -> series-filtering it cannot re-comb.
+    static constexpr float kModM1Hz = 2050.0f, kModM1Q = 2.8f, kModM1Db = 3.5f; // [EAR]
+    static constexpr float kModM2Hz = 3350.0f, kModM2Q = 3.5f, kModM2Db = 2.5f; // [EAR]
+    static constexpr float kModHsHz = 5000.0f, kModHsDb = -1.5f; // keep fizz polite     [EAR]
 
     // -------------------------------- state --------------------------------
     double mFs = 48000.0;
@@ -638,6 +866,7 @@ private:
     Biquad mA1, mA2, mLowShelf;
     int mCtrl = 0;
     float mA1Db = 0.0f, mA2Db = 0.0f, mLowCompDb = 0.0f, mDriveDbg = 1.0f;
+    double mA1CenterDbg = 90.0; // last-built A1 center (Hz), dbg for T17
 
     // Stage B
     Biquad mHp800, mLp3800;
@@ -649,6 +878,43 @@ private:
     DampAllpass mApA[3], mApB[3], mApC[3];
     Biquad mEncHp;          // subsonic high-pass on the wet enclosure output
     float mEncMixSm = 0.0f;
+
+    // ---- PHYSICS UPGRADE state (docs/cabdyn/PHYSICS_UPGRADE.md) ----
+    // Per-cab resonance targets (§4). Written by setSpeakerResonance/clear from the
+    // MESSAGE thread (rare, on IR load); consumed at the control-rate boundary in
+    // processPre. std::atomic float, not Biquad, so the audio thread only reads a
+    // plain value and retunes state-preservingly when it changes.
+    std::atomic<float> mFsTarget{kFsDefault};   // captured box resonance (Hz)
+    std::atomic<float> mPromTarget{0.0f};       // IR box-bump prominence (dB)
+    float mFsEst = kFsDefault;                  // current consumed Fs (control-rate)
+    float mPromN = 0.0f;                        // clamp01(promDb/8): base-Q coupling
+    float mFsApplied = -1.0f;                   // last Fs baked into the retuned filters
+
+    // Excursion model (§1): RBJ LP2 at FsEst,Q=kXQ on the pre-conv input -> xd/xs;
+    // slow displacement envelope dEnv (3ms/100ms) -> dispPush (coefficient driver).
+    Biquad mExcLp;                              // 2nd-order resonant displacement LP
+    float mDEnv = 0.0f;                         // displacement follower (|xd|)
+    float mDEnvAtk = 0.02f, mDEnvRel = 0.005f;  // 3 ms / 100 ms
+    float mDispPush = 0.0f;                     // clamp01((dEnv-lo)/(hi-lo)) slow
+    float mXs = 0.0f;                           // tanh(xd): signed instantaneous excursion
+
+    // Intermodulation stage (§3): shared HP800 already lives in mHp800; a small
+    // pow2 ring holds hp for the two-tap sidebands-only trick (clean integer tap +
+    // Doppler-modulated Hermite tap). Allocated in prepare().
+    std::vector<float> mImRing;                 // pow2 ring of HP800(s)
+    int mImMask = 0, mImPos = 0;                // ring index mask + write cursor
+    int mImTauC = 0;                            // integer center tap (>= ceil(kDop)+2)
+    float mImKDop = 0.0f;                       // Doppler swing in samples (fs*kDopUs)
+    float mImWet = 0.0f;                        // last Wim (dbg)
+
+    // Thermal voice-coil compression (§5): one-pole power integrator on input x^2.
+    float mPwr = 0.0f;                          // dissipated-power estimate (x^2, slow)
+    float mThermK = 0.0f;                       // one-pole coef for tau=kThermTau
+    float mThermGain = 1.0f;                    // dbToLin(droopDb), series broadband
+    float mThermDbg = 0.0f;                     // last droopDb (dbg)
+
+    // Modal shaping of the breakup exciter (§6): series peaks + shelf on delta only.
+    Biquad mModM1, mModM2, mModHs;              // fixed except on FsEst change
 };
 
 } // namespace nam_rig
