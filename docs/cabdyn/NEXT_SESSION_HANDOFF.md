@@ -29,10 +29,22 @@ the 3.8× clamp).
 
 **Not yet done:** local Windows build (JUCE-side edits — CabBlock/RigChain/
 PluginProcessor/IrAnalysis — could not be compiled offline; they are small and
-hand-reviewed). Stage C untouched this pass. New [EAR] constants to audition,
-in priority order: IM depth (`kAMsym/kAMasym/kDopUs`), excursion calibration
-(`kXCal`, `kDispLo/Hi` — sets how hard you must dig in), modal centers/gains,
-thermal depth (`kThermDb`), A1 excursion modifiers (`kA1FsShift/QDroop/PromQ`).
+hand-reviewed). Stage C untouched this pass.
+
+**Data-anchoring pass (same day):** the main [EAR] guesses were replaced with
+measured values from the published Klippel analysis of the Celestion G12H(55)
+Greenback (Voice Coil Feb 2015) — see PHYSICS_UPGRADE.md **§11**: `kAMsym 0.22`
+confirmed (Bl 82 % @ 2.0 mm), `kDopUs` 10.2→**6.4 µs** (2.2 mm slam excursion),
+`kA1FsShift` 0.06→**0.15** (Cms 75 % @ 2.3 mm), and the Bl asymmetry split into
+`kAMasymBase 0.10` (deliberate coil-out offset, present on FRESH cones — 1.6 mm
+measured) + `kAMasymAge 0.10` (wear, still [EAR]). Le(x) omission validated
+(0.04 mH measured swing). 40/40 tests re-pass.
+
+**Still [EAR] (dose/taste, not physics):** `kAMasymAge`, `kXCal` + `kDispLo/Hi`
+(gain-staging convention — calibrate against the real pre-cab level, not by
+ear), modal centers/gains, `kThermDb` dose, Stage C voicing. For judging by ear,
+use the delta-null trick: render a loop Dyn-on and Dyn-off, invert one, sum —
+the residual is exactly what the block adds, solo'd and plainly audible.
 
 ---
 

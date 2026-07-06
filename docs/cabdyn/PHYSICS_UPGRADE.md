@@ -71,15 +71,15 @@ everywhere at once (guarded by new tests T10/T17).
 
 ```
 g1Db  = min(3.0, kDepthA1 · Thump · dispPush)                (ceiling unchanged)
-f0    = FsEst · (1 − 0.12·Thump) · (1 + kA1FsShift·dispPush)   kA1FsShift = 0.06
+f0    = FsEst · (1 − 0.12·Thump) · (1 + kA1FsShift·dispPush)   kA1FsShift = 0.15
 Q     = (0.9 + 0.9·Thump) · (1 − kA1QDroop·dispPush) · (1 + kA1PromQ·promN)
         kA1QDroop = 0.20,  kA1PromQ = 0.15,  promN = clamp01(promDb / 8)
 ```
 
 Physics of the two new modifiers: at large excursion the progressive suspension
-**stiffens** (`Kms(x)` grows → `Fs = √(k/m)/2π` shifts **up**, `+6 %` max) and
-gets **lossier** (`Rms(x)` grows faster than `√k` → effective Q **drops**,
-−20 % max). `promN` couples the IR's measured box-bump prominence into the base
+**stiffens** (`Kms(x)` grows → `Fs = √(k/m)/2π` shifts **up**; DATA-ANCHORED per
+§11: Cms falls to 75 % at XC ⇒ Fs × √1.33 ≈ **+15 %** max) and gets **lossier**
+(`Rms(x)` grows faster than `√k` → effective Q **drops**, −20 % max). `promN` couples the IR's measured box-bump prominence into the base
 Q — a strongly resonant capture implies a high-`Qtc` box. All bounded; the +3 dB
 gain ceiling is untouched. **[EAR** for the three new coefficients**]**
 
@@ -159,17 +159,21 @@ Properties (each one is a test):
 ### Constants
 
 ```
-kDopUs   = 10.2 µs        (= 3.5 mm / c; τ swing at |xs| = 1)   [EAR]
-kDop     = fs · 10.2e-6   (samples; 0.49 @ 48k — scales with fs)
-τc       = ceil(kDop) + 2 (integer; Hermite needs ±2 guard)
-ring len = next pow2 ≥ τc + kDop + 4   (allocate in prepare; 16 @ 48k)
-kAMsym   = 0.22           (max symmetric droop ≈ −2.2 dB at |xs| = 1)   [EAR]
-kAMasym  = 0.12           (Age-scaled asymmetric term)                  [EAR]
-kImAge   = 0.6,  kImThump = 0.5
+kDopUs      = 6.4 µs      (= 2.2 mm slam excursion / c — DATA-ANCHORED, §11)
+kDop        = fs · 6.4e-6 (samples; 0.31 @ 48k — scales with fs)
+τc          = ceil(kDop) + 2 (integer; Hermite needs ±2 guard)
+ring len    = next pow2 ≥ τc + kDop + 4   (allocate in prepare; 16 @ 48k)
+kAMsym      = 0.22        (Bl 82 % at 2.0 mm ⇒ ~78 % at 2.2 mm — DATA-ANCHORED, §11)
+kAMasymBase = 0.10        (designed-in coil-out Bl offset, present on FRESH cones —
+                           1.6 mm measured, §11)
+kAMasymAge  = 0.10        (wear/fatigue adds asymmetry on top)   [EAR]
+kImAge      = 0.6,  kImThump = 0.5
+
+gAM = kAMsym·xs² + (kAMasymBase + kAMasymAge·Age)·xs
 ```
 
-Ceilings: instantaneous HF gain deviation `|gAM| ≤ 0.34` (−3.6/+1.0 dB extreme),
-delay swing ≤ ±10.2 µs, both further scaled by `Wim ≤ 1`. The δ content rides
+Ceilings: instantaneous HF gain deviation `gAM ∈ [−0.045, 0.42]` (−4.7/+0.4 dB
+extreme at Age 1), delay swing ≤ ±6.4 µs, both further scaled by `Wim ≤ 1`. The δ content rides
 ~τc (≈3 samples) behind the dry path — irrelevant for additive sidebands; the
 dry path is untouched, `latencySamples()` stays 0.
 
@@ -299,10 +303,10 @@ excursion model; its broadband-env drive stands).
 
 | stage | quantity | max swing | driver |
 |-------|----------|-----------|--------|
-| A1 | f0 shift / Q droop | +6 % / −20 % | dispPush |
+| A1 | f0 shift / Q droop | +15 % / −20 % | dispPush |
 | B1 | drive | ≤ **3.8×** (was 3.2×) | Age·(push, dispPush) |
-| IM | instantaneous HF gain | −3.6/+1.0 dB (`|gAM| ≤ 0.34`), ×Wim | xs, xs² |
-| IM | Doppler delay swing | ±10.2 µs | xs |
+| IM | instantaneous HF gain | −4.7/+0.4 dB (`gAM ≤ 0.42`), ×Wim | xs, xs² |
+| IM | Doppler delay swing | ±6.4 µs | xs |
 | thermal | broadband droop | **−1.5 dB**, reduction only | pwr·Age |
 | modal | exciter shaping | +3.5 dB peak, −1.5 dB shelf | static |
 
@@ -332,4 +336,72 @@ expressible as a delta; CPU + stability risk). Vented-box displacement null at
 from `Kms(x)` acting on the low band itself (parallel band-limited fundamental
 delta ⇒ the B1 comb trap all over again; revisit only with its own
 describing-function treatment). Port turbulence noise. Magnet-scale thermal
-(minutes).
+(minutes). `Le(x)` modulation — **measured negligible** on the reference driver
+(0.04 mH swing over the full excursion range, §11).
+
+## 11. Data anchors (added 2026-07-06, replacing [EAR] guesses)
+
+Primary source: **Vance Dickason, Voice Coil Test Bench, Feb 2015** (reprinted
+audioXpress) — full LEAP/LMS + **Klippel** analysis of the **Celestion G12H(55)
+Heritage "Greenback"**, the closest published large-signal dataset to the cabs
+this block models. Measured values and the constants they fix:
+
+| measured (G12H(55) Greenback) | value | constant it anchors |
+|---|---|---|
+| `XBl` @ 82 % Bl (IEC 10 % dist. limit) | **2.0 mm** | `kAMsym = 0.22` (parabolic Bl ⇒ ~78 % at the 2.2 mm slam point) |
+| `XC` @ 75 % Cms | **2.3 mm** | `kA1FsShift = 0.15` (k ×1.33 ⇒ Fs ×√1.33) |
+| deliberate coil-out Bl offset | **1.6 mm** ("increases 2nd-order HD… sounds really good with electric guitar") | `kAMasymBase = 0.10` — asymmetric AM exists on FRESH cones; only the wear increment (`kAMasymAge`) stays [EAR] |
+| slam excursion reference (Xmax+15 % sim point) | **2.2 mm** | `kDopUs = 6.4 µs` (2.2 mm / 343 m s⁻¹); also defines `|xs| = 1` for `kXCal` |
+| `Le(x)` swing across full excursion | **0.04 mH** | justifies NOT modelling Le(x) (§10) |
+| free-air Fs (G12H regular / G12H55) | 79 / 55 Hz | supports the 90 Hz in-box default and the [45, 200] estimator clamp |
+
+Secondary (thermal): published voice-coil thermal time constants are "a few
+seconds" (coil) vs minutes (magnet) — `kThermTau = 3.5 s` sits mid-literature
+for a 44.5 mm coil. Published steady-state power compression at rated power is
+~3 dB (US) to ~6 dB (British) including the magnet loop; the coil-only,
+seconds-scale component modelled here is capped at `kThermDb = 1.5 dB` —
+deliberately the conservative end. [EAR] only in dose, not existence.
+
+Still genuinely [EAR] (taste/dose, not physics): `kAMasymAge`, modal
+centers/gains (no published modal map for these cones), `kDriveBase` dose,
+Stage C voicing, and the macro-to-depth curves.
+
+## 12. Rig calibration (2026-07-06, measured from Robbie's renders)
+
+First ear-test findings ("not dynamic, fizzy, no thump") traced to a
+calibration-class bug: every level-dependent driver was scaled to FULL-SCALE
+PURE TONES, but the measured INTERNAL pre-cab level (boosted JCM800 capture, 7
+renders in `docs/cabdyn/renders/`; renders were −10.1 dB trimmed by the
+post-chain Mix Output Gain, corrected here) is **~ −14 dBFS RMS** with the
+80–110 Hz slice at `|LP2@90|` p99 = **0.141** during hard chugs — ~15 dB below
+the assumed scale.
+Result: `dispPush` p99 = 0.0000 on every file (thump/IM gates never opened),
+`push` peaked at 0.19, thermal sat at 0.8 % of full. A cranked amp is also a
+limiter: quiet-to-chug spans only ~6 dB at its output, so knees must sit
+tightly around the measured range.
+
+Recalibrated from the render statistics (chugs p50 → pin, riffing → mid,
+quiet/leads → 0):
+
+| constant | old → new | anchor (measured, INTERNAL level) |
+|---|---|---|
+| `kXCal` | 1.25 → **8.75** | chug `\|LP2\|` p99 0.141 ≡ 2.2 mm slam → tanh input ~1.23 |
+| `kDispLo/Hi` | 0.08/0.50 → **0.20/0.80** | dEnv percentiles (kXCal-normalized): chugs 0.89, riffing 0.37–0.54, quiet ≤0.15, leads ≤0.19 |
+| `kEnvLo/Hi` | 0.03/0.50 → **0.16/0.48** | env: quiet p90 0.17, riffing p90 0.36 |
+| `kThermFull` | 0.5 → **0.041** (+ input clamp 8×) | riffing mean x² = 0.040 |
+| drive law | `1+Age(1+0.9·push+0.8·disp)` → `1+Age(0.5+1.2·push+1.0·disp)` | measured constant −14 dBc grit → shift dose from static floor to dynamic terms (max 3.7×) |
+| `kModHsDb` / `kModLpHz` | −1.5 → −2.5 dB; **new LP1 @ 6.5 kHz·mScale** | exciter spray measured to 20 kHz; real cone output collapses > ~6 kHz |
+
+Verified on the renders through the recalibrated block (JCM preset 0.5/0.4):
+chugs `dispPush` mean **0.93**, riffing **0.31** (peaks 0.87), quiet **0.000**,
+leads 0.01; thermal −0.5…−0.75 dB while playing, −0.13 quiet; signed band
+change on riffing: HF −2.3 dB darker when hot (A2+thermal), LF bloom on
+dig-ins with B3 compression between — everything moves with the playing now.
+
+Tests: behaviour tests probe at `kRigAmp = 0.192` (≈ −14 dBFS, the internal
+level); full-scale tones are retained only where pinning is the point
+(stability/aliasing/ceilings).
+**Caveat:** this calibration assumes capture-normalized amp levels like the
+measured rig; a rig running e.g. +10 dB hotter into the cab block shifts every
+knee — if that ever matters, expose a single "speaker drive" trim upstream of
+the excursion model rather than re-deriving constants.

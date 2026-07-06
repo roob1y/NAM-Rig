@@ -45,6 +45,14 @@ static constexpr double SR = 48000.0;
 static constexpr int BLK = 512;
 static constexpr double kPi = 3.14159265358979323846;
 
+// Rig-realistic test level (PHYSICS_UPGRADE §12): the measured INTERNAL pre-cab
+// RMS on Robbie's rig is ~ -14 dBFS (renders were -10.1 dB trimmed post-chain),
+// and the excursion/push knees are calibrated to that structure. Program-
+// BEHAVIOUR tests therefore probe with ~0.19-amplitude tones; full-scale tones
+// (~15 dB hotter than the real internal level) remain in use only where they
+// should pin everything (stability, aliasing, ceilings).
+static constexpr double kRigAmp = 0.192;
+
 static void runPre(CabDynamicsBlock &d, std::vector<float> &m)
 {
     for (size_t p = 0; p < m.size(); p += BLK)
@@ -261,7 +269,10 @@ int main()
         {
             const double s = std::sin(2.0 * kPi * 90.0 * (double)n / SR);
             ml[n] = 0.9f * (float)s;
-            mq[n] = 0.01f * (float)s;
+            // "quiet" = rig-realistic quiet: measured quiet-playing 90 Hz slice is
+            // |LP2| ~ 0.010-0.016 INTERNAL (§12); a hotter pure 90 Hz tone would be
+            // louder in-band than real quiet playing and sit on the knee edge.
+            mq[n] = 0.016f * (float)s;
         }
         runPre(loud, ml);
         runPre(quiet, mq);
@@ -337,23 +348,23 @@ int main()
 
     // ---------- T10: excursion selectivity (displacement, not broadband envelope) ----------
     // The whole point of the excursion model: dispPush follows cone DISPLACEMENT (a
-    // resonant LP at ~90 Hz), so a full-scale LF note pushes hard while a full-scale
-    // HF note (mids/HF produce ~0 displacement) barely does. This kills the class of
-    // bug where a loud 2 kHz bend fattened the 90 Hz resonance via broadband envelope.
+    // resonant LP at ~90 Hz), so a RIG-LEVEL LF note pushes hard while an equally
+    // loud HF note (mids/HF produce ~0 displacement) barely does. This kills the
+    // class of bug where a loud 2 kHz bend fattened the 90 Hz resonance.
     {
         auto dispAt = [](double f) {
             CabDynamicsBlock d; d.prepare(SR, BLK);
             d.setThump(1.0f); // engage so processPre runs (dispPush is computed there)
             const size_t N = (size_t)(SR * 0.6);
             std::vector<float> m(N);
-            for (size_t n = 0; n < N; ++n) m[n] = 1.0f * (float)std::sin(2.0 * kPi * f * (double)n / SR);
+            for (size_t n = 0; n < N; ++n) m[n] = (float)(kRigAmp * std::sin(2.0 * kPi * f * (double)n / SR));
             runPre(d, m);
             return d.dbgDispPush();
         };
         const float dLo = dispAt(60.0);
         const float dHi = dispAt(2000.0);
-        CHECK(dLo >= 0.8f, "T10a full-scale 60 Hz pushes displacement (dispPush %.3f >= 0.8)", dLo);
-        CHECK(dHi <= 0.05f, "T10b full-scale 2 kHz barely displaces (dispPush %.3f <= 0.05)", dHi);
+        CHECK(dLo >= 0.8f, "T10a rig-level 60 Hz pushes displacement (dispPush %.3f >= 0.8)", dLo);
+        CHECK(dHi <= 0.05f, "T10b rig-level 2 kHz barely displaces (dispPush %.3f <= 0.05)", dHi);
     }
 
     // ---------- T11: IMD engages (Bl(x) AM + Doppler FM) ----------
@@ -371,8 +382,8 @@ int main()
             for (size_t n = 0; n < N; ++n)
             {
                 const double t = (double)n / SR;
-                const double lf = withLF ? 0.85 * std::sin(2.0 * kPi * fLF * t) : 0.0;
-                const double hf = 0.15 * std::sin(2.0 * kPi * fHF * t);
+                const double lf = withLF ? kRigAmp * std::sin(2.0 * kPi * fLF * t) : 0.0;
+                const double hf = 0.2 * kRigAmp * std::sin(2.0 * kPi * fHF * t);
                 m[n] = (float)(lf + hf);
             }
             runPre(d, m);
@@ -435,7 +446,7 @@ int main()
         for (size_t n = 0; n < N; ++n)
         {
             const double t = (double)n / SR;
-            m[n] = (float)(0.85 * std::sin(2.0 * kPi * fLF * t) + 0.15 * std::sin(2.0 * kPi * fHF * t));
+            m[n] = (float)(kRigAmp * std::sin(2.0 * kPi * fLF * t) + 0.2 * kRigAmp * std::sin(2.0 * kPi * fHF * t));
         }
         runPre(d, m);
         const size_t start = N / 2, win = N / 4;
@@ -460,16 +471,17 @@ int main()
     }
 
     // ---------- T14: thermal voice-coil compression ----------
-    // 6 s full-scale sine at Age 1 drives pwr -> steady-state pwrN = 1, so droopDb ->
-    // -kThermDb (= -1.5) * 1 * Age(1); at the ~3.5 s tau the 6 s point sits at
+    // 6 s of RIG-LEVEL sustained playing at Age 1: amplitude 0.286 gives mean
+    // x^2 = 0.041 = kThermFull (the measured internal riffing power, §12), so
+    // pwrN -> 1 and droopDb -> -1.5 * Age; at the ~3.5 s tau the 6 s point sits at
     // ~1-e^{-6/3.5} ~ 0.82 of full => expected ~1.23 dB. Then 6 s of silence must
-    // recover (droop returns toward 0). Compression only, monotone (ripple tol).
+    // recover. Compression only, monotone (ripple tol).
     {
         CabDynamicsBlock d; d.prepare(SR, BLK);
         d.setAgeDrive(1.0f);
         const size_t N = (size_t)(SR * 6.0);
         std::vector<float> m(N);
-        for (size_t n = 0; n < N; ++n) m[n] = 1.0f * (float)std::sin(2.0 * kPi * 80.0 * (double)n / SR);
+        for (size_t n = 0; n < N; ++n) m[n] = 0.286f * (float)std::sin(2.0 * kPi * 80.0 * (double)n / SR);
         // sample the droop at 1 s intervals to check monotone increase in magnitude
         double prevMag = 0.0; bool mono = true;
         for (int sec = 1; sec <= 6; ++sec)
@@ -596,13 +608,13 @@ int main()
             d.setThump(1.0f);
             const size_t N = (size_t)(SR * 0.6);
             std::vector<float> m(N);
-            for (size_t n = 0; n < N; ++n) m[n] = 1.0f * (float)std::sin(2.0 * kPi * 60.0 * (double)n / SR);
+            for (size_t n = 0; n < N; ++n) m[n] = (float)(kRigAmp * std::sin(2.0 * kPi * 60.0 * (double)n / SR));
             runPre(d, m);
-            CHECK(d.dbgA1Db() >= 1.5f, "T17a full-scale 60 Hz blooms A1 with fs=60 (%.2f dB >= 1.5)", d.dbgA1Db());
-            // center: fsEst*(1-0.12*Thump)*(1+0.06*dispPush). Thump=1 -> 60*0.88 ~ 52.8,
-            // with a small +6% excursion shift; must be well below the 90 default.
-            CHECK(d.dbgA1CenterHz() > 45.0 && d.dbgA1CenterHz() < 62.0,
-                  "T17c A1 center tracks shifted f0 (%.1f Hz in ~[45,62], not 90)", d.dbgA1CenterHz());
+            CHECK(d.dbgA1Db() >= 1.5f, "T17a rig-level 60 Hz blooms A1 with fs=60 (%.2f dB >= 1.5)", d.dbgA1Db());
+            // center: fsEst*(1-0.12*Thump)*(1+0.15*dispPush). Thump=1 -> 60*0.88 ~ 52.8,
+            // with the Klippel-anchored +15% excursion shift -> ~60.7; well below 90.
+            CHECK(d.dbgA1CenterHz() > 45.0 && d.dbgA1CenterHz() < 64.0,
+                  "T17c A1 center tracks shifted f0 (%.1f Hz in ~[45,64], not 90)", d.dbgA1CenterHz());
         }
         {
             CabDynamicsBlock d; d.prepare(SR, BLK);
@@ -610,9 +622,9 @@ int main()
             d.setThump(1.0f);
             const size_t N = (size_t)(SR * 0.6);
             std::vector<float> m(N);
-            for (size_t n = 0; n < N; ++n) m[n] = 1.0f * (float)std::sin(2.0 * kPi * 400.0 * (double)n / SR);
+            for (size_t n = 0; n < N; ++n) m[n] = (float)(kRigAmp * std::sin(2.0 * kPi * 400.0 * (double)n / SR));
             runPre(d, m);
-            CHECK(d.dbgA1Db() < 0.3f, "T17b full-scale 400 Hz barely blooms A1 (%.3f dB < 0.3)", d.dbgA1Db());
+            CHECK(d.dbgA1Db() < 0.3f, "T17b rig-level 400 Hz barely blooms A1 (%.3f dB < 0.3)", d.dbgA1Db());
         }
     }
 

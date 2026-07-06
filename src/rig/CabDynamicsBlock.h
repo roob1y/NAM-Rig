@@ -410,8 +410,12 @@ public:
 
             // ---- thermal power integrator (§5): one-pole on the INPUT x^2 (terminal-
             // voltage proxy), tau=3.5 s. Reads the pre-delta input, NOT the block's
-            // own output -> no self-feedback path by construction. ----
-            mPwr += mThermK * (x * x - mPwr);
+            // own output -> no self-feedback path by construction. The input is
+            // clamped at 8x the calibrated full-power point so a signal far hotter
+            // than the rig calibration can't wind the integrator up and leave the
+            // droop pinned long after the signal stops (bounded recovery ~2 tau). ----
+            const float xx = x * x;
+            mPwr += mThermK * ((xx < kThermInMax ? xx : kThermInMax) - mPwr);
 
             // ---- Stage A: series impedance-delta filters (identity at rest) ----
             float s = mA2.processSample(mA1.processSample(x));
@@ -437,7 +441,7 @@ public:
                 // breakup drive gains an excursion term (§2): rebalanced env + dispPush,
                 // ceiling 3.8x. Midband level (push) still drives it; excursion adds LF
                 // stiffening of the cone edge (earlier/harder breakup) + free LF->mid IMD.
-                float drive = 1.0f + mAgeSmPre * (1.0f + kDriveEnv * push + kDriveDisp * mDispPush);
+                float drive = 1.0f + mAgeSmPre * (kDriveBase + kDriveEnv * push + kDriveDisp * mDispPush);
                 drive = std::min(drive, kDriveMax);
                 mDriveDbg = drive;
                 // band amplitude envelope -> describing-function fundamental gain G
@@ -454,7 +458,7 @@ public:
                 float db = mHb.down(n0, n1);
                 // modal shaping of the exciter (§6): two paper-cone bending-wave peaks
                 // + a polite fizz shelf. Applied at base rate after the halfband down().
-                db = mModHs.processSample(mModM2.processSample(mModM1.processSample(db)));
+                db = mModLp.processSample(mModHs.processSample(mModM2.processSample(mModM1.processSample(db))));
                 s = s + Wb * db;
             }
 
@@ -471,8 +475,11 @@ public:
                 mImRing[(size_t)mImPos] = hp;                         // write shared HP800(s)
                 const float clean = mImRing[(size_t)((mImPos - mImTauC) & mImMask)]; // integer tap
                 const float mod   = imRead((float)mImTauC + mImKDop * mXs);          // Doppler tap
-                // Bl(x) droop: symmetric x^2 term + Age-scaled asymmetric x term.
-                const float gAM = kAMsym * mXs * mXs + kAMasym * mAgeSmPre * mXs;
+                // Bl(x) droop: symmetric x^2 term + asymmetric x term. The asym part has
+                // a BASE component (guitar speakers ship with a deliberate coil-out Bl
+                // offset — 1.6 mm measured on the Greenback) plus an Age-scaled wear term.
+                const float gAM = kAMsym * mXs * mXs
+                                  + (kAMasymBase + kAMasymAge * mAgeSmPre) * mXs;
                 const float dIM = (1.0f - gAM) * mod - clean;        // sidebands-only
                 s = s + Wim * dIM;
                 mImPos = (mImPos + 1) & mImMask;
@@ -660,8 +667,14 @@ private:
         const Biquad m1 = Biquad::peaking(mFs, std::min((double)(kModM1Hz * mScale), 0.45 * mFs), (double)kModM1Q, (double)kModM1Db);
         const Biquad m2 = Biquad::peaking(mFs, std::min((double)(kModM2Hz * mScale), 0.45 * mFs), (double)kModM2Q, (double)kModM2Db);
         const Biquad hs = Biquad::highshelf(mFs, std::min((double)kModHsHz, 0.45 * mFs), (double)kModHsDb, 0.7);
-        if (force) { mModM1 = m1; mModM2 = m2; mModHs = hs; mModM1.reset(); mModM2.reset(); mModHs.reset(); }
-        else { mModM1.copyCoeffsFrom(m1); mModM2.copyCoeffsFrom(m2); mModHs.copyCoeffsFrom(hs); }
+        // Cone-mass HF collapse: a real 12" cone's mechanical output dies above
+        // ~6 kHz, so the exciter's upper tanh harmonics must too (measured 10-20 kHz
+        // spray at -10.8 dBc on the render probe before this LP1 — not physical).
+        const Biquad lp = Biquad::lowpass1(mFs, std::min((double)(kModLpHz * mScale), 0.45 * mFs));
+        if (force) { mModM1 = m1; mModM2 = m2; mModHs = hs; mModLp = lp;
+                     mModM1.reset(); mModM2.reset(); mModHs.reset(); mModLp.reset(); }
+        else { mModM1.copyCoeffsFrom(m1); mModM2.copyCoeffsFrom(m2); mModHs.copyCoeffsFrom(hs);
+               mModLp.copyCoeffsFrom(lp); }
         mFsApplied = fsHz;
     }
 
@@ -725,7 +738,7 @@ private:
         mImPos = 0; mImWet = 0.0f;
         std::fill(mImRing.begin(), mImRing.end(), 0.0f);
         mPwr = 0.0f; mThermGain = 1.0f; mThermDbg = 0.0f;
-        mModM1.reset(); mModM2.reset(); mModHs.reset();
+        mModM1.reset(); mModM2.reset(); mModHs.reset(); mModLp.reset();
         rebuildStageA(0.0f, 0.0f); // identity coeffs at the transparent edge
     }
     void resetPostState()
@@ -755,7 +768,7 @@ private:
     {
         // includes the excursion LP2 and the three modal exciter biquads (§1/§6).
         for (Biquad *b : {&mA1, &mA2, &mLowShelf, &mHp800, &mLp3800,
-                          &mExcLp, &mModM1, &mModM2, &mModHs})
+                          &mExcLp, &mModM1, &mModM2, &mModHs, &mModLp})
         {
             if (std::fabs(b->z1) < 1.0e-30f) b->z1 = 0.0f;
             if (std::fabs(b->z2) < 1.0e-30f) b->z2 = 0.0f;
@@ -784,16 +797,22 @@ private:
     static constexpr int   kGN = 257;       // tanh describing-function table size
     static constexpr float kGBetaMax = 12.0f;
     static constexpr float kSettle = 1.0e-6f;
-    static constexpr float kEnvLo = 0.03f, kEnvHi = 0.50f; // push knee (~ -30 .. -6 dBFS)
+    // push knee — RIG-CALIBRATED (§12, corrected +10.1 dB to INTERNAL level): a
+    // cranked amp is a limiter; the internal envelope spans only ~0.16 (genuinely
+    // quiet) to ~0.36 (riffing p90). 0.16..0.48 puts normal playing at push
+    // ~0.5-0.6, quiet ~0, digging-in headroom to 1.
+    static constexpr float kEnvLo = 0.16f, kEnvHi = 0.48f;
     // Stage A depths
     static constexpr float kDepthA1 = 4.0f; // 90 Hz peak scale (clamped +3 dB)
     static constexpr float kDepthA2 = 2.0f; // 2 kHz dynamic droop scale
     static constexpr float kHfEase  = 1.5f; // static Age HF ease (into the -3 dB shelf)
-    // Stage B
-    static constexpr float kDriveEnv = 0.9f; // envelope contribution to drive (rebalanced
-                                             // from 1.2 for the excursion term, §2: natural
-                                             // max 3.7x keeps the response monotone below
-                                             // the 3.8x clamp instead of flat-topping)
+    // Stage B — drive rebalanced toward DYNAMIC terms (§12): the measured on/off
+    // delta showed constant -14 dBc grit at 2.5-20 kHz ("fizz on fizz" on a hot
+    // compressed high-gain input) while the level-dependent terms never moved. The
+    // static floor drops 1.0 -> 0.5 and the env/excursion terms carry more, so
+    // breakup now GROWS with playing instead of idling hot. Max 1+(0.5+1.2+1.0)=3.7.
+    static constexpr float kDriveBase = 0.5f; // static wear floor (was implicit 1.0) [EAR]
+    static constexpr float kDriveEnv  = 1.2f; // midband-envelope contribution to drive
     static constexpr float kAgeComp  = 0.6f; // static low-comp from Age
     static constexpr float kEnvComp  = 1.8f; // dynamic low-comp from Age*env
     // Stage C
@@ -810,34 +829,66 @@ private:
     // so kXCal calibrates xs->+/-1 only when the cab is truly slammed AT resonance.
     static constexpr float kFsDefault = 90.0f; // default box resonance (no IR estimate)
     static constexpr float kXQ    = 0.9f;  // generic sealed-ish guitar-cab Qtc
-    static constexpr float kXCal  = 1.25f; // excursion calibration -> |xs|~1 at Xmax  [EAR]
-    static constexpr float kDispLo = 0.08f, kDispHi = 0.50f; // dispPush knee (disp env)
-    // A1 excursion modifiers (§2): stiffening Kms(x) shifts Fs up +6% max and drops
+    // RIG-CALIBRATED (2026-07-06, docs/cabdyn/renders analysis, PHYSICS_UPGRADE §12):
+    // the renders were captured with the Mix Output Gain at -10.1 dB (post-chain, so
+    // it never affects this block internally) -> INTERNAL pre-cab level = render
+    // +10.1 dB. Measured chug |LP2@90| p99 = 0.044 on the render == 0.141 internal
+    // == the 2.2 mm slam point; kXCal maps that to tanh input ~1.23 -> xs ~ 0.85.
+    // (The original 1.25 assumed a FULL-SCALE sine at resonance -- ~15 dB hotter
+    // than the real internal level; that's why thump/IM never engaged.)
+    static constexpr float kXCal  = 8.75f;
+    // dispPush knee on dEnv, from measured per-style percentiles (x22.4 rescale):
+    // chugs p50 0.89 / chords p90 0.74 / riffing p50 0.37 p90 0.54 / quiet p99 0.15
+    // / leads p90 0.19 -> knee 0.20..0.80: chugs pin ~1, riffing mid, quiet/leads ~0.
+    static constexpr float kDispLo = 0.20f, kDispHi = 0.80f;
+    // A1 excursion modifiers (§2): stiffening Kms(x) shifts Fs up +15% max and drops
     // effective Q -20% max; promN couples the IR box-bump prominence into base Q.
-    static constexpr float kA1FsShift = 0.06f; // Fs up with excursion (Kms stiffening)  [EAR]
+    static constexpr float kA1FsShift = 0.15f; // DATA-ANCHORED: Cms falls to 75% at XC=2.3mm
+                                               // (Klippel, G12H Greenback, Voice Coil 2/2015)
+                                               // -> k x1.33 -> Fs x sqrt(1.33) ~ +15%
     static constexpr float kA1QDroop  = 0.20f; // Q down with excursion (Rms lossier)    [EAR]
     static constexpr float kA1PromQ   = 0.15f; // IR-prominence -> higher base Q         [EAR]
     // B1 breakup drive (§2): rebalanced env term + new excursion term, ceiling 3.8x.
-    static constexpr float kDriveDisp = 0.8f;  // excursion contribution to breakup drive
+    static constexpr float kDriveDisp = 1.0f;  // excursion contribution to breakup drive
     static constexpr float kDriveMax  = 3.8f;  // breakup drive ceiling (was 3.2x)
-    // Intermodulation stage (§3): LF->HF coupling the block otherwise lacks.
-    // Doppler: instantaneous HF delay tau(t)=x(t)/c; 3.5 mm @ |xs|=1 -> 10.2 us swing.
-    static constexpr double kDopUs = 10.2e-6; // Doppler delay swing at |xs|=1 (=3.5mm/c) [EAR]
-    static constexpr float kAMsym  = 0.22f;   // Bl(x) symmetric droop (~-2.2 dB at |xs|=1)[EAR]
-    static constexpr float kAMasym = 0.12f;   // Age-scaled asymmetric (worn/offset) droop [EAR]
+    // Intermodulation stage (§3): LF->HF coupling the block otherwise lacks. All four
+    // constants below are DATA-ANCHORED to the Klippel analysis of the Celestion
+    // G12H(55) Greenback (Vance Dickason, Voice Coil Feb 2015 / audioXpress Test
+    // Bench): XBl(82% Bl) = 2.0 mm, XC(75% Cms) = 2.3 mm, deliberate coil-out Bl
+    // offset 1.6 mm ("increases 2nd-order HD... sounds really good with electric
+    // guitar"), Le(x) swing 0.04 mH (negligible -> we rightly don't model Le(x)).
+    // |xs| = 1 is calibrated to the 2.2 mm slam point (XBl + 10%).
+    static constexpr double kDopUs = 6.4e-6;  // Doppler swing at |xs|=1: 2.2 mm / c(343 m/s)
+    static constexpr float kAMsym  = 0.22f;   // Bl droop at slam: 82% at 2.0 mm, parabolic
+                                              // -> ~78% at 2.2 mm = 22% droop
+    static constexpr float kAMasymBase = 0.10f; // designed-in coil-out offset (1.6 mm meas.)
+                                                // -> asym AM exists even on a FRESH cone
+    static constexpr float kAMasymAge  = 0.10f; // wear/fatigue adds asymmetry on top    [EAR]
     static constexpr float kImAge   = 0.6f;   // IM engage from Age
     static constexpr float kImThump = 0.5f;   // IM engage from Thump
     // Thermal voice-coil compression (§5): Re rises with dissipated power (tau~sec),
     // sensitivity droops a couple dB; compression only, never restored. Scaled by Age.
     static constexpr float kThermTau = 3.5f;  // voice-coil thermal time constant (s)
-    static constexpr float kThermFull = 0.5f; // full-scale-sine steady-state power (x^2)
+    // RIG-CALIBRATED (§12, corrected to INTERNAL level): "full power" = sustained
+    // hard playing on THIS rig, not a full-scale sine (which left thermal at <1% on
+    // real material). Internal riffing mean x^2 = 0.040 -> 0.041: sustained riffing
+    // reaches full droop, quiet playing sits at ~16%. Hot test tones clamp to 1.
+    static constexpr float kThermFull = 0.041f;
+    static constexpr float kThermInMax = 8.0f * kThermFull; // integrator input clamp
+                                              // (+9 dB over cal): bounds recovery lag
     static constexpr float kThermDb  = 1.5f;  // max broadband droop at full power       [EAR]
     // Modal shaping of the harmonics-only breakup exciter (§6): real cone breakup
     // hits discrete bending-wave modes (~1-4 kHz), so the 'cry' has structure. Safe
     // because delta has no fundamental -> series-filtering it cannot re-comb.
     static constexpr float kModM1Hz = 2050.0f, kModM1Q = 2.8f, kModM1Db = 3.5f; // [EAR]
     static constexpr float kModM2Hz = 3350.0f, kModM2Q = 3.5f, kModM2Db = 2.5f; // [EAR]
-    static constexpr float kModHsHz = 5000.0f, kModHsDb = -1.5f; // keep fizz polite     [EAR]
+    static constexpr float kModHsHz = 5000.0f, kModHsDb = -2.5f; // keep fizz polite; deepened
+                                              // -1.5 -> -2.5 after the render delta measured
+                                              // -14 dBc grit extending to 20 kHz (§12) [EAR]
+    static constexpr float kModLpHz = 6500.0f; // cone-mass HF collapse on the exciter (LP1):
+                                               // real cone output dies above ~6 kHz, so the
+                                               // upper tanh harmonics must too (scaled by
+                                               // mScale for bass cones)
 
     // -------------------------------- state --------------------------------
     double mFs = 48000.0;
@@ -913,8 +964,9 @@ private:
     float mThermGain = 1.0f;                    // dbToLin(droopDb), series broadband
     float mThermDbg = 0.0f;                     // last droopDb (dbg)
 
-    // Modal shaping of the breakup exciter (§6): series peaks + shelf on delta only.
-    Biquad mModM1, mModM2, mModHs;              // fixed except on FsEst change
+    // Modal shaping of the breakup exciter (§6): series peaks + shelf + cone-mass
+    // LP1 on the delta only.
+    Biquad mModM1, mModM2, mModHs, mModLp;      // fixed except on FsEst change
 };
 
 } // namespace nam_rig
