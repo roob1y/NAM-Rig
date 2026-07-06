@@ -2823,8 +2823,20 @@ public:
         // presets from CabDynamicsBlock. (Selection is a recall action; moving a
         // knob afterwards doesn't auto-flip the label back to Custom.)
         mPreset.addItem("Custom", 1);
-        for (int i = 0; i < nam_rig::CabDynamicsBlock::numPresets(); ++i)
-            mPreset.addItem(nam_rig::CabDynamicsBlock::presets()[i].name, i + 2);
+        {
+            const auto *P = nam_rig::CabDynamicsBlock::presets();
+            const int n = nam_rig::CabDynamicsBlock::numPresets();
+            juce::String lastGroup;
+            for (int i = 0; i < n; ++i)
+            {
+                if (juce::String(P[i].group) != lastGroup) // "Guitar" / "Bass" headings
+                {
+                    lastGroup = P[i].group;
+                    mPreset.addSectionHeading(lastGroup);
+                }
+                mPreset.addItem(P[i].name, i + 2); // id = index + 2 (1 is Custom)
+            }
+        }
         mPreset.setSelectedId(1, juce::dontSendNotification);
         mPreset.setTextWhenNothingSelected("Preset");
         mPreset.onChange = [this] { applyPreset(mPreset.getSelectedId()); };

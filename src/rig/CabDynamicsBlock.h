@@ -208,21 +208,23 @@ public:
         // Stage C subsonic high-pass on the wet enclosure output (see processPost).
         mEncHp = Biquad::highpass(mFs, std::min((double)kEncSubHpHz, 0.45 * mFs));
 
-        // Stage C: two archetype networks, prime delays (<10 ms) scaled to fs.
-        // Retuned DOWN from the original {113,179,251}/{211,331,461}: those put the
-        // box resonance at ~35 Hz (A) / ~14 Hz (B) — too subsonic to be musical
-        // (measured in Plugin Doctor + offline probe). These land the summed box
-        // bump at ~93 Hz (A, tight) and ~61 Hz (B, big) WITH the subsonic HP in
-        // path, so Cab Size sweeps a musical ~60-90 Hz box tuning (bigger box =
-        // lower). Calibrated with the HP enabled — its phase shifts the dry+wet
-        // interference peak, so delays were tuned against the real signal path.
-        static const int a48[3] = {43, 71, 97};    // tight 1x12 open-back  (~93 Hz)
-        static const int b48[3] = {47, 73, 101};   // big 4x12 closed-back  (~61 Hz)
+        // Stage C: THREE archetype networks, prime delays (<10 ms) scaled to fs.
+        // Cab Size crossfades A->B->C in two segments (see processPost), so the box
+        // bump glides continuously across a wide, musical range instead of morphing
+        // between two far-apart bumps. Calibrated WITH the subsonic HP in path (its
+        // phase shifts the dry+wet interference peak). Summed-bump tunings:
+        //   A (tight, guitar small/tight)  ~103 Hz   Size 0.0
+        //   B (mid,   guitar 4x12 / big)    ~62 Hz   Size 0.5
+        //   C (deep,  big bass cab)         ~35 Hz   Size 1.0
+        static const int a48[3] = {43, 71, 97};      // tight   (~103 Hz)
+        static const int b48[3] = {47, 73, 101};     // mid     (~62 Hz)
+        static const int c48[3] = {127, 191, 263};   // deep    (~35 Hz, bass)
         const double sc = mFs / 48000.0;
         for (int i = 0; i < 3; ++i)
         {
             mApA[i].prepare(std::max(2, (int)std::lround(a48[i] * sc)), kDampA_Hz, mFs);
             mApB[i].prepare(std::max(2, (int)std::lround(b48[i] * sc)), kDampB_Hz, mFs);
+            mApC[i].prepare(std::max(2, (int)std::lround(c48[i] * sc)), kDampC_Hz, mFs);
         }
 
         reset();
@@ -242,7 +244,7 @@ public:
         mHp800.reset();
         mLp3800.reset();
         mHb.reset();
-        for (int i = 0; i < 3; ++i) { mApA[i].reset(); mApB[i].reset(); }
+        for (int i = 0; i < 3; ++i) { mApA[i].reset(); mApB[i].reset(); mApC[i].reset(); }
         mCtrl = 0;
         rebuildStageA(0.0f); // identity at rest
         mA1Db = mA2Db = 0.0f;
@@ -269,22 +271,34 @@ public:
     // hi-fi cabs (fresh, tight) get LOW Age; old broken-in cabs get HIGH Age.
     // Thump = low-end bloom; Size = enclosure box (tight -> big). These set the
     // plugin macros only; the loaded IR still supplies the cab's static voicing.
-    struct Preset { const char *name; float age, thump, size; };
-    static const Preset *presets()          // array of numPresets() entries
+    // "group" ("Guitar" / "Bass") lets the UI show section headings; presets are
+    // ordered by group. Bass cabs are big boxes -> high Size (the block's deepest
+    // box tuning is ~61 Hz); Thump high for low-end weight; Age low for modern
+    // hi-fi rigs, moderate for vintage Ampeg grind.
+    struct Preset { const char *name; const char *group; float age, thump, size; };
+    static const Preset *presets(int *count = nullptr) // array of numPresets() entries
     {
         static const Preset kP[] = {
-            { "Recto 4x12",   0.20f, 0.50f, 1.00f }, // modern, tight, fresh V30 - low wear
-            { "Dumble 2x12",  0.30f, 0.30f, 0.45f }, // boutique, lightly broken-in
-            { "Twin 2x12",    0.35f, 0.25f, 0.40f }, // clean but vintage cones
-            { "Deluxe 1x12",  0.45f, 0.20f, 0.15f }, // old, well-worn small open-back
-            { "Bassman 4x10", 0.45f, 0.35f, 0.55f }, // old, loose, broken-in
-            { "JCM800 4x12",  0.50f, 0.40f, 0.90f }, // 80s, breaks up, moderately aged
-            { "AC30 2x12",    0.55f, 0.25f, 0.35f }, // alnico Blue, early breakup, vintage
-            { "Plexi 4x12",   0.60f, 0.45f, 0.85f }, // worn Greenbacks, earliest breakup
+            // ---- Guitar (Size re-fit for the 3-network sweep; box-bump Hz noted) ----
+            { "Recto 4x12",   "Guitar", 0.20f, 0.50f, 0.65f }, // modern, tight, fresh V30 - low wear  (~66 Hz)
+            { "Dumble 2x12",  "Guitar", 0.30f, 0.30f, 0.36f }, // boutique, lightly broken-in           (~80 Hz)
+            { "Twin 2x12",    "Guitar", 0.35f, 0.25f, 0.28f }, // clean but vintage cones               (~88 Hz)
+            { "Deluxe 1x12",  "Guitar", 0.45f, 0.20f, 0.20f }, // old, well-worn small open-back         (~93 Hz)
+            { "Bassman 4x10", "Guitar", 0.45f, 0.35f, 0.43f }, // old, loose, broken-in (gtr)            (~76 Hz)
+            { "JCM800 4x12",  "Guitar", 0.50f, 0.40f, 0.52f }, // 80s, breaks up, moderately aged        (~69 Hz)
+            { "AC30 2x12",    "Guitar", 0.55f, 0.25f, 0.28f }, // alnico Blue, early breakup, vintage    (~88 Hz)
+            { "Plexi 4x12",   "Guitar", 0.60f, 0.45f, 0.52f }, // worn Greenbacks, earliest breakup      (~69 Hz)
+            // ---- Bass (big boxes -> deep box tuning via network C) ----
+            { "SVT 8x10",     "Bass",   0.35f, 0.60f, 0.77f }, // Ampeg fridge - sealed, grind when pushed (~54 Hz)
+            { "B-15 1x15",    "Bass",   0.45f, 0.55f, 0.74f }, // vintage flip-top, warm & round          (~60 Hz)
+            { "Ampeg 4x10",   "Bass",   0.25f, 0.55f, 0.83f }, // modern ported punchy 4x10               (~45 Hz)
+            { "Aguilar 2x12", "Bass",   0.15f, 0.50f, 0.85f }, // hi-fi, clean, tight ported              (~40 Hz)
+            { "Acoustic 360", "Bass",   0.30f, 0.65f, 1.00f }, // 1x18 folded horn, very deep             (~35 Hz)
         };
+        if (count) *count = (int)(sizeof(kP) / sizeof(kP[0]));
         return kP;
     }
-    static int numPresets() { return 8; }
+    static int numPresets() { int n = 0; presets(&n); return n; }
 
     double latencySamples() const { return 0.0; } // dry path undelayed
 
@@ -387,13 +401,18 @@ public:
             // enclosure feedback scaled by Thump (bounded)
             const float gA = std::min(kGmaxHard, kGsetA + kGthump * mThumpSmPost);
             const float gB = std::min(kGmaxHard, kGsetB + kGthump * mThumpSmPost);
+            const float gC = std::min(kGmaxHard, kGsetC + kGthump * mThumpSmPost);
 
-            // two parallel diffusion networks, crossfaded by Cab Size (artifact-free:
-            // we crossfade OUTPUTS, never delay times -> no pitch warble)
-            float a = x, b = x;
+            // three parallel diffusion networks (tight A / mid B / deep C), crossfaded
+            // by Cab Size in two segments: 0..0.5 fades A->B, 0.5..1 fades B->C. We
+            // crossfade OUTPUTS, never delay times -> no pitch warble.
+            float a = x, b = x, c = x;
             for (int k = 0; k < 3; ++k) a = mApA[k].process(a, gA);
             for (int k = 0; k < 3; ++k) b = mApB[k].process(b, gB);
-            float net = (1.0f - mSizeSm) * a + mSizeSm * b;
+            for (int k = 0; k < 3; ++k) c = mApC[k].process(c, gC);
+            float net;
+            if (mSizeSm < 0.5f) { const float t = mSizeSm * 2.0f;          net = (1.0f - t) * a + t * b; }
+            else                { const float t = (mSizeSm - 0.5f) * 2.0f; net = (1.0f - t) * b + t * c; }
             // subsonic high-pass on the WET enclosure output only: the diffusion
             // loops build up sub-30 Hz energy (box resonance sits low), so trim it
             // to keep the delta as "air", not rumble. Dry path stays bit-exact.
@@ -416,13 +435,14 @@ public:
     // Test-only: re-prepare the Stage C allpass delays (base-48k samples, scaled to
     // fs) so an offline probe can sweep delay sets and read the box-resonance peak
     // without recompiling the header. Not used by the plugin.
-    void dbgSetEncDelays(const int a48[3], const int b48[3])
+    void dbgSetEncDelays(const int a48[3], const int b48[3], const int c48[3])
     {
         const double sc = mFs / 48000.0;
         for (int i = 0; i < 3; ++i)
         {
             mApA[i].prepare(std::max(2, (int)std::lround(a48[i] * sc)), kDampA_Hz, mFs);
             mApB[i].prepare(std::max(2, (int)std::lround(b48[i] * sc)), kDampB_Hz, mFs);
+            mApC[i].prepare(std::max(2, (int)std::lround(c48[i] * sc)), kDampC_Hz, mFs);
         }
     }
 
@@ -526,7 +546,7 @@ private:
     {
         mEnvPost  = 0.0f;
         mEncMixSm = 0.0f;
-        for (int i = 0; i < 3; ++i) { mApA[i].reset(); mApB[i].reset(); }
+        for (int i = 0; i < 3; ++i) { mApA[i].reset(); mApB[i].reset(); mApC[i].reset(); }
         mEncHp.reset();
     }
 
@@ -561,6 +581,7 @@ private:
         {
             mApA[i].flushDenormals(); // one-pole damping + recursive delay line
             mApB[i].flushDenormals();
+            mApC[i].flushDenormals();
         }
         if (std::fabs(mEncHp.z1) < 1.0e-30f) mEncHp.z1 = 0.0f;
         if (std::fabs(mEncHp.z2) < 1.0e-30f) mEncHp.z2 = 0.0f;
@@ -585,9 +606,10 @@ private:
     // Stage C
     static constexpr float kEncBase  = 0.12f;
     static constexpr float kEncMax   = 0.12f;
-    static constexpr float kGsetA = 0.50f, kGsetB = 0.62f, kGthump = 0.10f, kGmaxHard = 0.72f;
-    static constexpr double kDampA_Hz = 6000.0, kDampB_Hz = 3000.0;
-    static constexpr int   kEncSubHpHz = 30;  // subsonic HP on the wet enclosure output
+    static constexpr float kGsetA = 0.50f, kGsetB = 0.62f, kGsetC = 0.66f;
+    static constexpr float kGthump = 0.10f, kGmaxHard = 0.74f;
+    static constexpr double kDampA_Hz = 6000.0, kDampB_Hz = 3000.0, kDampC_Hz = 2200.0;
+    static constexpr int   kEncSubHpHz = 22;  // subsonic HP on wet enclosure out (low, for bass reach)
 
     // -------------------------------- state --------------------------------
     double mFs = 48000.0;
@@ -624,7 +646,7 @@ private:
     float mGtab[kGN] = {0}; // tanh describing-function g(beta) lookup
 
     // Stage C
-    DampAllpass mApA[3], mApB[3];
+    DampAllpass mApA[3], mApB[3], mApC[3];
     Biquad mEncHp;          // subsonic high-pass on the wet enclosure output
     float mEncMixSm = 0.0f;
 };
