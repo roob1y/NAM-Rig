@@ -735,6 +735,137 @@ int main()
               "T18c trim 0 dB is bit-exact vs never-set (byte-identical)");
     }
 
+    // ---------- T19: prime-snapped Stage C delays + multi-rate invariants ----------
+    // (a) nearestPrime unit points; (b) every scaled Stage C delay stays prime at
+    // 44.1/96k; (c) the core invariants T1/T2b/T11/T13 re-verified at 44100 + 96000.
+    {
+        auto isPrime = [](int v) {
+            if (v < 2) return false;
+            for (int d = 2; d * d <= v; ++d) if (v % d == 0) return false;
+            return true;
+        };
+        // (a) exact on primes, floors at 2, snaps composites, ties resolve low (9 -> 7).
+        const bool npOk = CabDynamicsBlock::nearestPrime(97) == 97
+                       && CabDynamicsBlock::nearestPrime(1)  == 2
+                       && CabDynamicsBlock::nearestPrime(9)  == 7
+                       && isPrime(CabDynamicsBlock::nearestPrime(200))
+                       && isPrime(CabDynamicsBlock::nearestPrime(526));
+        CHECK(npOk, "T19a nearestPrime exact/floor/tie-low/snaps");
+
+        // (b) the actual scaled Stage C base delays remain prime at each non-48k rate.
+        static const int base48[9] = {43, 71, 97, 47, 73, 101, 127, 191, 263};
+        bool allPrime = true; int worst = 0; double worstSr = 0.0;
+        for (double sr : {44100.0, 96000.0})
+        {
+            const double sc = sr / 48000.0;
+            for (int b : base48)
+            {
+                const int snapped = CabDynamicsBlock::nearestPrime((int)std::lround(b * sc));
+                if (!isPrime(snapped)) { allPrime = false; worst = snapped; worstSr = sr; }
+            }
+        }
+        CHECK(allPrime, "T19b scaled Stage C delays all prime at 44.1k/96k (worst %d @ %g)", worst, worstSr);
+    }
+
+    // (c) multi-rate re-verification of the core invariants (suite is otherwise 48k-only).
+    for (double sr : {44100.0, 96000.0})
+    {
+        // T1 @ sr: bit-exact bypass, pre + post.
+        {
+            CabDynamicsBlock d; d.prepare(sr, BLK);
+            std::mt19937 rng(101);
+            std::uniform_real_distribution<float> u(-0.8f, 0.8f);
+            std::vector<float> in((size_t)sr, 0.0f);
+            for (auto &v : in) v = u(rng);
+            std::vector<float> pre = in, post = in;
+            runPre(d, pre); runPost(d, post);
+            const bool ex = std::memcmp(pre.data(),  in.data(), in.size() * sizeof(float)) == 0
+                         && std::memcmp(post.data(), in.data(), in.size() * sizeof(float)) == 0;
+            CHECK(ex, "T19c [%g Hz] bit-exact bypass pre+post (byte-identical)", sr);
+        }
+        // T2b @ sr: hard-driven breakup aliasing bound (oversampled halfband must reject).
+        {
+            CabDynamicsBlock d; d.prepare(sr, BLK);
+            d.setAgeDrive(1.0f);
+            const double f0 = 3300.0;
+            const size_t N = (size_t)sr;
+            std::vector<float> m(N);
+            for (size_t n = 0; n < N; ++n) m[n] = 0.9f * (float)std::sin(2.0 * kPi * f0 * (double)n / sr);
+            runPre(d, m);
+            const size_t start = N / 2, win = N / 4;
+            const double fund = goertzelW(m, start, win, f0, sr);
+            double maxInh = 0.0, atF = 0.0;
+            for (double f = 200.0; f < 20000.0; f += 50.0)
+            {
+                bool harm = false;
+                for (int k = 1; k <= 8; ++k) if (std::fabs(f - k * f0) < 150.0) { harm = true; break; }
+                if (harm) continue;
+                const double mag = goertzelW(m, start, win, f, sr);
+                if (mag > maxInh) { maxInh = mag; atF = f; }
+            }
+            const double dB = 20.0 * std::log10((maxInh + 1e-15) / (fund + 1e-15));
+            CHECK(dB < -55.0, "T19d [%g Hz] T2b worst inharm %.1f dB @ %.0f (< -55)", sr, dB, atF);
+        }
+        // T11 @ sr: IMD sidebands engage with LF, collapse without it.
+        {
+            const double fLF = 100.0, fHF = 4500.0;
+            auto sidebandDbc = [&](bool withLF) {
+                CabDynamicsBlock d; d.prepare(sr, BLK);
+                d.setThump(1.0f); d.setAgeDrive(0.6f);
+                const size_t N = (size_t)(sr * 1.0);
+                std::vector<float> m(N);
+                for (size_t n = 0; n < N; ++n)
+                {
+                    const double t = (double)n / sr;
+                    const double lf = withLF ? kRigAmp * std::sin(2.0 * kPi * fLF * t) : 0.0;
+                    const double hf = 0.2 * kRigAmp * std::sin(2.0 * kPi * fHF * t);
+                    m[n] = (float)(lf + hf);
+                }
+                runPre(d, m);
+                const size_t start = N / 2, win = N / 4;
+                const double carrier = goertzelW(m, start, win, fHF, sr);
+                const double sb = std::max(goertzelW(m, start, win, fHF - fLF, sr),
+                                           goertzelW(m, start, win, fHF + fLF, sr));
+                return 20.0 * std::log10((sb + 1e-15) / (carrier + 1e-15));
+            };
+            const double sbOn = sidebandDbc(true), sbOff = sidebandDbc(false);
+            CHECK(sbOn >= -48.0 && sbOn <= -14.0, "T19e [%g Hz] T11a sidebands with LF (%.1f in [-48,-14])", sr, sbOn);
+            CHECK(sbOff < -70.0, "T19f [%g Hz] T11b no self-mod w/o LF (%.1f < -70)", sr, sbOff);
+        }
+        // T13 @ sr: base-rate IM does not fold (all off-grid energy < -55 dBc).
+        {
+            const double fLF = 95.0, fHF = 4700.0;
+            CabDynamicsBlock d; d.prepare(sr, BLK);
+            d.setThump(1.0f);
+            const size_t N = (size_t)sr;
+            std::vector<float> m(N);
+            for (size_t n = 0; n < N; ++n)
+            {
+                const double t = (double)n / sr;
+                m[n] = (float)(kRigAmp * std::sin(2.0 * kPi * fLF * t) + 0.2 * kRigAmp * std::sin(2.0 * kPi * fHF * t));
+            }
+            runPre(d, m);
+            const size_t start = N / 2, win = N / 4;
+            const double carrier = goertzelW(m, start, win, fHF, sr);
+            double worstOff = 0.0, atF = 0.0;
+            for (double f = 500.0; f < 20000.0; f += 25.0)
+            {
+                bool onGrid = false;
+                for (int mm = 0; mm <= 1 && !onGrid; ++mm)
+                    for (int nn = 0; nn <= 8; ++nn)
+                    {
+                        if (std::fabs(f - (mm * fHF + nn * fLF)) < 40.0) { onGrid = true; break; }
+                        if (std::fabs(f - std::fabs(mm * fHF - nn * fLF)) < 40.0) { onGrid = true; break; }
+                    }
+                if (onGrid) continue;
+                const double mag = goertzelW(m, start, win, f, sr);
+                if (mag > worstOff) { worstOff = mag; atF = f; }
+            }
+            const double dbc = 20.0 * std::log10((worstOff + 1e-15) / (carrier + 1e-15));
+            CHECK(dbc < -55.0, "T19g [%g Hz] T13 worst off-grid %.1f dBc @ %.0f (< -55)", sr, dbc, atF);
+        }
+    }
+
     std::printf("\n%s (%d failure%s)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails, gFails == 1 ? "" : "s");
     return gFails == 0 ? 0 : 1;
 }

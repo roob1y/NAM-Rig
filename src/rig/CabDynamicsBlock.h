@@ -251,9 +251,11 @@ public:
         const double sc = mFs / 48000.0;
         for (int i = 0; i < 3; ++i)
         {
-            mApA[i].prepare(std::max(2, (int)std::lround(a48[i] * sc)), kDampA_Hz, mFs);
-            mApB[i].prepare(std::max(2, (int)std::lround(b48[i] * sc)), kDampB_Hz, mFs);
-            mApC[i].prepare(std::max(2, (int)std::lround(c48[i] * sc)), kDampC_Hz, mFs);
+            // snap the scaled delay back to the nearest prime (identity at 48k, where
+            // sc==1 and the base delays are already prime — 48k stays bit-exact).
+            mApA[i].prepare(nearestPrime((int)std::lround(a48[i] * sc)), kDampA_Hz, mFs);
+            mApB[i].prepare(nearestPrime((int)std::lround(b48[i] * sc)), kDampB_Hz, mFs);
+            mApC[i].prepare(nearestPrime((int)std::lround(c48[i] * sc)), kDampC_Hz, mFs);
         }
 
         reset();
@@ -590,6 +592,27 @@ public:
     double dbgA1CenterHz()const { return mA1CenterDbg; }// last-built A1 center (Hz)
     float dbgImWet()      const { return mImWet; }      // current IM engage Wim
 
+    // Nearest prime to n (>= 2), for Stage C delay scaling. The base-48k delays are
+    // prime so the three allpasses in each network stay mutually incommensurate (no
+    // coincident echoes); after scaling by fs/48000 and rounding, primality is lost,
+    // so snap back to the nearest prime. Ties resolve to the lower value (deterministic).
+    static int nearestPrime(int n)
+    {
+        auto isPrime = [](int v) {
+            if (v < 2) return false;
+            if (v % 2 == 0) return v == 2;
+            for (int d = 3; d * d <= v; d += 2) if (v % d == 0) return false;
+            return true;
+        };
+        if (n < 2) return 2;
+        if (isPrime(n)) return n;
+        for (int off = 1; ; ++off)
+        {
+            if (isPrime(n - off)) return n - off; // prefer lower on tie
+            if (isPrime(n + off)) return n + off;
+        }
+    }
+
     // Test-only: re-prepare the Stage C allpass delays (base-48k samples, scaled to
     // fs) so an offline probe can sweep delay sets and read the box-resonance peak
     // without recompiling the header. Not used by the plugin.
@@ -598,9 +621,9 @@ public:
         const double sc = mFs / 48000.0;
         for (int i = 0; i < 3; ++i)
         {
-            mApA[i].prepare(std::max(2, (int)std::lround(a48[i] * sc)), kDampA_Hz, mFs);
-            mApB[i].prepare(std::max(2, (int)std::lround(b48[i] * sc)), kDampB_Hz, mFs);
-            mApC[i].prepare(std::max(2, (int)std::lround(c48[i] * sc)), kDampC_Hz, mFs);
+            mApA[i].prepare(nearestPrime((int)std::lround(a48[i] * sc)), kDampA_Hz, mFs);
+            mApB[i].prepare(nearestPrime((int)std::lround(b48[i] * sc)), kDampB_Hz, mFs);
+            mApC[i].prepare(nearestPrime((int)std::lround(c48[i] * sc)), kDampC_Hz, mFs);
         }
     }
 
