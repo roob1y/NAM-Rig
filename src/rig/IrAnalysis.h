@@ -15,7 +15,7 @@ namespace nam_rig::ir
 {
 
 static constexpr int kResPts = 200;               // response points (log-spaced)
-static constexpr double kResFLo = 40.0, kResFHi = 8000.0; // guitar band
+static constexpr double kResFLo = 25.0, kResFHi = 8000.0; // widened low edge for bass-cab Fs (was 40)
 
 // 1/6-octave-smoothed magnitude response (mean-centred dB) from raw IR samples.
 // outDb must hold kResPts floats. A zero-padded FFT gives the dense spectrum;

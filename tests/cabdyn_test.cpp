@@ -527,7 +527,7 @@ int main()
         using nam_rig::ir::estimateLfResonance;
         using nam_rig::ir::LfEstimate;
         const int NP = 200;
-        const float FLO = 40.0f, FHI = 8000.0f;
+        const float FLO = 25.0f, FHI = 8000.0f; // mirror IrAnalysis kResFLo 40 -> 25
         const double lrSpan = std::log((double)FHI / (double)FLO);
         auto freqAt = [&](int i) { return (double)FLO * std::exp(lrSpan * (double)i / (double)(NP - 1)); };
         // deterministic hash in [-1.5,1.5] dB (comb-like residual, seeded per-index)
@@ -576,6 +576,38 @@ int main()
             LfEstimate e = estimateLfResonance(r.data(), NP, FLO, FHI);
             CHECK(!e.valid, "T15c flat/hash curve -> invalid (falls back 90); reported valid=%d", (int)e.valid);
         }
+        // 40 Hz bass-cab bump (edge-adjacent) -> valid after the 25 Hz grid widen
+        {
+            auto r = synth(40.0, 8.0, true, true);
+            LfEstimate e = estimateLfResonance(r.data(), NP, FLO, FHI);
+            const bool near = std::fabs(e.fsHz - 40.0f) / 40.0f <= 0.15f;
+            CHECK(e.valid && near, "T15d bass 40 Hz curve -> valid %d, fs %.1f (±15%%)", (int)e.valid, e.fsHz);
+        }
+        // 35 Hz deep-bass bump (grid-edge; edge-aware low-fall keeps it valid)
+        {
+            auto r = synth(35.0, 8.0, true, true);
+            LfEstimate e = estimateLfResonance(r.data(), NP, FLO, FHI);
+            const bool near = std::fabs(e.fsHz - 35.0f) / 35.0f <= 0.15f;
+            CHECK(e.valid && near, "T15e deep-bass 35 Hz curve -> valid %d, fs %.1f (±15%%)", (int)e.valid, e.fsHz);
+        }
+        // mic-proximity shelf: monotone rise toward the low edge, no interior bump.
+        // Must stay INVALID (the widened window must not turn a shelf into a peak).
+        {
+            std::vector<float> r(NP);
+            double sum = 0.0;
+            for (int i = 0; i < NP; ++i)
+            {
+                const double f = freqAt(i);
+                double v = 0.0;
+                if (f < 150.0) v += 6.0 * std::log(150.0 / f) / std::log(2.0); // rising shelf, no peak
+                v += hash(i);
+                r[(size_t)i] = (float)v; sum += v;
+            }
+            const float mean = (float)(sum / (double)NP);
+            for (int i = 0; i < NP; ++i) r[(size_t)i] -= mean;
+            LfEstimate e = estimateLfResonance(r.data(), NP, FLO, FHI);
+            CHECK(!e.valid, "T15f proximity shelf -> invalid (no false box peak); reported valid=%d", (int)e.valid);
+        }
     }
 
     // ---------- T16: resonance plumb-through (retune stays stable + comb-free) ----------
@@ -609,6 +641,25 @@ int main()
             prev = ld; first = false;
         }
         CHECK(worstRipple < 1.2, "T16c comb sweep smooth after modal rescale (max ripple %.3f dB < 1.2)", worstRipple);
+    }
+    // ---------- T16d: deep bass-cab resonance (35 Hz) plumbs through + stays stable ----------
+    // setSpeakerResonance(35, 6) now survives the [32,200] clamp (was clamped to 45).
+    // At max macros on 2 s noise the retuned excursion LP2 (32-Hz-capable) must stay
+    // finite/bounded and dbgFsEst must report 35, not the old 45 floor.
+    {
+        CabDynamicsBlock d; d.prepare(SR, BLK);
+        d.setSpeakerResonance(35.0f, 6.0f);
+        d.setAgeDrive(1.0f); d.setThump(1.0f); d.setCabSize(1.0f);
+        std::mt19937 rng(29);
+        std::uniform_real_distribution<float> u(-1.0f, 1.0f);
+        const size_t N = (size_t)(SR * 2.0);
+        std::vector<float> m(N);
+        for (auto &v : m) v = u(rng);
+        runPre(d, m);
+        bool finite = true; float peak = 0.0f;
+        for (float v : m) { if (!std::isfinite(v)) finite = false; peak = std::max(peak, std::fabs(v)); }
+        CHECK(finite && peak < 4.0f, "T16d stable at max with fs=35 (finite %d, peak %.3f < 4.0)", (int)finite, peak);
+        CHECK(std::fabs(d.dbgFsEst() - 35.0f) < 0.5f, "T16d resonance consumed (dbgFsEst %.1f ~ 35)", d.dbgFsEst());
     }
 
     // ---------- T17: A1 keys on displacement, and its center tracks the shifted f0 ----------

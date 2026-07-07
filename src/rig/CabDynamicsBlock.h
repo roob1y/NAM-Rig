@@ -686,7 +686,7 @@ private:
     // mScale: a bass cab (low Fs -> bigger cone) has lower breakup modes.
     void retuneResonance(float fsHz, bool force)
     {
-        fsHz = std::max(45.0f, std::min(200.0f, fsHz));
+        fsHz = std::max(32.0f, std::min(200.0f, fsHz)); // down to 32 Hz for bass cabs (was 45)
         if (!force && fsHz == mFsApplied) return;
         mFsEst = fsHz;
         // Excursion LP2 at the box resonance, Q = Qtc (state-preserving unless forced).
@@ -737,11 +737,14 @@ private:
         // B3: dynamic low-band cone POWER COMPRESSION as a clean magnitude low-shelf
         // (series filter, NOT a parallel delta -> no phase-comb). Now excursion-driven
         // (dispPush) — excursion compression IS displacement-driven by definition. The
-        // shelf corner tracks the cab: clamp(2.2*FsEst,140,260) (FsEst=90 -> ~198 Hz,
-        // ~ the old fixed 200). Gain reduction only, floored at -2 dB; identity at rest.
+        // shelf corner tracks the cab: clamp(2.2*FsEst,80,260) (FsEst=90 -> ~198 Hz,
+        // ~ the old fixed 200). Floor lowered 140 -> 80 so bass cabs (35 Hz Fs ->
+        // 80 Hz shelf) compress at/near their own fundamental register instead of a
+        // pinned 140 Hz well above it; guitar cabs unaffected (2.2*69 = 152 > 140 > 80).
+        // Gain reduction only, floored at -2 dB; identity at rest.
         float grDb = -(kAgeComp * mAgeSmPre + kEnvComp * mAgeSmPre * dispPush);
         grDb = std::max(grDb, -2.0f);
-        const float fShelf = std::max(140.0f, std::min(260.0f, 2.2f * mFsEst));
+        const float fShelf = std::max(80.0f, std::min(260.0f, 2.2f * mFsEst));
         const Biquad n3 = Biquad::lowshelf(mFs, std::min((double)fShelf, 0.45 * mFs), (double)grDb, 0.7);
         mLowShelf.copyCoeffsFrom(n3);
         mLowCompDb = grDb;
