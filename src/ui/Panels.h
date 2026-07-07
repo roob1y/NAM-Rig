@@ -3002,6 +3002,19 @@ private:
         const bool haveIr = mLoaded && mProc.getCabResponseDb(resp, mRig);
         drawIrResponse(g, mRespRect.toFloat(), resp, haveIr,
                        juce::String::fromUTF8("No IR loaded \xC2\xB7 amp runs direct"));
+
+        // Per-cab Fs readout (top-left of the well): the resonance the dynamics model
+        // actually keyed on. "Fs 52 Hz" when the estimator locked to the IR box bump,
+        // "Fs --" when it fell back to the generic 90 Hz (invalid estimate / no IR) —
+        // makes the 90 Hz fallback visible instead of silent.
+        const auto lf = mProc.getCabLfResonance(mRig);
+        const juce::String fsText = (haveIr && lf.valid)
+            ? "Fs " + juce::String(juce::roundToInt(lf.fsHz)) + " Hz"
+            : juce::String::fromUTF8("Fs \xE2\x80\x94"); // em dash = fell back to 90 Hz
+        g.setColour(colors::captionDim);
+        g.setFont(fonts::mono(10.0f));
+        g.drawText(fsText, mRespRect.reduced(6, 4).removeFromTop(14),
+                   juce::Justification::topLeft);
     }
 
     NamRigProcessor &mProc;

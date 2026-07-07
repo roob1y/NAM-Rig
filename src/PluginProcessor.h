@@ -66,6 +66,10 @@ public:
     // IR magnitude response for the Cab panel (dst must hold CabBlock::kResPts
     // floats); false until an IR is loaded. Message thread only.
     bool getCabResponseDb(float *dst, int rig = 0) const { return cabFor(rig).copyResponseDb(dst); }
+    // Per-cab LF resonance estimated from the loaded IR (PHYSICS_UPGRADE §4 /
+    // LfResonance.h). .valid is false when the estimator fell back to 90 Hz (or no
+    // IR); the Cab panel shows fsHz so that fallback is visible. Message thread only.
+    nam_rig::ir::LfEstimate getCabLfResonance(int rig = 0) const { return cabFor(rig).lfResonance(); }
 
     // Persistent IR-library root folder (a tiny settings file next to the
     // presets). Empty until the user picks one. Message thread only.

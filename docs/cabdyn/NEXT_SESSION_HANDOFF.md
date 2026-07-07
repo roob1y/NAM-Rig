@@ -75,8 +75,9 @@ first). All roadmap items landed:
 
 **Verification: 40/40 checks pass** (T1–T17, zero warnings, offline g++ from the
 exact repo bytes). Bit-exact bypass, click-free disengage, determinism, all
-ceilings held. `kDriveEnv` rebalanced 1.2→0.9 (natural 3.7× max, monotone under
-the 3.8× clamp).
+ceilings held. Stage B breakup drive is `1 + Age·(kDriveBase 0.5 + kDriveEnv 1.2·push
++ kDriveDisp 1.0·dispPush)` per §12 (a static wear floor was added and the envelope
+term left at 1.2 — an earlier note claiming kDriveEnv was rebalanced to 0.9 is stale).
 
 **Not yet done:** local Windows build (JUCE-side edits — CabBlock/RigChain/
 PluginProcessor/IrAnalysis — could not be compiled offline; they are small and

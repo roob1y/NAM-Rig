@@ -238,6 +238,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("cabDynSize", 1), "Cab Size",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.0f));
+    // Speaker-drive calibration trim: scales ONLY the dynamics detector sidechain
+    // (excursion/push/thermal), never the audio path, so the level-dependent knees
+    // track a rig whose pre-cab level differs from the ~-14 dBFS reference. Default
+    // 0 dB is bit-exact vs never-set (see cabdyn T18c). Not a tone control.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("cabDynSpkrDrive", 1), "Cab Spkr Drive Cal",
+        juce::NormalisableRange<float>(-18.0f, 18.0f, 0.1f), 0.0f,
+        juce::AudioParameterFloatAttributes().withLabel("dB")));
 
     // --- Pre-amp modulation pedal (mono, front-of-amp): rig/PreModBlock.h,
     // premod_test.cpp. Sits after the drive rack and before the amp split, so it
@@ -677,6 +685,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("rigBcabDynSize", 1), "Rig B Cab Size",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("rigBcabDynSpkrDrive", 1), "Rig B Cab Spkr Drive Cal",
+        juce::NormalisableRange<float>(-18.0f, 18.0f, 0.1f), 0.0f,
+        juce::AudioParameterFloatAttributes().withLabel("dB")));
 
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("oversampleB", 1), "Rig B Oversampling",
@@ -1248,6 +1260,8 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.cabDyn.setAgeDrive(apvts.getRawParameterValue("cabDynAge")->load());
     mChain.cabDyn.setThump(apvts.getRawParameterValue("cabDynThump")->load());
     mChain.cabDyn.setCabSize(apvts.getRawParameterValue("cabDynSize")->load());
+    // Detector-sidechain calibration trim (audio path untouched; 0 dB bit-exact).
+    mChain.cabDyn.setSpeakerDriveDb(apvts.getRawParameterValue("cabDynSpkrDrive")->load());
     // Whole-block Dynamic Cab bypass (macros retained; fades out click-free).
     mChain.cabDyn.setBypassed(apvts.getRawParameterValue("cabDynOn")->load() < 0.5f);
 
@@ -1267,6 +1281,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.cabDynB.setAgeDrive(apvts.getRawParameterValue("rigBcabDynAge")->load());
     mChain.cabDynB.setThump(apvts.getRawParameterValue("rigBcabDynThump")->load());
     mChain.cabDynB.setCabSize(apvts.getRawParameterValue("rigBcabDynSize")->load());
+    mChain.cabDynB.setSpeakerDriveDb(apvts.getRawParameterValue("rigBcabDynSpkrDrive")->load());
     mChain.cabDynB.setBypassed(apvts.getRawParameterValue("cabDynOnB")->load() < 0.5f);
 
     // ---- Dual-rig mixer (mode / per-rig level + pan + polarity + align) ----
