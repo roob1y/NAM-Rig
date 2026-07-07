@@ -1263,7 +1263,15 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     // Detector-sidechain calibration trim (audio path untouched; 0 dB bit-exact).
     mChain.cabDyn.setSpeakerDriveDb(apvts.getRawParameterValue("cabDynSpkrDrive")->load());
     // Whole-block Dynamic Cab bypass (macros retained; fades out click-free).
-    mChain.cabDyn.setBypassed(apvts.getRawParameterValue("cabDynOn")->load() < 0.5f);
+    // Gate: the delta wraps the IR convolution, so it is meaningless when the
+    // cab conv is bypassed (cabOn) or no IR is loaded -> disengage in those
+    // cases too. setBypassed only ever *adds* bypass (bit-exact when off), so
+    // this cannot perturb the all-default byte-exact baseline.
+    {
+        const bool dynOn = apvts.getRawParameterValue("cabDynOn")->load() >= 0.5f;
+        const bool cabOn = apvts.getRawParameterValue("cabOn")->load() >= 0.5f;
+        mChain.cabDyn.setBypassed(!(dynOn && cabOn && mChain.cab.isIrLoaded()));
+    }
 
     // ---- Rig B voice (independent amp AA + EQ + cab cuts; see oversampleB) ----
     {
@@ -1282,7 +1290,12 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     mChain.cabDynB.setThump(apvts.getRawParameterValue("rigBcabDynThump")->load());
     mChain.cabDynB.setCabSize(apvts.getRawParameterValue("rigBcabDynSize")->load());
     mChain.cabDynB.setSpeakerDriveDb(apvts.getRawParameterValue("rigBcabDynSpkrDrive")->load());
-    mChain.cabDynB.setBypassed(apvts.getRawParameterValue("cabDynOnB")->load() < 0.5f);
+    // Same gate as Rig A: disengage when the cab conv is off or no IR is loaded.
+    {
+        const bool dynOnB = apvts.getRawParameterValue("cabDynOnB")->load() >= 0.5f;
+        const bool cabOnB = apvts.getRawParameterValue("cabOnB")->load() >= 0.5f;
+        mChain.cabDynB.setBypassed(!(dynOnB && cabOnB && mChain.cabB.isIrLoaded()));
+    }
 
     // ---- Dual-rig mixer (mode / per-rig level + pan + polarity + align) ----
     mChain.setLevelA(juce::Decibels::decibelsToGain(apvts.getRawParameterValue("rigLevelA")->load()));

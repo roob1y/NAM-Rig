@@ -63,7 +63,7 @@ inline void drawIrResponse(juce::Graphics &g, juce::Rectangle<float> well,
     // bright/cutting, hot fizz = harsh.
     struct Zone { double fLo, fHi; const char *lbl; };
     static const Zone zones[] = {
-        {40.0, 120.0, "LOWS"}, {120.0, 400.0, "BODY"}, {400.0, 1500.0, "MIDS"},
+        {nam_rig::ir::kResFLo, 120.0, "LOWS"}, {120.0, 400.0, "BODY"}, {400.0, 1500.0, "MIDS"},
         {1500.0, 4000.0, "PRESENCE"}, {4000.0, 8000.0, "FIZZ"}};
     const double zfLo = nam_rig::ir::kResFLo, zfHi = nam_rig::ir::kResFHi;
     const double lr = std::log(zfHi / zfLo);

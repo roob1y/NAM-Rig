@@ -1,5 +1,26 @@
 # Dynamic Cab — NEXT SESSION HANDOFF
 
+## 2026-07-07b session — small open items + dyncab gating (JUCE, needs local build)
+
+Baseline re-confirmed from literal repo bytes: 61 checks, ALL PASS, zero warnings
+(`git archive HEAD` -> /tmp mirror; the bash-mount working tree was again the
+stale/truncated overlay, real files intact). Three prior stages confirmed
+committed (1fa07a3 bass-Fs, dd9d4b0 multi-rate+prime-snap, 063745f JUCE plumbing).
+
+Decisions (Robbie, this session):
+- **T15e (35 Hz box bump -> fs 32.1): ACCEPTED as-is.** Passes ±15%; a 32 vs 35 Hz
+  Fs bloom is sonically identical, and lowering the 32 Hz search floor would add
+  proximity-shelf false-positive risk (T15f). No code change.
+- **Gate dyncab when cab bypassed / no IR: YES.** Implemented (PluginProcessor.cpp,
+  both lanes): `setBypassed(!(dynOn && cabOn && cab.isIrLoaded()))`. Reuses the
+  existing click-free bypass ramp; only ever *adds* bypass (bit-exact when off) so
+  the all-default byte-exact baseline is preserved. JUCE-side — needs local build.
+- **IrGraph.h LOWS zone floor 40 -> `nam_rig::ir::kResFLo` (25 Hz)** so the heat-map
+  low band spans the widened well (closes the 25-40 Hz sliver). Cosmetic one-liner.
+
+Still open: local Windows build (gating + IrGraph + the committed plumbing all
+need one compile pass — can't build JUCE offline); ear pass on the [EAR] constants.
+
 ## 2026-07-07 session — review fixes landed; bass-Fs next
 
 A full review pass, then two of its findings SHIPPED (in the working tree —
