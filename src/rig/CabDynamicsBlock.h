@@ -217,9 +217,9 @@ public:
         mDEnvRel = onePoleK(0.100);
         // Thermal integrator (§5): tau = 3.5 s, attack = release.
         mThermK  = onePoleK((double)kThermTau);
-        // Intermodulation ring (§3): kDop = fs * 10.2 us (samples); integer
-        // center tap tauC = ceil(kDop)+2 (Hermite needs +/-2 guard); ring is
-        // the next pow2 >= tauC + kDop + 4 (16 @ 48k).
+        // Intermodulation ring (§3): kDop = fs * kDopUs (samples; 6.4 us since the
+        // Klippel anchor, was 10.2); integer center tap tauC = ceil(kDop)+2 (Hermite
+        // needs +/-2 guard); ring is the next pow2 >= tauC + kDop + 4 (8 @ 48k).
         mImKDop = (float)(mFs * kDopUs);
         mImTauC = (int)std::ceil((double)mImKDop) + 2;
         int need = mImTauC + (int)std::ceil((double)mImKDop) + 4;
@@ -263,6 +263,7 @@ public:
     void reset()
     {
         mAgeSmPre = mThumpSmPre = mAgeSmPost = mThumpSmPost = mSizeSm = 0.0f;
+        mTrimSm = mTrimSmPost = mTrimTarget; // calibration: snap, never ramp from cold
         mPreWasActive = mPostWasActive = false;
         mEnvPre = mEnvPost = 0.0f;
         mBandEnv = 0.0f;
@@ -293,6 +294,23 @@ public:
     void setAgeDrive(float v) { mAgeTarget   = clamp01(v); }
     void setThump(float v)    { mThumpTarget = clamp01(v); }
     void setCabSize(float v)  { mSizeTarget  = clamp01(v); }
+
+    // Speaker-drive calibration trim (dB, clamped ±24; rev 2026-07-07). The §12
+    // displacement/push/thermal knees (kXCal, kEnvLo/Hi, kDispLo/Hi, kThermFull)
+    // are calibrated to THIS rig's measured internal pre-cab level (~ -14 dBFS
+    // RMS). A hotter or quieter capture chain shifts that level and silently
+    // mis-scales the whole physics sidechain (the original dispPush==0 bug). This
+    // trim scales ONLY the level-DETECTION inputs — excursion LP2 drive, the
+    // pre/post push envelopes, and the thermal power integrator — never the audio
+    // path, the IM ring contents, or the Stage B1 band/describing-function math
+    // (their levels are physical signal, not calibration convention). 0 dB =
+    // gain 1.0 = today's behaviour bit-exactly. No loudness compensation: this
+    // changes what the model THINKS the level is, not what comes out.
+    void setSpeakerDriveDb(float db)
+    {
+        db = db < -kTrimMaxDb ? -kTrimMaxDb : (db > kTrimMaxDb ? kTrimMaxDb : db);
+        mTrimTarget = dbToLin(db);
+    }
 
     // Whole-block bypass. Independent of the macros (which stay at their set
     // values, so the UI knobs are remembered). When bypassed, the effective
@@ -374,7 +392,11 @@ public:
             // running both stages can't double-step the de-zip) ----
             mAgeSmPre   += mMacroK * (ageTgt()   - mAgeSmPre);
             mThumpSmPre += mMacroK * (thumpTgt() - mThumpSmPre);
-            const float r = std::fabs(x);
+            // speaker-drive trim: scales the DETECTOR inputs only (see setter doc).
+            // The env followers are the de-zip (fastest is 3 ms), but smooth anyway
+            // so a live trim edit can't step the knees; 1.0 stays exactly 1.0.
+            mTrimSm += mMacroK * (mTrimTarget - mTrimSm);
+            const float r = std::fabs(x) * mTrimSm;
             mEnvPre += (r > mEnvPre ? mEnvAtk : mEnvRel) * (r - mEnvPre);
             const float push = pushOf(mEnvPre);
 
@@ -382,7 +404,7 @@ public:
             // order resonant LP of the pre-conv INPUT at the box resonance. xd is the
             // calibrated displacement, xs=tanh(xd) the signed bounded excursion that
             // drives the IM stage; dEnv (3ms/100ms) -> dispPush drives coefficients. ----
-            const float xd = kXCal * mExcLp.processSample(x);
+            const float xd = kXCal * mTrimSm * mExcLp.processSample(x); // LP2 linear -> trim outside
             mXs = std::tanh(xd);
             const float axd = std::fabs(xd);
             mDEnv += (axd > mDEnv ? mDEnvAtk : mDEnvRel) * (axd - mDEnv);
@@ -400,10 +422,16 @@ public:
                 mPromN = clamp01(mPromTarget.load(std::memory_order_relaxed) / 8.0f);
                 retuneResonance(fsT, /*force*/ false); // state-preserving on change only
                 rebuildStageA(push, mDispPush);
-                // Thermal droop (§5): -1.5 dB * clamp01(pwr/0.5) * Age, reduction only.
-                // Age=0 -> droopDb=0 -> gain exactly 1.0f (bit-exact bypass preserved).
+                // Thermal droop (§5, rev 2026-07-07): voice-coil heating is MOTOR
+                // physics, not wear — a fresh V30 sags when cooked just like a worn
+                // Greenback. Engage therefore keys on max(Age, Thump) (the motor
+                // floor), with Age adding only a modest wear bonus on top, so hi-fi
+                // low-Age presets keep the effect. Both macros 0 -> w=0 -> droopDb=0
+                // -> gain exactly 1.0f (bit-exact bypass preserved).
+                const float wTherm = clamp01(kThermMotor * std::max(mAgeSmPre, mThumpSmPre)
+                                             + kThermWear * mAgeSmPre);
                 const float pwrN = clamp01(mPwr / kThermFull);
-                mThermDbg = -kThermDb * pwrN * mAgeSmPre;
+                mThermDbg = -kThermDb * pwrN * wTherm;
                 mThermGain = (mThermDbg == 0.0f) ? 1.0f : dbToLin(mThermDbg);
             }
             if (++mCtrl >= kCtrl) mCtrl = 0;
@@ -414,7 +442,8 @@ public:
             // clamped at 8x the calibrated full-power point so a signal far hotter
             // than the rig calibration can't wind the integrator up and leave the
             // droop pinned long after the signal stops (bounded recovery ~2 tau). ----
-            const float xx = x * x;
+            const float tx = x * mTrimSm; // trim the terminal-voltage proxy too
+            const float xx = tx * tx;
             mPwr += mThermK * ((xx < kThermInMax ? xx : kThermInMax) - mPwr);
 
             // ---- Stage A: series impedance-delta filters (identity at rest) ----
@@ -509,7 +538,8 @@ public:
             mSizeSm      += mMixK   * (sizeTgt()  - mSizeSm);
             mThumpSmPost += mMacroK * (thumpTgt() - mThumpSmPost);
             mAgeSmPost   += mMacroK * (ageTgt()   - mAgeSmPost);
-            const float r = std::fabs(x);
+            mTrimSmPost  += mMacroK * (mTrimTarget - mTrimSmPost); // own state (see pre note)
+            const float r = std::fabs(x) * mTrimSmPost;
             mEnvPost += (r > mEnvPost ? mEnvAtkPost : mEnvRelPost) * (r - mEnvPost);
             const float push = pushOf(mEnvPost);
 
@@ -726,6 +756,7 @@ private:
     {
         mEnvPre  = 0.0f;
         mBandEnv = 0.0f;
+        mTrimSm  = mTrimTarget; // calibration snap (cold engage starts calibrated)
         mA1.reset(); mA2.reset(); mLowShelf.reset();
         mHp800.reset(); mLp3800.reset();
         mHb.reset();
@@ -745,6 +776,7 @@ private:
     {
         mEnvPost  = 0.0f;
         mEncMixSm = 0.0f;
+        mTrimSmPost = mTrimTarget; // calibration snap
         for (int i = 0; i < 3; ++i) { mApA[i].reset(); mApB[i].reset(); mApC[i].reset(); }
         mEncHp.reset();
     }
@@ -794,6 +826,7 @@ private:
 
     // ------------------------------- constants -------------------------------
     static constexpr int   kCtrl = 32;      // Stage A coeff recompute period
+    static constexpr float kTrimMaxDb = 24.0f; // speaker-drive trim clamp (±dB)
     static constexpr int   kGN = 257;       // tanh describing-function table size
     static constexpr float kGBetaMax = 12.0f;
     static constexpr float kSettle = 1.0e-6f;
@@ -877,6 +910,11 @@ private:
     static constexpr float kThermInMax = 8.0f * kThermFull; // integrator input clamp
                                               // (+9 dB over cal): bounds recovery lag
     static constexpr float kThermDb  = 1.5f;  // max broadband droop at full power       [EAR]
+    // Thermal engage split (rev 2026-07-07): motor floor on max(Age,Thump) + wear
+    // bonus on Age. Age=1 sums to exactly 1.0 (old behaviour preserved); a fresh
+    // cab (Age~0, Thump up) keeps ~60% of the sag it physically has.
+    static constexpr float kThermMotor = 0.6f; // engage floor: heating is motor physics [EAR]
+    static constexpr float kThermWear  = 0.4f; // wear bonus: worn suspension sags more  [EAR]
     // Modal shaping of the harmonics-only breakup exciter (§6): real cone breakup
     // hits discrete bending-wave modes (~1-4 kHz), so the 'cry' has structure. Safe
     // because delta has no fundamental -> series-filtering it cannot re-comb.
@@ -903,6 +941,10 @@ private:
     float mAgeSmPre = 0.0f, mThumpSmPre = 0.0f;
     float mAgeSmPost = 0.0f, mThumpSmPost = 0.0f;
     float mSizeSm = 0.0f;
+    // speaker-drive trim (linear; 1.0 = 0 dB = calibrated behaviour). Smoothed
+    // per stage like the macros; snapped (not ramped) on reset/re-engage since it
+    // is a calibration, not an engage.
+    float mTrimTarget = 1.0f, mTrimSm = 1.0f, mTrimSmPost = 1.0f;
     // inactive->active edge trackers (see resetPreState/resetPostState)
     bool mPreWasActive = false, mPostWasActive = false;
 

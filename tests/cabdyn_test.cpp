@@ -22,9 +22,12 @@
 // T12 IM adds no static color — Thump 1/Age 0, quiet HF: pre-path within 0.1 dB of bypass
 // T13 IM alias grid — Thump 1/Age 0: energy off the |m*fHF +/- n*fLF| grid < -55 dBc
 // T14 thermal — 6 s full-scale sine @ Age 1: droop in [1.0,1.5] dB, monotonic; recovers
+//     (d) motor-floor engage: Age 0 / Thump 1 still sags ~60% of the Age-1 dose
 // T15 Fs estimator — 78 Hz gtr / 52 Hz bass curves valid; flat/hash invalid (falls back)
 // T16 resonance plumb-through — setSpeakerResonance(52,8) stable; T9 comb sweep still smooth
 // T17 A1 keys on displacement — fs 60: 60 Hz => dbgA1Db >= 1.5; 400 Hz => < 0.3; center tracks
+// T18 speaker-drive trim — sidechain-only calibration: -18 dB kills dispPush on the T10a
+//     tone; +12 dB restores it on a 12 dB quieter tone; 0 dB is bit-exact vs never-set
 #include "rig/CabDynamicsBlock.h"
 #include "rig/LfResonance.h"
 #include <cstdio>
@@ -501,6 +504,18 @@ int main()
         runPre(d, sil);
         const double resid = -(double)d.dbgThermDb();
         CHECK(resid < 0.3, "T14c thermal recovers on silence (residual %.3f dB < 0.3)", resid);
+
+        // (d) motor-floor engage (rev 2026-07-07): heating is motor physics, not
+        // wear. Age 0 / Thump 1 must still sag at kThermMotor (0.6) of the Age-1
+        // dose: expected ~0.6 * 1.23 = 0.74 dB at the same 6 s point.
+        CabDynamicsBlock d2; d2.prepare(SR, BLK);
+        d2.setThump(1.0f); // Age stays 0 — fresh cone, motor still heats
+        std::vector<float> m2(N);
+        for (size_t n = 0; n < N; ++n) m2[n] = 0.286f * (float)std::sin(2.0 * kPi * 80.0 * (double)n / SR);
+        runPre(d2, m2);
+        const double droopFresh = -(double)d2.dbgThermDb();
+        CHECK(droopFresh >= 0.55 && droopFresh <= 0.95,
+              "T14d fresh-cab (Age 0, Thump 1) motor sag (%.3f dB in [0.55,0.95])", droopFresh);
     }
 
     // ---------- T15: Fs estimator (LfResonance.h, synthetic dB curves) ----------
@@ -626,6 +641,47 @@ int main()
             runPre(d, m);
             CHECK(d.dbgA1Db() < 0.3f, "T17b rig-level 400 Hz barely blooms A1 (%.3f dB < 0.3)", d.dbgA1Db());
         }
+    }
+
+    // ---------- T18: speaker-drive trim (sidechain-only level calibration) ----------
+    // The §12 knees are calibrated to one rig's internal level; setSpeakerDriveDb
+    // tells the model how far a different rig sits from that convention. It scales
+    // ONLY the detectors (excursion, push envelopes, thermal integrator) — the
+    // audio path and the IM/band math are untouched. Guards: (a) the T10a tone
+    // with trim -18 dB reads as a quiet rig => dispPush collapses; (b) a tone
+    // 12 dB quieter than T10a with trim +12 dB reads calibrated => dispPush
+    // restores; (c) trim 0 dB is BIT-EXACT vs a block that never called the setter.
+    {
+        auto dispWithTrim = [](double amp, float trimDb) {
+            CabDynamicsBlock d; d.prepare(SR, BLK);
+            d.setSpeakerDriveDb(trimDb);
+            d.setThump(1.0f);
+            const size_t N = (size_t)(SR * 0.6);
+            std::vector<float> m(N);
+            for (size_t n = 0; n < N; ++n) m[n] = (float)(amp * std::sin(2.0 * kPi * 60.0 * (double)n / SR));
+            runPre(d, m);
+            return d.dbgDispPush();
+        };
+        const float dCold = dispWithTrim(kRigAmp, -18.0f);            // hot cal, quiet rig story
+        const float dHot  = dispWithTrim(kRigAmp * 0.251, +12.0f);    // -12 dB tone, +12 dB trim
+        CHECK(dCold <= 0.05f, "T18a -18 dB trim kills dispPush on the T10a tone (%.3f <= 0.05)", dCold);
+        CHECK(dHot  >= 0.8f,  "T18b +12 dB trim restores dispPush on a -12 dB tone (%.3f >= 0.8)", dHot);
+
+        // (c) 0 dB == never-set, byte-identical (same input, same macros, full stack)
+        std::mt19937 rng(31);
+        std::uniform_real_distribution<float> u(-0.5f, 0.5f);
+        std::vector<float> in((size_t)SR);
+        for (auto &v : in) v = u(rng);
+        CabDynamicsBlock a, b;
+        a.prepare(SR, BLK); b.prepare(SR, BLK);
+        a.setSpeakerDriveDb(0.0f); // b never calls the setter
+        a.setAgeDrive(0.8f); a.setThump(0.7f); a.setCabSize(0.5f);
+        b.setAgeDrive(0.8f); b.setThump(0.7f); b.setCabSize(0.5f);
+        std::vector<float> xa = in, xb = in;
+        runPre(a, xa); runPost(a, xa);
+        runPre(b, xb); runPost(b, xb);
+        CHECK(std::memcmp(xa.data(), xb.data(), xa.size() * sizeof(float)) == 0,
+              "T18c trim 0 dB is bit-exact vs never-set (byte-identical)");
     }
 
     std::printf("\n%s (%d failure%s)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails, gFails == 1 ? "" : "s");

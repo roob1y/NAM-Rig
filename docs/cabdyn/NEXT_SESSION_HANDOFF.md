@@ -1,5 +1,56 @@
 # Dynamic Cab — NEXT SESSION HANDOFF
 
+## 2026-07-07 session — review fixes landed; bass-Fs next
+
+A full review pass, then two of its findings SHIPPED (in the working tree —
+commit first if not yet committed):
+
+1. **Thermal motor-floor engage** (`CabDynamicsBlock.h` control block):
+   voice-coil heating is motor physics, not wear, so engage now keys on
+   `clamp01(kThermMotor(0.6)·max(Age,Thump) + kThermWear(0.4)·Age)`. Age=1 is
+   bit-identical to the old dose; fresh-cab presets (Recto/Aguilar) now keep
+   ~60% of the sag they physically have. Guarded by **T14d** (0.736 dB, fresh
+   cab @ 6 s). Both constants [EAR].
+2. **Speaker-drive calibration trim** `setSpeakerDriveDb(±24 dB)`: scales ONLY
+   the detector sidechain (excursion LP2 drive, pre/post push envelopes,
+   thermal x² integrator) — never the audio path, IM ring, or B1
+   band/describing-function math. Fixes the §12 portability caveat (knees are
+   calibrated to ONE rig's ~ −14 dBFS internal level). 0 dB is bit-exact vs
+   never-set (**T18c**, memcmp); −18 dB kills dispPush on the T10a tone
+   (**T18a**), +12 dB restores it on a −12 dB tone (**T18b**). NOT yet exposed
+   as a parameter — JUCE plumbing below.
+3. Stale IM-ring comment fixed (kDopUs 6.4 µs → ring is 8 @ 48k, not 16).
+
+**Verified 45/45, zero warnings** (offline g++; byte-equivalent /tmp
+reconstruction — a fresh session should re-run the suite from its mount as
+step 0 to confirm from literal repo bytes).
+
+**Queue, in order (specs ready):**
+
+- **Bass-Fs upgrade — `docs/cabdyn/BASS_FS_UPGRADE.md`** (full spec, review
+  finding #1: cabs tuned 35–45 Hz fall back to 90 Hz). An Opus agent was
+  launched and died at the session limit BEFORE editing anything — no partial
+  state, start clean from the spec.
+- **Multi-rate tests**: suite is 48k-only. Re-run T1/T2b/T11a/T13 invariants at
+  44.1k and 96k. While there: Stage C prime delays lose primality when scaled
+  by fs/48000 and rounded — snap to nearest prime after scaling (prepare and
+  dbgSetEncDelays).
+- **JUCE plumbing** (hand-review only, cannot compile offline): APVTS floats
+  `cabDynSpkrDrive`/`rigBcabDynSpkrDrive` (−18..+18 dB, default 0) pushed to
+  `setSpeakerDriveDb` next to the other cabDyn params (PluginProcessor.cpp
+  ~1248/1267); an fsEst readout in CabPanel via `CabBlock::lfResonance()`
+  ("Fs 52 Hz", or "Fs —" when invalid/no IR) so the 90 Hz fallback is finally
+  visible; response-well x-axis eyeball after kResFLo 40→25; fix the stale
+  "kDriveEnv 0.9" claim in the older section below (code is 1.2 + kDriveBase
+  0.5 per §12).
+- Robbie's items, unchanged: local Windows build; EAR_NOTES listen (all [EAR]
+  constants still unheard). Product call pending: gate dyncab when the cab
+  block is bypassed / no IR loaded?
+
+Sandbox note: mid-session file-tool edits are NOT visible to the repo bash
+mount (fresh-session mounts DO include prior sessions' edits). Verify offline
+builds from `git show` bases + re-applied patches, or commit first.
+
 ## PHYSICS UPGRADE shipped (2026-07-06) — needs local build + ear-test
 
 The block moved from broadband-envelope-driven to **cone-displacement-driven**
