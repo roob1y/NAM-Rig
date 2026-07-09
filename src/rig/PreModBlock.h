@@ -311,6 +311,11 @@ public:
     // for the tremolo). De-zippered (mSpreadZ) so automation can't step the R lane's
     // phase at block boundaries; mono process() ignores it.
     void setSpread(float s) { mSpread = std::min(std::max(s, 0.0f), 1.0f); }
+    // Snap the de-zippered Spread to its target immediately (no smoothing ramp).
+    // Called on discontinuous state changes that aren't live automation moves —
+    // e.g. engaging the stereo feature — so the first stereo block honours the
+    // current Spread exactly (Spread 0 -> bit-exact dual-mono from sample 0).
+    void snapSpread() { mSpreadZ = mSpread; }
 
     float effectiveRateHz() const
     {
