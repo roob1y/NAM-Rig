@@ -141,7 +141,9 @@ public:
 
     static constexpr float kMinTimeMs = 20.0f;
     static constexpr float kMaxTimeMs = 2000.0f;     // param ceiling; each model clamps to its real max
-    static constexpr float kMaxFeedbackHard = 1.10f; // absolute safety clamp
+    // (No separate hard feedback clamp: the real bounds are the in-loop compander sat +
+    //  loopLimit. A former kMaxFeedbackHard=1.10 was dead — copied from DelayBlock, never
+    //  referenced here, and below the Carbon Copy's shipped fbCeiling 1.18 — so it was removed.)
 
     // Tempo-sync divisions in quarter-note beats; index 0 = Off (free). Same order
     // and convention as PreModBlock, so the parameter StringArray is shared. Append
@@ -290,6 +292,36 @@ public:
             ln->mixZ = mMix;
             ln->levelZ = mLevel;
         }
+        mStereoRunning = false; // next processStereo() is a fresh rising edge
+    }
+
+    // Re-seed the R lane from L on a mono->stereo transition. Clears R's delay line (kills the
+    // stale ghost that would otherwise play into Amp B), copies L's LFO phase (so the two lanes
+    // are phase-locked again after any mono spell), and seeds R's glide + smoothers + filter/sat
+    // state from L (so R's baseZ doesn't glide in from a stale time — the exact Haas lean the
+    // ping-pong rebuild killed — and Mix/Level don't zip). Reads are self-relative to each line's
+    // own write pointer, so zeroing R's buffer is sufficient; no pointer alignment needed.
+    void seedLaneRfromL()
+    {
+        mLaneR.line.reset();
+        mLaneR.loopHp.reset();
+        mLaneR.loopLp.reset();
+        mLaneR.mid.reset();
+        mLaneR.tone.reset();
+        mLaneR.pres.reset();
+        mLaneR.analogLp.reset();
+        mLaneR.satX1 = mLaneR.satX2 = 0.0;
+        mLaneR.dcX1 = mLaneR.dcY1 = 0.0;
+        mLaneR.aSatX1 = mLaneR.aSatX2 = mLaneR.aDcX1 = mLaneR.aDcY1 = 0.0;
+        mLaneR.revPhase = mLaneL.revPhase;
+        // Leave mLaneR.loopLpHzBuilt as-is: the per-block updateBandwidth(mLaneR, t) compares it
+        // against the current corner and rebuilds R's in-loop LP coefficients if the delay time
+        // moved during the mono spell — self-healing. (Zeroing the filter STATE above is what
+        // clears the ghost; the coefficients stay valid for their built corner.)
+        mLaneR.lfo.setPhase(mLaneL.lfo.phase());
+        mLaneR.baseZ = mLaneL.baseZ;
+        mLaneR.mixZ = mLaneL.mixZ;
+        mLaneR.levelZ = mLaneL.levelZ;
     }
 
     // ---- parameters (audio thread) ----
@@ -342,6 +374,7 @@ public:
     // MONO: drive the L lane ONLY at the base time -> BIT-EXACT to the pre-stereo block.
     void process(float *mono, int numSamples) override
     {
+        mStereoRunning = false; // record that the last pass was mono (only the L lane advanced)
         processLane(mono, numSamples, mLaneL, currentTimeMs());
     }
 
@@ -351,6 +384,13 @@ public:
     // centred; each amp keeps its OWN dry. No spread — the ping-pong is fixed.
     void processStereo(float *left, float *right, int numSamples)
     {
+        // On the mono->stereo transition the R lane is STALE: while mono ran, only L advanced,
+        // so R still holds whatever audio, LFO phase, glide and smoother state it had the last
+        // time stereo ran. Left alone it dumps a ghost burst into Amp B and drifts out of phase
+        // with L (a per-lane time wobble under Mod). Re-seed R from L on the rising edge so the
+        // ping-pong starts clean and phase-locked. Mono path untouched (it only ever uses L).
+        if (!mStereoRunning) { seedLaneRfromL(); mStereoRunning = true; }
+
         const float t = currentTimeMs(); // one delay time, both lanes (same repeat rate as mono)
 
         mLaneL.io.processIn(left, numSamples);
@@ -375,8 +415,8 @@ public:
         {
             const float dryL = left[i], dryR = right[i];
             float outwL = 0.0f, outwR = 0.0f;
-            const float wetL = laneRecirc(mLaneL, dryL, reverse, analog, modAmt, fsK, t, outwL);
-            const float wetR = laneRecirc(mLaneR, dryR, reverse, analog, modAmt, fsK, t, outwR);
+            const float wetL = laneRecirc(mLaneL, dryL, reverse, analog, hold, modAmt, fsK, t, outwL);
+            const float wetR = laneRecirc(mLaneR, dryR, reverse, analog, hold, modAmt, fsK, t, outwR);
             // TRUE alternating ping-pong: dry enters L; L bounces to R at UNITY (so the R tap
             // matches the L tap it came from), R feeds back to L scaled by the feedback knob.
             // The taps stay at the MONO spacing (D, 2D, 3D, ...) but alternate L, R, L, R — same
@@ -430,7 +470,7 @@ private:
     // sets `outwOut` (the presence-shaped wet for the output mix). Does NOT write the line
     // or advance the LFO — the caller owns the feedback write. Byte-identical maths to the
     // former inline loop, so mono stays bit-exact.
-    float laneRecirc(Lane &ln, float dry, bool reverse, bool analog, float modAmt,
+    float laneRecirc(Lane &ln, float dry, bool reverse, bool analog, bool hold, float modAmt,
                      double fsK, float baseTarget, float &outwOut)
     {
         (void)dry; // dry is the caller's; kept in the signature for symmetry/readability
@@ -444,18 +484,27 @@ private:
         const double lfo = (double)ln.lfo.value();
         // Modulation depth is a FIXED absolute ms (not a % of the delay) -> constant musical
         // pitch mod at every delay (pitch dev = depthMs·4·rate). (Robbie ear-fix 2026-07-04.)
-        const double modMs = (double)modAmt * (double)mVoicing.modDepthMs * lfo;
+        // HOLD is a bit-exact digital freeze on the real DD-7: zero the mod so the frozen
+        // loop doesn't accumulate pitch-wobble (hardware Hold has none).
+        const double modMs = hold ? 0.0 : (double)modAmt * (double)mVoicing.modDepthMs * lfo;
         const double tSamp = std::max(3.0, (ln.baseZ + modMs) * fsK);
         float wet = reverse ? reverseRead(ln, tSamp) : ln.line.readFrac6(tSamp - 1.0); // REVERSE = grain playback
 
-        // In-loop tone (recirculates -> compounds per repeat = analog "repeats darken"):
-        if (ln.loopHpOn) wet = ln.loopHp.processSample(wet); // low-cut
-        if (ln.loopLpOn) wet = ln.loopLp.processSample(wet); // bandwidth (BBD Nyquist / converter)
-        if (ln.midOn)    wet = ln.mid.processSample(wet);    // Memory Man mid bump
-        if (ln.toneOn)   wet = ln.tone.processSample(wet);   // user high-cut
-        if (analog) { wet = ln.analogLp.processSample(wet); wet = analogSat(ln, wet); } // DD-7 ANALOG
-        // Companding / preamp soft-clip (cubic ADAA, in-loop): BBD compander knee.
-        if (mVoicing.satDrive > 0.0f) wet = loopSat(ln, wet);
+        // In-loop tone (recirculates -> compounds per repeat = analog "repeats darken").
+        // Skipped entirely in HOLD: the real DD-7 Hold recirculates a bit-exact digital loop,
+        // so running the in-loop LP/sat/mod here would dull it ~0.2 dB/pass (audible within
+        // ~30 s on a 500 ms hold). loopLimit (below, transparent under ±1.5) is the only stage
+        // still applied on the write, keeping the frozen loop lossless.
+        if (!hold)
+        {
+            if (ln.loopHpOn) wet = ln.loopHp.processSample(wet); // low-cut
+            if (ln.loopLpOn) wet = ln.loopLp.processSample(wet); // bandwidth (BBD Nyquist / converter)
+            if (ln.midOn)    wet = ln.mid.processSample(wet);    // Memory Man mid bump
+            if (ln.toneOn)   wet = ln.tone.processSample(wet);   // user high-cut
+            if (analog) { wet = ln.analogLp.processSample(wet); wet = analogSat(ln, wet); } // DD-7 ANALOG
+            // Companding / preamp soft-clip (cubic ADAA, in-loop): BBD compander knee.
+            if (mVoicing.satDrive > 0.0f) wet = loopSat(ln, wet);
+        }
 
         // Output-once presence sheen (not recirculated -> shapes timbre without compounding).
         float outw = wet;
@@ -508,7 +557,7 @@ private:
             const float dry = buf[i];
             float outw = 0.0f;
             // Read + in-loop-filter this lane's recirculating wet (no line write yet).
-            const float wet = laneRecirc(ln, dry, reverse, analog, modAmt, fsK, baseTarget, outw);
+            const float wet = laneRecirc(ln, dry, reverse, analog, hold, modAmt, fsK, baseTarget, outw);
             // Mono / own-lane feedback: the delay input is dry + fb·its OWN wet.
             ln.line.write(loopLimit(hold ? (fb * wet) : (dry + fb * wet)));
             buf[i] = mixLaw(ln, dry, outw);
@@ -742,6 +791,7 @@ private:
     float mGlideK = 0.01f;   // glide smoother coefficient (per model)
     float mSmoothK = 0.01f;  // 10 ms Mix/Level de-zip coefficient
     bool mPrepared = false;
+    bool mStereoRunning = false; // was the last pass processStereo()? false -> next stereo block re-seeds R from L
 }; // class PreDelayBlock
 
 } // namespace nam_rig

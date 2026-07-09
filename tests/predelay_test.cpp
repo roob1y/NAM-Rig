@@ -22,6 +22,7 @@
 #include "rig/PreDelayBlock.h"
 #include <cstdio>
 #include <cmath>
+#include <cstdint>
 #include <vector>
 
 using nam_rig::PreDelayBlock;
@@ -603,6 +604,87 @@ int main()
         for (size_t i = 0; i < bl.size(); ++i)
         { md = std::max(md, (double)std::abs(bl[i] - ml[i])); md = std::max(md, (double)std::abs(br[i] - mr[i])); }
         CHECK(md < 1.0e-5, "T18 ping-pong block-split == one-shot (max diff %.2e)", md);
+    }
+
+    // ---- T19: mono->stereo transition re-seeds the R lane (no stale ghost into Amp B) ----
+    // Load the stereo ping-pong with a loud burst (fills R's line), spend a while in MONO (R
+    // frozen, holding that content + drifting LFO phase), then resume stereo with SILENCE. The
+    // fix clears R on the rising edge, so Amp B stays quiet; without it R replays its stale line.
+    {
+        PreDelayBlock d;
+        d.setModel(PreDelayBlock::kDD7); d.setDd7Mode(PreDelayBlock::kMode800);
+        d.setTimeMs(200.0f); d.setFeedback(0.5f); d.setMix(1.0f);
+        d.prepare({SR, BLK});
+        auto stereoRun = [&](std::vector<float> &L, std::vector<float> &R) {
+            for (size_t p = 0; p < L.size(); p += (size_t)BLK)
+                d.processStereo(L.data() + p, R.data() + p,
+                                (int)std::min<size_t>((size_t)BLK, L.size() - p));
+        };
+        // 1) load: 0.4 s burst through the ping-pong so R's line is full of repeats.
+        std::vector<float> aL((size_t)(SR * 0.4), 0.0f), aR((size_t)(SR * 0.4), 0.0f);
+        for (int k = 0; k < (int)(0.01 * SR); ++k)
+        { const float v = 0.5f; aL[(size_t)k] = v; aR[(size_t)k] = v; }
+        stereoRun(aL, aR);
+        // 2) mono spell: 1.0 s of silence on the mono path (only L advances; R is frozen stale).
+        settle(d, 1.0);
+        // 3) resume stereo with SILENCE -> R must not dump a ghost. Capture max |R|.
+        std::vector<float> bL((size_t)(SR * 0.4), 0.0f), bR((size_t)(SR * 0.4), 0.0f);
+        stereoRun(bL, bR);
+        double ghost = 0.0;
+        for (float v : bR) ghost = std::max(ghost, (double)std::abs(v));
+        CHECK(ghost < 0.02, "T19 mono->stereo: R lane re-seeded, no ghost burst (max|R|=%.4f)", ghost);
+    }
+
+    // ---- T20: DD-7 HOLD is a LOSSLESS digital loop (no per-pass darkening, no mod wobble) ----
+    // HOLD freezes the EXISTING line content (its write is fb*wet, not dry+fb*wet -> it does not
+    // record new input), so fill the line in normal mode FIRST, then engage HOLD and check the
+    // frozen loop neither decays nor wobbles period-to-period. The fix skips the in-loop LP/sat
+    // and zeroes the mod, so consecutive periods are bit-identical (loopLimit is transparent
+    // below +-1.5). Mod is left at 1.0 to prove HOLD zeroes it (else the read would wobble and the
+    // periods diverge); T20b shows a NON-hold loop DOES drift per pass.
+    {
+        PreDelayBlock d;
+        d.setModel(PreDelayBlock::kDD7); d.setDd7Mode(PreDelayBlock::kMode800);
+        const float periodMs = 250.0f;
+        const size_t period = (size_t)(periodMs * 0.001 * SR); // 12000 samples
+        d.setTimeMs(periodMs); d.setMix(1.0f); d.setMod(1.0f); d.setFeedback(0.9f);
+        d.prepare({SR, BLK});
+        // Fill the first period with a deterministic pseudo-noise burst (< +-1.5 so loopLimit is
+        // transparent); normal mode recirculates it so the line holds repeats.
+        std::vector<float> m(period * 3, 0.0f);
+        uint32_t rng = 0x1234567u;
+        for (size_t k = 0; k < period; ++k)
+        { rng = rng * 1664525u + 1013904223u; m[k] = 0.3f * ((float)((rng >> 8) & 0xFFFF) / 32768.0f - 1.0f); }
+        run(d, m);
+        d.setDd7Mode(PreDelayBlock::kHold); // FREEZE the buffered loop
+        std::vector<float> h(period * 4, 0.0f);
+        run(d, h);
+        // Compare period 1 vs period 2 within the frozen (hold) region.
+        double diff = 0.0, ref = 0.0;
+        for (size_t k = 0; k < period; ++k)
+        {
+            const double a = h[1 * period + k], b = h[2 * period + k];
+            diff = std::max(diff, std::abs(a - b));
+            ref  = std::max(ref, std::abs(a));
+        }
+        CHECK(ref > 0.05, "T20 HOLD sustains a frozen loop (peak=%.3f)", ref);
+        CHECK(diff < 1.0e-4, "T20 HOLD loop is lossless: period N == period N+1 (max diff %.2e)", diff);
+
+        // T20b control: the SAME loop in a normal (non-hold) mode DOES change per pass (the in-
+        // loop LP + mod are active), so the losslessness above is specific to HOLD.
+        PreDelayBlock e;
+        e.setModel(PreDelayBlock::kDD7); e.setDd7Mode(PreDelayBlock::kMode800);
+        e.setTimeMs(periodMs); e.setMix(1.0f); e.setMod(1.0f); e.setFeedback(1.0f);
+        e.prepare({SR, BLK});
+        std::vector<float> mm(period * 8, 0.0f);
+        rng = 0x1234567u;
+        for (size_t k = 0; k < period; ++k)
+        { rng = rng * 1664525u + 1013904223u; mm[k] = 0.3f * ((float)((rng >> 8) & 0xFFFF) / 32768.0f - 1.0f); }
+        run(e, mm);
+        double cd = 0.0;
+        for (size_t k = 0; k < period; ++k)
+            cd = std::max(cd, std::abs((double)mm[3 * period + k] - (double)mm[4 * period + k]));
+        CHECK(cd > 1.0e-4, "T20b control: NON-hold loop changes per pass (max diff %.2e)", cd);
     }
 
     std::printf("\n%s (%d failures)\n", gFails == 0 ? "ALL PASS" : "FAILURES", gFails);
