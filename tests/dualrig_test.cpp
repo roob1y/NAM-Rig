@@ -498,13 +498,17 @@ int main(int argc, char **argv)
 
         auto run = [&](int mode, int send, bool stereo, float spread,
                        std::vector<float> &L, std::vector<float> &R) {
+            // Set Spread BEFORE reset() so reset()'s snap lands on THIS run's target
+            // (mSpreadZ = mSpread); otherwise the de-zippered Spread would ramp from
+            // the previous run's value and spread 0 wouldn't be a bit-exact no-op on
+            // the first block. Mirrors how Depth/Rate are set once before the runs.
+            chain.setPremodSpread(spread);
             chain.reset();
             chain.setDriveSend(send);
             chain.setMode(mode);
             chain.setLevelA(1.0f);
             chain.setLevelB(1.0f);
             chain.setPremodStereo(stereo);
-            chain.setPremodSpread(spread);
             juce::AudioBuffer<float> buf(2, n);
             std::memcpy(buf.getWritePointer(0), x.data(), (size_t)n * sizeof(float));
             buf.clear(1, 0, n);

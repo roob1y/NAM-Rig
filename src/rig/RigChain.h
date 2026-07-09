@@ -124,7 +124,16 @@ public:
     void setPremodPreDrive(bool b) { mPremodPreDrive = b; }
     // Stereo front-mod: in Dual, the post-drive premod becomes mono-in / stereo-out
     // (L lane -> Amp A, R lane -> Amp B). Off/Solo/pre-drive keep the mono premod.
-    void setPremodStereo(bool b) { mPremodStereo = b; }
+    void setPremodStereo(bool b)
+    {
+        // On the OFF->ON edge, snap the premod's de-zippered Spread to its target so
+        // the first stereo block honours the current Spread exactly (Spread 0 stays a
+        // bit-exact dual-mono no-op). While stereo stays on, Spread still de-zippers,
+        // so live automation moves don't step the R lane's phase at block boundaries.
+        if (b && !mPremodStereo)
+            premod.snapSpread();
+        mPremodStereo = b;
+    }
     void setPremodSpread(float s) { premod.setSpread(s); } // 0 = dual-mono, 1 = 180°
     // Pre-amp delay pedal position: true = BEFORE the drive rack, false = AFTER it (default).
     void setPredelayPreDrive(bool b) { mPredelayPreDrive = b; }
