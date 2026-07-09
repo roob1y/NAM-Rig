@@ -214,25 +214,11 @@ public:
 
         // Pink (equal-energy-per-octave) probe — roughly guitar's spectral
         // balance, so the nonlinear amp distorts it like it would real playing
-        // (white noise over-drives the highs). Paul Kellett economy pink filter,
-        // then normalized to ~0.15 RMS so the amp sees a sensible drive level.
+        // (white noise over-drives the highs). Normalized to ~0.15 RMS so the amp
+        // sees a sensible drive level. Shared with measurePreCabLevels below.
         std::vector<float> a((size_t)n), b((size_t)n);
-        std::uint32_t s = 0x9e3779b9u;
-        float k0 = 0.0f, k1 = 0.0f, k2 = 0.0f;
-        double sq = 0.0;
-        for (int i = 0; i < n; ++i)
-        {
-            s = s * 1103515245u + 12345u;
-            const float w = (float)((int)((s >> 16) & 0x7fff) - 16384) / 16384.0f;
-            k0 = 0.99765f * k0 + w * 0.0990460f;
-            k1 = 0.96300f * k1 + w * 0.2965164f;
-            k2 = 0.57000f * k2 + w * 1.0526913f;
-            const float p = k0 + k1 + k2 + w * 0.1848f;
-            a[(size_t)i] = p;
-            sq += (double)p * p;
-        }
-        const float norm = (sq > 0.0) ? (float)(0.15 / std::sqrt(sq / (double)n)) : 1.0f;
-        for (int i = 0; i < n; ++i) { a[(size_t)i] *= norm; b[(size_t)i] = a[(size_t)i]; }
+        fillPinkProbe(a.data(), n, 0.15);
+        for (int i = 0; i < n; ++i) b[(size_t)i] = a[(size_t)i];
 
         renderVoice(0, a.data(), n, true); // withTrims = include cal/normalize
         reset();
@@ -246,6 +232,37 @@ public:
         // 2.5 kHz) tracks perceived loudness much better.
         bandLimit(a.data(), n);
         bandLimit(b.data(), n);
+
+        VoiceLevels r;
+        r.rmsA = voiceRms(a.data(), n);
+        r.rmsB = voiceRms(b.data(), n);
+        return r;
+    }
+
+    // Measure each rig's internal PRE-cab output RMS — exactly the level the
+    // Dynamic Cab detectors see (post-calibration, post-amp, post-eq, BEFORE the
+    // cab/dyn). Feeds NamRigProcessor::calibrateCabDrive, which turns it into the
+    // per-rig SpeakerDrive trim so a hot/quiet capture still breaks up correctly.
+    //
+    // The caller passes the NET pre-amp gain per rig (calibrationGainDb(rig) +
+    // per-amp Input, folded to linear) — the global-cal term cancels in the real
+    // chain (see process()), so this needs no live chain state and is correct
+    // right after a model load. Plain broadband RMS (NOT band-limited): the
+    // physics detectors are physical, not perceptual, so they track raw signal
+    // level. Same threading contract as measureLevels (caller suspends).
+    VoiceLevels measurePreCabLevels(float preGainA, float preGainB)
+    {
+        const int n = 8192; // long window -> stable RMS
+        reset();
+
+        std::vector<float> a((size_t)n), b((size_t)n);
+        fillPinkProbe(a.data(), n, 0.15); // SAME probe/level as measureLevels
+        for (int i = 0; i < n; ++i) b[(size_t)i] = a[(size_t)i];
+
+        renderPreCab(0, a.data(), n, preGainA);
+        reset();
+        renderPreCab(1, b.data(), n, preGainB);
+        reset();
 
         VoiceLevels r;
         r.rmsA = voiceRms(a.data(), n);
@@ -679,6 +696,49 @@ private:
             c.process(buf + pos, m);
             if (withTrims && outTrim != 1.0f) scale(buf + pos, m, outTrim);
         }
+    }
+
+    // Render one voice up to (but NOT including) the cab: preGain -> amp -> eq,
+    // chunked by the prepared block size. Mirrors renderVoice but stops at the
+    // Dynamic Cab detector tap and takes an explicit pre-amp gain instead of the
+    // chain's inTrim, so the measurement is independent of live audio-thread
+    // state (correct immediately after a model load). No cab -> no settleCab.
+    void renderPreCab(int rig, float *buf, int n, float preGain)
+    {
+        AmpBlock &a = rig ? ampB : amp;
+        EqBlock &e = rig ? eqB : eq;
+        const int chunk = juce::jmax(1, juce::jmin(mMaxBlock, n));
+        for (int pos = 0; pos < n; pos += chunk)
+        {
+            const int m = juce::jmin(chunk, n - pos);
+            if (preGain != 1.0f) scale(buf + pos, m, preGain);
+            a.process(buf + pos, m);
+            e.process(buf + pos, m);
+        }
+    }
+
+    // Paul Kellett economy pink-noise probe, deterministic (fixed seed) and
+    // normalized to targetRms. Shared by measureLevels (full-voice loudness) and
+    // measurePreCabLevels (pre-cab drive calibration) so both drive the amp with
+    // the identical signal — factored out to guarantee they can't drift.
+    static void fillPinkProbe(float *buf, int n, double targetRms)
+    {
+        std::uint32_t s = 0x9e3779b9u;
+        float k0 = 0.0f, k1 = 0.0f, k2 = 0.0f;
+        double sq = 0.0;
+        for (int i = 0; i < n; ++i)
+        {
+            s = s * 1103515245u + 12345u;
+            const float w = (float)((int)((s >> 16) & 0x7fff) - 16384) / 16384.0f;
+            k0 = 0.99765f * k0 + w * 0.0990460f;
+            k1 = 0.96300f * k1 + w * 0.2965164f;
+            k2 = 0.57000f * k2 + w * 1.0526913f;
+            const float p = k0 + k1 + k2 + w * 0.1848f;
+            buf[i] = p;
+            sq += (double)p * p;
+        }
+        const float norm = (sq > 0.0) ? (float)(targetRms / std::sqrt(sq / (double)n)) : 1.0f;
+        for (int i = 0; i < n; ++i) buf[i] *= norm;
     }
 
     // RMS of a rendered voice, skipping the amp's startup ramp.

@@ -2,6 +2,7 @@
 #include "PluginEditor.h"
 #include "PresetManager.h"
 #include "CalNorm.h"
+#include "CabDriveCal.h"
 #include <cmath>
 
 juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParameterLayout()
@@ -992,6 +993,46 @@ void NamRigProcessor::matchLevels()
     };
     setLevel("rigLevelA", ref / lv.rmsA);
     setLevel("rigLevelB", ref / lv.rmsB);
+}
+
+// One-shot: measure each loaded amp's real pre-cab level and set its Dynamic Cab
+// SpeakerDrive trim so the level-dependent breakup is anchored to the reference,
+// regardless of how hot or quiet the capture chain is. Sibling to matchLevels /
+// autoAlign (offline, suspended, writes params via gestures). Deliberately NOT
+// auto-run on model load: loadModel also fires on preset recall, and this must
+// not clobber a preset's saved SpeakerDrive. Per-rig, so it works in Solo too.
+void NamRigProcessor::calibrateCabDrive()
+{
+    const bool aOn = isModelLoaded(0);
+    const bool bOn = isModelLoaded(1);
+    if (!aOn && !bOn)
+        return;
+
+    // Net pre-amp gain the probe must see = calibration + per-amp Input drive.
+    // The global-cal term cancels in the real chain (see RigChain::process), so
+    // this pair reproduces the exact level that hits the cab, driven or not, from
+    // the freshly-loaded engine metadata — no dependency on the audio thread.
+    const float preDbA = calibrationGainDb(0) + apvts.getRawParameterValue("rigInputA")->load();
+    const float preDbB = calibrationGainDb(1) + apvts.getRawParameterValue("rigInputB")->load();
+    const float preGainA = juce::Decibels::decibelsToGain(preDbA);
+    const float preGainB = juce::Decibels::decibelsToGain(preDbB);
+
+    suspendProcessing(true);
+    const auto lv = mChain.measurePreCabLevels(preGainA, preGainB);
+    suspendProcessing(false);
+
+    auto setDrive = [this](const char *id, double rms)
+    {
+        if (auto *p = apvts.getParameter(id))
+        {
+            const float db = nam_rig::CabDriveCal::speakerDriveDb(rms);
+            p->beginChangeGesture();
+            p->setValueNotifyingHost(p->convertTo0to1(db));
+            p->endChangeGesture();
+        }
+    };
+    if (aOn) setDrive("cabDynSpkrDrive", lv.rmsA);
+    if (bOn) setDrive("rigBcabDynSpkrDrive", lv.rmsB);
 }
 
 int NamRigProcessor::requestedFactorNow(int rig) const

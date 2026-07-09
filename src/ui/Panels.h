@@ -5955,6 +5955,11 @@ public:
         addAndMakeVisible(mAutoBtn);
         mMatchBtn.onClick = [this] { mProc.matchLevels(); };
         addAndMakeVisible(mMatchBtn);
+        // Calibrate the Dynamic Cab SpeakerDrive to each loaded amp's real pre-cab
+        // level (anchors level-dependent breakup for hot/quiet captures). Per-rig,
+        // so unlike Auto-align / Match Levels it also works in Solo.
+        mCalCabBtn.onClick = [this] { mProc.calibrateCabDrive(); };
+        addAndMakeVisible(mCalCabBtn);
 
         // Level A/B link: clicks write the (UI-only) rigLevelLink param; refresh()
         // mirrors it back. The actual tie-together is done by listening to the two
@@ -6045,6 +6050,9 @@ public:
         mAlign->setEnabled(aligning);
         mAutoBtn.setEnabled(aligning && bothLoaded);
         mMatchBtn.setEnabled(aligning && bothLoaded);
+        // Cab-drive cal is per-rig, so it's live whenever EITHER amp is loaded
+        // (including Solo) — not gated on Dual like align/match.
+        mCalCabBtn.setEnabled(aOn || bOn);
         // Level link only bites when both rigs are actually playing (Dual, both
         // amps live) — same gate as align/match, since a single live level has
         // nothing to link to.
@@ -6119,6 +6127,12 @@ public:
         mMatchBtn.setBounds(alignRow.removeFromLeft(132).withSizeKeepingCentre(132, 34));
         // Level A/B link pill, pinned to the row's right edge.
         mLinkBtn.setBounds(alignRow.removeFromRight(92).withSizeKeepingCentre(92, 30));
+
+        // Cab-drive calibration on its own row beneath the align/match controls.
+        // (Standalone row so it can't overlap them; nudge to taste in-build.)
+        body.removeFromTop(6);
+        auto calRow = body.removeFromTop(40);
+        mCalCabBtn.setBounds(calRow.removeFromLeft(150).withSizeKeepingCentre(150, 34));
     }
 
 private:
@@ -6158,6 +6172,7 @@ private:
     double mLastA = 0.0, mLastB = 0.0;
     bool mSyncing = false;
     juce::TextButton mAutoBtn{"Auto-align"}, mMatchBtn{"Match Levels"};
+    juce::TextButton mCalCabBtn{"Cal Cab Drive"};
 
     // Layout rects (set in resized, drawn in paint).
     juce::Rectangle<int> mCardA, mCardB, mTagA, mTagB;

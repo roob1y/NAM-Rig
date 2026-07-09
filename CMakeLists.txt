@@ -154,6 +154,24 @@ if(BUILD_RIG_HARNESS)
         target_compile_options(cal_test PRIVATE /arch:AVX2 /fp:fast)
     endif()
 
+    # cabdrive_test — Dynamic Cab drive calibration formula (CabDriveCal.h). Pure
+    # math (no engine/JUCE dependency); verifies the pre-cab-RMS -> SpeakerDrive
+    # trim used by PluginProcessor::calibrateCabDrive.
+    juce_add_console_app(cabdrive_test PRODUCT_NAME "cabdrive_test")
+    target_sources(cabdrive_test PRIVATE tests/cabdrive_test.cpp)
+    target_include_directories(cabdrive_test PRIVATE src)
+    target_compile_definitions(cabdrive_test PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+    )
+    target_link_libraries(cabdrive_test PRIVATE
+        juce::juce_audio_basics
+        juce::juce_recommended_config_flags
+    )
+    if(MSVC)
+        target_compile_options(cabdrive_test PRIVATE /arch:AVX2 /fp:fast)
+    endif()
+
     # dualrig_test — dual-voice RigChain core (SoloA bit-exact regression, mixer/
     # mode/pan, latency invariant). Links the engine (loads a model for T1).
     juce_add_console_app(dualrig_test PRODUCT_NAME "dualrig_test")

@@ -133,6 +133,14 @@ public:
     // louder rig is brought down, no boost. Suspends processing; message thread.
     void matchLevels();
 
+    // Calibrate Cab Drive: probe each loaded amp's real PRE-cab level and set its
+    // Dynamic Cab SpeakerDrive trim so the level-dependent breakup is anchored to
+    // the reference regardless of a hot/quiet capture (CabDriveCal.h). One-shot,
+    // per-rig (works in Solo), suspends processing; message thread. NOT auto-run
+    // on model load — that also fires on preset recall and would clobber the
+    // preset's saved SpeakerDrive.
+    void calibrateCabDrive();
+
     // --- Input calibration / output normalization (NAM-AA parity; CalNorm.h) ---
     // Per-rig: each rig is calibrated/normalized from its OWN model metadata,
     // applied as that rig's voice in/out trims. The enable toggles are global;
