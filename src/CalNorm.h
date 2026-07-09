@@ -61,6 +61,32 @@ struct CalNorm
             return 0.0f;
         return kTargetLoudnessDb - modelLoudnessDb;
     }
+
+    // Compensation (dB) that corrects output normalization for the input-
+    // calibration drive, ADDED to normalizationGainDb at the out-trim.
+    //
+    // The loudness metadata is measured at the model's CAPTURE drive, but input
+    // calibration re-drives the amp by calibrationGainDb before playback. For a
+    // clean (near-linear) amp the real output shifts by that same amount, which
+    // static normalization ignores — so a +cal model comes out louder than a
+    // -cal model even with Normalize on (a +5 dB vs -7 dB cal pair sits ~12 dB
+    // apart). Subtracting the calibration gain lands both back on the target.
+    //
+    // Returns 0 unless BOTH normalization and calibration are active with their
+    // metadata, so it's a bit-exact no-op whenever either feature is off (the
+    // default). Exact for clean amps; an approximation for heavily-driven models
+    // (their nonlinear gain doesn't track the drive 1:1) — still far better than
+    // ignoring the drive entirely, and Match Levels remains the exact per-pair
+    // fallback.
+    static float calibrationCompensationDb(bool normEnabled, bool hasLoudness,
+                                           bool calEnabled, bool hasInputLevelDbu,
+                                           float userDbu, float modelInputLevelDbu)
+    {
+        if (!normEnabled || !hasLoudness)
+            return 0.0f;
+        return -calibrationGainDb(calEnabled, hasInputLevelDbu, userDbu,
+                                  modelInputLevelDbu);
+    }
 };
 
 } // namespace nam_rig

@@ -142,6 +142,51 @@ int main(int argc, char **argv)
               "T5 no-metadata: residual cancels global at the amp (drives still trimmed)");
     }
 
+    // ---- T6: calibration compensation for normalize. Static normalization is
+    //          blind to the input-cal drive, so a +cal and a -cal model come out
+    //          at different levels even with Normalize on. The compensation term
+    //          (-calibrationGainDb) added at the out-trim lands both on the
+    //          target. Uses the real values seen in the plugin's amp panel:
+    //          Amp A cal -7.2 / norm -1.4, Amp B cal +5.0 / norm +2.7. ----
+    {
+        // Recover each model's metadata from the displayed cal/norm (cal = user -
+        // modelDbu; norm = -18 - loudness), then rebuild through the formulas.
+        const float userDbu = 13.0f; // Robbie's interface max input level
+        const float calA = -7.2f, normA_static = -1.4f;
+        const float calB = +5.0f, normB_static = +2.7f;
+        const float modelDbuA = userDbu - calA;             // 20.2 dBu
+        const float modelDbuB = userDbu - calB;             //  8.0 dBu
+        const float loudA = CalNorm::kTargetLoudnessDb - normA_static; // -16.6
+        const float loudB = CalNorm::kTargetLoudnessDb - normB_static; // -20.7
+
+        // Compensation both enabled: exactly -calibrationGainDb.
+        const float compA = CalNorm::calibrationCompensationDb(true, true, true, true, userDbu, modelDbuA);
+        const float compB = CalNorm::calibrationCompensationDb(true, true, true, true, userDbu, modelDbuB);
+        CHECK(approx(compA, -calA), "T6 comp A = -cal = %.2f dB", -calA);
+        CHECK(approx(compB, -calB), "T6 comp B = -cal = %.2f dB", -calB);
+
+        // For a clean (linear) amp the output loudness = loudnessMeta + calGain +
+        // outTrim, where outTrim = normStatic + comp. Both must land on the -18
+        // target — i.e. the ~12 dB A/B gap collapses to 0.
+        const float outA = loudA + calA + (normA_static + compA);
+        const float outB = loudB + calB + (normB_static + compB);
+        CHECK(approx(outA, CalNorm::kTargetLoudnessDb, 1e-3f),
+              "T6 Amp A lands on target (%.2f dB)", outA);
+        CHECK(approx(outB, CalNorm::kTargetLoudnessDb, 1e-3f),
+              "T6 Amp B lands on target (%.2f dB)", outB);
+        CHECK(approx(outA, outB, 1e-3f), "T6 A and B match (were ~12 dB apart)");
+
+        // No-op guards: comp is 0 unless BOTH normalize and calibration are on.
+        CHECK(CalNorm::calibrationCompensationDb(false, true, true, true, userDbu, modelDbuA) == 0.0f,
+              "T6 normalize off -> comp 0 (bit-exact)");
+        CHECK(CalNorm::calibrationCompensationDb(true, true, false, true, userDbu, modelDbuA) == 0.0f,
+              "T6 calibration off -> comp 0 (bit-exact)");
+        CHECK(CalNorm::calibrationCompensationDb(true, false, true, true, userDbu, modelDbuA) == 0.0f,
+              "T6 no loudness metadata -> comp 0");
+        CHECK(CalNorm::calibrationCompensationDb(true, true, true, false, userDbu, modelDbuA) == 0.0f,
+              "T6 no input_level_dbu metadata -> comp 0");
+    }
+
     std::printf("\n%s (%d failure%s)\n", gFails == 0 ? "ALL PASS" : "FAILURES",
                 gFails, gFails == 1 ? "" : "s");
     return gFails == 0 ? 0 : 1;

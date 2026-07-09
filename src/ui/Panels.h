@@ -2317,7 +2317,10 @@ public:
         const float calDb = mProc.calibrationGainDb(mRig);
         if (calDb != 0.0f)
             info << "  |  cal " << (calDb > 0 ? "+" : "") << juce::String(calDb, 1) << " dB";
-        const float normDb = mProc.normalizationGainDb(mRig);
+        // Corrected normalize (static metadata + input-cal compensation) — this
+        // is what's actually applied at the out-trim, so a +cal / -cal pair reads
+        // the values that make them match, not the misleading static numbers.
+        const float normDb = mProc.normalizationGainDb(mRig) + mProc.calibrationCompensationDb(mRig);
         mNormalized = (normDb != 0.0f);
         if (mNormalized)
             info << "  |  norm " << (normDb > 0 ? "+" : "") << juce::String(normDb, 1) << " dB";

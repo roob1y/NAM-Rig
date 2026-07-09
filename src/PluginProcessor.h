@@ -155,6 +155,11 @@ public:
     }
     float calibrationGainDb(int rig = 0) const;
     float normalizationGainDb(int rig = 0) const;
+    // Correction added to normalizationGainDb at the out-trim so a calibrated
+    // amp actually hits the normalize target (undoes the input-cal drive the
+    // static loudness metadata is blind to). 0 unless normalize + calibration
+    // are both active. See CalNorm::calibrationCompensationDb.
+    float calibrationCompensationDb(int rig = 0) const;
 
     // Live gain-reduction telemetry for the editor meters.
     float gateGainDb() const { return mChain.gate.currentGainDb(); }

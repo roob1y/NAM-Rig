@@ -943,6 +943,18 @@ float NamRigProcessor::normalizationGainDb(int rig) const
         eng.loudnessDb());
 }
 
+float NamRigProcessor::calibrationCompensationDb(int rig) const
+{
+    const auto &eng = ampFor(rig).engine();
+    return nam_rig::CalNorm::calibrationCompensationDb(
+        apvts.getRawParameterValue("normalize")->load() >= 0.5f,
+        eng.hasLoudness(),
+        apvts.getRawParameterValue("calEnable")->load() >= 0.5f,
+        eng.hasInputLevelDbu(),
+        apvts.getRawParameterValue("calDbu")->load(),
+        eng.inputLevelDbu());
+}
+
 void NamRigProcessor::autoAlign()
 {
     if (!isModelLoaded(0) || !isModelLoaded(1))
@@ -1369,8 +1381,12 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     const float rigInDbB = apvts.getRawParameterValue("rigInputB")->load();
     mChain.setInTrimA(juce::Decibels::decibelsToGain(calibrationGainDb(0) - globalCalDb + rigInDbA));
     mChain.setInTrimB(juce::Decibels::decibelsToGain(calibrationGainDb(1) - globalCalDb + rigInDbB));
-    mChain.setOutTrimA(juce::Decibels::decibelsToGain(normalizationGainDb(0)));
-    mChain.setOutTrimB(juce::Decibels::decibelsToGain(normalizationGainDb(1)));
+    // Normalize is corrected for the input-cal drive (calibrationCompensationDb)
+    // so a +cal and a -cal model actually land at the same target instead of the
+    // static metadata leaving them ~12 dB apart. 0 comp when either feature is
+    // off -> bit-exact vs before.
+    mChain.setOutTrimA(juce::Decibels::decibelsToGain(normalizationGainDb(0) + calibrationCompensationDb(0)));
+    mChain.setOutTrimB(juce::Decibels::decibelsToGain(normalizationGainDb(1) + calibrationCompensationDb(1)));
     const int rigMode = (int)apvts.getRawParameterValue("rigMode")->load();
     const float rigAlign = apvts.getRawParameterValue("rigAlign")->load();
     mChain.setMode(rigMode);
