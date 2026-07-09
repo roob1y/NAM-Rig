@@ -62,9 +62,9 @@ int main(int argc, char **argv)
     CHECK(CalNorm::normalizationGainDb(true, false, kModelLoud) == 0.0f,
           "T1 norm no-metadata -> 0 dB");
     CHECK(approx(CalNorm::normalizationGainDb(true, true, kModelLoud),
-                 CalNorm::kTargetLoudnessDb - kModelLoud),
-          "T1 norm enabled -> -18-loudness = %.2f dB",
-          CalNorm::kTargetLoudnessDb - kModelLoud);
+                 CalNorm::kNormalizeTargetDb - kModelLoud),
+          "T1 norm enabled -> (target-headroom)-loudness = %.2f dB",
+          CalNorm::kNormalizeTargetDb - kModelLoud);
 
     // ---- T2: real metadata path through the engine the plugin runs ----
     nam_aa::AaEngine eng;
@@ -85,7 +85,7 @@ int main(int argc, char **argv)
                                                       eng.loudnessDb());
     CHECK(approx(calDb, kUserDbu - kModelDbu),
           "T2 end-to-end cal = %.2f dB", calDb);
-    CHECK(approx(normDb, CalNorm::kTargetLoudnessDb - kModelLoud),
+    CHECK(approx(normDb, CalNorm::kNormalizeTargetDb - kModelLoud),
           "T2 end-to-end norm = %.2f dB", normDb);
 
     // ---- T3: a model without the metadata fields -> unity corrections ----
@@ -110,7 +110,7 @@ int main(int argc, char **argv)
     CHECK(approx(inGain, juce::Decibels::decibelsToGain(userIn + (kUserDbu - kModelDbu)), 1e-5f),
           "T4 input gain folds calibration");
     CHECK(approx(outGain,
-                 juce::Decibels::decibelsToGain(userOut + (CalNorm::kTargetLoudnessDb - kModelLoud)),
+                 juce::Decibels::decibelsToGain(userOut + (CalNorm::kNormalizeTargetDb - kModelLoud)),
                  1e-5f),
           "T4 output gain folds normalization");
     // A DC buffer scaled by inGain lands at exactly the expected level.

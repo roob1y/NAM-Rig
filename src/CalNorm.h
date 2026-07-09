@@ -23,8 +23,20 @@ namespace nam_rig
 
 struct CalNorm
 {
-    // Same loudness target as the official NAM plugin.
+    // Loudness reference of the official NAM plugin (-18 LUFS).
     static constexpr float kTargetLoudnessDb = -18.0f;
+
+    // Safety headroom (dB) subtracted from the loudness target. -18 LUFS peaks
+    // near 0 dBFS for high-crest clean guitar, so normalizing there — especially
+    // once the input-cal compensation boosts a hot-captured model to match —
+    // clips at unity mix. Targeting (kTargetLoudnessDb - kNormalizeHeadroomDb)
+    // keeps the hottest matched output below clipping and leaves final loudness
+    // to the Level knobs (Robbie's "level lives in the knobs" approach). Single
+    // tuning constant: raise for more headroom (quieter), lower for hotter.
+    static constexpr float kNormalizeHeadroomDb = 6.0f;
+
+    // Effective normalize target after the safety headroom.
+    static constexpr float kNormalizeTargetDb = kTargetLoudnessDb - kNormalizeHeadroomDb;
 
     // Internal reference level (dBu) the SHARED pre-amp section (drive rack,
     // gate, comp) is voiced at. Equal to the calDbu default so default settings
@@ -59,7 +71,7 @@ struct CalNorm
     {
         if (!enabled || !hasLoudness)
             return 0.0f;
-        return kTargetLoudnessDb - modelLoudnessDb;
+        return kNormalizeTargetDb - modelLoudnessDb;
     }
 
     // Compensation (dB) that corrects output normalization for the input-
