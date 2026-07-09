@@ -288,6 +288,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("premodPos", 1), "Pre Mod Position",
         juce::StringArray{"After Drive", "Before Drive"}, 0));
+    // Phaser voice (phaser only): the two famous MXR Phase 90 revisions. Script
+    // (early, no feedback around the all-pass chain) = a smooth, gentle swirl;
+    // Block (later, R28 feedback resistor) = the resonant mid-hump "throb". Maps to
+    // the phaser's fixed feedback in the update block below (Script 0.0 / Block 0.35).
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("premodPhaserVoice", 1), "Pre Mod Phaser Voice",
+        juce::StringArray{"Script", "Block"}, 0)); // default Script (the smoother voice)
 
     // --- Pre-amp delay pedal (mono, front-of-amp): rig/PreDelayBlock.h,
     // predelay_test.cpp. Sits after the premod and before the amp split, so the
@@ -1196,7 +1203,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     // sweet spot here so you can't dial a bad sound. (Type 0 Chorus, 1 Phaser,
     // 2 Flanger, 3 Tremolo, 4 Uni-Vibe.)
     //   Chorus   : Rate, Depth            (Mix fixed 50/50 = CE-2)
-    //   Phaser   : Rate                   (Depth + Feedback fixed sweet spots)
+    //   Phaser   : Rate, Voice            (Depth fixed; Voice = Script 0 / Block 0.35)
     //   Flanger  : Rate, Depth, Feedback  (Manual + Mix fixed = deepest comb)
     //   Tremolo  : Rate, Depth, Wave
     //   Uni-Vibe : Rate, Depth, Mix       (Mix = Chorus<->Vibrato; no feedback = stock)
@@ -1212,8 +1219,11 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         mChain.premod.setManual(0.15f);                                          // flanger base delay (fixed sweet spot)
         // Depth: exposed on all but the phaser (fixed musical sweep there).
         mChain.premod.setDepth(pt == 1 ? 0.60f : depth);
-        // Feedback: flanger Regen (knob), phaser fixed gentle resonance, else none.
-        mChain.premod.setFeedback(pt == 2 ? feedback : (pt == 1 ? 0.35f : 0.0f));
+        // Feedback: flanger Regen (knob); phaser = Script/Block voice toggle
+        // (Script 0.0 = smooth swirl, Block 0.35 = resonant throb); else none.
+        const float phaserFb =
+            (int)apvts.getRawParameterValue("premodPhaserVoice")->load() == 1 ? 0.35f : 0.0f;
+        mChain.premod.setFeedback(pt == 2 ? feedback : (pt == 1 ? phaserFb : 0.0f));
         // Mix: Uni-Vibe = Chorus/Vibrato knob; flanger = deepest (DSP halves it);
         // chorus/phaser = fixed 50/50.
         mChain.premod.setMix(pt == 4 ? mix : (pt == 2 ? 1.0f : 0.5f));
@@ -1402,6 +1412,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
 
     if (auto *ph = getPlayHead())
         if (auto pos = ph->getPosition())
+        {
             if (auto bpm = pos->getBpm())
             {
                 mChain.delay.setBpm(*bpm);
@@ -1409,6 +1420,13 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
                 mChain.premod.setBpm(*bpm);
                 mChain.predelay.setBpm(*bpm);
             }
+            // Transport -> PPQ phase-resync of the premod's tempo-synced LFO: on the
+            // rising edge of playback the LFO phase snaps to the beat grid, so a synced
+            // tremolo/flanger locks to the groove and re-records identically each take.
+            double ppq = 0.0;
+            if (auto p = pos->getPpqPosition()) ppq = *p;
+            mChain.premod.setTransport(pos->getIsPlaying(), ppq);
+        }
     const int delayChar = (int)apvts.getRawParameterValue("delayCharacter")->load();
     // Ping-pong + dual (independent L/R, via Sync R unlinked) are STEREO digital-delay
     // tricks; both tape characters are authentically mono (Space Tape already ignores

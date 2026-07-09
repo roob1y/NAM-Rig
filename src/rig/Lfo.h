@@ -34,6 +34,12 @@ public:
     }
     void setWaveform(int w) { mWave = (Wave)w; }
 
+    // Snap the phase accumulator (in cycles, wrapped to [0,1)). Used to align a
+    // tempo-synced LFO to the host's PPQ position on transport start. Additive: no
+    // caller that never invokes it is affected, so existing behaviour is unchanged.
+    void setPhase(double cycles) { mPhase = cycles - std::floor(cycles); }
+    double phase() const { return mPhase; }
+
     // -1..1 at (phase + offset01 cycles). Does not advance.
     float value(double offset01 = 0.0) const
     {

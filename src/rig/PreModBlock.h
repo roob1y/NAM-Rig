@@ -1,6 +1,9 @@
 #pragma once
-// PreModBlock — a MONO modulation pedal that sits IN FRONT OF THE AMP, in the
-// shared pre section (after the drive rack, before the A/B split). This is the
+// PreModBlock — a modulation pedal that sits IN FRONT OF THE AMP, in the
+// shared pre section (after the drive rack, before the A/B split). Mono-in, with a
+// mono process() path that stays bit-exact and an optional mono-in/stereo-out
+// processStereo() path (one shared LFO read at two phases, Spread-controlled) for
+// dual-amp rigs. This is the
 // "pedalboard modulation" position: a modulation stompbox feeding the amp, so the
 // modulated signal is coloured by the amp's nonlinearity — deliberately DISTINCT
 // from the post-cab STEREO ModBlock, which only ever sees the finished, cabinet-
@@ -10,12 +13,12 @@
 // (research: ElectroSmash CE-2 teardown, Electric Druid's BBD-chorus study,
 // Raffel & Smith DAFx-2010 "Practical Modeling of BBD Circuits", Dattorro):
 //
-//   * MULTI-TAP, DECORRELATED voices — kVoices taps read one delay line at
-//     DIFFERENT fixed delay offsets, each swept at its own LFO phase. Several
-//     detuned voices at different comb positions summed with the dry is what reads
-//     as a chorus; a single voice is just a vibrato. Voiced to the BOSS CE-2: the
-//     taps sit tightly around its ~9.5 ms delay centre with a small triangle-LFO
-//     swing (classic/subtle, not a wide studio ensemble).
+//   * SINGLE BBD voice — the shipped chorus is voiced to the BOSS CE-2, which is a
+//     one-voice BBD: a single tap on the delay line at the CE-2's ~9.5 ms delay
+//     centre, swept by a small triangle LFO (classic/subtle, not a wide studio
+//     ensemble). The tap engine can read kVoices taps at DIFFERENT fixed delay
+//     offsets (each at its own LFO phase) for a fuller, decorrelated ensemble, but
+//     kVoices == 1 ships the authentic mono CE-2.
 //   * BBD NONLINEARITY as a gentle, LEVEL-INDEPENDENT 3rd-order polynomial
 //     (x - a·x² - b·x³, a=1/8 b=1/18), NOT a tanh soft-clip. The x² term gives the
 //     2nd-harmonic, x³ the 3rd; the point is a fixed subtle colour, not a clipper
@@ -29,8 +32,8 @@
 //
 // STATE: all five are voiced — CHORUS (CE-2), PHASER (Phase 90 / Small Stone),
 // FLANGER (MXR EVH117 / M117R -- identical circuit), TREMOLO (Boss TR-2) and UNI-VIBE
-// (Shin-ei). Mono; zero reported latency. JUCE-free core DSP, verified by
-// tests/premod_test.cpp.
+// (Shin-ei). Mono-in; bit-exact mono path plus an optional stereo-out widen; zero
+// reported latency. JUCE-free core DSP, verified by tests/premod_test.cpp.
 
 #include "Blocks.h"
 #include "Lfo.h"
@@ -49,12 +52,13 @@ public:
     // ---- chorus voicing (front-of-amp, analog BBD) ----
     // Voiced to the Boss CE-2: a SINGLE BBD voice at the CE-2's ~9.5 ms delay
     // centre with its small modulation swing — the authentic mono CE-2. (kVoices is
-    // kept as a knob: >1 clusters extra taps around the same centre for a fuller,
-    // less strictly-authentic chorus; 1 = the real CE-2.)
+    // a compile-time constant, not a knob: it ships at 1 = the real CE-2. Raising it
+    // clusters extra taps around the same centre for a fuller, less strictly-
+    // authentic chorus, but that is a code change, not a user parameter.)
     static constexpr int kVoices = 1;
     static constexpr double kDelayMinMs = 8.0;   // (with kVoices==1 the tap sits at the mean)
     static constexpr double kDelayMaxMs = 11.0;  // ~9.5 ms mean = CE-2 delay centre
-    static constexpr double kModDepthMs = 1.4;   // max +/- sweep at depth 1 (CE-2 is ~±1.1 ms)
+    static constexpr double kModDepthMs = 1.1;   // max +/- sweep at depth 1 = authentic CE-2 (~±1.1 ms)
     static constexpr float kChorusMaxRateHz = 3.5f; // real chorus lives <~4 Hz (faster -> vibrato/warble)
     static constexpr double kWetLpHz = 6600.0;   // CE-2 reconstruction ceiling -> dark wet that fuses
     static constexpr double kWetHpHz = 40.0;     // subsonic trim (kills the x^2 DC + tightens lows)
@@ -75,7 +79,13 @@ public:
     static constexpr double kPhaserRestHz = 141.0;   // at-rest all-pass corner (JFET at max R):
                                                      // notches sit at 58.5 & 340.8 Hz (ElectroSmash)
     static constexpr double kPhaserOctaves = 3.9;    // UPWARD sweep span (octaves) at Depth 1 --
-                                                     // the JFET only ever RAISES the corner from rest
+                                                     // the JFET only ever RAISES the corner from rest.
+                                                     // Shipped Depth 0.60 -> ~2.34 oct sweep: corner
+                                                     // 141 Hz -> ~713 Hz, so notch2 tops ~1.7 kHz. Kept
+                                                     // deliberately low/concentrated -- matches the
+                                                     // Phase 90's dark low-mid voice (Eichas DAFx-14
+                                                     // spectrograms Fig 7/8; rest verified vs ElectroSmash).
+                                                     // Sweeping higher would read swooshy/hi-fi, un-P90.
     static constexpr float kPhaserFbMax = 0.70f;     // musical feedback ceiling; kept modest so the swept
                                                      // resonance peak doesn't spike the level as it crosses a note
 
@@ -104,7 +114,7 @@ public:
     // hard square; the slew keeps it click-free, like the TR-2's anti-tick edges).
     // Gain is CUT-ONLY (g in [1-depth, 1], peak at unity) — the authentic TR-2 law,
     // including its signature perceived volume drop as Depth rises. Clean AM (no EQ).
-    static constexpr float kTremWaveK = 8.0f;  // max triangle->trapezoid sharpening gain
+    static constexpr float kTremWaveK = 16.0f; // max triangle->trapezoid sharpening gain (Wave 1 ~ square; the slew still de-clicks the edges)
     static constexpr float kTremSlewMs = 1.5f; // de-click slew on the gain envelope
 
     // ---- uni-vibe voicing (Shin-ei Uni-Vibe: 4 STAGGERED opto all-pass stages) ----
@@ -120,7 +130,7 @@ public:
     static constexpr float kUniLampHeatMs = 12.0f; // lamp filament heats fast (~10-40 ms, DAFx-19)
     static constexpr float kUniLampCoolMs = 110.0f;// ...and cools much slower -> the lopsided "throb"
     static constexpr float kUniGamma = 1.5f;      // LDR power-law transfer (fc ~ light^gamma)
-    static constexpr float kUniAmDepth = 0.08f;   // subtle photocell amplitude throb
+    static constexpr float kUniAmDepth = 0.12f;   // photocell amplitude throb (DAFx-19 real unit ran higher; reads more "vibe", less "phaser")
     static constexpr float kUniFbMax = 0.5f;      // hot-rod feedback ceiling (stock = 0)
 
     // Tempo-sync division table (index 0 = Off = free), shared convention with the rig.
@@ -241,6 +251,9 @@ public:
         mFeedbackZ = mFeedback;
         mManualZ = mManual;
         mWaveZ = mWave;
+        mSpreadZ = mSpread;
+        mPlaying = false;
+        mWasPlaying = false; // next transport-start edge re-snaps the synced LFO phase
     }
 
     // Reset one lane's memory. tremG starts at unity (no chop on the first sample);
@@ -280,6 +293,10 @@ public:
     void setRateHz(float hz) { mFreeRateHz = hz; }
     void setSyncIndex(int i) { mSyncIndex = i; } // 0 = Off (free)
     void setBpm(double bpm) { if (bpm > 0.0) mBpm = bpm; }
+    // Host transport, for PPQ phase-resync of the tempo-synced LFO. playing = transport
+    // running; ppqPosition = playhead position in quarter-note beats. Call once per
+    // block (before process()/processStereo()); harmless when the host reports neither.
+    void setTransport(bool playing, double ppqPosition) { mPlaying = playing; mPpq = ppqPosition; }
     // NB: the member defaults below are NOT the shipped voice. The fool-proof panel
     // hides most knobs and PluginProcessor.cpp (~1130-1148) pins them per-type — e.g.
     // the shipped phaser runs feedback 0.35 + depth 0.60, the flanger Manual 0.15.
@@ -291,7 +308,8 @@ public:
     void setWave(float w) { mWave = w; }         // tremolo shape morph: triangle (0) -> trapezoid (1)
     // Stereo width for processStereo: 0 = both lanes in phase (dual-mono), 1 = the R
     // lane's LFO read is 180° out of phase with L (widest swirl / anti-phase auto-pan
-    // for the tremolo). Read live per block (unsmoothed); mono process() ignores it.
+    // for the tremolo). De-zippered (mSpreadZ) so automation can't step the R lane's
+    // phase at block boundaries; mono process() ignores it.
     void setSpread(float s) { mSpread = std::min(std::max(s, 0.0f), 1.0f); }
 
     float effectiveRateHz() const
@@ -310,6 +328,7 @@ public:
         mLfo.setRateHz(effectiveRateHz());
         // Uni-Vibe's LFO is a sine (then the lamp lag skews it); the others use triangle.
         mLfo.setWaveform(mType == kUniVibe ? Lfo::Sine : Lfo::Triangle);
+        maybeResyncPhase(); // tempo-sync: snap LFO phase to the beat on transport start
         for (int i = 0; i < numSamples; ++i)
         {
             advanceSmoothed();
@@ -334,10 +353,11 @@ public:
         mLaneR.io.processIn(R, numSamples);
         mLfo.setRateHz(effectiveRateHz());
         mLfo.setWaveform(mType == kUniVibe ? Lfo::Sine : Lfo::Triangle);
-        const double phaseR = 0.5 * (double)mSpread; // cycles: 0..0.5 = 0..180°
+        maybeResyncPhase(); // tempo-sync: snap LFO phase to the beat on transport start
         for (int i = 0; i < numSamples; ++i)
         {
             advanceSmoothed();
+            const double phaseR = 0.5 * (double)mSpreadZ; // de-zippered offset: 0..0.5 = 0..180°
             L[i] = voiceLane(L[i], mLaneL, 0.0);
             R[i] = voiceLane(R[i], mLaneR, phaseR);
             mLfo.advance();
@@ -355,6 +375,20 @@ private:
     // both process() and processStereo() (before the lane calls) so the two lanes
     // always see identical smoothed values — kept in this exact order so the mono
     // path stays bit-exact to the pre-stereo block.
+    // On the rising edge of the host transport, and ONLY when tempo-synced, snap the
+    // LFO phase so cycle-start (phase 0) lands on the beat grid at the current PPQ.
+    // The synced LFO then free-runs at the exact synced rate, so a synced tremolo/
+    // flanger chop relates to the groove and re-recording a section gives the identical
+    // wobble every take. Free-running (or when the host never reports play) it does
+    // nothing -> the offline tests, which never set transport, stay bit-exact.
+    void maybeResyncPhase()
+    {
+        const double beats = syncBeats(mSyncIndex);
+        if (beats > 0.0 && mPlaying && !mWasPlaying)
+            mLfo.setPhase(mPpq / beats); // setPhase wraps to [0,1)
+        mWasPlaying = mPlaying;
+    }
+
     void advanceSmoothed()
     {
         mDepthZ += mSmoothK * (mDepth - mDepthZ);
@@ -362,6 +396,7 @@ private:
         mFeedbackZ += mSmoothK * (mFeedback - mFeedbackZ);
         mManualZ += mSmoothK * (mManual - mManualZ);
         mWaveZ += mSmoothK * (mWave - mWaveZ);
+        mSpreadZ += mSmoothK * (mSpread - mSpreadZ); // stereo width; only read by processStereo (mono path unaffected -> still bit-exact)
     }
 
     // Voice one sample for one lane. lanePhase is the extra LFO phase offset (cycles)
@@ -497,11 +532,13 @@ private:
             // the POSITIVE feedback loop with zero delay: u = (x + k·B)/(1 - k·A).
             float G[4], alpha[4], beta[4];
             float A = 1.0f, B = 0.0f;
+            // Loop-invariant across all 4 stages: hoist the pow out (bit-exact — the
+            // per-stage multiply order kUniCenterHz * kUniMult[s] * sweep is unchanged).
+            const double sweep = std::pow(2.0, (double)warp * kUniOctaves * (double)mDepthZ);
             for (int s = 0; s < 4; ++s)
             {
                 const double fc = std::min(0.45 * mFs, std::max(20.0,
-                    kUniCenterHz * kUniMult[s]
-                        * std::pow(2.0, (double)warp * kUniOctaves * (double)mDepthZ)));
+                    kUniCenterHz * kUniMult[s] * sweep));
                 const double g = std::tan(3.14159265358979323846 * fc / mFs);
                 G[s] = (float)(g / (1.0 + g));
                 alpha[s] = 2.0f * G[s] - 1.0f;
@@ -607,13 +644,18 @@ private:
     float mFlFbCoef = 1.0f;                          // flanger feedback tone-shape one-pole
     float mTremCoef = 1.0f;                          // tremolo de-click slew
     float mUniHeatCoef = 1.0f, mUniCoolCoef = 1.0f;  // uni-vibe lamp heat/cool
-    float mSpread = 0.5f; // stereo L/R LFO phase offset: 0 = dual-mono, 1 = 180° anti-phase
+    float mSpread = 0.5f, mSpreadZ = 0.5f; // stereo L/R LFO phase offset: 0 = dual-mono, 1 = 180° anti-phase (Z = de-zippered)
 
     float mDepth = 0.5f, mMix = 0.5f, mFeedback = 0.0f, mManual = 0.15f, mWave = 0.3f;
     float mDepthZ = 0.5f, mMixZ = 0.5f, mFeedbackZ = 0.0f, mManualZ = 0.15f, mWaveZ = 0.3f, mSmoothK = 0.01f;
     float mFreeRateHz = 1.0f;
     int mSyncIndex = 0;
     double mBpm = 120.0;
+    // Host transport, for PPQ phase-resync of the tempo-synced LFO. mPpq is the
+    // playhead position in quarter-note beats; the LFO phase is snapped to the beat
+    // grid on the rising edge of mPlaying (see maybeResyncPhase()).
+    bool mPlaying = false, mWasPlaying = false;
+    double mPpq = 0.0;
     bool mPrepared = false;
 };
 

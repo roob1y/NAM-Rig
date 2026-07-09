@@ -6173,7 +6173,8 @@ private:
 // Phaser Phase 90 / Flanger EVH117 / Tremolo TR-2 / Uni-Vibe). FOOL-PROOF UI:
 // Type + Sync + Position pickers, and each pedal SHOWS only the knobs the real
 // one has — Rate (all); Depth (all but the phaser); Mix (Uni-Vibe only);
-// Feedback/Regen (flanger only); Wave (tremolo only). The hidden knobs are pinned
+// Feedback/Regen (flanger only); Wave (tremolo only); plus a Script/Block voice
+// selector on the phaser (the two Phase 90 revisions). The hidden knobs are pinned
 // to their per-type sweet spot in the processor (PluginProcessor.cpp:1130-1148),
 // so the shipped voice is NOT the knob defaults in PreModBlock.h.
 class PremodPanel : public BlockPanel
@@ -6211,6 +6212,14 @@ public:
         mStereoAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
             apvts, "premodStereo", mStereo);
         mStereo.onChange = [this] { refresh(); };
+
+        // Phaser voice (phaser only): Script = smooth swirl (no feedback), Block =
+        // resonant "throb" (feedback). Hidden for every other pedal (visibility set
+        // in refresh()). Maps to the fixed phaser feedback in the processor.
+        mPhaserVoice.addItemList({"Script", "Block"}, 1);
+        addChildComponent(mPhaserVoice);
+        mPhaserVoiceAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, "premodPhaserVoice", mPhaserVoice);
 
         const std::pair<const char *, const char *> defs[] = {
             {"premodRate", "Rate"}, {"premodDepth", "Depth"},
@@ -6250,6 +6259,7 @@ public:
         show(4, false);         // Manual  : never (fixed sweet spot)
         show(5, t == 3);        // Wave    : tremolo only
         show(6, stereoOn);      // Spread  : stereo (Dual) only
+        mPhaserVoice.setVisible(t == 1); // Script/Block voice : phaser only
         resized();              // re-centre the now-visible knobs
     }
 
@@ -6271,6 +6281,14 @@ public:
 
         area.removeFromTop(16);
 
+        // Phaser-only Script/Block voice selector: a slim centred bar above the knobs.
+        if (mPhaserVoice.isVisible())
+        {
+            auto vrow = area.removeFromTop(26);
+            mPhaserVoice.setBounds(vrow.withSizeKeepingCentre(juce::jmin(vrow.getWidth(), 160), 24));
+            area.removeFromTop(12);
+        }
+
         // Lay out only the VISIBLE knobs, centred (count varies 1..3 per pedal).
         std::vector<LabeledKnob *> vis;
         for (auto &k : mKnobs)
@@ -6285,8 +6303,8 @@ public:
 
 private:
     juce::AudioProcessorValueTreeState &mApvts;
-    juce::ComboBox mType, mSync, mPos, mStereo;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt, mSyncAtt, mPosAtt, mStereoAtt;
+    juce::ComboBox mType, mSync, mPos, mStereo, mPhaserVoice;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt, mSyncAtt, mPosAtt, mStereoAtt, mPhaserVoiceAtt;
     std::vector<std::unique_ptr<LabeledKnob>> mKnobs;
     int mLastType = -1;
     bool mLastStereo = false;

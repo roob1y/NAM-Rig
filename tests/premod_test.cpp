@@ -1,5 +1,6 @@
-// premod_test — offline verification harness for the MONO front-of-amp
-// modulation pedal (PreModBlock). Measurement-first; exits nonzero on any FAIL.
+// premod_test — offline verification harness for the front-of-amp modulation pedal
+// (PreModBlock): a bit-exact mono path plus an optional mono-in/stereo-out widen.
+// Measurement-first; exits nonzero on any FAIL.
 //
 // ALL FIVE types are voiced (Chorus CE-2 / Phaser Phase 90 / Flanger EVH117 /
 // Tremolo TR-2 / Uni-Vibe Shin-ei) — none is a passthrough stub. A T<n> denotes
@@ -34,6 +35,7 @@
 //   T26 stereo spread 1 decorrelates L/R (wide)
 //   T27 split-block == one-shot (shared LFO + lane state continuous across blocks)
 //   T28 anti-phase mono fold-down combs the wet (documented trade-off)
+//   T29 PPQ phase-resync: a tempo-synced LFO snaps to the beat grid on transport start
 
 #include "rig/PreModBlock.h"
 
@@ -399,6 +401,8 @@ int main()
         auto setup = [](PreModBlock &pm) {
             pm.setType(PreModBlock::kChorus); pm.setRateHz(1.3f);
             pm.setDepth(0.7f); pm.setMix(0.5f); pm.setSpread(0.0f);
+            pm.reset(); // Spread is now de-zippered; snap it (+ all smoothed params) so
+                        // the dual-mono invariant holds exactly from sample 0
         };
         auto mono = run(x, fs, setup);
         std::vector<float> L, R; runStereo(fs, setup, L, R);
@@ -458,6 +462,26 @@ int main()
         check(e1 <= e0 * 1.001, "T28 anti-phase mono fold combs the wet (no energy gain vs in-phase)");
         std::printf("  [info] mono-fold wet energy: spread0=%.4e spread1=%.4e (%.1f%% retained)\n",
                     e0, e1, e0 > 0.0 ? 100.0 * e1 / e0 : 0.0);
+    }
+
+    // T29: PPQ phase-resync. A tempo-synced LFO snaps its phase to the beat grid on the
+    // transport-start edge, so starting at PPQ 0 and at PPQ = one full sync cycle (1 beat
+    // for 1/4) give the IDENTICAL output, while a half-cycle offset (0.5 beat) differs.
+    // This is what locks a synced tremolo to the groove and makes takes reproducible.
+    {
+        auto mk = [&](double ppq) {
+            return run(x, fs, [ppq](PreModBlock &pm) {
+                pm.setType(PreModBlock::kTremolo); pm.setDepth(0.9f); pm.setWave(0.5f);
+                pm.setSyncIndex(3);           // 1/4 -> 1 beat/cycle; at 120 BPM = 2 Hz
+                pm.setTransport(true, ppq);   // rising edge (fresh block) -> snap phase
+            });
+        };
+        auto a0 = mk(0.0), a1 = mk(1.0), ah = mk(0.5);
+        bool eq01 = (a0.size() == a1.size() && a0.size() == ah.size());
+        bool neqH = false;
+        for (size_t i = 0; i < a0.size(); ++i) { if (a0[i] != a1[i]) eq01 = false; if (a0[i] != ah[i]) neqH = true; }
+        check(eq01, "T29 synced LFO: PPQ 0 == PPQ 1 full cycle (phase locked to the beat grid)");
+        check(neqH, "T29 synced LFO: half-cycle PPQ offset (0.5 beat) shifts the phase");
     }
 
     std::printf("%s (%d failures)\n", g_fail == 0 ? "ALL PASS" : "FAILURES", g_fail);
