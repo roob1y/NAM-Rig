@@ -156,12 +156,16 @@ the **level-dependent** part.
 ### B1 — harmonics-only parallel delta, band-limited drive
 
 Cone breakup is a **midrange** phenomenon, not a broadband or extreme-top one.
-The driven band is isolated with a Linkwitz-Riley-style crossover HP at ~800 Hz
+The driven band is isolated with a 2nd-order Butterworth crossover HP at ~800 Hz
 plus a gentle LP at ~3.8 kHz (the low band stays perfectly linear, as required):
 
 ```
-band = LP_3800( HP_800(x) )              LR2 sections (Butterworth, Q = 0.707)
+band = LP_3800( HP_800(x) )              2nd-order Butterworth sections (Q = 0.707)
 ```
+
+(These are plain Butterworth biquads, Q = 0.707 — *not* Linkwitz-Riley, which
+would be Q = 0.5. The band is a series HP→LP band-pass, not a complementary
+crossover, so LR summing-flatness doesn't apply here.)
 
 The nonlinearity is applied as a **parallel delta** added to the un-filtered dry
 `x`, so the low band and full-range dry are untouched and bypass is bit-exact:

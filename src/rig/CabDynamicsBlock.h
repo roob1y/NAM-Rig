@@ -73,9 +73,16 @@ public:
     {
         static constexpr int L = 65;        // taps (L % 4 == 1 -> center C is even)
         static constexpr int C = (L - 1) / 2; // 32
+        // Circular histories (pow2, masked indexing) replace the old O(L) shift
+        // loops — one write + O(L/2) MACs per sample, no ~95 float moves. The
+        // arithmetic (same taps, same summation order) is BIT-IDENTICAL to the
+        // shift version. XN >= max up-delay+1 (31+1); WN >= L (max down-delay 64).
+        static constexpr int XN = 64, XMASK = XN - 1;   // up: input history ring
+        static constexpr int WN = 128, WMASK = WN - 1;  // down: 2x history ring
         float h[L] = {0};                   // prototype: DC gain 1, halfband
-        float xh[C + 1] = {0};              // up: input history (newest at 0)
-        float wh[L] = {0};                  // down: 2x history (newest at 0)
+        float xh[XN] = {0};                 // up: input history (delay j = xh[(xpos-j)&XMASK])
+        float wh[WN] = {0};                 // down: 2x history (delay j via newest cursor)
+        int xpos = 0, wpos = 0;             // ring write cursors
 
         static double i0(double x) // modified Bessel I0 (Kaiser window)
         {
@@ -113,29 +120,33 @@ public:
 
         void reset()
         {
-            for (int i = 0; i <= C; ++i) xh[i] = 0.0f;
-            for (int i = 0; i < L; ++i) wh[i] = 0.0f;
+            for (int i = 0; i < XN; ++i) xh[i] = 0.0f;
+            for (int i = 0; i < WN; ++i) wh[i] = 0.0f;
+            xpos = 0;
+            wpos = 0;
         }
 
         // one base sample -> two 2x samples (interpolator, gain-2 halfband)
         inline void up(float x, float &u0, float &u1)
         {
-            for (int i = C; i > 0; --i) xh[i] = xh[i - 1];
-            xh[0] = x;
-            u0 = 2.0f * h[C] * xh[C / 2];            // even phase = single center tap
+            xh[xpos] = x;                            // delay 0 = newest
+            u0 = 2.0f * h[C] * xh[(xpos - C / 2) & XMASK]; // even phase = single center tap
             float s = 0.0f;
-            for (int k = 1; k < L; k += 2) s += 2.0f * h[k] * xh[(k - 1) / 2]; // odd phase
+            for (int k = 1; k < L; k += 2)
+                s += 2.0f * h[k] * xh[(xpos - (k - 1) / 2) & XMASK]; // odd phase
             u1 = s;
+            xpos = (xpos + 1) & XMASK;
         }
 
         // two 2x samples -> one base sample (decimator, DC-gain-1 halfband)
         inline float down(float w0, float w1)
         {
-            for (int i = L - 1; i > 1; --i) wh[i] = wh[i - 2];
-            wh[1] = w0;
-            wh[0] = w1;
-            float y = h[C] * wh[C];                  // center even tap
-            for (int k = 1; k < L; k += 2) y += h[k] * wh[k]; // odd taps
+            wh[wpos] = w0; wpos = (wpos + 1) & WMASK; // older of the pair
+            wh[wpos] = w1; wpos = (wpos + 1) & WMASK; // newest
+            const int newest = (wpos - 1) & WMASK;    // delay 0
+            float y = h[C] * wh[(newest - C) & WMASK]; // center even tap
+            for (int k = 1; k < L; k += 2)
+                y += h[k] * wh[(newest - k) & WMASK]; // odd taps
             return y;
         }
     };
@@ -693,8 +704,11 @@ private:
     {
         const float beta = d * A;
         if (beta < 1.0e-4f) return 1.0f;                          // small signal -> unity
-        constexpr double kPi = 3.14159265358979323846;
-        if (beta >= kGBetaMax) return (float)(4.0 / kPi) / beta;  // g(inf) = 4/pi
+        // Beyond the table, hold the last tabulated g (= g(kGBetaMax), which is
+        // already ~4/pi) rather than the analytic 4/pi limit: identical to ~0.3%
+        // but CONTINUOUS with the interpolated branch at the beta==kGBetaMax seam
+        // (no step). Practically unreachable (needs band env ~3.7 at max drive).
+        if (beta >= kGBetaMax) return mGtab[kGN - 1] / beta;      // g(kGBetaMax), continuous
         const float xr = beta / kGBetaMax * (float)(kGN - 1);
         const int i = (int)xr;
         const float f = xr - (float)i;
