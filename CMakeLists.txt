@@ -226,6 +226,24 @@ if(BUILD_RIG_HARNESS)
         target_compile_options(drive_test PRIVATE /arch:AVX2 /fp:fast)
     endif()
 
+    # DrivePedalEngine extraction equivalence (single pedal == one rack slot,
+    # byte-exact; pins the pedalboard-pool prerequisite, SCOPE_PEDALBOARD Stage A)
+    juce_add_console_app(drivepedal_test PRODUCT_NAME "drivepedal_test")
+    target_sources(drivepedal_test PRIVATE tests/drivepedal_test.cpp)
+    target_include_directories(drivepedal_test PRIVATE src)
+    target_compile_definitions(drivepedal_test PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        _USE_MATH_DEFINES   # M_PI on MSVC
+    )
+    target_link_libraries(drivepedal_test PRIVATE
+        juce::juce_audio_basics
+        juce::juce_recommended_config_flags
+    )
+    if(MSVC)
+        target_compile_options(drivepedal_test PRIVATE /arch:AVX2 /fp:fast)
+    endif()
+
     # CompBlock measurement suite (PASS/FAIL, exits nonzero on failure)
     juce_add_console_app(comp_test PRODUCT_NAME "comp_test")
     target_sources(comp_test PRIVATE tests/comp_test.cpp)
