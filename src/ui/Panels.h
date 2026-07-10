@@ -1536,15 +1536,21 @@ class DrivePedal : public juce::Component
 {
 public:
     DrivePedal(juce::AudioProcessorValueTreeState &apvts, int slot)
-        : mApvts(apvts), mSlot(slot)
+        : DrivePedal(apvts, "drv" + juce::String(slot + 1), "drv" + juce::String(slot + 1) + "Type") {}
+
+    // Prefix-configurable ctor: `prefix` replaces "drv{n}" (e.g. "pbS3" for a pedalboard
+    // pool slot); `typeParam` is the 5-value Off/Boost/OD/Dist/Fuzz selector it binds to
+    // (the pool passes "pbS{i}dCat"). Lets the SAME pedal widget serve the board.
+    DrivePedal(juce::AudioProcessorValueTreeState &apvts, juce::String prefix, juce::String typeParam)
+        : mApvts(apvts), mPrefix(std::move(prefix)), mTypeParam(std::move(typeParam))
     {
-        const juce::String p = "drv" + juce::String(slot + 1);
+        const juce::String p = mPrefix;
 
         // Hidden parameter bridges (the pill + menu drive these; they keep the
         // params synced with host automation / presets).
         mType.addItemList({"Off", "Boost", "Overdrive", "Distortion", "Fuzz"}, 1);
         mTypeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-            apvts, p + "Type", mType);
+            apvts, mTypeParam, mType);
         mType.onChange = [this] { refresh(); };
         addChildComponent(mType);
 
@@ -1588,7 +1594,7 @@ public:
 
     void refresh()
     {
-        const juce::String pid = "drv" + juce::String(mSlot + 1);
+        const juce::String pid = mPrefix;
         // Type is read from the param (authoritative), not the hidden bridge combo,
         // so a fresh selection always takes effect immediately. Keep the combo in
         // sync for the APVTS attachment, without re-triggering onChange.
@@ -1755,7 +1761,7 @@ private:
     int curModel() const
     {
         return juce::jmax(0,
-            (int)mApvts.getRawParameterValue("drv" + juce::String(mSlot + 1) + "bModel")->load());
+            (int)mApvts.getRawParameterValue(mPrefix + "bModel")->load());
     }
 
     void showMenu()
@@ -1811,10 +1817,9 @@ private:
     // on a hidden ComboBox that didn't fire its change.
     void setTypeModel(int type, int model)
     {
-        const juce::String p = "drv" + juce::String(mSlot + 1);
-        setChoiceParam(p + "Type", type);
+        setChoiceParam(mTypeParam, type);
         if (nam_rig::DriveBlock::modelCount((nam_rig::DriveBlock::Kind)type) > 1)
-            setChoiceParam(p + "bModel", model);
+            setChoiceParam(mPrefix + "bModel", model);
         refresh();
     }
     void setChoiceParam(const juce::String &id, int idx)
@@ -1829,7 +1834,7 @@ private:
     int curTypeIndex() const
     {
         return juce::jlimit(0, 4,
-            (int)mApvts.getRawParameterValue("drv" + juce::String(mSlot + 1) + "Type")->load());
+            (int)mApvts.getRawParameterValue(mTypeParam)->load());
     }
 
     void populateModels(int type)
@@ -1847,13 +1852,13 @@ private:
     }
     void setModelParam(int idx)
     {
-        if (auto *prm = mApvts.getParameter("drv" + juce::String(mSlot + 1) + "bModel"))
+        if (auto *prm = mApvts.getParameter(mPrefix + "bModel"))
             prm->setValueNotifyingHost(prm->convertTo0to1((float)juce::jmax(0, idx)));
     }
     void configure()
     {
         static const char *names[] = {"DRIVE", "BOOST", "OVERDRIVE", "DISTORTION", "FUZZ"};
-        const juce::String p = "drv" + juce::String(mSlot + 1);
+        const juce::String p = mPrefix;
         const int type = mType.getSelectedItemIndex();
         const int model = juce::jmax(0, mModel.getSelectedItemIndex());
         const auto cat = (nam_rig::DriveBlock::Kind)type;
@@ -1929,7 +1934,7 @@ private:
     }
 
     juce::AudioProcessorValueTreeState &mApvts;
-    int mSlot;
+    juce::String mPrefix, mTypeParam; // param prefix ("drv{n}" or "pbS{i}") + the Off/Boost/OD/Dist/Fuzz selector id
     juce::ComboBox mType, mModel;
     std::unique_ptr<SegmentedControl> mRangeSeg;
     std::unique_ptr<SegmentedControl> mGateSeg; // fuzz bias-starved gate (Off/Gate)

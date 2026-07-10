@@ -880,8 +880,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
             pbC(id("Type"), L + "Type", juce::StringArray{"Off", "Drive", "Mod", "Delay"}, 0);
             pbC(id("Lane"), L + "Route", juce::StringArray{"Both", "Amp A", "Amp B"}, 0);
             pbB(id("On"), L + "On", true);
-            // --- Drive union (mirrors drv{n}* suffixes; no "Off" here — the slot Type is Off) ---
-            pbC(id("dCat"), L + "Drive Type", juce::StringArray{"Boost", "Overdrive", "Distortion", "Fuzz"}, 1);
+            // --- Drive union (mirrors drv{n}* incl. its 5-value Off/Boost/OD/Dist/Fuzz "Type",
+            //     so the real DrivePedal widget can bind to pbS{i}dCat directly). dCat == Kind. ---
+            pbC(id("dCat"), L + "Drive Type", juce::StringArray{"Off", "Boost", "Overdrive", "Distortion", "Fuzz"}, 0);
             pbI(id("bModel"), L + "Model", 0, 3, 0);
             pbF(id("bDrive"), L + "Boost", RR(0.0f, 1.0f, 0.01f), 0.5f);
             pbC(id("bRange"), L + "Boost Range", juce::StringArray{"Treble", "Mid", "Full"}, 0);
@@ -1470,17 +1471,18 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
                 bd.setSlotLane(i, (int)s("Lane"));
                 bd.setSlotOn(i, s("On") >= 0.5f);
 
-                // Drive engine (dCat 0..3 -> Kind Boost/OD/Dist/Fuzz = 1..4; mirrors legacy drv wiring).
+                // Drive engine. dCat is now the 5-value Off/Boost/OD/Dist/Fuzz selector = Kind directly.
                 auto &dr = bd.drive[i];
-                const int cat = (int)s("dCat");
-                dr.setKind(cat + 1); dr.setModel((int)s("bModel")); dr.setRange((int)s("bRange"));
+                const int cat = (int)s("dCat"); // 0 Off, 1 Boost, 2 OD, 3 Dist, 4 Fuzz
+                dr.setKind(cat); dr.setModel((int)s("bModel")); dr.setRange((int)s("bRange"));
                 dr.setGateOn(s("fGate") >= 0.5f); dr.setMigrateFull(s("dMigrate") >= 0.5f);
                 switch (cat)
                 {
-                case 0: dr.setDrive(s("bDrive")); dr.setTone(0.5f); dr.setLevel(0.5f); break; // Boost: no tone/vol
-                case 1: dr.setDrive(s("oDrive")); dr.setTone(s("oTone")); dr.setLevel(s("oLevel")); break;
-                case 2: dr.setDrive(s("dDrive")); dr.setTone(s("dTone")); dr.setLevel(s("dLevel")); break;
-                default: dr.setDrive(s("fDrive")); dr.setTone((int)s("bModel") == 1 ? s("fTone") : 0.5f); dr.setLevel(s("fLevel")); break;
+                case 1: dr.setDrive(s("bDrive")); dr.setTone(0.5f); dr.setLevel(0.5f); break; // Boost: no tone/vol
+                case 2: dr.setDrive(s("oDrive")); dr.setTone(s("oTone")); dr.setLevel(s("oLevel")); break;
+                case 3: dr.setDrive(s("dDrive")); dr.setTone(s("dTone")); dr.setLevel(s("dLevel")); break;
+                case 4: dr.setDrive(s("fDrive")); dr.setTone((int)s("bModel") == 1 ? s("fTone") : 0.5f); dr.setLevel(s("fLevel")); break;
+                default: break; // Off (Kind 0) = passthrough
                 }
                 dr.setOn(true); dr.setBypassed(false);
 

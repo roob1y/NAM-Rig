@@ -23,8 +23,9 @@
 // (that + preset-v3 migration is Stage D).
 
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <cmath>
 #include "RigLookAndFeel.h"
-#include "Panels.h" // BlockPanel, LabeledKnob, SegmentedControl, ToggleSwitch, nam_rig::DriveBlock
+#include "Panels.h" // BlockPanel, LabeledKnob, SegmentedControl, ToggleSwitch, DriveBlock, paintDriveGlyph
 
 namespace nam_rig::ui
 {
@@ -103,6 +104,7 @@ public:
         if (mPalDrive.contains(p)) { showAddMenu(1); return; }
         if (mPalMod.contains(p))   { showAddMenu(2); return; }
         if (mPalDelay.contains(p)) { showAddMenu(3); return; }
+        if (mImportRect.contains(p)) { importLegacy(); return; }
 
         // detail model button / remove button
         if (mHasModel && mModelRect.contains(p)) { showModelMenu(); return; }
@@ -148,10 +150,6 @@ private:
         default: return colors::outline;
         }
     }
-    static juce::Colour lockedAccent(int which) // 0 env, 1 comp
-    {
-        return which == 0 ? juce::Colour(0xff6fd0c9) /*env teal*/ : juce::Colour(0xff8fb3ff) /*comp blue*/;
-    }
     static const char *typeShort(int type)
     {
         switch (type) { case 1: return "DRIVE"; case 2: return "MOD"; case 3: return "DELAY"; default: return ""; }
@@ -162,7 +160,7 @@ private:
         const int t = slotType(i);
         if (t == 1)
         {
-            const auto k = (nam_rig::DriveBlock::Kind)(getC(sid(i, "dCat")) + 1);
+            const auto k = (nam_rig::DriveBlock::Kind)(getC(sid(i, "dCat")));
             return nam_rig::DriveBlock::modelName(k, getC(sid(i, "bModel")));
         }
         if (t == 2)
@@ -279,37 +277,133 @@ private:
         g.strokePath(p, juce::PathStrokeType(2.0f));
     }
 
+    // ---- per-pedal livery (drives reuse the real-pedal palette; the others get a
+    //      family tint so the board reads at a glance) ----
+    colors::AccentPair slotAccent(int type, int i) const
+    {
+        using AP = colors::AccentPair; using C = juce::Colour;
+        if (type == 1) return colors::driveModelAccent(getC(sid(i, "dCat")), getC(sid(i, "bModel")));
+        if (type == 2) // Modulation — violet family per model
+        {
+            static const C mv[5] = {C(0xffc7a6f0), C(0xff9b8ce8), C(0xffb69af0), C(0xffa6c0f0), C(0xffcaa6f0)};
+            const C a = mv[juce::jlimit(0, 4, getC(sid(i, "mType")))];
+            return AP{a, a.darker(0.72f)};
+        }
+        if (type == 3) // Delay — green family per model
+        {
+            static const C dv[3] = {C(0xff7fd08a), C(0xff62c69a), C(0xff9ad07f)};
+            const C a = dv[juce::jlimit(0, 2, getC(sid(i, "pModel")))];
+            return AP{a, a.darker(0.72f)};
+        }
+        return AP{colors::outline, colors::outline.darker(0.4f)};
+    }
+    static colors::AccentPair lockedPair(int which) // 0 env (teal), 1 comp (blue)
+    {
+        using C = juce::Colour;
+        const C a = which == 0 ? C(0xff6fd0c9) : C(0xff8fb3ff);
+        return colors::AccentPair{a, a.darker(0.72f)};
+    }
+
+    // Family art glyphs (drives delegate to the shared paintDriveGlyph).
+    void paintSlotGlyph(juce::Graphics &g, int nodeKind, int type, int i, juce::Rectangle<float> box, juce::Colour col) const
+    {
+        if (nodeKind == 0) { paintEnvGlyph(g, box, col); return; }
+        if (nodeKind == 1) { paintCompGlyph(g, box, col); return; }
+        if (type == 1) { paintDriveGlyph(g, getC(sid(i, "dCat")), getC(sid(i, "bModel")), box, col); return; }
+        if (type == 2) { paintModGlyph(g, box, col); return; }
+        if (type == 3) { paintDelayGlyph(g, box, col); return; }
+    }
+    static juce::PathStrokeType glyphStroke(float w) { return {w, juce::PathStrokeType::curved, juce::PathStrokeType::rounded}; }
+    static void paintModGlyph(juce::Graphics &g, juce::Rectangle<float> b, juce::Colour c)
+    {
+        g.setColour(c);
+        juce::Path p; const float y = b.getCentreY(), amp = b.getHeight() * 0.32f; const int N = 40;
+        for (int k = 0; k <= N; ++k)
+        {
+            const float x = b.getX() + b.getWidth() * (float)k / N;
+            const float yy = y - amp * std::sin((float)k / N * juce::MathConstants<float>::twoPi * 1.5f);
+            if (k == 0) p.startNewSubPath(x, yy); else p.lineTo(x, yy);
+        }
+        g.strokePath(p, glyphStroke(juce::jmax(1.4f, b.getHeight() * 0.06f)));
+    }
+    static void paintDelayGlyph(juce::Graphics &g, juce::Rectangle<float> b, juce::Colour c)
+    {
+        const int n = 4; const float bw = b.getWidth() * 0.11f;
+        for (int k = 0; k < n; ++k)
+        {
+            const float h = b.getHeight() * (0.92f - 0.19f * k);
+            const float x = b.getX() + b.getWidth() * (0.14f + 0.24f * k);
+            g.setColour(c.withAlpha(1.0f - 0.18f * k));
+            g.fillRoundedRectangle(x, b.getCentreY() - h * 0.5f, bw, h, bw * 0.4f);
+        }
+    }
+    static void paintCompGlyph(juce::Graphics &g, juce::Rectangle<float> b, juce::Colour c)
+    {
+        g.setColour(c); // classic diamond
+        juce::Path d;
+        d.startNewSubPath(b.getCentreX(), b.getY());
+        d.lineTo(b.getRight(), b.getCentreY());
+        d.lineTo(b.getCentreX(), b.getBottom());
+        d.lineTo(b.getX(), b.getCentreY());
+        d.closeSubPath();
+        g.strokePath(d, glyphStroke(juce::jmax(1.4f, b.getHeight() * 0.06f)));
+    }
+    static void paintEnvGlyph(juce::Graphics &g, juce::Rectangle<float> b, juce::Colour c)
+    {
+        g.setColour(c); // resonant filter sweep (rise to a peak, then roll off)
+        juce::Path p;
+        p.startNewSubPath(b.getX(), b.getBottom());
+        p.quadraticTo(b.getX() + b.getWidth() * 0.45f, b.getBottom(),
+                      b.getX() + b.getWidth() * 0.60f, b.getY());
+        p.quadraticTo(b.getX() + b.getWidth() * 0.74f, b.getBottom() - b.getHeight() * 0.15f,
+                      b.getRight(), b.getBottom() - b.getHeight() * 0.05f);
+        g.strokePath(p, glyphStroke(juce::jmax(1.4f, b.getHeight() * 0.06f)));
+    }
+
+    // Draw the enclosure body (gradient + tint border), the DrivePedal look.
+    void paintEnclosure(juce::Graphics &g, juce::Rectangle<float> r, juce::Colour tint,
+                        bool on, bool selected, float radius) const
+    {
+        const juce::Colour t = on ? tint : juce::Colour(0xff343a43);
+        const juce::Colour encTop = juce::Colour(0xff262b33).overlaidWith(t.withAlpha(0.20f));
+        const juce::Colour encBot = juce::Colour(0xff15181d).overlaidWith(t.withAlpha(0.05f));
+        juce::ColourGradient base(encTop, 0.0f, r.getY(), encBot, 0.0f, r.getBottom(), false);
+        dither::fillRoundedRectangle(g, base, r, radius);
+        g.setColour((selected ? colors::accent : t).withAlpha(selected ? 1.0f : (on ? 0.55f : 0.34f)));
+        g.drawRoundedRectangle(r.reduced(0.5f), radius, selected ? 2.0f : 1.4f);
+    }
+
     void drawNode(juce::Graphics &g, const Node &n)
     {
-        juce::Colour ac;
-        juce::String name, sub;
-        bool on = true;
-        if (n.kind == 0) { ac = lockedAccent(0); name = "ENV"; on = getF("envfilterOn") >= 0.5f; }
-        else if (n.kind == 1) { ac = lockedAccent(1); name = "COMP"; on = getF("compOn") >= 0.5f; }
-        else { const int t = slotType(n.slot); ac = typeAccent(t); name = typeShort(t); sub = slotModelName(n.slot); on = slotOn(n.slot); }
+        colors::AccentPair pair; juce::String name, sub; bool on = true; int type = 2;
+        if (n.kind == 0) { pair = lockedPair(0); name = "ENV"; on = getF("envfilterOn") >= 0.5f; }
+        else if (n.kind == 1) { pair = lockedPair(1); name = "COMP"; on = getF("compOn") >= 0.5f; }
+        else { type = slotType(n.slot); pair = slotAccent(type, n.slot); name = typeShort(type); sub = slotModelName(n.slot); on = slotOn(n.slot); }
 
         auto r = n.rect.toFloat();
-        g.setColour(colors::wellTop);
-        g.fillRoundedRectangle(r, 8.0f);
-        g.setColour((isSelected(n) ? colors::accent : ac).withAlpha(isSelected(n) ? 1.0f : 0.85f));
-        g.drawRoundedRectangle(r.reduced(0.5f), 8.0f, isSelected(n) ? 2.0f : 1.3f);
-        g.setColour(ac.withAlpha(on ? 0.9f : 0.3f));
-        g.fillRoundedRectangle(r.withHeight(4.0f).reduced(6.0f, 0.0f).translated(0, 4.0f), 2.0f);
+        paintEnclosure(g, r, pair.tint, on, isSelected(n), 8.0f);
 
-        g.setColour(on ? colors::text : colors::textDim);
-        g.setFont(fonts::archivo(10.5f, fonts::Bold, 0.02f));
-        g.drawText(name, n.rect.withTrimmedTop(8).withTrimmedBottom(sub.isEmpty() ? 0 : 12),
-                   juce::Justification::centred);
+        // silkscreen glyph (centre, faint)
+        auto gbox = r.reduced(r.getWidth() * 0.22f, 0.0f).withTrimmedTop(15.0f).withTrimmedBottom(sub.isEmpty() ? 6.0f : 15.0f);
+        paintSlotGlyph(g, n.kind, type, n.slot, gbox, (on ? pair.led : juce::Colour(0xff5a616b)).withAlpha(0.85f));
+
+        // name (top, accent)
+        g.setColour(on ? pair.accent : colors::textDim);
+        g.setFont(fonts::archivo(9.0f, fonts::Bold, 0.10f));
+        g.drawText(name, n.rect.withHeight(14).translated(0, 3), juce::Justification::centred);
+        // model sub (bottom)
         if (sub.isNotEmpty())
         {
-            juce::Rectangle<int> subR = n.rect;                 // local copy (n is const)
-            subR = subR.removeFromBottom(13).withTrimmedBottom(2);
+            juce::Rectangle<int> subR = n.rect;
+            subR = subR.removeFromBottom(12).withTrimmedBottom(1);
             g.setColour(colors::textDim);
-            g.setFont(fonts::mono(8.0f, fonts::Medium, 0.02f));
+            g.setFont(fonts::mono(7.5f, fonts::Medium, 0.02f));
             g.drawText(sub, subR, juce::Justification::centred);
         }
-        auto jewel = juce::Rectangle<float>(6.0f, 6.0f).withPosition(r.getRight() - 11.0f, r.getY() + 5.0f);
-        g.setColour(on ? colors::accent : colors::ledOff);
+        // jewel LED (top-right), glow when on
+        auto jewel = juce::Rectangle<float>(7.0f, 7.0f).withPosition(r.getRight() - 12.0f, r.getY() + 5.0f);
+        if (on) fx::glowEllipse(g, jewel, pair.led, 9, 0.55f, 5, 0.5f);
+        g.setColour(on ? pair.led : colors::ledOff);
         g.fillEllipse(jewel);
     }
 
@@ -324,7 +418,7 @@ private:
     }
 
     // -------------------------------------------------------------- palette (right)
-    juce::Rectangle<int> mPalDrive, mPalMod, mPalDelay;
+    juce::Rectangle<int> mPalDrive, mPalMod, mPalDelay, mImportRect;
     void layoutPalette()
     {
         auto r = mPaletteRect;
@@ -332,7 +426,8 @@ private:
         const int h = 44, gap = 10;
         mPalDrive = r.removeFromTop(h); r.removeFromTop(gap);
         mPalMod = r.removeFromTop(h); r.removeFromTop(gap);
-        mPalDelay = r.removeFromTop(h);
+        mPalDelay = r.removeFromTop(h); r.removeFromTop(gap * 2);
+        mImportRect = r.removeFromTop(38);
     }
     void paintPalette(juce::Graphics &g)
     {
@@ -344,6 +439,15 @@ private:
         paintPaletteBtn(g, mPalDrive, "DRIVE", typeAccent(1));
         paintPaletteBtn(g, mPalMod, "MODULATION", typeAccent(2));
         paintPaletteBtn(g, mPalDelay, "DELAY", typeAccent(3));
+
+        // Import-legacy button: copies the (still-live) legacy front chain into the pool.
+        {
+            auto rr = mImportRect.toFloat();
+            g.setColour(colors::tile); g.fillRoundedRectangle(rr, 8.0f);
+            g.setColour(colors::accent.withAlpha(0.7f)); g.drawRoundedRectangle(rr.reduced(0.5f), 8.0f, 1.2f);
+            g.setColour(colors::textDim); g.setFont(fonts::mono(8.5f, fonts::Medium, 0.04f));
+            g.drawText("IMPORT LEGACY", mImportRect, juce::Justification::centred);
+        }
     }
     static void paintPaletteBtn(juce::Graphics &g, juce::Rectangle<int> ri, const juce::String &txt, juce::Colour ac)
     {
@@ -398,9 +502,9 @@ private:
         if (slot < 0) return; // board full
         if (family == 1)
         {
-            const int cat = r / 100, mdl = (r % 100) - 1; // cat 1..4
+            const int cat = r / 100, mdl = (r % 100) - 1; // cat 1..4 = Boost..Fuzz = dCat/Kind
             setC(sid(slot, "Type"), 1);
-            setC(sid(slot, "dCat"), cat - 1);
+            setC(sid(slot, "dCat"), cat);
             setC(sid(slot, "bModel"), mdl);
         }
         else if (family == 2)
@@ -424,6 +528,62 @@ private:
     {
         if (auto *pr = mApvts.getParameter(id)) { pr->beginChangeGesture(); pr->setValueNotifyingHost(on ? 1.0f : 0.0f); pr->endChangeGesture(); }
     }
+    // Write a raw (natural-units) value to a param, mapped through its range.
+    void setFloatP(const juce::String &id, float val)
+    {
+        if (auto *pr = mApvts.getParameter(id)) { pr->beginChangeGesture(); pr->setValueNotifyingHost(pr->convertTo0to1(val)); pr->endChangeGesture(); }
+    }
+    // Copy one param's value to another (same range/type mirrored across legacy<->pool).
+    void copyP(const juce::String &src, const juce::String &dst) { setFloatP(dst, getF(src)); }
+
+    // ---- Import the (still-live) legacy front chain into the pool (opt-in; nothing is
+    // deleted — the legacy params stay put, this just mirrors them into the pool + turns
+    // the board on so enabling it reproduces the current sound). Env/Comp are shared, so
+    // only the drive rack + premod + predelay need copying. ----
+    void importLegacy()
+    {
+        static const char *driveSuf[] = {"bDrive", "bRange", "bModel", "oDrive", "oTone", "oLevel",
+                                         "dDrive", "dTone", "dLevel", "dMigrate", "fDrive", "fTone", "fLevel", "fGate"};
+        // driveSend: 0 Amp A, 1 Amp B, 2 Both -> Lane: 0 Both, 1 Amp A, 2 Amp B
+        const int ds = getC("driveSend");
+        const int driveLane = ds == 0 ? 1 : ds == 1 ? 2 : 0;
+        for (int n = 1; n <= 3; ++n)
+        {
+            const int slot = n - 1;
+            const juce::String dp = "drv" + juce::String(n);
+            for (auto *suf : driveSuf) copyP(dp + suf, sid(slot, suf));
+            const int dt = getC(dp + "Type"); // 0 Off, 1 Boost, 2 OD, 3 Dist, 4 Fuzz == dCat/Kind
+            if (dt == 0) { setC(sid(slot, "Type"), 0); }
+            else
+            {
+                setC(sid(slot, "Type"), 1);
+                setC(sid(slot, "dCat"), dt);
+                setC(sid(slot, "Lane"), driveLane);
+                setBool(sid(slot, "On"), getF(dp + "On") >= 0.5f);
+            }
+        }
+        // premod -> slot 3 (Mod)
+        copyP("premodRate", sid(3, "mRate")); copyP("premodDepth", sid(3, "mDepth"));
+        copyP("premodMix", sid(3, "mMix")); copyP("premodFeedback", sid(3, "mFeedback"));
+        copyP("premodWave", sid(3, "mWave"));
+        setC(sid(3, "mType"), getC("premodType")); setC(sid(3, "mSync"), getC("premodSync"));
+        setC(sid(3, "mPhaserVoice"), getC("premodPhaserVoice"));
+        const bool premodOn = getF("premodOn") >= 0.5f;
+        setC(sid(3, "Type"), premodOn ? 2 : 0); setC(sid(3, "Lane"), 0); setBool(sid(3, "On"), premodOn);
+        // predelay -> slot 4 (Delay)
+        copyP("predelayTime", sid(4, "pTime")); copyP("predelayFeedback", sid(4, "pFeedback"));
+        copyP("predelayMix", sid(4, "pMix")); copyP("predelayMod", sid(4, "pMod"));
+        copyP("predelayTone", sid(4, "pTone")); copyP("predelayLevel", sid(4, "pLevel"));
+        setC(sid(4, "pModel"), getC("predelayModel")); setC(sid(4, "pMode"), getC("predelayMode"));
+        setC(sid(4, "pSync"), getC("predelaySync")); setC(sid(4, "pChorusVib"), getC("predelayChorusVib"));
+        const bool predelayOn = getF("predelayOn") >= 0.5f;
+        setC(sid(4, "Type"), predelayOn ? 3 : 0); setC(sid(4, "Lane"), 0); setBool(sid(4, "On"), predelayOn);
+
+        setBool("pbEnabled", true); // now the board reproduces the imported chain
+        mSelType = 2; mSelSlot = 0;
+        buildDetail();
+        repaint();
+    }
     void removeSelected()
     {
         if (mSelType != 2) return;
@@ -444,6 +604,7 @@ private:
     std::unique_ptr<SegmentedControl> mAuxSeg;   // range / gate / migrate / mode / voice / phaser-voice
     std::unique_ptr<SegmentedControl> mRouteSeg; // pbS{i}Lane (bound)
     std::unique_ptr<ToggleSwitch> mOnSw;
+    DrivePedal *mDrivePedal = nullptr; // the REAL drive-pedal widget, hosted for drive slots
     bool mHasModel = false, mHasRemove = false;
     juce::Rectangle<int> mModelRect, mRemoveRect;
     juce::String mModelLabel, mDetailTitle;
@@ -463,6 +624,7 @@ private:
         // tear down previous detail widgets
         mKnobs.clear();
         mTypeSeg.reset(); mAuxSeg.reset(); mRouteSeg.reset(); mOnSw.reset();
+        mDrivePedal = nullptr; // owned via mDetailOwned; cleared below
         mDetailOwned.clear();
         mHasModel = mHasRemove = false;
         mModelLabel.clear();
@@ -504,15 +666,17 @@ private:
     void buildFree(int i)
     {
         const int type = slotType(i);
+        if (type == 0) { mDetailTitle = "EMPTY SLOT  -  add a pedal from the palette"; return; }
+
         mHasRemove = true;
         mRouteSeg = std::make_unique<SegmentedControl>(mApvts, sid(i, "Lane"), juce::StringArray{"Both", "Amp A", "Amp B"});
         addAndMakeVisible(*mRouteSeg);
+
+        if (type == 1) { buildDrive(i); return; } // the real DrivePedal owns Type/model/knobs/On
+
+        // mod / delay get their own footswitch (drive's lives inside the DrivePedal)
         mOnSw = std::make_unique<ToggleSwitch>(mApvts, sid(i, "On")); addAndMakeVisible(*mOnSw);
-
-        if (type == 0) { mDetailTitle = "EMPTY SLOT  -  add a pedal from the palette"; mHasRemove = false; mRouteSeg.reset(); mOnSw.reset(); return; }
-
-        if (type == 1) buildDrive(i);
-        else if (type == 2) buildMod(i);
+        if (type == 2) buildMod(i);
         else buildDelay(i);
     }
 
@@ -539,38 +703,15 @@ private:
 
     void buildDrive(int i)
     {
-        const int cat = juce::jlimit(0, 3, getC(sid(i, "dCat")));
+        // Host the REAL DrivePedal widget (identical to the old DRIVE panel), bound to this
+        // slot's pool params via the prefix + the 5-value dCat selector. It owns the pedal
+        // enclosure, silkscreen art, model pill/picker, Drive/Tone/Level knobs, footswitch,
+        // and the Range/Gate/Migrate segs. The pool only adds Route + Remove around it.
         mDetailTitle = "DRIVE  -  slot " + juce::String(i + 1);
-        mTypeSeg = makeRebuildSeg(sid(i, "dCat"), juce::StringArray{"Boost", "OD", "Dist", "Fuzz"});
-        mHasModel = true;
-        const auto k = (nam_rig::DriveBlock::Kind)(cat + 1);
-        mModelLabel = "MODEL:  " + juce::String(nam_rig::DriveBlock::modelName(k, getC(sid(i, "bModel"))));
-
-        switch (cat)
-        {
-        case 0: // Boost
-            makeKnob(sid(i, "bDrive"), "BOOST");
-            mAuxSeg = makeRebuildSeg(sid(i, "bRange"), juce::StringArray{"Treble", "Mid", "Full"});
-            break;
-        case 1: // Overdrive
-            makeKnob(sid(i, "oDrive"), "DRIVE");
-            makeKnob(sid(i, "oTone"), "TONE");
-            makeKnob(sid(i, "oLevel"), "LEVEL");
-            break;
-        case 2: // Distortion
-            makeKnob(sid(i, "dDrive"), "DRIVE");
-            makeKnob(sid(i, "dTone"), "FILTER");
-            makeKnob(sid(i, "dLevel"), "VOLUME");
-            mAuxSeg = makeRebuildSeg(sid(i, "dMigrate"), juce::StringArray{"Tight", "Full"});
-            break;
-        default: // Fuzz
-            makeKnob(sid(i, "fDrive"), "FUZZ");
-            if (getC(sid(i, "bModel")) == 1) makeKnob(sid(i, "fTone"), "TONE"); // Big Muff only
-            makeKnob(sid(i, "fLevel"), "VOLUME");
-            mAuxSeg = std::make_unique<SegmentedControl>(mApvts, sid(i, "fGate"), juce::StringArray{"Off", "Gate"});
-            addAndMakeVisible(*mAuxSeg);
-            break;
-        }
+        auto dp = std::make_unique<DrivePedal>(mApvts, "pbS" + juce::String(i), sid(i, "dCat"));
+        mDrivePedal = dp.get();
+        addAndMakeVisible(*dp);
+        mDetailOwned.push_back(std::move(dp));
     }
     void buildMod(int i)
     {
@@ -603,7 +744,7 @@ private:
     {
         if (mSelType != 2 || slotType(mSelSlot) != 1) return;
         const int i = mSelSlot;
-        const auto k = (nam_rig::DriveBlock::Kind)(getC(sid(i, "dCat")) + 1);
+        const auto k = (nam_rig::DriveBlock::Kind)(getC(sid(i, "dCat")));
         const int n = nam_rig::DriveBlock::modelCount(k);
         juce::PopupMenu m;
         for (int mdl = 0; mdl < n; ++mdl) m.addItem(mdl + 1, nam_rig::DriveBlock::modelName(k, mdl));
@@ -613,61 +754,119 @@ private:
     }
 
     // ---------------------------------------------------------------- detail layout
+    // Everything sits on ONE centred pedal-shaped enclosure (a real stompbox on the dark
+    // stage): header -> category selector -> model -> big silkscreen glyph -> knob row ->
+    // aux selector -> bottom route/on/remove. Mirrors the DrivePedal face so it reads as
+    // a pedal instead of a lonely knob in a void.
     void layoutDetail()
     {
         if (mDetailRect.isEmpty()) return;
-        auto area = mDetailRect.reduced(10, 8);
-        area.removeFromTop(24); // title band drawn in paint
+        const int pw = juce::jmin(520, mDetailRect.getWidth() - 40);
+        const int ph = juce::jmax(60, mDetailRect.getHeight() - 14);
+        mPedalRect = {mDetailRect.getCentreX() - pw / 2, mDetailRect.getY() + 7, pw, ph};
 
-        // control row: type/category selector + (model button) + spacer + route + on + remove
-        auto ctl = area.removeFromTop(30);
-        if (mTypeSeg) mTypeSeg->setBounds(ctl.removeFromLeft(juce::jmin(190, mTypeSeg->idealWidth() > 0 ? mTypeSeg->idealWidth() : 190)).withSizeKeepingCentre(juce::jmin(190, ctl.getWidth()), 24));
-        ctl.removeFromLeft(10);
-        mModelRect = {};
-        if (mHasModel) { mModelRect = ctl.removeFromLeft(150).withSizeKeepingCentre(146, 26); ctl.removeFromLeft(10); }
-
-        auto rightCtl = ctl;
-        mRemoveRect = {};
-        if (mHasRemove) { mRemoveRect = rightCtl.removeFromRight(72).withSizeKeepingCentre(66, 26); rightCtl.removeFromRight(8); }
-        if (mOnSw) { mOnSw->setBounds(rightCtl.removeFromRight(50).withSizeKeepingCentre(46, 24)); rightCtl.removeFromRight(8); }
-        if (mRouteSeg) mRouteSeg->setBounds(rightCtl.removeFromRight(juce::jmin(150, rightCtl.getWidth())).withSizeKeepingCentre(juce::jmin(150, rightCtl.getWidth()), 24));
-
-        area.removeFromTop(10);
-
-        // aux seg row (range/gate/migrate/mode/voice/phaser), if any
-        if (mAuxSeg)
+        // Drive slots host the real DrivePedal (it paints/lays out its own face); the pool
+        // only frames it with a Route + Remove row along the bottom.
+        if (mDrivePedal)
         {
-            auto ar = area.removeFromTop(26);
-            mAuxSeg->setBounds(ar.removeFromLeft(juce::jmin(180, ar.getWidth())).withSizeKeepingCentre(juce::jmin(180, ar.getWidth()), 22));
-            area.removeFromTop(8);
+            auto area = mDetailRect.reduced(8, 8);
+            auto bot = area.removeFromBottom(30);
+            auto brow = bot.withSizeKeepingCentre(juce::jmin(bot.getWidth(), 380), 26);
+            mRemoveRect = {};
+            if (mHasRemove) { mRemoveRect = brow.removeFromRight(74).withSizeKeepingCentre(70, 26); brow.removeFromRight(10); }
+            if (mRouteSeg) { const int w = juce::jmin(brow.getWidth(), 220); mRouteSeg->setBounds(brow.removeFromLeft(w).withSizeKeepingCentre(w, 24)); }
+            area.removeFromBottom(8);
+            const int dw = juce::jmin(360, area.getWidth());
+            mDrivePedal->setBounds(area.withSizeKeepingCentre(dw, area.getHeight()));
+            return;
         }
 
-        // knob row
+        auto in = mPedalRect.reduced(24, 16);
+        in.removeFromTop(24); // header band (drawn in paint)
+
+        if (mTypeSeg)
+        {
+            auto row = in.removeFromTop(26);
+            const int w = juce::jlimit(200, row.getWidth(), mTypeSeg->idealWidth() > 0 ? mTypeSeg->idealWidth() + 12 : 280);
+            mTypeSeg->setBounds(row.withSizeKeepingCentre(w, 24));
+            in.removeFromTop(9);
+        }
+        mModelRect = {};
+        if (mHasModel) { auto row = in.removeFromTop(26); mModelRect = row.withSizeKeepingCentre(juce::jmin(row.getWidth(), 240), 24); in.removeFromTop(12); }
+
+        mGlyphRect = in.removeFromTop(juce::jlimit(40, 130, in.getHeight() / 3));
+        in.removeFromTop(6);
+
+        // bottom row reserved FIRST (so it hugs the base of the pedal), then knobs/aux fill the middle.
+        auto bot = in.removeFromBottom(28);
+        mRemoveRect = {};
+        if (mHasRemove) { mRemoveRect = bot.removeFromRight(74).withSizeKeepingCentre(70, 26); bot.removeFromRight(8); }
+        if (mOnSw) { mOnSw->setBounds(bot.removeFromRight(50).withSizeKeepingCentre(46, 24)); bot.removeFromRight(10); }
+        if (mRouteSeg) { const int w = juce::jmin(bot.getWidth(), 220); mRouteSeg->setBounds(bot.removeFromLeft(w).withSizeKeepingCentre(w, 24)); }
+        in.removeFromBottom(8);
+
+        if (mAuxSeg)
+        {
+            auto ar = in.removeFromBottom(26);
+            mAuxSeg->setBounds(ar.withSizeKeepingCentre(juce::jmin(ar.getWidth(), 220), 22));
+            in.removeFromBottom(8);
+        }
+
+        // knob row centred in whatever's left
         if (!mKnobs.empty())
         {
-            auto row = area.removeFromTop(juce::jmin(96, area.getHeight()));
+            const int rh = juce::jlimit(60, 108, in.getHeight());
+            auto row = in.withSizeKeepingCentre(in.getWidth(), rh);
             const int n = (int)mKnobs.size();
-            const int kw = juce::jmin(96, row.getWidth() / juce::jmax(1, n));
-            const int total = kw * n;
-            int x = row.getCentreX() - total / 2;
+            const int kw = juce::jmin(92, row.getWidth() / juce::jmax(1, n));
+            int x = row.getCentreX() - kw * n / 2;
             for (auto *k : mKnobs) { k->setBounds(x, row.getY(), kw, row.getHeight()); x += kw; }
         }
     }
 
     void paintDetailCard(juce::Graphics &g)
     {
-        auto r = mDetailRect.toFloat();
-        g.setColour(colors::inset);
-        g.fillRoundedRectangle(r, 10.0f);
-        g.setColour(colors::outline);
-        g.drawRoundedRectangle(r.reduced(0.5f), 10.0f, 1.0f);
+        // Drive slots: the hosted DrivePedal paints its own enclosure/art/knobs; the pool
+        // only owns the Remove button here (Route seg is a child component).
+        if (mDrivePedal)
+        {
+            if (mHasRemove && !mRemoveRect.isEmpty())
+            {
+                auto rr = mRemoveRect.toFloat();
+                g.setColour(colors::tile); g.fillRoundedRectangle(rr, 6.0f);
+                g.setColour(colors::red.withAlpha(0.6f)); g.drawRoundedRectangle(rr.reduced(0.5f), 6.0f, 1.0f);
+                g.setColour(colors::red); g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.03f));
+                g.drawText("REMOVE", mRemoveRect, juce::Justification::centred);
+            }
+            return;
+        }
 
-        // title band
-        juce::Colour ac = mSelType == 0 ? lockedAccent(0) : mSelType == 1 ? lockedAccent(1) : typeAccent(slotType(mSelSlot));
-        auto title = mDetailRect.reduced(12, 8).removeFromTop(20);
-        g.setColour(ac);
-        g.setFont(fonts::archivo(12.5f, fonts::Bold, 0.03f));
-        g.drawText(mDetailTitle, title, juce::Justification::centredLeft);
+        colors::AccentPair pair; int selType = 2;
+        if (mSelType == 0) pair = lockedPair(0);
+        else if (mSelType == 1) pair = lockedPair(1);
+        else { selType = slotType(mSelSlot); pair = slotAccent(selType, mSelSlot); }
+
+        if (mPedalRect.isEmpty()) return;
+        auto r = mPedalRect.toFloat();
+        paintEnclosure(g, r, pair.tint, true, false, 16.0f); // the pedal enclosure
+
+        // header: title (accent silkscreen) + jewel LED
+        auto head = mPedalRect.reduced(22, 13).removeFromTop(22);
+        g.setColour(pair.accent);
+        g.setFont(fonts::archivo(13.5f, fonts::Bold, 0.07f));
+        g.drawText(mDetailTitle, head, juce::Justification::centredLeft);
+        auto jewel = juce::Rectangle<float>(12.0f, 12.0f).withCentre({(float)head.getRight() - 3.0f, (float)head.getCentreY()});
+        fx::glowEllipse(g, jewel, pair.led, 12, 0.6f, 6, 0.5f);
+        g.setColour(pair.led); g.fillEllipse(jewel);
+
+        // big silkscreen art glyph on the pedal face
+        if (!mGlyphRect.isEmpty())
+        {
+            const float gw = juce::jmin(130.0f, (float)mGlyphRect.getWidth());
+            const float gh = juce::jmin(96.0f, (float)mGlyphRect.getHeight());
+            paintSlotGlyph(g, mSelType == 0 ? 0 : mSelType == 1 ? 1 : 2, selType, mSelSlot,
+                           mGlyphRect.toFloat().withSizeKeepingCentre(gw, gh), pair.led.withAlpha(0.9f));
+        }
 
         if (mHasModel && !mModelRect.isEmpty())
         {
@@ -710,6 +909,7 @@ private:
     std::unique_ptr<SegmentedControl> mFrontOrder;
 
     juce::Rectangle<int> mChainRect, mPaletteRect, mDetailRect;
+    juce::Rectangle<int> mPedalRect, mGlyphRect; // the focused pedal enclosure + its silkscreen art
     juce::Rectangle<int> mInRect, mAmpARect, mAmpBRect;
     int mSplitX = 0, mAmpX = 0;
     std::uint64_t mLastSig = ~0ull;

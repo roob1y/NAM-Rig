@@ -24,12 +24,14 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
       mReverbPanel(p.apvts),
       mPedalboardPanel(p.apvts),
       mCalPanel(p.apvts),
-      // ENV FILTER sits at index 1 (after GATE), PREMOD at 4, PREDLY at 5. One combined
-      // AMP panel fed by both lanes sits at BOTH amp indices (6 = AMP A, 8 = AMP B), like
-      // the single CAB panel — either tile reveals it. EQ stays per-rig at 7 / 9.
-      mPanels{&mGatePanel, &mEnvFilterPanel, &mCompPanel, &mDrivePanel,
-              &mPremodPanel, &mPredelayPanel, &mAmpPanel, &mEqPanelA, &mAmpPanel, &mEqPanelB,
-              &mCabPanel, &mMixPanel, &mModPanel, &mDelayPanel, &mReverbPanel, &mPedalboardPanel}
+      // Stage D layout: GATE 0, BOARD 1 (the front-of-amp pool, replacing the old
+      // ENV/COMP/DRIVE/PREMOD/PREDLY tiles), then AMP A 2 / EQ A 3 / AMP B 4 / EQ B 5,
+      // CAB 6, MIX 7, MOD 8, DELAY 9, VERB 10. One combined AMP panel sits at BOTH amp
+      // indices (2 = AMP A, 4 = AMP B); the single CAB panel at 6. Must match BlockStrip
+      // slots[]. The 5 legacy front panels remain constructed (below) but are no longer
+      // in the strip — everything front-of-amp is edited via the board.
+      mPanels{&mGatePanel, &mPedalboardPanel, &mAmpPanel, &mEqPanelA, &mAmpPanel, &mEqPanelB,
+              &mCabPanel, &mMixPanel, &mModPanel, &mDelayPanel, &mReverbPanel}
 {
     setLookAndFeel(&mLnf.get());
     // The process default LookAndFeel (used by manually-shown PopupMenus that don't

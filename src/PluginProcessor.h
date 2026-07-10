@@ -197,7 +197,7 @@ public:
     std::atomic<float> mOutputPeakDb{-100.0f};
 
     // --- Editor session state (not persisted; survives editor close/reopen) ---
-    int uiSelectedBlock = 5; // strip selection, default AMP A (shifted +1 by ENV FILTER at 1)
+    int uiSelectedBlock = 1; // strip selection, default BOARD (front-of-amp pool) after Stage D
     int uiWidth = 0;         // last editor width, 0 = use default
 
     // Momentary mod-slot solo (dial-in tool; not a parameter -> not saved, not

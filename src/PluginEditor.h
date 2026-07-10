@@ -62,8 +62,10 @@ private:
     nam_rig::ui::HamburgerButton mMenuBtn;
 
     // --- Chain strip + per-block panels ---
-    // selectable: 0 gate, 1 envfilter, 2 comp, 3 drive, 4 premod, 5 ampA,
-    //             6 eqA, 7 ampB, 8 eqB, 9 cab (both), 10 mix, 11 mod, 12 delay, 13 reverb
+    // Stage D selectable indices: 0 gate, 1 BOARD (front-of-amp pool), 2 ampA, 3 eqA,
+    //             4 ampB, 5 eqB, 6 cab (both), 7 mix, 8 mod, 9 delay, 10 reverb.
+    // The 5 legacy front panels (env/comp/drive/premod/predelay) remain as members but are
+    // no longer in mPanels/the strip (front-of-amp editing moved into the board).
     nam_rig::ui::BlockStrip mStrip;
     nam_rig::ui::GatePanel mGatePanel;
     nam_rig::ui::EnvFilterPanel mEnvFilterPanel; // auto-wah, before comp
@@ -83,7 +85,7 @@ private:
     nam_rig::ui::IrBrowser mIrBrowser;     // IR library overlay (opened from a cab)
     nam_rig::ui::AmpBrowser mAmpBrowser;   // amp-model library overlay (from an amp)
     nam_rig::ui::TunerOverlay mTunerPanel; // header tuner overlay
-    std::array<juce::Component *, 16> mPanels; // 15 blocks + BOARD (index 15)
+    std::array<juce::Component *, 11> mPanels; // Stage D: GATE + BOARD + AMP/EQ x2 + CAB/MIX/MOD/DELAY/VERB
 
     void openIrBrowser(int rig);
     void openAmpBrowser(int rig);
