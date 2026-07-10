@@ -381,12 +381,52 @@ public:
             ? std::min(mFeedback, mVoicing.fbCeiling) / mLoopPeakGain
             : std::min(mFeedback, kMaxFeedback);
 
+        // Whole-block idle fast path. When the delay is left ON but Mix is at 0 (a
+        // common state, and any automation that rides Mix down to 0), the output is
+        // just the dry input — which already sits in left[]/right[]. Once the smoothed
+        // mix mMixZ has fully settled to ~0 we skip the expensive per-sample work
+        // (fractional wet read + in-loop tone/low-cut + tape colour + feedback + width
+        // + mix blend) for the whole block. We still advance the delay line with the
+        // dry input and advance the LFO phase, so the line stays time-coherent and
+        // raising Mix later fades wet back in without a time-base glitch. The gate is
+        // "mMixZ settled", not "mMix == 0", so the fade INTO silence runs the full path
+        // (no abrupt tail drop) and only the fully-inaudible steady state is skipped.
+        // kIdleMixEps is -80 dB on the wet, so the latch step is inaudible.
+        constexpr float kIdleMixEps = 1.0e-4f;
+        if (mMix <= 0.0f && mMixZ <= kIdleMixEps)
+        {
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const float dryL = left[i];
+                const float dryR = stereo ? right[i] : dryL;
+                mLine[0].write(dryL); // keep the line advancing + primed with real input
+                if (stereo)
+                    mLine[1].write(dryR);
+                mWow.advance();       // keep LFO phase continuous for a clean resume
+                mFlutter.advance();
+                if (mTapeOn)
+                    mDrift.advance();
+                mMixZ += mSmoothK * (mMix - mMixZ); // keep decaying toward 0
+                mWidthZ += mSmoothK * (mWidth - mWidthZ);
+                // left[i]/right[i] already hold the dry output — leave them untouched.
+            }
+            return;
+        }
+
         for (int i = 0; i < numSamples; ++i)
         {
             mMixZ += mSmoothK * (mMix - mMixZ);
             mWidthZ += mSmoothK * (mWidth - mWidthZ);
 
-            const double wv = (double)mWow.value(), fv = (double)mFlutter.value();
+            // Wow/Flutter taps are only read when something uses them: any tape
+            // character (always wanders) or a non-tape delay with Mod > 0. Lfo::value()
+            // is a std::sin per call, so skipping the two reads on the common clean/no-
+            // mod path saves two sines/sample. Phase is still advanced below so turning
+            // Mod up stays phase-continuous, and modMs collapses to 0 here (mModAmt == 0)
+            // -> byte-for-byte identical to the old `mModAmt * (... wv ... fv ...)`.
+            const bool needTaps = mTapeOn || mModAmt != 0.0f;
+            const double wv = needTaps ? (double)mWow.value() : 0.0;
+            const double fv = needTaps ? (double)mFlutter.value() : 0.0;
             double modMs;
             if (mTapeOn)
             {
