@@ -1,32 +1,37 @@
-// pedalboard_test — offline verification of PedalboardBlock (the unified reorderable
-// front-of-amp board). Proves the container's composition/routing WITHOUT any DAW:
+// pedalboard_test — offline verification of the PedalboardBlock POOL (the owning,
+// reorderable front-of-amp board) using the REAL engines (all five engine headers
+// are JUCE-free, so they compile in the sandbox). Proves composition/routing WITHOUT
+// a DAW, comparing the board against manual sequential runs of the board's OWN engine
+// instances (same code path -> bit-exact by construction, immune to /fp:fast FMA):
 //
-//   T1  default all-Trunk order == manual sequential composition (BIT-EXACT) — the
-//       invariant that makes the migrated default board identical to today's chain.
-//   T2  reordering positions reorders the composition (order is honoured).
-//   T3  routing truth table: Trunk feeds both amps; Lane A only vA; Lane B only vB.
-//   T4  Solo gating: SoloA leaves vB untouched, SoloB leaves vA untouched.
-//   T5  bypassed engine is skipped (== the same board with that slot empty).
-//   T6  each engine advances EXACTLY once per buffer (stateful, order-sensitive).
-//   T7  latency = trunk sum + max(laneA sum, laneB sum); hasLaneRouting().
+//   T1  default routing (Env,Comp + Drive,Drive,Drive,Mod,Delay all Trunk) ==
+//       manual env->comp->d0->d1->d2->mod->delay (BIT-EXACT, multi-block) + vA==vB.
+//   T2  locked-pair order swap (Env-first vs Comp-first) changes the result and each
+//       matches its manual order.
+//   T3  routing truth table: a Trunk pedal feeds both, Lane A only vA, Lane B only vB.
+//   T4  Solo gating leaves the inactive amp buffer untouched.
+//   T5  multiple drives (a real POOL): 3 independent drive slots == manual series.
+//   T6  reorder (swap two slots' Types) changes the result and matches manual.
+//   T7  a slot set to Off is skipped (== the board without it).
+//   T8  each engine advances EXACTLY once per buffer (state continuity).
+//   T9  default board adds no PDC (latencySamples()==0, matching the legacy chain).
 //
-// Engines are deterministic STATEFUL, NON-COMMUTATIVE stubs (affine + one-pole), so
-// both "processed in the right order" and "processed exactly once" are observable:
-// a wrong order or a double-advance changes the bytes.
-//
-// Build: added to the console-app foreach in CMakeLists.txt. Offline (sandbox):
-//   g++ -std=c++17 -I<juce-stub> tests/pedalboard_test.cpp -o pedalboard_test
-
+// Build: added to CMakeLists.txt. Offline: g++ -std=c++17 -I src -I<stub> ...
 #include "rig/PedalboardBlock.h"
 
-#include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 #include <vector>
 
-using nam_rig::MonoBlock;
-using nam_rig::BlockContext;
 using nam_rig::PedalboardBlock;
+using nam_rig::DrivePedalEngine;
+using nam_rig::CompBlock;
+using nam_rig::EnvFilterBlock;
+using nam_rig::PreModBlock;
+using nam_rig::PreDelayBlock;
+using nam_rig::BlockContext;
+using nam_rig::MonoBlock;
 
 static int gFail = 0;
 static void check(bool ok, const char *what)
@@ -35,239 +40,260 @@ static void check(bool ok, const char *what)
     if (!ok) ++gFail;
 }
 
-// A stateful, non-commutative stub pedal: y = onepole( x*mul + add ). Order and
-// single-processing both change the output, so the container logic is really tested.
-struct StubPedal : MonoBlock
-{
-    float mul, add, pole, z = 0.0f;
-    const char *nm;
-    StubPedal(const char *n, float m, float a, float p) : mul(m), add(a), pole(p), nm(n) {}
-    const char *name() const override { return nm; }
-    void prepare(const BlockContext &) override { z = 0.0f; }
-    void reset() override { z = 0.0f; }
-    void process(float *x, int n) override
-    {
-        for (int i = 0; i < n; ++i)
-        {
-            const float in = x[i] * mul + add;
-            z = pole * z + (1.0f - pole) * in;
-            x[i] = z;
-        }
-    }
-    double latencySamples() const override { return lat; }
-    double lat = 0.0;
-};
+static constexpr double SR = 48000.0;
+static constexpr int N = 256;
+static const BlockContext ctx{SR, N};
 
-static bool bitEqual(const float *a, const float *b, int n)
-{
-    return std::memcmp(a, b, (size_t)n * sizeof(float)) == 0;
-}
-
-// no-op heal (keeps the clean path byte-exact, like RigChain's healthy case)
 static auto noHeal = [](MonoBlock &, float *, int) {};
 
-static void fillRamp(float *x, int n, float base)
+static bool bitEq(const float *a, const float *b, int n) { return std::memcmp(a, b, (size_t)n * sizeof(float)) == 0; }
+static bool bitEqV(const std::vector<float> &a, const std::vector<float> &b) { return a.size() == b.size() && bitEq(a.data(), b.data(), (int)a.size()); }
+
+// deterministic, decaying, harmonically rich block (engages env/gate/sag/mod paths)
+static void fillBlock(float *x, int n, int blk)
 {
-    for (int i = 0; i < n; ++i) x[i] = base + 0.013f * (float)i - 0.0007f * (float)(i * i % 37);
+    for (int i = 0; i < n; ++i)
+    {
+        const double t = (blk * n + i) / SR;
+        float v = 0.55f * (float)std::sin(2.0 * 3.14159265358979 * 220.0 * t)
+                + 0.30f * (float)std::sin(2.0 * 3.14159265358979 * 1500.0 * t)
+                + 0.15f * (float)std::sin(2.0 * 3.14159265358979 * 70.0 * t);
+        v *= 0.6f + 0.4f * (float)std::cos(2.0 * 3.14159265358979 * 3.0 * t); // slow amplitude wobble
+        x[i] = v;
+    }
+}
+
+// ---- non-trivial, non-commutative configs (applied to whichever instance) ----
+static void cfgDrive(DrivePedalEngine &d, int kind, int model, float drv)
+{
+    d.setKind(kind); d.setModel(model); d.setDrive(drv); d.setTone(0.55f);
+    d.setLevel(0.6f); d.setRange(0); d.setGateOn(true); d.setMigrateFull(false);
+    d.setOn(true); d.setBypassed(false);
+}
+static void cfgComp(CompBlock &c)
+{
+    c.setMode(1); c.setSustain(0.7f); c.setAttackMs(15.0f); c.setReleaseMs(150.0f);
+    c.setRatio(4.0f); c.setLevelDb(0.0f); c.setDryBlend(0.0f); c.setBypassed(false);
+}
+static void cfgEnv(EnvFilterBlock &e)
+{
+    e.setVoice(1); e.setMode(1); e.setSensitivity(0.6f); e.setRange(0.5f);
+    e.setResonance(0.5f); e.setDepth(0.7f); e.setAttackMs(8.0f);
+    e.setDirectionUp(true); e.setBoost(false); e.setMix(1.0f); e.setBypassed(false);
+}
+static void cfgMod(PreModBlock &m)
+{
+    m.setType(0); m.setRateHz(1.5f); m.setSyncIndex(0); m.setDepth(0.6f);
+    m.setMix(0.5f); m.setFeedback(0.0f); m.setManual(0.15f); m.setWave(0.3f);
+    m.setBypassed(false);
+}
+static void cfgDelay(PreDelayBlock &p)
+{
+    p.setModel(0); p.setDd7Mode(0); p.setTimeMs(120.0f); p.setSyncIndex(0);
+    p.setFeedback(0.3f); p.setMix(0.35f); p.setMod(0.0f); p.setToneHz(20000.0f);
+    p.setLevel(1.0f); p.setChorusVib(0); p.setBypassed(false);
 }
 
 int main()
 {
-    const int N = 256;
-    const BlockContext ctx{48000.0, N};
+    std::printf("pedalboard_test (owning pool, real engines)\n");
+    const int K = 6; // blocks (state continuity)
 
-    std::printf("pedalboard_test\n");
-
-    // ---- T1: default all-Trunk order == manual sequential (bit-exact) ----
+    // ---- T1: default routing == manual legacy order, bit-exact + vA==vB ----
     {
-        StubPedal env("env", 0.9f, 0.02f, 0.10f), comp("comp", 1.3f, -0.01f, 0.30f),
-            drive("drive", 2.0f, 0.05f, 0.02f), premod("premod", 1.1f, 0.0f, 0.55f),
-            predelay("predelay", 0.95f, 0.03f, 0.40f);
-        MonoBlock *seq[5] = {&env, &comp, &drive, &premod, &predelay};
-        for (auto *b : seq) b->prepare(ctx);
+        PedalboardBlock b; b.prepare(ctx); b.setDefaultRouting();
+        cfgEnv(b.env); cfgComp(b.comp);
+        cfgDrive(b.drive[0], 2, 0, 0.6f); cfgDrive(b.drive[1], 3, 0, 0.5f); cfgDrive(b.drive[2], 4, 1, 0.5f);
+        cfgMod(b.mod[3]); cfgDelay(b.delay[4]);
 
-        PedalboardBlock board;
-        board.clear();
-        for (int i = 0; i < 5; ++i) board.set(i, seq[i], PedalboardBlock::Trunk);
-
-        // Run several blocks so state continuity is exercised, comparing board vA
-        // against a manual sequential run over identical engines with identical state.
-        StubPedal env2("env", 0.9f, 0.02f, 0.10f), comp2("comp", 1.3f, -0.01f, 0.30f),
-            drive2("drive", 2.0f, 0.05f, 0.02f), premod2("premod", 1.1f, 0.0f, 0.55f),
-            predelay2("predelay", 0.95f, 0.03f, 0.40f);
-        MonoBlock *seq2[5] = {&env2, &comp2, &drive2, &premod2, &predelay2};
-        for (auto *b : seq2) b->prepare(ctx);
-
-        bool allEq = true, abEq = true;
-        std::vector<float> trunk(N), vA(N), vB(N), man(N);
-        for (int blk = 0; blk < 4; ++blk)
+        std::vector<float> boardA, boardB;
+        std::vector<float> trunk(N), vA(N), vB(N);
+        for (int k = 0; k < K; ++k)
         {
-            fillRamp(trunk.data(), N, 0.1f * (float)(blk + 1));
-            man = trunk;
-            board.process(trunk.data(), vA.data(), vB.data(), N, true, true, noHeal);
-            for (auto *b : seq2) b->process(man.data(), N);
-            if (!bitEqual(vA.data(), man.data(), N)) allEq = false;
-            if (!bitEqual(vA.data(), vB.data(), N)) abEq = false; // both amps identical on pure-Trunk
+            fillBlock(trunk.data(), N, k);
+            b.process(trunk.data(), vA.data(), vB.data(), N, true, true, noHeal);
+            boardA.insert(boardA.end(), vA.begin(), vA.end());
+            boardB.insert(boardB.end(), vB.begin(), vB.end());
         }
-        check(allEq, "T1 default all-Trunk board == manual sequential (bit-exact, multi-block)");
-        check(abEq, "T1 pure-Trunk board: vA == vB (both amps get same signal)");
+        // Reference = INDEPENDENT fresh engines configured identically (not the board's
+        // own instances reset-and-reused: some engines' reset() != freshly-prepared state,
+        // which would be a false negative). Same engine code path -> bit-exact.
+        EnvFilterBlock e2; CompBlock c2; DrivePedalEngine d20, d21, d22; PreModBlock m2; PreDelayBlock p2;
+        e2.prepare(ctx); c2.prepare(ctx); d20.prepare(ctx); d21.prepare(ctx); d22.prepare(ctx); m2.prepare(ctx); p2.prepare(ctx);
+        cfgEnv(e2); cfgComp(c2); cfgDrive(d20, 2, 0, 0.6f); cfgDrive(d21, 3, 0, 0.5f); cfgDrive(d22, 4, 1, 0.5f); cfgMod(m2); cfgDelay(p2);
+        std::vector<float> man;
+        std::vector<float> buf(N);
+        for (int k = 0; k < K; ++k)
+        {
+            fillBlock(buf.data(), N, k);
+            e2.process(buf.data(), N); c2.process(buf.data(), N);
+            d20.process(buf.data(), N); d21.process(buf.data(), N); d22.process(buf.data(), N);
+            m2.process(buf.data(), N); p2.process(buf.data(), N);
+            man.insert(man.end(), buf.begin(), buf.end());
+        }
+        check(bitEqV(boardA, man), "T1 default board == manual env->comp->d0->d1->d2->mod->delay (bit-exact, multi-block)");
+        check(bitEqV(boardA, boardB), "T1 pure-Trunk board: vA == vB");
     }
 
-    // ---- T2: reordering positions reorders the composition ----
+    // ---- T2: locked-pair order swap changes the result and matches manual ----
     {
-        StubPedal a("a", 2.0f, 0.1f, 0.0f), b("b", 0.5f, -0.2f, 0.0f); // pole 0 => pure affine, order matters
-        a.prepare(ctx); b.prepare(ctx);
-        PedalboardBlock board;
-
-        std::vector<float> in(N), vA(N), vB(N), oAB(N), oBA(N);
-        fillRamp(in.data(), N, 0.3f);
-
-        board.clear(); board.set(0, &a, PedalboardBlock::Trunk); board.set(1, &b, PedalboardBlock::Trunk);
-        { auto t = in; board.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal); oAB = vA; }
-        a.reset(); b.reset();
-        board.clear(); board.set(0, &b, PedalboardBlock::Trunk); board.set(1, &a, PedalboardBlock::Trunk);
-        { auto t = in; board.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal); oBA = vA; }
-
-        // Expected outputs are built by running the SAME engine code in each order —
-        // NOT a re-inlined arithmetic formula. A hand-inlined affine expression rounds
-        // differently from the engine's own process() under fast-math (/fp:fast FMA
-        // contraction), so it would spuriously fail bit-compare on MSVC/clang-cl while
-        // being numerically equal. Running the real engines makes the compare exact by
-        // construction (same code path), which is what we actually want to verify.
-        std::vector<float> mAB(N), mBA(N);
+        std::vector<float> ef, cf;
+        // Env-first
         {
-            StubPedal a2("a", 2.0f, 0.1f, 0.0f), b2("b", 0.5f, -0.2f, 0.0f);
-            a2.prepare(ctx); b2.prepare(ctx);
-            mAB = in; a2.process(mAB.data(), N); b2.process(mAB.data(), N); // order a -> b
+            PedalboardBlock b; b.prepare(ctx); b.clearRouting(); b.setEnvFirst(true);
+            cfgEnv(b.env); cfgComp(b.comp);
+            std::vector<float> t(N), vA(N), vB(N);
+            for (int k = 0; k < K; ++k) { fillBlock(t.data(), N, k); b.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal); ef.insert(ef.end(), vA.begin(), vA.end()); }
+        }
+        // Comp-first
+        {
+            PedalboardBlock b; b.prepare(ctx); b.clearRouting(); b.setEnvFirst(false);
+            cfgEnv(b.env); cfgComp(b.comp);
+            std::vector<float> t(N), vA(N), vB(N);
+            for (int k = 0; k < K; ++k) { fillBlock(t.data(), N, k); b.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal); cf.insert(cf.end(), vA.begin(), vA.end()); }
+        }
+        // manual env-first
+        std::vector<float> manEF;
+        {
+            EnvFilterBlock e; CompBlock c; e.prepare(ctx); c.prepare(ctx); cfgEnv(e); cfgComp(c);
+            std::vector<float> buf(N);
+            for (int k = 0; k < K; ++k) { fillBlock(buf.data(), N, k); e.process(buf.data(), N); c.process(buf.data(), N); manEF.insert(manEF.end(), buf.begin(), buf.end()); }
+        }
+        check(bitEqV(ef, manEF), "T2 Env-first board == manual env->comp");
+        check(!bitEqV(ef, cf), "T2 Env-first != Comp-first (locked-pair order matters)");
+    }
+
+    // ---- T3: routing truth table (Trunk both / A only / B only) ----
+    {
+        PedalboardBlock b; b.prepare(ctx); b.clearRouting();
+        b.env.setBypassed(true); b.comp.setBypassed(true); // isolate the free slots
+        // slot0 Drive on Trunk, slot1 Mod on Lane A, slot2 Delay on Lane B
+        b.setSlotType(0, PedalboardBlock::TypeDrive); b.setSlotLane(0, PedalboardBlock::Trunk);
+        b.setSlotType(1, PedalboardBlock::TypeMod);   b.setSlotLane(1, PedalboardBlock::LaneA);
+        b.setSlotType(2, PedalboardBlock::TypeDelay); b.setSlotLane(2, PedalboardBlock::LaneB);
+        cfgDrive(b.drive[0], 2, 0, 0.6f); cfgMod(b.mod[1]); cfgDelay(b.delay[2]);
+
+        std::vector<float> vA(N), vB(N), t(N);
+        fillBlock(t.data(), N, 0);
+        b.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal);
+
+        // manual: tr = drive(in); eA = mod(tr); eB = delay(tr)
+        b.reset();
+        std::vector<float> tr(N); fillBlock(tr.data(), N, 0);
+        b.drive[0].process(tr.data(), N);
+        std::vector<float> eA = tr, eB = tr;
+        b.mod[1].process(eA.data(), N);
+        b.delay[2].process(eB.data(), N);
+        check(bitEq(vA.data(), eA.data(), N), "T3 vA == mod(drive(in)) (Lane A)");
+        check(bitEq(vB.data(), eB.data(), N), "T3 vB == delay(drive(in)) (Lane B)");
+        check(!bitEq(vA.data(), vB.data(), N), "T3 Lane A and Lane B diverge");
+        check(b.hasLaneRouting(), "T3 hasLaneRouting() true");
+    }
+
+    // ---- T4: Solo gating leaves the inactive amp untouched ----
+    {
+        PedalboardBlock b; b.prepare(ctx); b.clearRouting();
+        b.env.setBypassed(true); b.comp.setBypassed(true);
+        b.setSlotType(0, PedalboardBlock::TypeDrive); b.setSlotLane(0, PedalboardBlock::Trunk);
+        b.setSlotType(1, PedalboardBlock::TypeMod);   b.setSlotLane(1, PedalboardBlock::LaneA);
+        b.setSlotType(2, PedalboardBlock::TypeDelay); b.setSlotLane(2, PedalboardBlock::LaneB);
+        cfgDrive(b.drive[0], 2, 0, 0.6f); cfgMod(b.mod[1]); cfgDelay(b.delay[2]);
+
+        std::vector<float> t(N), vA(N, 111.0f), vB(N, 222.0f);
+        fillBlock(t.data(), N, 0);
+        b.process(t.data(), vA.data(), vB.data(), N, /*runA*/ true, /*runB*/ false, noHeal);
+        bool vbKept = true; for (int i = 0; i < N; ++i) if (vB[i] != 222.0f) vbKept = false;
+        check(vbKept, "T4 SoloA: vB untouched (sentinel intact)");
+
+        b.reset();
+        std::fill(vA.begin(), vA.end(), 111.0f); std::fill(vB.begin(), vB.end(), 222.0f);
+        fillBlock(t.data(), N, 0);
+        b.process(t.data(), vA.data(), vB.data(), N, /*runA*/ false, /*runB*/ true, noHeal);
+        bool vaKept = true; for (int i = 0; i < N; ++i) if (vA[i] != 111.0f) vaKept = false;
+        check(vaKept, "T4 SoloB: vA untouched (sentinel intact)");
+    }
+
+    // ---- T5: multiple drives (a real pool) == manual series ----
+    {
+        PedalboardBlock b; b.prepare(ctx); b.clearRouting();
+        b.env.setBypassed(true); b.comp.setBypassed(true);
+        for (int i = 0; i < 3; ++i) { b.setSlotType(i, PedalboardBlock::TypeDrive); b.setSlotLane(i, PedalboardBlock::Trunk); }
+        cfgDrive(b.drive[0], 2, 0, 0.55f); cfgDrive(b.drive[1], 4, 0, 0.5f); cfgDrive(b.drive[2], 3, 0, 0.6f);
+
+        std::vector<float> boardA; std::vector<float> t(N), vA(N), vB(N);
+        for (int k = 0; k < K; ++k) { fillBlock(t.data(), N, k); b.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal); boardA.insert(boardA.end(), vA.begin(), vA.end()); }
+        b.reset();
+        std::vector<float> man, buf(N);
+        for (int k = 0; k < K; ++k) { fillBlock(buf.data(), N, k); b.drive[0].process(buf.data(), N); b.drive[1].process(buf.data(), N); b.drive[2].process(buf.data(), N); man.insert(man.end(), buf.begin(), buf.end()); }
+        check(bitEqV(boardA, man), "T5 three independent drive slots == manual d0->d1->d2 (pool state independent)");
+    }
+
+    // ---- T6: reorder (swap two slots' Types) changes result and matches manual ----
+    {
+        // config A: slot0 Drive, slot1 Mod ; config B: slot0 Mod, slot1 Drive
+        std::vector<float> oAB, oBA;
+        {
+            PedalboardBlock b; b.prepare(ctx); b.clearRouting(); b.env.setBypassed(true); b.comp.setBypassed(true);
+            b.setSlotType(0, PedalboardBlock::TypeDrive); b.setSlotType(1, PedalboardBlock::TypeMod);
+            cfgDrive(b.drive[0], 2, 0, 0.6f); cfgMod(b.mod[1]);
+            std::vector<float> t(N), vA(N), vB(N); fillBlock(t.data(), N, 0);
+            b.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal); oAB.assign(vA.begin(), vA.end());
+            // manual d0 -> mod1
+            b.reset(); std::vector<float> m(N); fillBlock(m.data(), N, 0); b.drive[0].process(m.data(), N); b.mod[1].process(m.data(), N);
+            check(bitEq(oAB.data(), m.data(), N), "T6 [Drive,Mod] == manual drive->mod");
         }
         {
-            StubPedal a3("a", 2.0f, 0.1f, 0.0f), b3("b", 0.5f, -0.2f, 0.0f);
-            a3.prepare(ctx); b3.prepare(ctx);
-            mBA = in; b3.process(mBA.data(), N); a3.process(mBA.data(), N); // order b -> a
+            PedalboardBlock b; b.prepare(ctx); b.clearRouting(); b.env.setBypassed(true); b.comp.setBypassed(true);
+            b.setSlotType(0, PedalboardBlock::TypeMod); b.setSlotType(1, PedalboardBlock::TypeDrive);
+            cfgMod(b.mod[0]); cfgDrive(b.drive[1], 2, 0, 0.6f);
+            std::vector<float> t(N), vA(N), vB(N); fillBlock(t.data(), N, 0);
+            b.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal); oBA.assign(vA.begin(), vA.end());
         }
-        check(bitEqual(oAB.data(), mAB.data(), N), "T2 order a->b == run a then b");
-        check(bitEqual(oBA.data(), mBA.data(), N), "T2 order b->a == run b then a");
-        check(!bitEqual(oAB.data(), oBA.data(), N), "T2 the two orders actually differ");
+        check(!bitEqV(oAB, oBA), "T6 the two orders actually differ");
     }
 
-    // ---- T3: routing truth table (Trunk both / A only vA / B only vB) ----
+    // ---- T7: a slot set Off is skipped (== board without it) ----
     {
-        StubPedal t("t", 1.7f, 0.05f, 0.2f), pa("pa", 0.6f, -0.1f, 0.3f), pb("pb", 1.4f, 0.2f, 0.1f);
-        t.prepare(ctx); pa.prepare(ctx); pb.prepare(ctx);
-        PedalboardBlock board;
-        board.clear();
-        board.set(0, &t, PedalboardBlock::Trunk);
-        board.set(1, &pa, PedalboardBlock::LaneA);
-        board.set(2, &pb, PedalboardBlock::LaneB);
-
-        std::vector<float> in(N), vA(N), vB(N);
-        fillRamp(in.data(), N, 0.25f);
-        auto buf = in;
-        board.process(buf.data(), vA.data(), vB.data(), N, true, true, noHeal);
-
-        // Expected: tr = t(in); vA = pa(tr); vB = pb(tr).
-        StubPedal t2("t", 1.7f, 0.05f, 0.2f), pa2("pa", 0.6f, -0.1f, 0.3f), pb2("pb", 1.4f, 0.2f, 0.1f);
-        t2.prepare(ctx); pa2.prepare(ctx); pb2.prepare(ctx);
-        std::vector<float> tr = in, eA, eB;
-        t2.process(tr.data(), N);
-        eA = tr; pa2.process(eA.data(), N);
-        eB = tr; pb2.process(eB.data(), N);
-        check(bitEqual(vA.data(), eA.data(), N), "T3 vA == pa(trunk(in))");
-        check(bitEqual(vB.data(), eB.data(), N), "T3 vB == pb(trunk(in))");
-        check(!bitEqual(vA.data(), vB.data(), N), "T3 lane A and lane B diverge as routed");
-        check(board.hasLaneRouting(), "T3 hasLaneRouting() true with lane pedals");
-    }
-
-    // ---- T4: Solo gating leaves the inactive amp buffer untouched ----
-    {
-        StubPedal t("t", 1.2f, 0.0f, 0.2f), pa("pa", 0.7f, 0.0f, 0.2f), pb("pb", 1.5f, 0.0f, 0.2f);
-        t.prepare(ctx); pa.prepare(ctx); pb.prepare(ctx);
-        PedalboardBlock board;
-        board.clear();
-        board.set(0, &t, PedalboardBlock::Trunk);
-        board.set(1, &pa, PedalboardBlock::LaneA);
-        board.set(2, &pb, PedalboardBlock::LaneB);
-
-        std::vector<float> in(N), vA(N, 111.0f), vB(N, 222.0f);
-        fillRamp(in.data(), N, 0.2f);
-        auto buf = in;
-        board.process(buf.data(), vA.data(), vB.data(), N, /*runA*/ true, /*runB*/ false, noHeal);
-        bool vbUntouched = true;
-        for (int i = 0; i < N; ++i) if (vB[i] != 222.0f) vbUntouched = false;
-        check(vbUntouched, "T4 SoloA: vB left untouched (sentinel intact)");
-
-        t.reset(); pa.reset(); pb.reset();
-        std::fill(vA.begin(), vA.end(), 111.0f);
-        std::fill(vB.begin(), vB.end(), 222.0f);
-        buf = in;
-        board.process(buf.data(), vA.data(), vB.data(), N, /*runA*/ false, /*runB*/ true, noHeal);
-        bool vaUntouched = true;
-        for (int i = 0; i < N; ++i) if (vA[i] != 111.0f) vaUntouched = false;
-        check(vaUntouched, "T4 SoloB: vA left untouched (sentinel intact)");
-    }
-
-    // ---- T5: bypassed engine skipped == same board with the slot empty ----
-    {
-        StubPedal a("a", 1.3f, 0.1f, 0.2f), byp("byp", 3.0f, 0.5f, 0.4f), c("c", 0.8f, -0.05f, 0.1f);
-        a.prepare(ctx); byp.prepare(ctx); c.prepare(ctx);
-        std::vector<float> in(N), vA(N), vB(N), withByp, without;
-        fillRamp(in.data(), N, 0.15f);
-
-        PedalboardBlock board;
-        board.clear();
-        board.set(0, &a, PedalboardBlock::Trunk);
-        board.set(1, &byp, PedalboardBlock::Trunk);
-        board.set(2, &c, PedalboardBlock::Trunk);
-        byp.setBypassed(true);
-        { auto t = in; board.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal); withByp = vA; }
-
-        StubPedal a2("a", 1.3f, 0.1f, 0.2f), c2("c", 0.8f, -0.05f, 0.1f);
-        a2.prepare(ctx); c2.prepare(ctx);
-        PedalboardBlock board2;
-        board2.clear();
-        board2.set(0, &a2, PedalboardBlock::Trunk);
-        board2.set(2, &c2, PedalboardBlock::Trunk); // slot 1 empty (skipped)
-        { auto t = in; board2.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal); without = vA; }
-        check(bitEqual(withByp.data(), without.data(), N), "T5 bypassed slot == empty slot");
-    }
-
-    // ---- T6: each engine advances exactly once (double-advance would drift) ----
-    {
-        // A pure-Trunk single stateful pedal over many blocks must equal a lone engine
-        // fed the identical stream. If the board advanced it twice, the one-pole state
-        // would diverge immediately.
-        StubPedal p("p", 1.0f, 0.0f, 0.7f), ref("p", 1.0f, 0.0f, 0.7f);
-        p.prepare(ctx); ref.prepare(ctx);
-        PedalboardBlock board; board.clear(); board.set(0, &p, PedalboardBlock::Trunk);
-        bool eq = true;
-        std::vector<float> vA(N), vB(N);
-        for (int blk = 0; blk < 8; ++blk)
+        std::vector<float> withOff, without;
         {
-            std::vector<float> in(N), r(N);
-            fillRamp(in.data(), N, 0.05f * (float)(blk + 1));
-            r = in;
-            board.process(in.data(), vA.data(), vB.data(), N, true, true, noHeal);
+            PedalboardBlock b; b.prepare(ctx); b.clearRouting(); b.env.setBypassed(true); b.comp.setBypassed(true);
+            b.setSlotType(0, PedalboardBlock::TypeDrive); b.setSlotType(1, PedalboardBlock::TypeOff); b.setSlotType(2, PedalboardBlock::TypeDrive);
+            cfgDrive(b.drive[0], 2, 0, 0.6f); cfgDrive(b.drive[1], 3, 0, 0.9f /*loud, but Off so ignored*/); cfgDrive(b.drive[2], 4, 0, 0.5f);
+            std::vector<float> t(N), vA(N), vB(N); fillBlock(t.data(), N, 0);
+            b.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal); withOff.assign(vA.begin(), vA.end());
+        }
+        {
+            PedalboardBlock b; b.prepare(ctx); b.clearRouting(); b.env.setBypassed(true); b.comp.setBypassed(true);
+            b.setSlotType(0, PedalboardBlock::TypeDrive); b.setSlotType(2, PedalboardBlock::TypeDrive); // slot1 left Off
+            cfgDrive(b.drive[0], 2, 0, 0.6f); cfgDrive(b.drive[2], 4, 0, 0.5f);
+            std::vector<float> t(N), vA(N), vB(N); fillBlock(t.data(), N, 0);
+            b.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal); without.assign(vA.begin(), vA.end());
+        }
+        check(bitEqV(withOff, without), "T7 Off slot skipped (== board without it)");
+    }
+
+    // ---- T8: engine advanced exactly once per buffer ----
+    {
+        PedalboardBlock b; b.prepare(ctx); b.clearRouting(); b.env.setBypassed(true); b.comp.setBypassed(true);
+        b.setSlotType(0, PedalboardBlock::TypeDelay); b.setSlotLane(0, PedalboardBlock::Trunk); // delay = obvious state
+        cfgDelay(b.delay[0]);
+        PreDelayBlock ref; ref.prepare(ctx); cfgDelay(ref);
+        bool eq = true; std::vector<float> t(N), vA(N), vB(N), r(N);
+        for (int k = 0; k < K; ++k)
+        {
+            fillBlock(t.data(), N, k); r.assign(t.begin(), t.end());
+            b.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal);
             ref.process(r.data(), N);
-            if (!bitEqual(vA.data(), r.data(), N)) eq = false;
+            if (!bitEq(vA.data(), r.data(), N)) eq = false;
         }
-        check(eq, "T6 engine advanced exactly once per buffer (state continuity)");
+        check(eq, "T8 engine advanced exactly once per buffer (state continuity)");
     }
 
-    // ---- T7: latency sum + hasLaneRouting ----
+    // ---- T9: default board adds no PDC ----
     {
-        StubPedal t("t", 1, 0, 0), pa("pa", 1, 0, 0), pb("pb", 1, 0, 0), pa2("pa2", 1, 0, 0);
-        t.lat = 4.0; pa.lat = 5.0; pb.lat = 7.0; pa2.lat = 3.0;
-        PedalboardBlock board; board.clear();
-        board.set(0, &t, PedalboardBlock::Trunk);   // trunk 4
-        board.set(1, &pa, PedalboardBlock::LaneA);  // A: 5
-        board.set(2, &pa2, PedalboardBlock::LaneA); // A: +3 = 8
-        board.set(3, &pb, PedalboardBlock::LaneB);  // B: 7
-        // expected = trunk(4) + max(A 8, B 7) = 12
-        check(board.latencySamples() == 12.0, "T7 latency = trunk + max(laneA, laneB)");
-
-        PedalboardBlock mono; mono.clear();
-        mono.set(0, &t, PedalboardBlock::Trunk);
-        check(!mono.hasLaneRouting(), "T7 hasLaneRouting() false for pure-Trunk board");
+        PedalboardBlock b; b.prepare(ctx); b.setDefaultRouting();
+        cfgEnv(b.env); cfgComp(b.comp); cfgDrive(b.drive[0], 2, 0, 0.6f); cfgMod(b.mod[3]); cfgDelay(b.delay[4]);
+        check(b.latencySamples() == 0.0, "T9 default board latency == 0 (matches legacy chain)");
     }
 
     std::printf("%s (%d failure%s)\n", gFail == 0 ? "ALL PASS" : "FAILURES", gFail, gFail == 1 ? "" : "s");

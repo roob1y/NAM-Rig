@@ -244,6 +244,9 @@ if(BUILD_RIG_HARNESS)
         target_compile_options(drivepedal_test PRIVATE /arch:AVX2 /fp:fast)
     endif()
 
+    # NOTE: pedalboard_test is already registered in the console-app foreach below
+    # (with mod_test/premod_test/...), so it is NOT added standalone here.
+
     # CompBlock measurement suite (PASS/FAIL, exits nonzero on failure)
     juce_add_console_app(comp_test PRODUCT_NAME "comp_test")
     target_sources(comp_test PRIVATE tests/comp_test.cpp)

@@ -77,6 +77,10 @@ public:
         // prepared explicitly rather than via allMonoBlocks().
         cabDyn.prepare(sampleRate, maxBlockSize);
         cabDynB.prepare(sampleRate, maxBlockSize);
+        // The pedalboard OWNS its engine pool (not in allMonoBlocks()), so prepare it
+        // explicitly. Pre-allocates the pool (incl. each free slot's PreDelay line) here,
+        // off the audio thread. Runs only when pbEnabled; harmless otherwise.
+        mBoard.prepare(ctx);
         mVoiceA.assign((size_t)juce::jmax(1, maxBlockSize), 0.0f);
         mVoiceB.assign((size_t)juce::jmax(1, maxBlockSize), 0.0f);
         mCleanTap.assign((size_t)juce::jmax(1, maxBlockSize), 0.0f);
@@ -95,6 +99,7 @@ public:
             b->reset();
         cabDyn.reset();
         cabDynB.reset();
+        mBoard.reset(); // owned pool (not in allMonoBlocks())
         mFdlA.reset();
         mFdlB.reset();
     }
@@ -109,18 +114,15 @@ public:
     int driveSend() const { return mDriveSend; }
 
     // ---- unified Pedalboard (opt-in; default OFF keeps the legacy pre-amp path) ----
-    // Engine ids for the board's non-owning slots (the board routes the SAME engine
-    // instances that live on this RigChain, so it can't change any voicing).
-    enum PbEngine { PbNone = 0, PbEnv = 1, PbComp = 2, PbDrive = 3, PbPreMod = 4, PbPreDelay = 5 };
+    // The board now OWNS its engine pool (a locked Env+Comp front pair + kFreeSlots
+    // free slots, each holding a Drive/Mod/Delay engine — SCOPE_PEDALBOARD §10). The
+    // processor configures routing + per-engine params directly via board(). The legacy
+    // members below (envfilter/comp/drive/premod/predelay) stay for the default
+    // pbEnabled=false path, which remains byte-exact.
     void setUsePedalboard(bool b) { mUsePedalboard = b; }
     bool usePedalboard() const { return mUsePedalboard; }
-    void clearPedalboard() { mBoard.clear(); }
-    // Place an engine (by id) at board position `pos` on a lane (Trunk/A/B). Called
-    // from the message thread when the pedalboard is (re)configured from params.
-    void setPedalboardSlot(int pos, int engineId, int lane)
-    {
-        mBoard.set(pos, engineFor(engineId), lane);
-    }
+    PedalboardBlock &board() { return mBoard; }
+    const PedalboardBlock &board() const { return mBoard; }
     void setLevelA(float linear) { mLevelA = linear; }
     void setLevelB(float linear) { mLevelB = linear; }
     void setPanA(float pan) { mPanA = juce::jlimit(-1.0f, 1.0f, pan); }
@@ -865,23 +867,9 @@ private:
     std::array<StereoBlock *, 3> stereoBlocks() { return {&mod, &delay, &reverb}; }
     std::array<const StereoBlock *, 3> stereoBlocks() const { return {&mod, &delay, &reverb}; }
 
-    // Map a PbEngine id to the owning engine instance (nullptr = empty slot).
-    MonoBlock *engineFor(int id)
-    {
-        switch (id)
-        {
-        case PbEnv:      return &envfilter;
-        case PbComp:     return &comp;
-        case PbDrive:    return &drive;
-        case PbPreMod:   return &premod;
-        case PbPreDelay: return &predelay;
-        default:         return nullptr;
-        }
-    }
-
     int mMode = SoloA;
     bool mUsePedalboard = false; // opt-in unified board; false = legacy pre-amp path (bit-exact)
-    PedalboardBlock mBoard;      // non-owning router over the engines above
+    PedalboardBlock mBoard;      // OWNING pool (locked Env+Comp + kFreeSlots free slots)
     int mDriveSend = SendBoth; // which amp(s) the drive rack feeds (default both)
     float mLevelA = 1.0f, mLevelB = 1.0f;
     float mPanA = -1.0f, mPanB = 1.0f; // default hard L / hard R for Dual

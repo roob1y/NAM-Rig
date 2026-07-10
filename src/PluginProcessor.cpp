@@ -850,27 +850,73 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID("predelayStereo", 1), "Pre Delay Stereo", false));
 
-    // --- Unified PEDALBOARD (Stage 1, opt-in). OFF by default -> the legacy fixed
-    // pre-amp chain runs, byte-exact. When enabled, these place the SAME engines
-    // (env / comp / drive / premod / predelay) on an ordered 8-slot board with a
-    // per-slot LANE route (Both / Amp A / Amp B). The DEFAULT slot layout reproduces
-    // the current processing order (env, comp, drive, premod, predelay) on the shared
-    // trunk, so enabling the board with default slots is itself bit-exact. Engine and
-    // Lane choice indices map directly to RigChain::PbEngine and PedalboardBlock::Lane.
-    // Appended last for automation-index stability. ---
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID("pbEnabled", 1), "Pedalboard Enable", false));
-    static const int kPbDefaultEngine[8] = {1, 2, 3, 4, 5, 0, 0, 0}; // Env,Comp,Drive,PreMod,PreDelay,-,-,-
-    for (int i = 0; i < 8; ++i)
+    // --- Unified PEDALBOARD (opt-in). OFF by default -> the legacy fixed pre-amp chain
+    // runs, byte-exact. ---
+    // Stage B (SCOPE_PEDALBOARD §10): the board is an OWNING POOL. A locked Env+Comp
+    // front pair (reusing the shared comp*/envfilter* params, one instance) + 8 FREE
+    // slots, each of which can be a Drive / Mod / Delay and carries the FULL param union
+    // for all three (the MOD/DRIVE 3-slot-superset precedent, generalised). Defaults:
+    // every free slot Off -> enabling the board reproduces the legacy DEFAULT (comp/env
+    // only), byte-exact. Appended last for automation-index stability. Local helpers keep
+    // the ~300 IDs consistent; ranges mirror the drv*/premod*/predelay* originals.
     {
-        const juce::String pid = "pbSlot" + juce::String(i);
-        params.push_back(std::make_unique<juce::AudioParameterChoice>(
-            juce::ParameterID(pid + "Engine", 1), "PB Slot " + juce::String(i) + " Engine",
-            juce::StringArray{"Empty", "Env Filter", "Compressor", "Drive", "Pre Mod", "Pre Delay"},
-            kPbDefaultEngine[i]));
-        params.push_back(std::make_unique<juce::AudioParameterChoice>(
-            juce::ParameterID(pid + "Lane", 1), "PB Slot " + juce::String(i) + " Route",
-            juce::StringArray{"Both", "Amp A", "Amp B"}, 0));
+        auto pbF = [&](const juce::String &id, const juce::String &nm, juce::NormalisableRange<float> r, float d, const char *lab = "") {
+            params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID(id, 1), nm, r, d, juce::AudioParameterFloatAttributes().withLabel(lab))); };
+        auto pbC = [&](const juce::String &id, const juce::String &nm, juce::StringArray c, int d) {
+            params.push_back(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID(id, 1), nm, std::move(c), d)); };
+        auto pbB = [&](const juce::String &id, const juce::String &nm, bool d) {
+            params.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID(id, 1), nm, d)); };
+        auto pbI = [&](const juce::String &id, const juce::String &nm, int lo, int hi, int d) {
+            params.push_back(std::make_unique<juce::AudioParameterInt>(juce::ParameterID(id, 1), nm, lo, hi, d)); };
+        auto RR = [](float lo, float hi, float st, float sk = 1.0f) { return juce::NormalisableRange<float>(lo, hi, st, sk); };
+        const juce::StringArray syncChoices{"Off", "1/1", "1/2", "1/4", "1/4.", "1/4T", "1/8", "1/8.", "1/8T", "1/16"};
+
+        pbB("pbEnabled", "Pedalboard Enable", false);
+        pbC("pbFrontOrder", "PB Front Order", juce::StringArray{"Env First", "Comp First"}, 0);
+        for (int i = 0; i < 8; ++i)
+        {
+            auto id = [i](const char *suf) { return "pbS" + juce::String(i) + suf; };
+            const juce::String L = "PB" + juce::String(i) + " ";
+            pbC(id("Type"), L + "Type", juce::StringArray{"Off", "Drive", "Mod", "Delay"}, 0);
+            pbC(id("Lane"), L + "Route", juce::StringArray{"Both", "Amp A", "Amp B"}, 0);
+            pbB(id("On"), L + "On", true);
+            // --- Drive union (mirrors drv{n}* suffixes; no "Off" here — the slot Type is Off) ---
+            pbC(id("dCat"), L + "Drive Type", juce::StringArray{"Boost", "Overdrive", "Distortion", "Fuzz"}, 1);
+            pbI(id("bModel"), L + "Model", 0, 3, 0);
+            pbF(id("bDrive"), L + "Boost", RR(0.0f, 1.0f, 0.01f), 0.5f);
+            pbC(id("bRange"), L + "Boost Range", juce::StringArray{"Treble", "Mid", "Full"}, 0);
+            pbF(id("oDrive"), L + "OD Drive", RR(0.0f, 1.0f, 0.01f), 0.5f);
+            pbF(id("oTone"), L + "OD Tone", RR(0.0f, 1.0f, 0.01f), 0.5f);
+            pbF(id("oLevel"), L + "OD Level", RR(0.0f, 1.0f, 0.01f), 0.5f);
+            pbF(id("dDrive"), L + "Dist Drive", RR(0.0f, 1.0f, 0.01f), 0.5f);
+            pbF(id("dTone"), L + "Dist Filter", RR(0.0f, 1.0f, 0.01f), 0.5f);
+            pbF(id("dLevel"), L + "Dist Volume", RR(0.0f, 1.0f, 0.01f), 0.5f);
+            pbB(id("dMigrate"), L + "Dist Hump Range", false);
+            pbF(id("fDrive"), L + "Fuzz", RR(0.0f, 1.0f, 0.01f), 0.5f);
+            pbF(id("fTone"), L + "Fuzz Tone", RR(0.0f, 1.0f, 0.01f), 0.5f);
+            pbF(id("fLevel"), L + "Fuzz Volume", RR(0.0f, 1.0f, 0.01f), 0.5f);
+            pbB(id("fGate"), L + "Fuzz Gate", true);
+            // --- Mod union (mirrors premod* suffixes; Manual is fixed at 0.15 like legacy) ---
+            pbC(id("mType"), L + "Mod", juce::StringArray{"Chorus", "Phaser", "Flanger", "Tremolo", "Uni-Vibe"}, 0);
+            pbF(id("mRate"), L + "Mod Rate", RR(0.03f, 20.0f, 0.01f, 0.35f), 0.8f, "Hz");
+            pbC(id("mSync"), L + "Mod Sync", syncChoices, 0);
+            pbF(id("mDepth"), L + "Mod Depth", RR(0.0f, 1.0f, 0.01f), 0.5f);
+            pbF(id("mMix"), L + "Mod Mix", RR(0.0f, 1.0f, 0.01f), 0.5f);
+            pbF(id("mFeedback"), L + "Mod Feedback", RR(0.0f, 0.95f, 0.01f), 0.0f);
+            pbF(id("mWave"), L + "Mod Wave", RR(0.0f, 1.0f, 0.01f), 0.3f);
+            pbC(id("mPhaserVoice"), L + "Phaser Voice", juce::StringArray{"Script", "Block"}, 0);
+            // --- Delay union (mirrors predelay* suffixes) ---
+            pbC(id("pModel"), L + "Delay", juce::StringArray{"Boss DD-7", "Carbon Copy", "Memory Man"}, 0);
+            pbC(id("pMode"), L + "Delay Mode", juce::StringArray{"50 ms", "200 ms", "800 ms", "3200 ms", "Hold", "Modulate", "Analog", "Reverse"}, 3);
+            pbF(id("pTime"), L + "Delay Time", RR(20.0f, 2000.0f, 1.0f, 0.35f), 350.0f, "ms");
+            pbC(id("pSync"), L + "Delay Sync", syncChoices, 0);
+            pbF(id("pFeedback"), L + "Delay Feedback", RR(0.0f, 1.0f, 0.01f), 0.35f);
+            pbF(id("pMix"), L + "Delay Mix", RR(0.0f, 1.0f, 0.01f), 0.28f);
+            pbF(id("pMod"), L + "Delay Mod", RR(0.0f, 1.0f, 0.01f), 0.0f);
+            pbF(id("pTone"), L + "Delay Tone", RR(1000.0f, 20000.0f, 10.0f, 0.5f), 20000.0f, "Hz");
+            pbF(id("pLevel"), L + "Delay Level", RR(0.0f, 1.0f, 0.01f), 1.0f);
+            pbC(id("pChorusVib"), L + "Delay ChorusVib", juce::StringArray{"Chorus", "Vibrato"}, 0);
+        }
     }
 
     return {params.begin(), params.end()};
@@ -1375,26 +1421,86 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         mChain.setPredelayPreDrive((int)apvts.getRawParameterValue("predelayPos")->load() == 1);
         mChain.setPredelayStereo(apvts.getRawParameterValue("predelayStereo")->load() >= 0.5f);
 
-    // --- Unified Pedalboard configuration (opt-in). When enabled, place the engines
-    // on the board per the pbSlot* params (deduped so one engine can never be run
-    // twice in a buffer -> no double state-advance) and switch RigChain to the board
-    // path. When disabled, the legacy fixed pre-amp path runs (bit-exact). The engine
-    // param setters above still run either way, so each pedal is fully configured;
-    // the board only decides ORDER + LANE. ---
+    // --- Unified Pedalboard configuration (opt-in, Stage B). When enabled, configure the
+    // board's OWNED pool: the locked Env+Comp front pair (from the SHARED comp*/envfilter*
+    // params, so one preset drives both the legacy and board copies identically) + each of
+    // the 8 free slots' Drive/Mod/Delay engines from their per-slot param union. The board
+    // decides ORDER + LANE + the active engine per slot. When disabled, the legacy fixed
+    // pre-amp path runs (byte-exact) and this block is skipped. ---
     {
         const bool pbOn = apvts.getRawParameterValue("pbEnabled")->load() >= 0.5f;
         if (pbOn)
         {
-            mChain.clearPedalboard();
-            bool placed[6] = {false, false, false, false, false, false}; // by PbEngine id
+            auto &bd = mChain.board();
+            auto gp = [&](const juce::String &pid) { return apvts.getRawParameterValue(pid)->load(); };
+            bd.setEnvFirst((int)gp("pbFrontOrder") == 0);
+
+            // Locked Env (voice-branched, mirrors the legacy env wiring) + Comp.
+            const int efVoice = (int)gp("envfilterVoice");
+            bd.env.setVoice(efVoice);
+            bd.env.setSensitivity(gp("envfilterSens"));
+            bd.env.setDepth(0.7f);
+            if (efVoice == 0) // FX25
+            {
+                bd.env.setMode(1); bd.env.setDirectionUp(true); bd.env.setBoost(false);
+                bd.env.setResonance(0.45f); bd.env.setRange(gp("envfilterRange"));
+                bd.env.setMix(gp("envfilterMix")); bd.env.setAttackMs(8.0f);
+            }
+            else // Q-Tron
+            {
+                bd.env.setMode((int)gp("envfilterMode"));
+                bd.env.setDirectionUp((int)gp("envfilterDir") == 0);
+                bd.env.setBoost((int)gp("envfilterBoost") == 1);
+                bd.env.setResonance(gp("envfilterReso"));
+                bd.env.setRange((int)gp("envfilterQRange") == 1 ? 0.6f : 0.25f);
+                bd.env.setMix(1.0f);
+                bd.env.setAttackMs((int)gp("envfilterResponse") == 1 ? 35.0f : 8.0f);
+            }
+            bd.env.setBypassed(gp("envfilterOn") < 0.5f);
+
+            bd.comp.setSustain(gp("compSustain")); bd.comp.setAttackMs(gp("compAttack"));
+            bd.comp.setLevelDb(gp("compLevel")); bd.comp.setRatio(gp("compRatio"));
+            bd.comp.setReleaseMs(gp("compRelease")); bd.comp.setMode((int)gp("compMode"));
+            bd.comp.setDryBlend(gp("compDry")); bd.comp.setBypassed(gp("compOn") < 0.5f);
+
             for (int i = 0; i < 8; ++i)
             {
-                const juce::String pid = "pbSlot" + juce::String(i);
-                const int eng  = (int)apvts.getRawParameterValue(pid + "Engine")->load();
-                const int lane = (int)apvts.getRawParameterValue(pid + "Lane")->load();
-                if (eng <= 0 || eng > 5 || placed[eng]) continue; // Empty or duplicate engine
-                placed[eng] = true;
-                mChain.setPedalboardSlot(i, eng, lane);
+                auto s = [&](const char *suf) { return apvts.getRawParameterValue("pbS" + juce::String(i) + suf)->load(); };
+                bd.setSlotType(i, (int)s("Type"));
+                bd.setSlotLane(i, (int)s("Lane"));
+                bd.setSlotOn(i, s("On") >= 0.5f);
+
+                // Drive engine (dCat 0..3 -> Kind Boost/OD/Dist/Fuzz = 1..4; mirrors legacy drv wiring).
+                auto &dr = bd.drive[i];
+                const int cat = (int)s("dCat");
+                dr.setKind(cat + 1); dr.setModel((int)s("bModel")); dr.setRange((int)s("bRange"));
+                dr.setGateOn(s("fGate") >= 0.5f); dr.setMigrateFull(s("dMigrate") >= 0.5f);
+                switch (cat)
+                {
+                case 0: dr.setDrive(s("bDrive")); dr.setTone(0.5f); dr.setLevel(0.5f); break; // Boost: no tone/vol
+                case 1: dr.setDrive(s("oDrive")); dr.setTone(s("oTone")); dr.setLevel(s("oLevel")); break;
+                case 2: dr.setDrive(s("dDrive")); dr.setTone(s("dTone")); dr.setLevel(s("dLevel")); break;
+                default: dr.setDrive(s("fDrive")); dr.setTone((int)s("bModel") == 1 ? s("fTone") : 0.5f); dr.setLevel(s("fLevel")); break;
+                }
+                dr.setOn(true); dr.setBypassed(false);
+
+                // Mod engine (mirrors legacy premod type-branched pins).
+                auto &md = bd.mod[i];
+                const int mt = (int)s("mType");
+                md.setType(mt); md.setSyncIndex((int)s("mSync")); md.setRateHz(s("mRate"));
+                md.setWave(s("mWave")); md.setManual(0.15f);
+                md.setDepth(mt == 1 ? 0.60f : s("mDepth"));
+                const float phFb = (int)s("mPhaserVoice") == 1 ? 0.35f : 0.0f;
+                md.setFeedback(mt == 2 ? s("mFeedback") : (mt == 1 ? phFb : 0.0f));
+                md.setMix(mt == 4 ? s("mMix") : (mt == 2 ? 1.0f : 0.5f));
+                md.setBypassed(false);
+
+                // Delay engine (mirrors legacy predelay wiring).
+                auto &dl = bd.delay[i];
+                dl.setModel((int)s("pModel")); dl.setDd7Mode((int)s("pMode")); dl.setTimeMs(s("pTime"));
+                dl.setSyncIndex((int)s("pSync")); dl.setFeedback(s("pFeedback")); dl.setMix(s("pMix"));
+                dl.setMod(s("pMod")); dl.setToneHz(s("pTone")); dl.setLevel(s("pLevel"));
+                dl.setChorusVib((int)s("pChorusVib")); dl.setBypassed(false);
             }
         }
         mChain.setUsePedalboard(pbOn);
@@ -1574,6 +1680,12 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
                 mChain.mod.setBpm(*bpm);
                 mChain.premod.setBpm(*bpm);
                 mChain.predelay.setBpm(*bpm);
+                if (mChain.usePedalboard())
+                    for (int i = 0; i < 8; ++i)
+                    {
+                        mChain.board().mod[i].setBpm(*bpm);
+                        mChain.board().delay[i].setBpm(*bpm);
+                    }
             }
             // Transport -> PPQ phase-resync of the premod's tempo-synced LFO: on the
             // rising edge of playback the LFO phase snaps to the beat grid, so a synced
@@ -1581,6 +1693,9 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
             double ppq = 0.0;
             if (auto p = pos->getPpqPosition()) ppq = *p;
             mChain.premod.setTransport(pos->getIsPlaying(), ppq);
+            if (mChain.usePedalboard())
+                for (int i = 0; i < 8; ++i)
+                    mChain.board().mod[i].setTransport(pos->getIsPlaying(), ppq);
         }
     const int delayChar = (int)apvts.getRawParameterValue("delayCharacter")->load();
     // Ping-pong + dual (independent L/R, via Sync R unlinked) are STEREO digital-delay
