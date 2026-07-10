@@ -24,7 +24,11 @@ int main(int argc, char **argv)
     if (argc < 7)
     {
         std::fprintf(stderr,
-                     "usage: rig_chain_process <model.nam|-> <ir.wav|-> <dawRate> <requestedFactor> <in.f32> <out.f32> [block]\n");
+                     "usage: rig_chain_process <model.nam|-> <ir.wav|-> <dawRate> <requestedFactor> <in.f32> <out.f32> [prepBlock] [procBlock]\n"
+                     "  prepBlock: max block size passed to prepare() (default 512)\n"
+                     "  procBlock: size of the blocks actually fed to process() (default = prepBlock).\n"
+                     "             Set procBlock > prepBlock to exercise RigChain's oversized-block\n"
+                     "             chunking; the output must be bit-identical to a run at procBlock=prepBlock.\n");
         return 1;
     }
     try
@@ -36,6 +40,10 @@ int main(int argc, char **argv)
         const std::string inPath = argv[5];
         const std::string outPath = argv[6];
         const int block = (argc >= 8) ? std::atoi(argv[7]) : 512;
+        // Process-block size, distinct from the prepare/max size, so we can feed a
+        // block LARGER than prepare() promised and exercise RigChain's oversized-block
+        // chunking. Default = block (the original single-arg behaviour).
+        const int procBlock = (argc >= 9) ? std::atoi(argv[8]) : block;
 
         nam_rig::RigChain chain;
 
@@ -103,11 +111,11 @@ int main(int argc, char **argv)
         fi.read(reinterpret_cast<char *>(x.data()), (std::streamsize)(total * sizeof(float)));
 
         // ---- block loop through the shared chain (mono buffer) ----
-        juce::AudioBuffer<float> buf(1, block);
+        juce::AudioBuffer<float> buf(1, procBlock);
         size_t pos = 0;
         while (pos < total)
         {
-            const int n = (int)std::min<size_t>(block, total - pos);
+            const int n = (int)std::min<size_t>(procBlock, total - pos);
             buf.setSize(1, n, false, false, true);
             std::memcpy(buf.getWritePointer(0), x.data() + pos, (size_t)n * sizeof(float));
             chain.process(buf);

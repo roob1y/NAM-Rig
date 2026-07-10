@@ -278,6 +278,26 @@ public:
         if (numSamples == 0)
             return;
 
+        // Buffer-size safety net. prepare() sizes every mono/stereo scratch buffer
+        // (mVoiceA/B, mCleanTap, the blocks' internals) to mMaxBlock, and the body
+        // below indexes them by numSamples. Most hosts never exceed the max they
+        // promised in prepareToPlay, but some (FL Studio varies the block size
+        // between callbacks; Logic/Reason can hand a larger block) do — which would
+        // overrun those buffers. Split anything bigger into <= mMaxBlock chunks and
+        // recurse; each sub-block is <= mMaxBlock so there is no further recursion.
+        // In the normal case (numSamples <= mMaxBlock) this branch is skipped, so
+        // the single-pass path stays byte-for-byte identical.
+        if (numSamples > mMaxBlock)
+        {
+            for (int off = 0; off < numSamples; off += mMaxBlock)
+            {
+                const int n = juce::jmin(mMaxBlock, numSamples - off);
+                juce::AudioBuffer<float> sub(buffer.getArrayOfWritePointers(), numChannels, off, n);
+                process(sub);
+            }
+            return;
+        }
+
         float *ch0 = buffer.getWritePointer(0);
 
         // ---- global input calibration (feeds the whole pre-amp section:
