@@ -22,13 +22,14 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
       mModPanel(p.apvts),
       mDelayPanel(p.apvts),
       mReverbPanel(p.apvts),
+      mPedalboardPanel(p.apvts),
       mCalPanel(p.apvts),
       // ENV FILTER sits at index 1 (after GATE), PREMOD at 4, PREDLY at 5. One combined
       // AMP panel fed by both lanes sits at BOTH amp indices (6 = AMP A, 8 = AMP B), like
       // the single CAB panel — either tile reveals it. EQ stays per-rig at 7 / 9.
       mPanels{&mGatePanel, &mEnvFilterPanel, &mCompPanel, &mDrivePanel,
               &mPremodPanel, &mPredelayPanel, &mAmpPanel, &mEqPanelA, &mAmpPanel, &mEqPanelB,
-              &mCabPanel, &mMixPanel, &mModPanel, &mDelayPanel, &mReverbPanel}
+              &mCabPanel, &mMixPanel, &mModPanel, &mDelayPanel, &mReverbPanel, &mPedalboardPanel}
 {
     setLookAndFeel(&mLnf.get());
     // The process default LookAndFeel (used by manually-shown PopupMenus that don't

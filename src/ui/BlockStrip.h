@@ -233,6 +233,11 @@ public:
             {"MOD",    "modOn",      10, Full},
             {"DELAY",  "delayOn",    11, Full},
             {"VERB",   "reverbOn",   12, Full},
+            // Unified PEDALBOARD (front-of-amp routing/order board). Its LED = pbEnabled.
+            // Interim placement at the far right; Stage 2b collapses the ENV..PREDLY tiles
+            // into this one. Appended LAST so every existing tile index (branch/merge/amp
+            // LEDs at 5/6/7/8/9/10) is unchanged.
+            {"BOARD",  "pbEnabled",  13, Full},
         };
         for (const auto &s : slots)
         {
@@ -422,7 +427,7 @@ private:
         updateLeds();
     }
 
-    static constexpr int kCols = 13; // GATE,ENV,COMP,DRIVE,PREMOD,PREDLY,AMP,EQ,CAB,MIX,MOD,DELAY,VERB
+    static constexpr int kCols = 14; // GATE,ENV,COMP,DRIVE,PREMOD,PREDLY,AMP,EQ,CAB,MIX,MOD,DELAY,VERB,BOARD
     juce::AudioProcessorValueTreeState &mApvts;
     std::vector<std::unique_ptr<BlockTile>> mTiles;
     std::vector<std::pair<int, int>> mLayout; // (col, lane) per tile

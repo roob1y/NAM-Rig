@@ -7,6 +7,7 @@
 #include "ui/HeaderPanel.h"
 #include "ui/BlockStrip.h"
 #include "ui/Panels.h"
+#include "ui/PedalboardPanel.h" // unified front-of-amp node-graph board
 #include "ui/IrBrowser.h"
 #include "ui/AmpBrowser.h"
 #include "ui/PresetBar.h"
@@ -77,11 +78,12 @@ private:
     nam_rig::ui::ModPanel mModPanel;
     nam_rig::ui::DelayPanel mDelayPanel;
     nam_rig::ui::ReverbPanel mReverbPanel;
+    nam_rig::ui::PedalboardPanel mPedalboardPanel; // unified front-of-amp board (routing/order)
     nam_rig::ui::CalPanel mCalPanel;       // global input-cal overlay (settings menu)
     nam_rig::ui::IrBrowser mIrBrowser;     // IR library overlay (opened from a cab)
     nam_rig::ui::AmpBrowser mAmpBrowser;   // amp-model library overlay (from an amp)
     nam_rig::ui::TunerOverlay mTunerPanel; // header tuner overlay
-    std::array<juce::Component *, 15> mPanels;
+    std::array<juce::Component *, 16> mPanels; // 15 blocks + BOARD (index 15)
 
     void openIrBrowser(int rig);
     void openAmpBrowser(int rig);

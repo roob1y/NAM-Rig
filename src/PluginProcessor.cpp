@@ -850,6 +850,29 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID("predelayStereo", 1), "Pre Delay Stereo", false));
 
+    // --- Unified PEDALBOARD (Stage 1, opt-in). OFF by default -> the legacy fixed
+    // pre-amp chain runs, byte-exact. When enabled, these place the SAME engines
+    // (env / comp / drive / premod / predelay) on an ordered 8-slot board with a
+    // per-slot LANE route (Both / Amp A / Amp B). The DEFAULT slot layout reproduces
+    // the current processing order (env, comp, drive, premod, predelay) on the shared
+    // trunk, so enabling the board with default slots is itself bit-exact. Engine and
+    // Lane choice indices map directly to RigChain::PbEngine and PedalboardBlock::Lane.
+    // Appended last for automation-index stability. ---
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("pbEnabled", 1), "Pedalboard Enable", false));
+    static const int kPbDefaultEngine[8] = {1, 2, 3, 4, 5, 0, 0, 0}; // Env,Comp,Drive,PreMod,PreDelay,-,-,-
+    for (int i = 0; i < 8; ++i)
+    {
+        const juce::String pid = "pbSlot" + juce::String(i);
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID(pid + "Engine", 1), "PB Slot " + juce::String(i) + " Engine",
+            juce::StringArray{"Empty", "Env Filter", "Compressor", "Drive", "Pre Mod", "Pre Delay"},
+            kPbDefaultEngine[i]));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID(pid + "Lane", 1), "PB Slot " + juce::String(i) + " Route",
+            juce::StringArray{"Both", "Amp A", "Amp B"}, 0));
+    }
+
     return {params.begin(), params.end()};
 }
 
@@ -1351,6 +1374,31 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         mChain.predelay.setBypassed(apvts.getRawParameterValue("predelayOn")->load() < 0.5f);
         mChain.setPredelayPreDrive((int)apvts.getRawParameterValue("predelayPos")->load() == 1);
         mChain.setPredelayStereo(apvts.getRawParameterValue("predelayStereo")->load() >= 0.5f);
+
+    // --- Unified Pedalboard configuration (opt-in). When enabled, place the engines
+    // on the board per the pbSlot* params (deduped so one engine can never be run
+    // twice in a buffer -> no double state-advance) and switch RigChain to the board
+    // path. When disabled, the legacy fixed pre-amp path runs (bit-exact). The engine
+    // param setters above still run either way, so each pedal is fully configured;
+    // the board only decides ORDER + LANE. ---
+    {
+        const bool pbOn = apvts.getRawParameterValue("pbEnabled")->load() >= 0.5f;
+        if (pbOn)
+        {
+            mChain.clearPedalboard();
+            bool placed[6] = {false, false, false, false, false, false}; // by PbEngine id
+            for (int i = 0; i < 8; ++i)
+            {
+                const juce::String pid = "pbSlot" + juce::String(i);
+                const int eng  = (int)apvts.getRawParameterValue(pid + "Engine")->load();
+                const int lane = (int)apvts.getRawParameterValue(pid + "Lane")->load();
+                if (eng <= 0 || eng > 5 || placed[eng]) continue; // Empty or duplicate engine
+                placed[eng] = true;
+                mChain.setPedalboardSlot(i, eng, lane);
+            }
+        }
+        mChain.setUsePedalboard(pbOn);
+    }
     }
 
     // Graphic EQ band gains (Rig A; zero latency; chain bypass via eqOn is safe).

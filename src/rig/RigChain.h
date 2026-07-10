@@ -33,6 +33,7 @@
 #include "DriveBlock.h"
 #include "PreModBlock.h"
 #include "PreDelayBlock.h"
+#include "PedalboardBlock.h" // unified reorderable front-of-amp board (routes the engines above)
 #include "AmpBlock.h"
 #include "EqBlock.h"
 #include "CabBlock.h"
@@ -103,9 +104,23 @@ public:
     // ---- mixer controls (message thread; cheap scalars) ----
     void setMode(int mode) { mMode = juce::jlimit(0, 2, mode); }
     int mode() const { return mMode; }
-    // Drive-send routing (SendA / SendB / SendBoth). Default Both.
+    // Drive-send routing (SendA / SendB / SendBoth). Default Both. (Legacy path.)
     void setDriveSend(int s) { mDriveSend = juce::jlimit(0, 2, s); }
     int driveSend() const { return mDriveSend; }
+
+    // ---- unified Pedalboard (opt-in; default OFF keeps the legacy pre-amp path) ----
+    // Engine ids for the board's non-owning slots (the board routes the SAME engine
+    // instances that live on this RigChain, so it can't change any voicing).
+    enum PbEngine { PbNone = 0, PbEnv = 1, PbComp = 2, PbDrive = 3, PbPreMod = 4, PbPreDelay = 5 };
+    void setUsePedalboard(bool b) { mUsePedalboard = b; }
+    bool usePedalboard() const { return mUsePedalboard; }
+    void clearPedalboard() { mBoard.clear(); }
+    // Place an engine (by id) at board position `pos` on a lane (Trunk/A/B). Called
+    // from the message thread when the pedalboard is (re)configured from params.
+    void setPedalboardSlot(int pos, int engineId, int lane)
+    {
+        mBoard.set(pos, engineFor(engineId), lane);
+    }
     void setLevelA(float linear) { mLevelA = linear; }
     void setLevelB(float linear) { mLevelB = linear; }
     void setPanA(float pan) { mPanA = juce::jlimit(-1.0f, 1.0f, pan); }
@@ -308,6 +323,26 @@ public:
         // ---- shared mono pre ----
         if (!gate.isBypassed())
             { gate.process(ch0, numSamples);  heal(gate, ch0, numSamples); }
+
+        // ---- unified PEDALBOARD path (opt-in; default OFF -> legacy branch runs
+        //      verbatim, byte-exact). When enabled, the board runs the same env/comp/
+        //      drive/premod/predelay engines with per-pedal ORDER + LANE routing
+        //      (Trunk -> both amps; Lane A/B -> one amp), replacing the fixed pre-amp
+        //      sequence + driveSend clean-tap of the legacy branch below. Gate stays
+        //      ahead of the board. vA/vB/runA/runB are hoisted here so both the board
+        //      path and the legacy split (and the per-rig voice section further down)
+        //      share them. ----
+        float *vA = mVoiceA.data();
+        float *vB = mVoiceB.data();
+        const bool runB = (mMode != SoloA);
+        const bool runA = (mMode != SoloB);
+        if (mUsePedalboard)
+        {
+            mBoard.process(ch0, vA, vB, numSamples, runA, runB,
+                           [this](MonoBlock &b, float *buf, int n) { heal(b, buf, n); });
+        }
+        else
+        {
         // Envelope filter / auto-wah: runs on the globally-CALIBRATED signal (the
         // input-cal scale above already trimmed the input to the pre-amp reference,
         // so the level-dependent sweep is anchored to the user's dBu calibration,
@@ -376,10 +411,7 @@ public:
         // (ch0) or the clean pre-drive tap. Both -> both driven (default, bit-
         // exact). SendA -> only A driven, B clean; SendB -> only B driven, A clean.
         // When needCleanTap is false (send=Both or drive bypassed) both are driven.
-        float *vA = mVoiceA.data();
-        float *vB = mVoiceB.data();
-        const bool runB = (mMode != SoloA);
-        const bool runA = (mMode != SoloB);
+        // (vA/vB/runA/runB are hoisted above the pedalboard branch.)
         const bool aDriven = !needCleanTap || (mDriveSend != SendB);
         const bool bDriven = !needCleanTap || (mDriveSend != SendA);
         std::memcpy(vA, aDriven ? ch0 : clean, (size_t)numSamples * sizeof(float));
@@ -406,6 +438,7 @@ public:
             heal(predelay, vA, numSamples);
             heal(predelay, vB, numSamples);
         }
+        } // end legacy pre-amp section (else !mUsePedalboard)
         double compA = 0.0, compB = 0.0;
         if (mMode == Dual)
         {
@@ -462,10 +495,15 @@ public:
     // (max of the two voices, INCLUDING their align delays) + shared post.
     double latencySamples() const
     {
+        // Pre-amp PDC: gate is always ahead of the pedals; the pedal engines' latency
+        // comes from the board when the unified path is on, else the fixed sum. (All of
+        // today's front pedals report 0, so both branches agree numerically.)
         const double pre = gate.latencySamples()
-                         + envfilter.latencySamples() + comp.latencySamples()
-                         + drive.latencySamples() + premod.latencySamples()
-                         + predelay.latencySamples();
+                         + (mUsePedalboard
+                                ? mBoard.latencySamples()
+                                : envfilter.latencySamples() + comp.latencySamples()
+                                      + drive.latencySamples() + premod.latencySamples()
+                                      + predelay.latencySamples());
         const double LA = amp.latencySamples() + eq.latencySamples() + cab.latencySamples();
         const double LB = ampB.latencySamples() + eqB.latencySamples() + cabB.latencySamples();
         double voice = LA + mAlignA;
@@ -827,7 +865,23 @@ private:
     std::array<StereoBlock *, 3> stereoBlocks() { return {&mod, &delay, &reverb}; }
     std::array<const StereoBlock *, 3> stereoBlocks() const { return {&mod, &delay, &reverb}; }
 
+    // Map a PbEngine id to the owning engine instance (nullptr = empty slot).
+    MonoBlock *engineFor(int id)
+    {
+        switch (id)
+        {
+        case PbEnv:      return &envfilter;
+        case PbComp:     return &comp;
+        case PbDrive:    return &drive;
+        case PbPreMod:   return &premod;
+        case PbPreDelay: return &predelay;
+        default:         return nullptr;
+        }
+    }
+
     int mMode = SoloA;
+    bool mUsePedalboard = false; // opt-in unified board; false = legacy pre-amp path (bit-exact)
+    PedalboardBlock mBoard;      // non-owning router over the engines above
     int mDriveSend = SendBoth; // which amp(s) the drive rack feeds (default both)
     float mLevelA = 1.0f, mLevelB = 1.0f;
     float mPanA = -1.0f, mPanB = 1.0f; // default hard L / hard R for Dual
