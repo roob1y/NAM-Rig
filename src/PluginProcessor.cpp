@@ -922,6 +922,10 @@ void NamRigProcessor::handleAsyncUpdate()
                         (int)apvts.getRawParameterValue("mod" + juce::String(s + 1) + "Type")->load());
     if (mask & (1 << nam_rig::ModBlock::kSlots))
         resetPrefix("post", (int)apvts.getRawParameterValue("postType")->load());
+
+    // Drain any latency report stashed by the audio thread (or held back by the
+    // Ableton first-load deferral). Message thread — safe to call setLatencySamples.
+    flushPendingLatency();
 }
 
 float NamRigProcessor::calibrationGainDb(int rig) const
@@ -1076,7 +1080,44 @@ void NamRigProcessor::updateLatency()
     mChain.ampB.setRequestedFactor(requestedFactorNow(1));
     const bool lowLat = apvts.getRawParameterValue("lowLatency")->load() >= 0.5f;
     mChain.gate.setLookaheadMs(lowLat ? 0.0f : apvts.getRawParameterValue("gateLook")->load());
-    setLatencySamples((int)std::round(mChain.latencySamples()));
+    // We're on the message thread here, but still go through the stash + guarded
+    // flush so the Ableton first-load deferral applies uniformly.
+    mPendingLatencySamples.store((int)std::round(mChain.latencySamples()));
+    flushPendingLatency();
+}
+
+// Audio-thread-safe latency update: the DSP-side config (amp factor, gate lookahead,
+// rig mode/align) has already been applied inline in processBlock, so here we only
+// stash the freshly-computed target (a coherent snapshot) and hand the host
+// notification to the message thread. Never touches setLatencySamples() directly.
+void NamRigProcessor::requestLatencyReport()
+{
+    if (!mChain.isPrepared())
+        return;
+    mPendingLatencySamples.store((int)std::round(mChain.latencySamples()));
+    triggerAsyncUpdate();
+}
+
+// Message thread only (AsyncUpdater / updateLatency). Atomically takes the stashed
+// target and reports it to the host. Guards:
+//   * exchange(-1) so a report is consumed exactly once (no lost/duplicated updates);
+//   * skip setLatencySamples() when unchanged — each call triggers a restartComponent(),
+//     so redundant calls cause needless engine restarts;
+//   * defer the first report(s) under Ableton Live, which can crash on a VST3 latency
+//     change during project load — put the value back and let processBlock re-trigger
+//     once enough blocks have flowed.
+void NamRigProcessor::flushPendingLatency()
+{
+    const int s = mPendingLatencySamples.exchange(-1);
+    if (s < 0)
+        return;
+    if (mHost.isAbletonLive() && mBlocksProcessed.load() < kAbletonLatencyDeferBlocks)
+    {
+        mPendingLatencySamples.store(s); // re-arm; processBlock re-triggers at threshold
+        return;
+    }
+    if (s != getLatencySamples())
+        setLatencySamples(s);
 }
 
 void NamRigProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
@@ -1085,6 +1126,7 @@ void NamRigProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     mChain.prepare(sampleRate, samplesPerBlock);
     mTuner.prepare(sampleRate);
     mTunerMono.assign((size_t)juce::jmax(1, samplesPerBlock), 0.0f);
+    mBlocksProcessed.store(0); // re-arm the Ableton first-load latency deferral
     updateLatency();
 }
 
@@ -1097,6 +1139,13 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     const int numChannels = buffer.getNumChannels();
     if (numSamples == 0)
         return;
+
+    // Ableton first-load latency deferral: when we cross the block threshold with a
+    // report still held back by reportLatencyNow(), kick the message thread to flush
+    // it. Cheap atomic bump on every block; the trigger fires at most once.
+    if (mBlocksProcessed.fetch_add(1) + 1 == kAbletonLatencyDeferBlocks
+        && mPendingLatencySamples.load() >= 0)
+        triggerAsyncUpdate();
 
     // User input gain plus dBu calibration correction (0 dB when disabled/absent).
     const float inGain = juce::Decibels::decibelsToGain(
@@ -1138,7 +1187,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     {
         mLastFactorA = fA;
         mLastFactorB = fB;
-        updateLatency();
+        requestLatencyReport(); // factor already applied above; report PDC off-thread
     }
 
     // Gate parameters (atomics; cheap to push every block). Lookahead changes
@@ -1153,7 +1202,8 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     if (gateLookMs != mLastGateLookMs)
     {
         mLastGateLookMs = gateLookMs;
-        updateLatency(); // sets the block's lookahead + re-reports PDC
+        mChain.gate.setLookaheadMs(gateLookMs); // apply lookahead on the audio thread
+        requestLatencyReport();                 // re-report PDC off-thread (message)
     }
 
     // gateOn does NOT chain-bypass: the lookahead delay must keep running or
@@ -1396,7 +1446,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     {
         mLastRigMode = rigMode;
         mLastRigAlign = rigAlign;
-        updateLatency();
+        requestLatencyReport(); // mode/align already applied above; report off-thread
     }
 
     // Stereo section (all zero-latency; plain chain bypass is safe).

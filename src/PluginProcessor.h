@@ -235,7 +235,27 @@ private:
 
     std::atomic<bool> mSuppressTypeReset{false};
     std::atomic<int> mPendingTypeReset{0}; // bitmask of slots awaiting a knob reset
-    void updateLatency();
+
+    // --- Latency reporting (host compatibility) ---
+    // setLatencySamples() must NEVER be called from the audio thread: several hosts
+    // (Ableton Live, Studio One, Cubase/Nuendo, Bitwig) turn a latency change into a
+    // synchronous restartComponent() and choke on it mid-callback (dropouts, disabled
+    // automation, and — historically — crashes on VST3 project load). So:
+    //   * updateLatency() applies the DSP-side config (amp factor, gate lookahead) and
+    //     reports the new latency via reportLatencyNow() — MESSAGE THREAD callers only
+    //     (prepareToPlay, model/IR load, setNonRealtime, auto-align, match-levels).
+    //   * From processBlock (audio thread) we call requestLatencyReport(), which stashes
+    //     the target and triggerAsyncUpdate()s so the message thread flushes it.
+    void updateLatency();        // message thread: apply config + report
+    void requestLatencyReport(); // audio thread: stash target + trigger async
+    void flushPendingLatency();  // message thread: drain + setLatencySamples (guarded)
+    juce::PluginHostType mHost;         // host detection for per-DAW workarounds
+    std::atomic<int> mPendingLatencySamples{-1}; // <0 = nothing pending
+    std::atomic<int> mBlocksProcessed{0};        // reset each prepareToPlay
+    // Ableton VST3 crashes if latency is reported too early on project load; hold the
+    // first report until this many blocks have flowed. Other hosts report immediately.
+    static constexpr int kAbletonLatencyDeferBlocks = 16;
+
     int requestedFactorNow(int rig) const; // per-rig oversample param + offline bump
 
     // Per-rig block access (rig 0 = A, 1 = B).
