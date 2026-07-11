@@ -74,7 +74,7 @@ public:
         g.setFont(fonts::archivo(juce::jmin(10.0f, (float)mCaptionH - 2.0f), fonts::SemiBold, 0.08f));
         g.drawText(mCaption, mCaptionRect, juce::Justification::centred);
 
-        if (mShowValue)
+        if (mShowValue && (!mValueOnDrag || mDragging))
         {
             juce::String txt = mSlider.getTextFromValue(mSlider.getValue());
             if (!mRotationReadout && mUnit.isNotEmpty()) // pedal-style 0..10 knobs stay unitless
@@ -147,6 +147,11 @@ public:
     // Drop the numeric readout (the rotary then fills the freed space).
     void hideValue() { mShowValue = false; resized(); repaint(); }
 
+    // Pedal-face mode: the readout appears only WHILE the knob is being turned
+    // (real pedals don't display numbers). Layout is unchanged — the value row
+    // stays reserved so the dial doesn't shift when the value blinks in.
+    void setValueOnDragOnly(bool b = true) { mValueOnDrag = b; repaint(); }
+
     // Read the value box as a 0..top reading of the knob's ROTATION (pedal-style,
     // "everything goes to 10") instead of raw parameter units. Display only.
     void setRotationReadout(double top = 10.0)
@@ -206,6 +211,7 @@ private:
     juce::String mValueMenuHeader; // optional title for the click-to-pick menu
     int mCaptionH = 15, mValueH = 16;
     bool mShowValue = true, mDragging = false, mRotationReadout = false, mReadoutFn = false;
+    bool mValueOnDrag = false; // pedal-face knobs: readout shown only while turning
 };
 
 // Horizontal knob in a rounded bordered box: knob on the left, caption + value
@@ -1528,10 +1534,263 @@ private:
     juce::Rectangle<int> mAnchor, mCatPanel, mModelPanel;
 };
 
-// One drive "stomp" in the pedalboard. Top-to-bottom: Type (category), a model
-// selector (when the category has several models), the model's descriptive
-// subtitle, the authentic knobs, the model's mode switch (treble-boost Range),
-// then the footswitch. Only the controls that pedal actually has are shown.
+// In-canvas dropdown for a StompPill — a real Component, NOT an OS PopupMenu
+// window, so it scales with the plugin. Drawn as a CONTINUATION of the engraved
+// switch slot (same fill, same lips, same width, square corners on the joining
+// edge) and tucked 2px under the switch so the two touch and read as one piece.
+// The selection dot is the pedal's accent. Async dismissal mirrors
+// DrivePickerOverlay (the proven recipe).
+class PillMenuOverlay : public juce::Component
+{
+public:
+    std::function<void(int)> onPick;
+    std::function<void()> onDismiss;
+
+    PillMenuOverlay(juce::StringArray items, int current, juce::Colour accent)
+        : mItems(std::move(items)), mCurrent(current), mAccent(accent)
+    {
+        setWantsKeyboardFocus(true);
+    }
+
+    // Pill rect expressed in THIS overlay's coordinate space.
+    void setAnchor(juce::Rectangle<int> a)
+    {
+        mAnchor = a;
+        layout();
+        repaint();
+    }
+    void resized() override { layout(); }
+    void mouseMove(const juce::MouseEvent &e) override { setHover(rowAt(e.getPosition())); }
+    void mouseDrag(const juce::MouseEvent &e) override { setHover(rowAt(e.getPosition())); }
+
+    void mouseDown(const juce::MouseEvent &e) override
+    {
+        const int r = rowAt(e.getPosition());
+        if (r >= 0)
+        {
+            if (onPick) onPick(r);
+            dismiss();
+            return;
+        }
+        if (!mPanel.contains(e.getPosition())) dismiss(); // click-away closes
+    }
+    bool keyPressed(const juce::KeyPress &k) override
+    {
+        if (k == juce::KeyPress::escapeKey) { dismiss(); return true; }
+        return false;
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        // Continuation of the engraved slot: same fill + lips as StompPill, square
+        // corners on the edge that touches the switch, no accent border (the accent
+        // lives only in the selection dot — exactly like the switch itself).
+        auto b = mPanel.toFloat().reduced(0.5f);
+        const float rad = 6.0f;
+        juce::Path body;
+        body.addRoundedRectangle(b.getX(), b.getY(), b.getWidth(), b.getHeight(), rad, rad,
+                                 mAbove, mAbove,    // rounded on top only when it opens upward
+                                 !mAbove, !mAbove); // rounded on the bottom when it hangs below
+        g.setColour(juce::Colour(0xff14171d));
+        g.fillPath(body);
+        g.setColour(juce::Colours::black.withAlpha(0.5f));
+        g.strokePath(body, juce::PathStrokeType(1.0f));
+        g.setColour(juce::Colours::white.withAlpha(0.05f));
+        g.drawLine(b.getX() + 5.0f, b.getBottom(), b.getRight() - 5.0f, b.getBottom(), 1.0f);
+
+        for (int i = 0; i < mItems.size(); ++i)
+        {
+            auto r = rowRect(i);
+            if (i == mHover)
+            {
+                g.setColour(colors::tileSel);
+                g.fillRoundedRectangle(r.toFloat().reduced(2.0f, 1.0f), 5.0f);
+            }
+            auto tx = r.reduced(9, 0);
+            if (i == mCurrent)
+            {
+                g.setColour(mAccent);
+                g.fillEllipse((float)tx.getX(), (float)r.getCentreY() - 2.25f, 4.5f, 4.5f);
+            }
+            g.setColour(i == mCurrent ? colors::textBright : colors::text2);
+            g.setFont(fonts::mono(9.5f, i == mCurrent ? fonts::SemiBold : fonts::Medium));
+            g.drawText(mItems[i], tx.withTrimmedLeft(11), juce::Justification::centredLeft);
+        }
+    }
+
+private:
+    static constexpr int kRowH = 22, kPad = 4;
+
+    void layout()
+    {
+        int w = juce::jmax(mAnchor.getWidth(), 64); // same width as the switch (wider only if an item needs it)
+        for (auto &it : mItems)
+            w = juce::jmax(w, (int)std::ceil(juce::GlyphArrangement::getStringWidth(
+                                  fonts::mono(9.5f, fonts::SemiBold), it)) + 36);
+        const int h = kPad * 2 + mItems.size() * kRowH;
+        // tucked 2px UNDER the switch so they touch; flips above when out of room
+        int x = mAnchor.getX();
+        int y = mAnchor.getBottom() - 2;
+        mAbove = false;
+        if (auto *par = getParentComponent())
+        {
+            if (y + h > par->getHeight() - 4)
+            {
+                mAbove = true;
+                y = mAnchor.getY() - h + 2;
+            }
+            x = juce::jlimit(4, juce::jmax(4, par->getWidth() - w - 4), x);
+            y = juce::jlimit(4, juce::jmax(4, par->getHeight() - h - 4), y);
+        }
+        mPanel = {x, y, w, h};
+    }
+    juce::Rectangle<int> rowRect(int i) const
+    {
+        return {mPanel.getX() + 4, mPanel.getY() + kPad + i * kRowH, mPanel.getWidth() - 8, kRowH};
+    }
+    int rowAt(juce::Point<int> p) const
+    {
+        for (int i = 0; i < mItems.size(); ++i)
+            if (rowRect(i).contains(p)) return i;
+        return -1;
+    }
+    void setHover(int h)
+    {
+        if (h != mHover) { mHover = h; repaint(); }
+    }
+    void dismiss()
+    {
+        if (mDismissing) return;
+        mDismissing = true;
+        juce::Component::SafePointer<PillMenuOverlay> self(this);
+        juce::MessageManager::callAsync([self]() mutable {
+            if (self == nullptr) return;
+            auto cb = self->onDismiss; // local copy: invoking it deletes the overlay
+            if (cb) cb();
+        });
+    }
+
+    juce::StringArray mItems;
+    int mCurrent, mHover = -1;
+    juce::Colour mAccent;
+    bool mDismissing = false, mAbove = false;
+    juce::Rectangle<int> mAnchor, mPanel;
+};
+
+// A compact pedal-face value pill: caption left, current choice right. Two-item
+// pills CLICK-CYCLE (hardware-toggle feel); longer lists open the themed in-canvas
+// dropdown above. Param-authoritative — reads the parameter every paint; the owning
+// pedal repaints it on its refresh tick. Shared by the pedalboard StompPedal faces
+// (SYNC / Q-Tron toggles / LFO) and DrivePedal's per-model switches (Range / Gate /
+// hump), so every switch on a pedal reads as part of the stompbox, not a UI button.
+class StompPill : public juce::Component
+{
+public:
+    StompPill(juce::AudioProcessorValueTreeState &apvts, juce::String paramId,
+              juce::String caption, juce::StringArray items)
+        : mApvts(apvts), mParam(std::move(paramId)), mCaption(std::move(caption)),
+          mItems(std::move(items)) {}
+
+    void setAccent(juce::Colour c)
+    {
+        if (mAccent != c) { mAccent = c; repaint(); }
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        // Engraved switch-window, not a button: a recessed slot in the enclosure
+        // (dark well + engraved lips), caption silkscreened at the left, and on
+        // 2-state switches a pair of position dots — the LIT dot shows which side
+        // the switch sits on. The pedal accent appears only as that lit dot.
+        auto r = getLocalBounds().toFloat().reduced(0.5f);
+        g.setColour(juce::Colour(0xff14171d));
+        g.fillRect(r);
+        g.setColour(juce::Colours::black.withAlpha(0.5f)); // engraved upper lip
+        g.drawRect(r, 1.0f);
+        g.setColour(juce::Colours::white.withAlpha(0.05f)); // light lower lip
+        g.drawLine(r.getX() + 5.0f, r.getBottom(), r.getRight() - 5.0f, r.getBottom(), 1.0f);
+
+        auto in = getLocalBounds().reduced(8, 0);
+        g.setColour(colors::caption);
+        g.setFont(fonts::archivo(7.5f, fonts::SemiBold, 0.08f));
+        g.drawText(mCaption, in, juce::Justification::centredLeft);
+
+        const int c = cur();
+        g.setFont(fonts::mono(9.0f, fonts::Medium));
+        if (mItems.size() == 2)
+        {
+            auto dots = in.removeFromRight(13);
+            const float dy = (float)dots.getCentreY();
+            g.setColour(c == 0 ? mAccent : juce::Colour(0xff3a3f47));
+            g.fillEllipse((float)dots.getX(), dy - 2.0f, 4.0f, 4.0f);
+            g.setColour(c == 1 ? mAccent : juce::Colour(0xff3a3f47));
+            g.fillEllipse((float)dots.getX() + 7.0f, dy - 2.0f, 4.0f, 4.0f);
+            in.removeFromRight(5);
+            g.setColour(colors::text);
+            g.drawText(mItems[c], in, juce::Justification::centredRight);
+        }
+        else
+        {
+            g.setColour(colors::text);
+            g.drawText(mItems[c] + juce::String::fromUTF8(" \xE2\x96\xBE"), in,
+                       juce::Justification::centredRight);
+        }
+    }
+
+    void mouseUp(const juce::MouseEvent &e) override
+    {
+        if (!getLocalBounds().contains(e.getPosition())) return;
+        if (mItems.size() == 2) { write(cur() == 0 ? 1 : 0); repaint(); return; }
+        if (mMenu != nullptr) { mMenu.reset(); return; } // click again = close
+
+        // Host the themed dropdown on the owning BlockPanel (inside the scaled
+        // canvas, so it zooms with the plugin; big enough that nothing clips).
+        juce::Component *host = findParentComponentOfClass<BlockPanel>();
+        if (host == nullptr) // safety: climb to the root
+            for (auto *c = getParentComponent(); c != nullptr; c = c->getParentComponent())
+                host = c;
+        if (host == nullptr) return;
+
+        auto ov = std::make_unique<PillMenuOverlay>(mItems, cur(), mAccent);
+        auto *raw = ov.get();
+        juce::Component::SafePointer<StompPill> sp(this);
+        raw->onPick = [sp](int i) { if (sp != nullptr) sp->write(i); };
+        raw->onDismiss = [sp] { if (sp != nullptr) sp->mMenu.reset(); };
+        mMenu = std::move(ov);
+        host->addAndMakeVisible(*raw);
+        raw->setBounds(host->getLocalBounds());
+        raw->setAnchor(host->getLocalArea(this, getLocalBounds()));
+        raw->grabKeyboardFocus();
+    }
+
+private:
+    int cur() const
+    {
+        if (auto *v = mApvts.getRawParameterValue(mParam))
+            return juce::jlimit(0, mItems.size() - 1, (int)v->load());
+        return 0;
+    }
+    void write(int idx)
+    {
+        if (auto *pr = mApvts.getParameter(mParam))
+        {
+            pr->beginChangeGesture();
+            pr->setValueNotifyingHost(pr->convertTo0to1((float)juce::jmax(0, idx)));
+            pr->endChangeGesture();
+        }
+    }
+
+    juce::AudioProcessorValueTreeState &mApvts;
+    juce::String mParam, mCaption;
+    juce::StringArray mItems;
+    juce::Colour mAccent{colors::accent};
+    std::unique_ptr<PillMenuOverlay> mMenu; // the themed in-canvas dropdown
+};
+
+// One drive "stomp" in the pedalboard. Real-pedal face, top-to-bottom: kind header
+// + jewel, the authentic knobs, the model's full-size silkscreen art, the model
+// nameplate, the per-model toggle pill (Range / Gate / hump), then the footswitch.
+// Only the controls that pedal actually has are shown.
 class DrivePedal : public juce::Component
 {
 public:
@@ -1557,22 +1816,19 @@ public:
         mModel.onChange = [this] { onModelPicked(); };
         addChildComponent(mModel);
 
-        // Boost-only tonal Range (Treble/Mid/Full), shown when the model has one.
-        mRangeSeg = std::make_unique<SegmentedControl>(apvts, p + "bRange",
-                                                       juce::StringArray{"Treble", "Mid", "Full"});
-        addChildComponent(*mRangeSeg);
-
-        // Fuzz-only bias-starved Gate (Off/Gate), shown when the model has a gate.
-        mGateSeg = std::make_unique<SegmentedControl>(apvts, p + "fGate",
-                                                      juce::StringArray{"Off", "Gate"});
-        addChildComponent(*mGateSeg);
-
-        // Distortion-only RAT hump-migration range (Tight/Full), shown for Black Rodent.
-        // Tight = the hump stays a mid honk when cranked; Full = it collapses darker
-        // (the authentic LM308 GBW ~300 Hz collapse). Default Tight.
-        mMigrateSeg = std::make_unique<SegmentedControl>(apvts, p + "dMigrate",
-                                                         juce::StringArray{"Tight", "Full"});
-        addChildComponent(*mMigrateSeg);
+        // Per-model toggles as pedal-face PILLS (part of the stompbox, not UI buttons);
+        // at most one is visible per model (configure()), in the band under the
+        // nameplate. Boost tonal Range; fuzz bias-starved Gate; RAT hump-migration
+        // range (Tight = mid honk when cranked, Full = the authentic LM308 collapse).
+        mRangePill = std::make_unique<StompPill>(apvts, p + "bRange", "RANGE",
+                                                 juce::StringArray{"Treble", "Mid", "Full"});
+        addChildComponent(*mRangePill);
+        mGatePill = std::make_unique<StompPill>(apvts, p + "fGate", "GATE",
+                                                juce::StringArray{"Off", "Gate"});
+        addChildComponent(*mGatePill);
+        mMigratePill = std::make_unique<StompPill>(apvts, p + "dMigrate", "VOICE",
+                                                   juce::StringArray{"Tight", "Full"});
+        addChildComponent(*mMigratePill);
 
         mOnAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             apvts, p + "On", mOn);
@@ -1586,6 +1842,7 @@ public:
         {
             k->setRotationReadout(10.0);
             k->setCaptionHeight(13);
+            k->setValueOnDragOnly(); // real pedals don't display numbers at rest
             addAndMakeVisible(*k);
         }
 
@@ -1626,9 +1883,11 @@ public:
 
         // Enclosure: neutral base + tint wash, pre-composited into one opaque
         // gradient so the whole fill is dithered in a single pass (a separate
-        // translucent wash on top would re-introduce 8-bit banding).
-        const juce::Colour encTop = juce::Colour(0xff262b33).overlaidWith(tint.withAlpha(0.20f));
-        const juce::Colour encBot = juce::Colour(0xff15181d).overlaidWith(tint.withAlpha(0.05f));
+        // translucent wash on top would re-introduce 8-bit banding). The wash is
+        // STRONG — the body takes the model's colour (a Green Drive is green),
+        // like real enclosures, so pedals read by colour at deck zoom.
+        const juce::Colour encTop = juce::Colour(0xff262b33).overlaidWith(tint.withAlpha(0.40f));
+        const juce::Colour encBot = juce::Colour(0xff15181d).overlaidWith(tint.withAlpha(0.12f));
         juce::ColourGradient base(encTop, 0.0f, b.getY(),
                                   encBot, 0.0f, b.getBottom(), false);
         dither::fillRoundedRectangle(g, base, b, 16.0f);
@@ -1647,114 +1906,85 @@ public:
         g.setColour(mActive ? pair.led : juce::Colour(0xff2a2f37));
         g.fillEllipse(jewel);
 
-        // Silkscreen art glyph (the Fuzz Gate toggle now lives up in the knob row,
-        // so the art always shows for an active pedal type).
-        if (mLastType != 0)
-            paintDriveGlyph(g, mLastType, mLastModel, mGlyphRect.toFloat(),
-                            mActive ? pair.led.withAlpha(0.85f) : juce::Colour(0xff5a616b));
+        // Silkscreen art, BIG and bright on the free face below the knobs
+        // (real-pedal layout — knobs top, art middle, footswitch base).
+        if (mLastType != 0 && mArtRect.getHeight() >= 40)
+            paintDriveGlyph(g, mLastType, mLastModel,
+                            mArtRect.toFloat().reduced(mArtRect.getWidth() * 0.16f, 0.0f),
+                            mActive ? pair.led.withAlpha(0.95f) : juce::Colour(0xff5a616b));
 
-        // Model-name pill + sub.
-        auto pill = mPillRect.toFloat();
-        g.setColour(mActive ? juce::Colours::white.withAlpha(0.06f) : juce::Colour(0xff22262d));
-        g.fillRoundedRectangle(pill, 12.0f);
-        g.setColour(tint.withAlpha(0.45f));
-        g.drawRoundedRectangle(pill, 12.0f, 1.0f);
-        g.setColour(colors::textBright);
-        g.setFont(fonts::archivo(23.0f, fonts::Bold));
-        g.drawText(mModelStr, pill, juce::Justification::centred);
-        g.setColour(juce::Colour(0xff7a808a));
-        g.setFont(fonts::mono(11.5f));
-        g.drawText(mSubStr, mSubRect, juce::Justification::centred);
-    }
+        // Model name PRINTED on the enclosure (silkscreen, no pill — pills mean
+        // controls now). Not clickable: models come from the palette rack.
+        g.setColour(mActive ? colors::textBright : colors::textDim);
+        g.setFont(fonts::archivo(19.0f, fonts::Bold));
+        g.drawText(mModelStr, mPillRect, juce::Justification::centred);
 
-    void mouseUp(const juce::MouseEvent &e) override
-    {
-        if (mPillRect.contains(e.getPosition()))
-            showMenu();
+        // stomp-plate rule: a hairline seam setting the footswitch zone apart
+        if (mPlateY > 0)
+        {
+            g.setColour(juce::Colours::black.withAlpha(0.35f));
+            g.fillRect(14, mPlateY, getWidth() - 28, 1);
+            g.setColour(juce::Colours::white.withAlpha(0.04f));
+            g.fillRect(14, mPlateY + 1, getWidth() - 28, 1);
+        }
     }
 
     void resized() override
     {
-        auto a = getLocalBounds().reduced(16, 18);
-        mHeaderRect = a.removeFromTop(16);
-        a.removeFromTop(14);
-        auto knobRow = a.removeFromTop(96);
+        // FIXED vertical rhythm, shared with the pedalboard's StompPedal faces: header /
+        // constant 172px knob+art zone / small nameplate pill / (empty) aux band /
+        // footswitch — so the pill and switch sit at the SAME y on every deck pedal and
+        // the watermark art has the same scale as the comp face (the reference look).
+        auto a = getLocalBounds().reduced(10, 8);
+        mHeaderRect = a.removeFromTop(15);
         a.removeFromTop(6);
-
-        auto fs = a.removeFromBottom(80);
-        mOn.setBounds(fs.withSizeKeepingCentre(120, 120)); // larger: room for the glow to disperse
-        a.removeFromBottom(4);
-
-        a.removeFromTop(8); // drop the model name down a touch
-        auto pillRow = a.removeFromTop(40);
-        const int pw = juce::jlimit(90, getWidth() - 24,
+        mZoneRect = a.removeFromTop(172);
+        a.removeFromTop(6);
+        auto pillRow = a.removeFromTop(28);
+        const int pw = juce::jlimit(80, pillRow.getWidth(),
             (int)std::ceil(juce::GlyphArrangement::getStringWidth(
-                fonts::archivo(23.0f, fonts::Bold), mModelStr.isEmpty() ? "Off" : mModelStr)) + 34);
-        mPillRect = pillRow.withSizeKeepingCentre(pw, 38);
-        a.removeFromTop(5);
-        mSubRect = a.removeFromTop(16);
+                fonts::archivo(19.0f, fonts::Bold), mModelStr.isEmpty() ? "Off" : mModelStr)) + 30);
+        mPillRect = pillRow.withSizeKeepingCentre(pw, 28);
+        a.removeFromTop(4);
+        auto auxBand = a.removeFromTop(26); // per-model toggle pill lives here
+        a.removeFromTop(8);                 // breathing room over the stomp plate
+        mPlateY = a.getY();                 // the seam line
+        // The WHOLE zone under the seam is the footswitch (stomp anywhere below the
+        // line to toggle) — and nothing above it, so the switch can't steal clicks
+        // from the toggle pill / knobs like an oversized centred button would.
+        mOn.setBounds(a.withTrimmedTop(3));
 
-        // Glyph centred vertically in the space left between the subtitle bottom
-        // and the footswitch top.
-        const int gh = juce::jlimit(40, 64, a.getHeight());
-        mGlyphRect = a.withSizeKeepingCentre(a.getWidth(), juce::jmin(gh, a.getHeight()))
-                         .translated(0, 14); // nudge down toward the footswitch
+        // Real-pedal face: knobs at the TOP of the zone, the model's full-size
+        // silkscreen art on the free face below them.
+        auto zone = mZoneRect;
+        auto knobRow = zone.removeFromTop(84);
+        zone.removeFromTop(4);
+        mArtRect = zone;
 
         LabeledKnob *ks[3] = {mDrive.get(), mTone.get(), mLevel.get()};
         int nVis = 0;
         for (auto *k : ks) if (k->isVisible()) ++nVis;
-        // A per-model 2-way toggle rides up in the knob row as a trailing column
-        // (instead of sitting down in the silkscreen area), so the art still shows:
-        // Round Fuzz's Off/Gate, or Black Rodent's Tight/Full hump range. They belong
-        // to different categories, so at most one is ever visible.
-        SegmentedControl *extraSeg = mGateSeg->isVisible() ? mGateSeg.get()
-                                   : (mMigrateSeg->isVisible() ? mMigrateSeg.get() : nullptr);
-        const bool segInRow = (extraSeg != nullptr);
-        const int nSlots = nVis + (segInRow ? 1 : 0);
-        if (nSlots > 0)
+        if (nVis > 0)
         {
-            // Knob-only pedals keep their exact shipped spacing (2 knobs = 16, else 0);
-            // the extra toggle column introduces a gap at the added slot.
-            const int gap = segInRow ? 8 : ((nVis == 2) ? 16 : 0);
-            const int kw = juce::jmin(78, juce::jmax(1, (knobRow.getWidth() - gap * (nSlots - 1)) / nSlots));
-            auto grp = knobRow.withSizeKeepingCentre(kw * nSlots + gap * (nSlots - 1), knobRow.getHeight());
+            const int gap = (nVis == 2) ? 16 : 0;
+            const int kw = juce::jmin(70, juce::jmax(1, (knobRow.getWidth() - gap * (nVis - 1)) / nVis));
+            auto grp = knobRow.withSizeKeepingCentre(kw * nVis + gap * (nVis - 1), knobRow.getHeight());
             bool first = true;
             for (auto *k : ks)
                 if (k->isVisible())
                 {
                     if (!first) grp.removeFromLeft(gap);
-                    k->setBounds(grp.removeFromLeft(kw).reduced(3, 0));
+                    k->setBounds(grp.removeFromLeft(kw).reduced(2, 0));
                     first = false;
                 }
-            if (segInRow) // the toggle as a vertical 2-cell column, level with the knob dials
-            {
-                if (!first) grp.removeFromLeft(gap);
-                auto cell = grp.removeFromLeft(kw);
-                extraSeg->setVertical(true);
-                const int sw = juce::jlimit(36, extraSeg->idealCellWidth(), kw);
-                const int sh = 58;
-                int dialCy = knobRow.getCentreY();
-                for (auto *k : ks)
-                    if (k->isVisible())
-                        dialCy = k->getBounds().getY() + k->slider().getBounds().getCentreY();
-                extraSeg->setBounds(cell.getCentreX() - sw / 2, dialCy - sh / 2, sw, sh);
-            }
         }
 
-        // Range '65 (Boost): Treble/Mid/Full stacked vertically (equal size) to
-        // the right of the Boost knob, without moving the knob. Width clamps to
-        // the room available so it always fits inside the pedal.
-        if (mRangeSeg->isVisible())
-        {
-            mRangeSeg->setVertical(true);
-            auto kb = mDrive->getBounds();
-            const int dialCy = kb.getY() + mDrive->slider().getBounds().getCentreY(); // dial centre
-            const int avail = (getWidth() - 16) - (kb.getRight() + 10);
-            const int sw = juce::jlimit(36, mRangeSeg->idealCellWidth(), avail);
-            const int sh = 58;
-            mRangeSeg->setBounds(kb.getRight() + 10, dialCy - sh / 2, sw, sh);
-        }
-        // (Fuzz Off/Gate toggle is now positioned up in the knob row above.)
+        // The per-model toggle pill (at most one visible), centred in the aux band.
+        StompPill *pill = mRangePill->isVisible() ? mRangePill.get()
+                        : mGatePill->isVisible() ? mGatePill.get()
+                        : mMigratePill->isVisible() ? mMigratePill.get() : nullptr;
+        if (pill != nullptr)
+            pill->setBounds(auxBand.withSizeKeepingCentre(juce::jmin(116, auxBand.getWidth()), 20));
     }
 
 private:
@@ -1764,6 +1994,9 @@ private:
             (int)mApvts.getRawParameterValue(mPrefix + "bModel")->load());
     }
 
+    // RETIRED from the UI (2026-07-10): the nameplate pill no longer opens the picker —
+    // specific drive models are dragged in from the pedalboard palette instead. Kept
+    // (unused) in case a face-level model swap ever comes back.
     void showMenu()
     {
         using DB = nam_rig::DriveBlock;
@@ -1794,8 +2027,12 @@ private:
             if (!c->getTransform().isIdentity()) { host = c; break; }
         if (host == nullptr)
         {
-            host = getParentComponent();                       // DrivePanel
-            if (host != nullptr) host = host->getParentComponent(); // mContent
+            // 1:1 zoom: every transform is identity, so ANY high ancestor shares this
+            // coordinate space — climb to the root. (The old fixed two-hop grandparent
+            // fallback assumed the DrivePanel hierarchy; the pedalboard DECK hosts the
+            // pedal inside a Viewport, where the grandparent would clip the picker.)
+            for (auto *c = getParentComponent(); c != nullptr; c = c->getParentComponent())
+                host = c;
         }
         if (host == nullptr) return; // safety
 
@@ -1916,19 +2153,16 @@ private:
         mKindStr = names[juce::jlimit(0, 4, type)];
         mSubStr = type == 0 ? juce::String("select a pedal")
                             : juce::String(nam_rig::DriveBlock::modelSub(cat, model));
-        // Range/Gate segmented controls take the pedal's own accent (the LED colour),
-        // so e.g. Round Fuzz's Off/Gate is red, not the global amber. They grey
-        // themselves via setEnabled(false) when the pedal is bypassed.
-        const juce::Colour segAcc = colors::driveModelAccent(type, model).led;
-        mRangeSeg->setAccent(segAcc);
-        mRangeSeg->setVisible(nam_rig::DriveBlock::modelHasRange(cat, model));
-        mRangeSeg->setEnabled(mActive); // drains its colour when the pedal is bypassed
-        mGateSeg->setAccent(segAcc);
-        mGateSeg->setVisible(nam_rig::DriveBlock::modelHasGate(cat, model)); // Round Fuzz only
-        mGateSeg->setEnabled(mActive);
-        mMigrateSeg->setAccent(segAcc);
-        mMigrateSeg->setVisible(nam_rig::DriveBlock::modelHasMigrate(cat, model)); // Black Rodent (RAT) only
-        mMigrateSeg->setEnabled(mActive);
+        // Toggle pills take the pedal's own accent (the LED colour), draining to
+        // grey when the pedal is bypassed — like the knobs.
+        const juce::Colour pillAcc = mActive ? colors::driveModelAccent(type, model).led
+                                             : juce::Colour(0xff5a616b);
+        mRangePill->setAccent(pillAcc);
+        mRangePill->setVisible(nam_rig::DriveBlock::modelHasRange(cat, model));
+        mGatePill->setAccent(pillAcc);
+        mGatePill->setVisible(nam_rig::DriveBlock::modelHasGate(cat, model)); // Round Fuzz only
+        mMigratePill->setAccent(pillAcc);
+        mMigratePill->setVisible(nam_rig::DriveBlock::modelHasMigrate(cat, model)); // Black Rodent (RAT) only
         mOn.setAccent(colors::driveModelAccent(type, model).led); // footswitch glow tracks the LED (= accent, except Violet Ram = violet)
         mOn.setLit(mActive);
     }
@@ -1936,15 +2170,16 @@ private:
     juce::AudioProcessorValueTreeState &mApvts;
     juce::String mPrefix, mTypeParam; // param prefix ("drv{n}" or "pbS{i}") + the Off/Boost/OD/Dist/Fuzz selector id
     juce::ComboBox mType, mModel;
-    std::unique_ptr<SegmentedControl> mRangeSeg;
-    std::unique_ptr<SegmentedControl> mGateSeg; // fuzz bias-starved gate (Off/Gate)
-    std::unique_ptr<SegmentedControl> mMigrateSeg; // RAT hump-migration range (Tight/Full)
+    std::unique_ptr<StompPill> mRangePill;   // boost tonal range (Treble/Mid/Full)
+    std::unique_ptr<StompPill> mGatePill;    // fuzz bias-starved gate (Off/Gate)
+    std::unique_ptr<StompPill> mMigratePill; // RAT hump-migration range (Tight/Full)
     Footswitch mOn;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mTypeAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mOnAtt;
     std::unique_ptr<LabeledKnob> mDrive, mTone, mLevel;
     juce::String mModelStr{"Off"}, mKindStr{"DRIVE"}, mSubStr{"select a pedal"};
-    juce::Rectangle<int> mHeaderRect, mGlyphRect, mPillRect, mSubRect;
+    juce::Rectangle<int> mHeaderRect, mZoneRect, mArtRect, mPillRect;
+    int mPlateY = 0; // stomp-plate seam y (0 until first layout)
     int mLastType = -1, mLastModel = -1;
     bool mLastOn = true, mActive = false;
     std::unique_ptr<DrivePickerOverlay> mPicker; // custom drive picker (in-canvas, not a PopupMenu)

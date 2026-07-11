@@ -161,13 +161,28 @@ public:
     // are both active. See CalNorm::calibrationCompensationDb.
     float calibrationCompensationDb(int rig = 0) const;
 
-    // Live gain-reduction telemetry for the editor meters.
+    // Live gain-reduction telemetry for the editor meters. Env/comp readings come
+    // from the ACTIVE instances — the pedalboard pool's when the board path runs
+    // (always, since the UI redesign); the legacy members otherwise.
     float gateGainDb() const { return mChain.gate.currentGainDb(); }
     float gateInDb() const { return mChain.gate.currentInDb(); }
-    float envFilterCutoffHz() const { return mChain.envfilter.currentCutoffHz(); }
-    float compGrDb() const { return mChain.comp.grDb(); }
-    float compInDb() const { return mChain.comp.inPeakDb(); }
-    float compOutDb() const { return mChain.comp.outPeakDb(); }
+    float envFilterCutoffHz() const
+    {
+        return mChain.usePedalboard() ? mChain.board().env.currentCutoffHz()
+                                      : mChain.envfilter.currentCutoffHz();
+    }
+    float compGrDb() const
+    {
+        return mChain.usePedalboard() ? mChain.board().comp.grDb() : mChain.comp.grDb();
+    }
+    float compInDb() const
+    {
+        return mChain.usePedalboard() ? mChain.board().comp.inPeakDb() : mChain.comp.inPeakDb();
+    }
+    float compOutDb() const
+    {
+        return mChain.usePedalboard() ? mChain.board().comp.outPeakDb() : mChain.comp.outPeakDb();
+    }
     // Effective delay time in ms AFTER sync resolution (division x host BPM), so
     // the UI tap visualiser tracks tempo-synced spacing, not just the Free knob.
     float delayTimeMs() const { return mChain.delay.currentTimeMs(); }

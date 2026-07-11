@@ -70,6 +70,9 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
     // Live filter cutoff readout in the ENV FILTER header.
     mEnvFilterPanel.cutoffHzProvider = [this] { return mProc.envFilterCutoffHz(); };
 
+    // Live comp gain reduction for the pedalboard's compressor-face GR meter.
+    mPedalboardPanel.compGrDbProvider = [this] { return mProc.compGrDb(); };
+
     // Global input-calibration overlay, toggled from the Settings menu.
     mContent.addChildComponent(mCalPanel);
     mCalPanel.onClose = [this] { mCalPanel.setVisible(false); };

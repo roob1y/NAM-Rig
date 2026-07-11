@@ -219,14 +219,14 @@ public:
         // both cabs together (cabOn + cabOnB). Per-cab bypass lives in the panel.
         // Stage D: the unified PEDALBOARD replaced the old ENV/COMP/DRIVE/PREMOD/PREDLY
         // tiles and moved to the FRONT (right after GATE) — it is now the sole front-of-amp
-        // editor (a locked Env+Comp pair + a Drive/Mod/Delay pool). Its LED = pbEnabled. The
-        // legacy front params/DSP still exist (opt-in path, byte-exact) but are edited via
-        // the board now. Indices below are the NEW locked layout; branch/merge/LED wiring is
-        // reindexed to match: split from BOARD (tile 1); AMP A 2 / EQ A 3 / AMP B 4 / EQ B 5;
-        // merge into CAB 6.
+        // editor (a locked Env+Comp pair + a Drive/Mod/Delay pool). The board path is
+        // ALWAYS on (processor forces it; pbEnabled is retired), so the tile has no bypass
+        // LED — per-pedal footswitches live on the board itself. Indices below are the
+        // locked layout; branch/merge/LED wiring is reindexed to match: split from BOARD
+        // (tile 1); AMP A 2 / EQ A 3 / AMP B 4 / EQ B 5; merge into CAB 6.
         static const Slot slots[] = {
             {"GATE",   "gateOn",     0, Full},
-            {"BOARD",  "pbEnabled",  1, Full}, // front-of-amp pool (Env+Comp + Drive/Mod/Delay)
+            {"BOARD",  "",           1, Full}, // front-of-amp pool (always on -> no bypass LED)
             {"AMP A",  "",           2, Top},
             {"EQ A",   "eqOn",       3, Top},
             {"AMP B",  "",           2, Bot},

@@ -1422,14 +1422,15 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         mChain.setPredelayPreDrive((int)apvts.getRawParameterValue("predelayPos")->load() == 1);
         mChain.setPredelayStereo(apvts.getRawParameterValue("predelayStereo")->load() >= 0.5f);
 
-    // --- Unified Pedalboard configuration (opt-in, Stage B). When enabled, configure the
-    // board's OWNED pool: the locked Env+Comp front pair (from the SHARED comp*/envfilter*
-    // params, so one preset drives both the legacy and board copies identically) + each of
-    // the 8 free slots' Drive/Mod/Delay engines from their per-slot param union. The board
-    // decides ORDER + LANE + the active engine per slot. When disabled, the legacy fixed
-    // pre-amp path runs (byte-exact) and this block is skipped. ---
+    // --- Unified Pedalboard configuration. The board IS the front-of-amp section now
+    // (UI redesign 2026-07-10): the pool always runs — pbEnabled is ignored (kept
+    // registered only for automation-index stability) and the legacy fixed pre-amp path
+    // is dead code kept for reference. Configure the board's OWNED pool: the locked
+    // Env+Comp front pair (from the SHARED comp*/envfilter* params) + each of the 8 free
+    // slots' Drive/Mod/Delay engines from their per-slot param union. The board decides
+    // ORDER + LANE + the active engine per slot. ---
     {
-        const bool pbOn = apvts.getRawParameterValue("pbEnabled")->load() >= 0.5f;
+        const bool pbOn = true; // board is the permanent front section (pbEnabled retired)
         if (pbOn)
         {
             auto &bd = mChain.board();

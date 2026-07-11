@@ -1,323 +1,172 @@
 #pragma once
-// PedalboardPanel — the AmpliTube-style 3-zone editor for the front-of-amp POOL
-// (SCOPE_PEDALBOARD Stage C). Drives the pool params on rig/PedalboardBlock.h:
+// PedalboardPanel — the front-of-amp PEDALBOARD editor (full redesign, 2026-07-10).
+// Drives the Stage-B pool on rig/PedalboardBlock.h (pbS{i}* params + the shared
+// envfilter*/comp* pair). Three zones, AmpliTube-style:
 //
-//   DETAIL (top-left)  : the selected slot's controls, param-bound (knobs + selectors).
-//   PALETTE (right)    : categorised add — Drive / Mod / Delay -> a model menu.
-//   CHAIN (bottom)     : locked Env+Comp front pair + the free slots as nodes, with the
-//                        A/B split and lane-coloured cables. Click a node to select it.
+//   DECK (middle)   : EVERY placed pedal at once, left-to-right in processing order,
+//                     each drawn as the tall stomp enclosure (drives host the REAL
+//                     DrivePedal widget; Env/Comp/Mod/Delay get the matching
+//                     StompPedal face). All knobs live — edit in place, scroll when
+//                     the board outgrows the view.
+//   RACK (right)    : the pedal palette — category headers with the ACTUAL pedals
+//                     underneath (Green Drive, Gold Horse, DD-7, ...). DRAG one onto
+//                     the deck or the chain to place it; CLICK adds to the trunk end.
+//   CHAIN (bottom)  : the signal-flow graph — IN -> locked ENV/COMP pair -> trunk
+//                     pedals -> split -> Amp A / Amp B lanes. DRAG nodes to reorder
+//                     and to move between trunk/lanes. ENV and COMP only swap with
+//                     each other (locked front pair -> pbFrontOrder). Right-click a
+//                     node for Route / Remove.
 //
-// Interaction (click-based, matches the first-cut hybrid: param-bound child widgets for
-// the knobs/selectors + custom-drawn/hit-tested nodes & buttons):
-//   - click a chain node        -> select it (the DETAIL zone rebuilds for that slot)
-//   - a palette category        -> model menu -> fills the target free slot (selected if
-//                                  empty, else the first empty) + enables the board
-//   - DETAIL Route/On/Remove     -> pbS{i}Lane / pbS{i}On / set Type=Off
-//   - ENABLE switch              -> pbEnabled (off = legacy fixed chain runs, byte-exact)
+// Removed on purpose (board is now ALWAYS the front section — the processor forces
+// the board path on): the ENABLE toggle, the Env 1st/Comp 1st buttons (drag in the
+// chain instead) and the IMPORT LEGACY button. pbEnabled/pbFrontOrder stay
+// registered (automation-index stability); only pbFrontOrder is still written.
 //
-// Env + Comp are the LOCKED front pair (always first two, on the trunk, order swappable
-// via pbFrontOrder); their controls edit the shared comp*/envfilter* params. Bespoke
-// per-pedal enclosure ART is a later polish pass — nodes/cards are clean styled shapes.
-//
-// The board still lives at the editor's BOARD tile / mPanels[15]; no strip surgery here
-// (that + preset-v3 migration is Stage D).
+// Reordering: the pool processes free slots in INDEX order per lane, so a reorder
+// REPACKS the pbS{i}* unions — snapshot all 8 slots, rearrange, write back only the
+// params that changed (message thread, full change gestures). Removed slots reset
+// to defaults so the next add starts clean.
 
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <functional>
+#include <vector>
 #include "RigLookAndFeel.h"
-#include "Panels.h" // BlockPanel, LabeledKnob, SegmentedControl, ToggleSwitch, DriveBlock, paintDriveGlyph
+#include "Panels.h" // BlockPanel, LabeledKnob, SegmentedControl, Footswitch, DrivePedal,
+                    // MenuSectionHeader, paintDriveGlyph, DriveBlock/CompBlock statics
 
 namespace nam_rig::ui
 {
 
-class PedalboardPanel : public BlockPanel, private juce::Timer
+class PedalboardPanel : public BlockPanel,
+                        public juce::DragAndDropContainer,
+                        private juce::Timer
 {
 public:
-    explicit PedalboardPanel(juce::AudioProcessorValueTreeState &apvts)
-        : BlockPanel("PEDALBOARD"), mApvts(apvts)
-    {
-        mEnable = std::make_unique<ToggleSwitch>(apvts, "pbEnabled");
-        addAndMakeVisible(*mEnable);
-        mFrontOrder = std::make_unique<SegmentedControl>(apvts, "pbFrontOrder",
-                                                         juce::StringArray{"Env 1st", "Comp 1st"});
-        addAndMakeVisible(*mFrontOrder);
-        buildDetail();
-        startTimerHz(20);
-    }
+    // ================================================================ constants
+    static constexpr int kSlots = 8;          // free pool slots (pbS0..7)
+    static constexpr int kPalW = 190;         // palette column width
+    static constexpr int kChainH = 88;        // chain strip height
+    static constexpr int kCellW = 220;        // pedal DESIGN width (faces are laid out at this)
+    static constexpr int kPedalDesignH = 366; // pedal DESIGN height (the tuned face skeleton)
+    static constexpr float kPedalScale = 0.85f; // deck render scale — same face, smaller
+    static constexpr int kCellGap = 16;       // deck cell gap (patch cable lives here)
 
-    void refresh() { repaint(); }
+    // selection ids for the non-slot pedals
+    static constexpr int kSelNone = -9, kSelEnv = -2, kSelComp = -3;
 
-    // ==================================================================== layout
-    void resized() override
-    {
-        auto body = contentArea();
-
-        auto top = body.removeFromTop(28);
-        mEnable->setBounds(top.removeFromRight(52).withSizeKeepingCentre(46, 24));
-        top.removeFromRight(70); // room for the "ENABLE" caption drawn in paint()
-        mFrontOrder->setBounds(top.removeFromLeft(150).withSizeKeepingCentre(140, 24));
-        body.removeFromTop(10);
-
-        mChainRect = body.removeFromBottom(112);
-        body.removeFromBottom(12);
-        mPaletteRect = body.removeFromRight(150);
-        body.removeFromRight(14);
-        mDetailRect = body;
-
-        layoutChain();
-        layoutPalette();
-        layoutDetail();
-    }
-
-    // ==================================================================== paint
-    void paint(juce::Graphics &g) override
-    {
-        BlockPanel::paint(g);
-
-        g.setColour(colors::caption);
-        g.setFont(fonts::mono(9.0f, fonts::Medium, 0.06f));
-        g.drawText("ENABLE", juce::Rectangle<int>(mEnable->getX() - 66, mEnable->getY(),
-                                                  62, mEnable->getHeight()),
-                   juce::Justification::centredRight);
-
-        paintDetailCard(g);
-        paintPalette(g);
-        paintChain(g);
-
-        if (!enabled())
-        {
-            g.setColour(colors::textDim);
-            g.setFont(fonts::mono(9.5f, fonts::Medium, 0.04f));
-            g.drawText("board off - legacy chain running (byte-exact). enable to route the pool.",
-                       juce::Rectangle<int>(mChainRect.getX(), mChainRect.getBottom() - 14,
-                                            mChainRect.getWidth(), 14),
-                       juce::Justification::centred);
-        }
-    }
-
-    // ================================================================ interaction
-    void mouseDown(const juce::MouseEvent &e) override
-    {
-        const auto p = e.getPosition();
-
-        // palette category buttons
-        if (mPalDrive.contains(p)) { showAddMenu(1); return; }
-        if (mPalMod.contains(p))   { showAddMenu(2); return; }
-        if (mPalDelay.contains(p)) { showAddMenu(3); return; }
-        if (mImportRect.contains(p)) { importLegacy(); return; }
-
-        // detail model button / remove button
-        if (mHasModel && mModelRect.contains(p)) { showModelMenu(); return; }
-        if (mHasRemove && mRemoveRect.contains(p)) { removeSelected(); return; }
-
-        // chain nodes -> select
-        for (const auto &n : mNodes)
-            if (n.rect.contains(p)) { selectNode(n); return; }
-    }
+    // Set by the editor: live compressor gain reduction (dB >= 0) for the comp
+    // pedal's GR meter (reads the ACTIVE board comp via the processor).
+    std::function<float()> compGrDbProvider;
 
 private:
-    // -------------------------------------------------------------- param helpers
-    float getF(const juce::String &id) const
+    // ================================================== palette catalogue (static)
+    struct Item
     {
-        if (auto *a = mApvts.getRawParameterValue(id)) return a->load();
-        return 0.0f;
-    }
-    int getC(const juce::String &id) const { return (int)getF(id); }
-    bool enabled() const { return getF("pbEnabled") >= 0.5f; }
-    void setC(const juce::String &id, int idx)
-    {
-        if (auto *pr = mApvts.getParameter(id))
-        {
-            pr->beginChangeGesture();
-            pr->setValueNotifyingHost(pr->convertTo0to1((float)juce::jmax(0, idx)));
-            pr->endChangeGesture();
-        }
-    }
-    juce::String sid(int slot, const char *suf) const { return "pbS" + juce::String(slot) + suf; }
+        int family;   // 1 drive, 2 mod, 3 delay
+        int cat;      // drives: DriveBlock::Kind 1..4 (== pbS dCat); else 0
+        int model;    // drives: bModel; mod: mType; delay: pModel
+        juce::String name, sub;
+        colors::AccentPair ap;
+    };
 
-    // slot Type: 0 Off, 1 Drive, 2 Mod, 3 Delay
-    int slotType(int i) const { return getC(sid(i, "Type")); }
-    int slotLane(int i) const { return getC(sid(i, "Lane")); }
-    bool slotOn(int i) const { return getF(sid(i, "On")) >= 0.5f; }
-
-    static juce::Colour typeAccent(int type) // 1 drive,2 mod,3 delay
-    {
-        switch (type)
-        {
-        case 1: return colors::accent;            // drive = amber
-        case 2: return juce::Colour(0xffc7a6f0);  // mod = violet
-        case 3: return juce::Colour(0xff7fd08a);  // delay = green
-        default: return colors::outline;
-        }
-    }
-    static const char *typeShort(int type)
-    {
-        switch (type) { case 1: return "DRIVE"; case 2: return "MOD"; case 3: return "DELAY"; default: return ""; }
-    }
-    // Short model label for a free slot node.
-    juce::String slotModelName(int i) const
-    {
-        const int t = slotType(i);
-        if (t == 1)
-        {
-            const auto k = (nam_rig::DriveBlock::Kind)(getC(sid(i, "dCat")));
-            return nam_rig::DriveBlock::modelName(k, getC(sid(i, "bModel")));
-        }
-        if (t == 2)
-        {
-            static const char *m[] = {"Chorus", "Phaser", "Flanger", "Tremolo", "Uni-Vibe"};
-            return m[juce::jlimit(0, 4, getC(sid(i, "mType")))];
-        }
-        if (t == 3)
-        {
-            static const char *m[] = {"DD-7", "Carbon Copy", "Memory Man"};
-            return m[juce::jlimit(0, 2, getC(sid(i, "pModel")))];
-        }
-        return {};
-    }
-
-    // ------------------------------------------------------------------ selection
-    // mSelType: 0 Env, 1 Comp, 2 Free ; mSelSlot valid when Free.
-    int mSelType = 0;
-    int mSelSlot = 0;
-
-    struct Node { int kind; int slot; juce::Rectangle<int> rect; }; // kind: 0 env,1 comp,2 free
-    std::vector<Node> mNodes;
-
-    void selectNode(const Node &n)
-    {
-        if (n.kind == 0) { mSelType = 0; }
-        else if (n.kind == 1) { mSelType = 1; }
-        else { mSelType = 2; mSelSlot = n.slot; }
-        buildDetail();
-        repaint();
-    }
-    bool isSelected(const Node &n) const
-    {
-        if (n.kind == 0) return mSelType == 0;
-        if (n.kind == 1) return mSelType == 1;
-        return mSelType == 2 && n.slot == mSelSlot;
-    }
-
-    int firstFreeSlot() const
-    {
-        for (int i = 0; i < 8; ++i) if (slotType(i) == 0) return i;
-        return -1;
-    }
-
-    // ---------------------------------------------------------------- chain layout
-    void layoutChain()
-    {
-        mNodes.clear();
-        if (mChainRect.isEmpty()) return;
-        const int nodeW = 84, nodeH = 40, gap = 16, inW = 34, ampW = 56;
-        const int cy = mChainRect.getCentreY();
-        const int yMid = cy - nodeH / 2;
-        const int yTop = mChainRect.getY() + mChainRect.getHeight() / 4 - nodeH / 2;
-        const int yBot = mChainRect.getY() + (3 * mChainRect.getHeight()) / 4 - nodeH / 2;
-
-        mInRect = juce::Rectangle<int>(mChainRect.getX(), yMid, inW, nodeH);
-        int x = mChainRect.getX() + inW + gap;
-
-        // locked pair in the chosen order, then trunk free slots.
-        const bool envFirst = getC("pbFrontOrder") == 0;
-        const int firstKind = envFirst ? 0 : 1, secondKind = envFirst ? 1 : 0;
-        mNodes.push_back({firstKind, -1, {x, yMid, nodeW, nodeH}}); x += nodeW + gap;
-        mNodes.push_back({secondKind, -1, {x, yMid, nodeW, nodeH}}); x += nodeW + gap;
-        for (int i = 0; i < 8; ++i)
-            if (slotType(i) != 0 && slotLane(i) == 0)
-            { mNodes.push_back({2, i, {x, yMid, nodeW, nodeH}}); x += nodeW + gap; }
-
-        mSplitX = x + gap / 2;
-        const int laneStart = mSplitX + gap;
-        int xa = laneStart, xb = laneStart;
-        for (int i = 0; i < 8; ++i)
-            if (slotType(i) != 0 && slotLane(i) == 1)
-            { mNodes.push_back({2, i, {xa, yTop, nodeW, nodeH}}); xa += nodeW + gap; }
-        for (int i = 0; i < 8; ++i)
-            if (slotType(i) != 0 && slotLane(i) == 2)
-            { mNodes.push_back({2, i, {xb, yBot, nodeW, nodeH}}); xb += nodeW + gap; }
-
-        mAmpX = juce::jmax(juce::jmax(xa, xb) + gap, mSplitX + gap * 2);
-        mAmpX = juce::jmin(mAmpX, mChainRect.getRight() - ampW);
-        mAmpARect = {mAmpX, yTop, ampW, nodeH};
-        mAmpBRect = {mAmpX, yBot, ampW, nodeH};
-    }
-
-    void paintChain(juce::Graphics &g)
-    {
-        if (mChainRect.isEmpty()) return;
-        const int cy = mChainRect.getCentreY();
-
-        drawPill(g, mInRect, colors::tile, colors::outline, "IN", colors::textDim);
-
-        // trunk cable IN -> split
-        g.setColour(colors::laneColour(0).withAlpha(0.9f));
-        g.drawLine((float)mInRect.getRight(), (float)cy, (float)mSplitX, (float)cy, 2.0f);
-        // split dot
-        g.setColour(colors::accent);
-        g.fillEllipse((float)mSplitX - 3.0f, (float)cy - 3.0f, 6.0f, 6.0f);
-        // lane cables
-        drawLaneCable(g, mAmpARect.getCentreY(), colors::laneColour(0));
-        drawLaneCable(g, mAmpBRect.getCentreY(), colors::laneColour(1));
-        // amps
-        drawPill(g, mAmpARect, colors::tile, colors::laneColour(0), "A", colors::laneColour(0));
-        drawPill(g, mAmpBRect, colors::tile, colors::laneColour(1), "B", colors::laneColour(1));
-
-        for (const auto &n : mNodes) drawNode(g, n);
-    }
-
-    void drawLaneCable(juce::Graphics &g, int laneY, juce::Colour c)
-    {
-        g.setColour(c.withAlpha(0.9f));
-        juce::Path p;
-        p.startNewSubPath((float)mSplitX, (float)mChainRect.getCentreY());
-        p.lineTo((float)mSplitX, (float)laneY);
-        p.lineTo((float)mAmpX, (float)laneY);
-        g.strokePath(p, juce::PathStrokeType(2.0f));
-    }
-
-    // ---- per-pedal livery (drives reuse the real-pedal palette; the others get a
-    //      family tint so the board reads at a glance) ----
-    colors::AccentPair slotAccent(int type, int i) const
-    {
-        using AP = colors::AccentPair; using C = juce::Colour;
-        if (type == 1) return colors::driveModelAccent(getC(sid(i, "dCat")), getC(sid(i, "bModel")));
-        if (type == 2) // Modulation — violet family per model
-        {
-            static const C mv[5] = {C(0xffc7a6f0), C(0xff9b8ce8), C(0xffb69af0), C(0xffa6c0f0), C(0xffcaa6f0)};
-            const C a = mv[juce::jlimit(0, 4, getC(sid(i, "mType")))];
-            return AP{a, a.darker(0.72f)};
-        }
-        if (type == 3) // Delay — green family per model
-        {
-            static const C dv[3] = {C(0xff7fd08a), C(0xff62c69a), C(0xff9ad07f)};
-            const C a = dv[juce::jlimit(0, 2, getC(sid(i, "pModel")))];
-            return AP{a, a.darker(0.72f)};
-        }
-        return AP{colors::outline, colors::outline.darker(0.4f)};
-    }
-    static colors::AccentPair lockedPair(int which) // 0 env (teal), 1 comp (blue)
+    static colors::AccentPair modAccent(int t)
     {
         using C = juce::Colour;
-        const C a = which == 0 ? C(0xff6fd0c9) : C(0xff8fb3ff);
+        static const C mv[5] = {C(0xffc7a6f0), C(0xff9b8ce8), C(0xffb69af0), C(0xffa6c0f0), C(0xffcaa6f0)};
+        const C a = mv[juce::jlimit(0, 4, t)];
+        return colors::AccentPair{a, a.darker(0.72f)};
+    }
+    static colors::AccentPair delayAccent(int m)
+    {
+        using C = juce::Colour;
+        static const C dv[3] = {C(0xff7fd08a), C(0xff62c69a), C(0xff9ad07f)};
+        const C a = dv[juce::jlimit(0, 2, m)];
+        return colors::AccentPair{a, a.darker(0.72f)};
+    }
+    static colors::AccentPair envAccent()
+    {
+        const juce::Colour a(0xff6fd0c9);
+        return colors::AccentPair{a, a.darker(0.72f)};
+    }
+    static colors::AccentPair compAccent()
+    {
+        const juce::Colour a(0xff8fb3ff);
         return colors::AccentPair{a, a.darker(0.72f)};
     }
 
-    // Family art glyphs (drives delegate to the shared paintDriveGlyph).
-    void paintSlotGlyph(juce::Graphics &g, int nodeKind, int type, int i, juce::Rectangle<float> box, juce::Colour col) const
+    static const char *modName(int t)
     {
-        if (nodeKind == 0) { paintEnvGlyph(g, box, col); return; }
-        if (nodeKind == 1) { paintCompGlyph(g, box, col); return; }
-        if (type == 1) { paintDriveGlyph(g, getC(sid(i, "dCat")), getC(sid(i, "bModel")), box, col); return; }
-        if (type == 2) { paintModGlyph(g, box, col); return; }
-        if (type == 3) { paintDelayGlyph(g, box, col); return; }
+        static const char *n[5] = {"Chorus", "Phaser", "Flanger", "Tremolo", "Uni-Vibe"};
+        return n[juce::jlimit(0, 4, t)];
     }
-    static juce::PathStrokeType glyphStroke(float w) { return {w, juce::PathStrokeType::curved, juce::PathStrokeType::rounded}; }
+    static const char *modSub(int t)
+    {
+        static const char *n[5] = {"CE-2 bucket-brigade", "Phase 90 four-stage", "EVH117 jet flange",
+                                   "TR-2 opto tremolo", "photocell chorus-vibe"};
+        return n[juce::jlimit(0, 4, t)];
+    }
+    static const char *delayName(int m)
+    {
+        static const char *n[3] = {"DD-7", "Carbon Copy", "Memory Man"};
+        return n[juce::jlimit(0, 2, m)];
+    }
+    static const char *delaySub(int m)
+    {
+        static const char *n[3] = {"pristine digital echo", "dark analog BBD", "warm bucket echo"};
+        return n[juce::jlimit(0, 2, m)];
+    }
+    static const char *envSub(int voice) { return voice == 1 ? "EHX Q-Tron+ envelope" : "DOD FX25B auto-wah"; }
+    static const char *compModeName(int m)
+    {
+        static const char *n[4] = {"Clean", "OTA", "Opto", "FET"};
+        return n[juce::jlimit(0, 3, m)];
+    }
+    static const char *compSub(int m)
+    {
+        static const char *n[4] = {"transparent studio VCA", "classic OTA squeeze",
+                                   "smooth optical sustain", "'76-style FET, parallel"};
+        return n[juce::jlimit(0, 3, m)];
+    }
+
+    std::vector<Item> buildCatalogue() const
+    {
+        using DB = nam_rig::DriveBlock;
+        std::vector<Item> v;
+        for (int cat = 1; cat <= 4; ++cat)
+        {
+            const auto k = (DB::Kind)cat;
+            for (int m = 0; m < DB::modelCount(k); ++m)
+                v.push_back({1, cat, m, juce::String(DB::modelName(k, m)),
+                             juce::String(DB::modelSub(k, m)), colors::driveModelAccent(cat, m)});
+        }
+        for (int m = 0; m < 5; ++m)
+            v.push_back({2, 0, m, modName(m), modSub(m), modAccent(m)});
+        for (int m = 0; m < 3; ++m)
+            v.push_back({3, 0, m, delayName(m), delaySub(m), delayAccent(m)});
+        return v;
+    }
+    static const char *paletteHeaderFor(const Item &it)
+    {
+        if (it.family == 2) return "MODULATION";
+        if (it.family == 3) return "DELAY";
+        static const char *cn[5] = {"", "BOOST", "OVERDRIVE", "DISTORTION", "FUZZ"};
+        return cn[juce::jlimit(0, 4, it.cat)];
+    }
+
+    // ==================================================== shared art (glyphs, body)
+    static juce::PathStrokeType glyphStroke(float w)
+    {
+        return {w, juce::PathStrokeType::curved, juce::PathStrokeType::rounded};
+    }
     static void paintModGlyph(juce::Graphics &g, juce::Rectangle<float> b, juce::Colour c)
     {
         g.setColour(c);
-        juce::Path p; const float y = b.getCentreY(), amp = b.getHeight() * 0.32f; const int N = 40;
+        juce::Path p;
+        const float y = b.getCentreY(), amp = b.getHeight() * 0.32f;
+        const int N = 40;
         for (int k = 0; k <= N; ++k)
         {
             const float x = b.getX() + b.getWidth() * (float)k / N;
@@ -328,7 +177,8 @@ private:
     }
     static void paintDelayGlyph(juce::Graphics &g, juce::Rectangle<float> b, juce::Colour c)
     {
-        const int n = 4; const float bw = b.getWidth() * 0.11f;
+        const int n = 4;
+        const float bw = b.getWidth() * 0.11f;
         for (int k = 0; k < n; ++k)
         {
             const float h = b.getHeight() * (0.92f - 0.19f * k);
@@ -350,569 +200,1838 @@ private:
     }
     static void paintEnvGlyph(juce::Graphics &g, juce::Rectangle<float> b, juce::Colour c)
     {
-        g.setColour(c); // resonant filter sweep (rise to a peak, then roll off)
-        juce::Path p;
+        g.setColour(c); // SYMMETRIC resonant peak (wah band-pass) — mirrored control
+        juce::Path p;    // points, so the watermark sits dead-centre on the face
         p.startNewSubPath(b.getX(), b.getBottom());
-        p.quadraticTo(b.getX() + b.getWidth() * 0.45f, b.getBottom(),
-                      b.getX() + b.getWidth() * 0.60f, b.getY());
-        p.quadraticTo(b.getX() + b.getWidth() * 0.74f, b.getBottom() - b.getHeight() * 0.15f,
-                      b.getRight(), b.getBottom() - b.getHeight() * 0.05f);
+        p.cubicTo(b.getX() + b.getWidth() * 0.30f, b.getBottom(),
+                  b.getCentreX() - b.getWidth() * 0.12f, b.getY() + b.getHeight() * 0.55f,
+                  b.getCentreX(), b.getY());
+        p.cubicTo(b.getCentreX() + b.getWidth() * 0.12f, b.getY() + b.getHeight() * 0.55f,
+                  b.getRight() - b.getWidth() * 0.30f, b.getBottom(),
+                  b.getRight(), b.getBottom());
         g.strokePath(p, glyphStroke(juce::jmax(1.4f, b.getHeight() * 0.06f)));
     }
+    // Family glyph dispatch. kind: kSelEnv / kSelComp / slot>=0 (uses that slot's type).
+    void paintPedalGlyph(juce::Graphics &g, int sel, juce::Rectangle<float> box, juce::Colour col) const
+    {
+        if (sel == kSelEnv) { paintEnvGlyph(g, box, col); return; }
+        if (sel == kSelComp) { paintCompGlyph(g, box, col); return; }
+        const int t = slotType(sel);
+        if (t == 1) paintDriveGlyph(g, paramC(sid(sel, "dCat")), paramC(sid(sel, "bModel")), box, col);
+        else if (t == 2) paintModGlyph(g, box, col);
+        else if (t == 3) paintDelayGlyph(g, box, col);
+    }
 
-    // Draw the enclosure body (gradient + tint border), the DrivePedal look.
-    void paintEnclosure(juce::Graphics &g, juce::Rectangle<float> r, juce::Colour tint,
-                        bool on, bool selected, float radius) const
+    // The DrivePedal enclosure body recipe (neutral base + tint wash, dithered).
+    // The wash is STRONG — the body takes the model's colour, like real enclosures,
+    // so pedals (and chain nodes) read by colour at a glance.
+    static void paintEnclosure(juce::Graphics &g, juce::Rectangle<float> r, juce::Colour tint,
+                               bool on, bool selected, float radius)
     {
         const juce::Colour t = on ? tint : juce::Colour(0xff343a43);
-        const juce::Colour encTop = juce::Colour(0xff262b33).overlaidWith(t.withAlpha(0.20f));
-        const juce::Colour encBot = juce::Colour(0xff15181d).overlaidWith(t.withAlpha(0.05f));
+        const juce::Colour encTop = juce::Colour(0xff262b33).overlaidWith(t.withAlpha(0.40f));
+        const juce::Colour encBot = juce::Colour(0xff15181d).overlaidWith(t.withAlpha(0.12f));
         juce::ColourGradient base(encTop, 0.0f, r.getY(), encBot, 0.0f, r.getBottom(), false);
         dither::fillRoundedRectangle(g, base, r, radius);
         g.setColour((selected ? colors::accent : t).withAlpha(selected ? 1.0f : (on ? 0.55f : 0.34f)));
-        g.drawRoundedRectangle(r.reduced(0.5f), radius, selected ? 2.0f : 1.4f);
+        g.drawRoundedRectangle(r.reduced(0.5f), radius, selected ? 1.8f : 1.4f);
     }
 
-    void drawNode(juce::Graphics &g, const Node &n)
+    // ================================================================ param access
+    float paramF(const juce::String &id) const
     {
-        colors::AccentPair pair; juce::String name, sub; bool on = true; int type = 2;
-        if (n.kind == 0) { pair = lockedPair(0); name = "ENV"; on = getF("envfilterOn") >= 0.5f; }
-        else if (n.kind == 1) { pair = lockedPair(1); name = "COMP"; on = getF("compOn") >= 0.5f; }
-        else { type = slotType(n.slot); pair = slotAccent(type, n.slot); name = typeShort(type); sub = slotModelName(n.slot); on = slotOn(n.slot); }
+        if (auto *a = mApvts.getRawParameterValue(id)) return a->load();
+        return 0.0f;
+    }
+    int paramC(const juce::String &id) const { return (int)paramF(id); }
+    juce::String sid(int slot, const char *suf) const { return "pbS" + juce::String(slot) + suf; }
 
-        auto r = n.rect.toFloat();
-        paintEnclosure(g, r, pair.tint, on, isSelected(n), 8.0f);
+    int slotType(int i) const { return paramC(sid(i, "Type")); } // 0 Off, 1 Drive, 2 Mod, 3 Delay
+    int slotLane(int i) const { return paramC(sid(i, "Lane")); } // 0 Both, 1 A, 2 B
+    bool slotOn(int i) const { return paramF(sid(i, "On")) >= 0.5f; }
+    bool slotUsed(int i) const { return slotType(i) != 0; }
+    int frontOrder() const { return paramC("pbFrontOrder"); } // 0 Env first, 1 Comp first
 
-        // silkscreen glyph (centre, faint)
-        auto gbox = r.reduced(r.getWidth() * 0.22f, 0.0f).withTrimmedTop(15.0f).withTrimmedBottom(sub.isEmpty() ? 6.0f : 15.0f);
-        paintSlotGlyph(g, n.kind, type, n.slot, gbox, (on ? pair.led : juce::Colour(0xff5a616b)).withAlpha(0.85f));
-
-        // name (top, accent)
-        g.setColour(on ? pair.accent : colors::textDim);
-        g.setFont(fonts::archivo(9.0f, fonts::Bold, 0.10f));
-        g.drawText(name, n.rect.withHeight(14).translated(0, 3), juce::Justification::centred);
-        // model sub (bottom)
-        if (sub.isNotEmpty())
+    void writeNorm(const juce::String &id, float norm)
+    {
+        if (auto *pr = mApvts.getParameter(id))
         {
-            juce::Rectangle<int> subR = n.rect;
-            subR = subR.removeFromBottom(12).withTrimmedBottom(1);
-            g.setColour(colors::textDim);
-            g.setFont(fonts::mono(7.5f, fonts::Medium, 0.02f));
-            g.drawText(sub, subR, juce::Justification::centred);
-        }
-        // jewel LED (top-right), glow when on
-        auto jewel = juce::Rectangle<float>(7.0f, 7.0f).withPosition(r.getRight() - 12.0f, r.getY() + 5.0f);
-        if (on) fx::glowEllipse(g, jewel, pair.led, 9, 0.55f, 5, 0.5f);
-        g.setColour(on ? pair.led : colors::ledOff);
-        g.fillEllipse(jewel);
-    }
-
-    static void drawPill(juce::Graphics &g, juce::Rectangle<int> ri, juce::Colour fill,
-                         juce::Colour border, const juce::String &txt, juce::Colour txtCol)
-    {
-        auto r = ri.toFloat();
-        g.setColour(fill); g.fillRoundedRectangle(r, 7.0f);
-        g.setColour(border); g.drawRoundedRectangle(r.reduced(0.5f), 7.0f, 1.2f);
-        g.setColour(txtCol); g.setFont(fonts::archivo(10.5f, fonts::Bold, 0.06f));
-        g.drawText(txt, ri, juce::Justification::centred);
-    }
-
-    // -------------------------------------------------------------- palette (right)
-    juce::Rectangle<int> mPalDrive, mPalMod, mPalDelay, mImportRect;
-    void layoutPalette()
-    {
-        auto r = mPaletteRect;
-        r.removeFromTop(4);
-        const int h = 44, gap = 10;
-        mPalDrive = r.removeFromTop(h); r.removeFromTop(gap);
-        mPalMod = r.removeFromTop(h); r.removeFromTop(gap);
-        mPalDelay = r.removeFromTop(h); r.removeFromTop(gap * 2);
-        mImportRect = r.removeFromTop(38);
-    }
-    void paintPalette(juce::Graphics &g)
-    {
-        g.setColour(colors::caption);
-        g.setFont(fonts::mono(8.5f, fonts::Medium, 0.08f));
-        g.drawText("ADD PEDAL", juce::Rectangle<int>(mPaletteRect.getX(), mPaletteRect.getY() - 14,
-                                                     mPaletteRect.getWidth(), 12),
-                   juce::Justification::centredLeft);
-        paintPaletteBtn(g, mPalDrive, "DRIVE", typeAccent(1));
-        paintPaletteBtn(g, mPalMod, "MODULATION", typeAccent(2));
-        paintPaletteBtn(g, mPalDelay, "DELAY", typeAccent(3));
-
-        // Import-legacy button: copies the (still-live) legacy front chain into the pool.
-        {
-            auto rr = mImportRect.toFloat();
-            g.setColour(colors::tile); g.fillRoundedRectangle(rr, 8.0f);
-            g.setColour(colors::accent.withAlpha(0.7f)); g.drawRoundedRectangle(rr.reduced(0.5f), 8.0f, 1.2f);
-            g.setColour(colors::textDim); g.setFont(fonts::mono(8.5f, fonts::Medium, 0.04f));
-            g.drawText("IMPORT LEGACY", mImportRect, juce::Justification::centred);
+            if (std::abs(pr->getValue() - norm) <= 1.0e-6f) return; // no-op writes skipped
+            pr->beginChangeGesture();
+            pr->setValueNotifyingHost(norm);
+            pr->endChangeGesture();
         }
     }
-    static void paintPaletteBtn(juce::Graphics &g, juce::Rectangle<int> ri, const juce::String &txt, juce::Colour ac)
+    void writeNat(const juce::String &id, float natural)
     {
-        auto r = ri.toFloat();
-        g.setColour(colors::tile); g.fillRoundedRectangle(r, 8.0f);
-        g.setColour(ac.withAlpha(0.8f)); g.drawRoundedRectangle(r.reduced(0.5f), 8.0f, 1.3f);
-        g.setColour(ac); g.fillRoundedRectangle(r.withWidth(4.0f).reduced(0.0f, 8.0f).translated(4.0f, 0.0f), 2.0f);
-        g.setColour(colors::text); g.setFont(fonts::archivo(11.0f, fonts::SemiBold, 0.02f));
-        g.drawText("+  " + txt, ri.reduced(14, 0), juce::Justification::centredLeft);
+        if (auto *pr = mApvts.getParameter(id)) writeNorm(id, pr->convertTo0to1(natural));
+    }
+    void writeChoice(const juce::String &id, int idx) { writeNat(id, (float)juce::jmax(0, idx)); }
+    void writeBool(const juce::String &id, bool on) { writeNorm(id, on ? 1.0f : 0.0f); }
+
+    // The per-slot param union (everything a slot owns; order irrelevant, Lane at [1]).
+    static constexpr int kU = 36;
+    static const char *const *unionSuffixes()
+    {
+        static const char *const u[kU] = {
+            "Type", "Lane", "On",
+            "dCat", "bModel", "bDrive", "bRange", "oDrive", "oTone", "oLevel",
+            "dDrive", "dTone", "dLevel", "dMigrate", "fDrive", "fTone", "fLevel", "fGate",
+            "mType", "mRate", "mSync", "mDepth", "mMix", "mFeedback", "mWave", "mPhaserVoice",
+            "pModel", "pMode", "pTime", "pSync", "pFeedback", "pMix", "pMod", "pTone", "pLevel", "pChorusVib"};
+        return u;
     }
 
-    void showAddMenu(int family) // 1 drive, 2 mod, 3 delay
+    // ============================================================== pool structure
+    struct Lanes { std::vector<int> l[3]; }; // slot indices per lane, in index (= process) order
+    Lanes lanesNow() const
     {
-        juce::PopupMenu m;
-        if (family == 1)
+        Lanes ln;
+        for (int lane = 0; lane < 3; ++lane)
+            for (int i = 0; i < kSlots; ++i)
+                if (slotUsed(i) && slotLane(i) == lane) ln.l[lane].push_back(i);
+        return ln;
+    }
+    int usedCount() const
+    {
+        int n = 0;
+        for (int i = 0; i < kSlots; ++i) if (slotUsed(i)) ++n;
+        return n;
+    }
+    bool boardFull() const { return usedCount() >= kSlots; }
+
+    juce::String slotModelName(int i) const
+    {
+        const int t = slotType(i);
+        if (t == 1)
         {
-            for (int cat = 1; cat <= 4; ++cat) // Boost/OD/Dist/Fuzz -> dCat = cat-1
+            const auto k = (nam_rig::DriveBlock::Kind)paramC(sid(i, "dCat"));
+            return nam_rig::DriveBlock::modelName(k, paramC(sid(i, "bModel")));
+        }
+        if (t == 2) return modName(paramC(sid(i, "mType")));
+        if (t == 3) return delayName(paramC(sid(i, "pModel")));
+        return {};
+    }
+    colors::AccentPair slotAccent(int i) const
+    {
+        const int t = slotType(i);
+        if (t == 1) return colors::driveModelAccent(paramC(sid(i, "dCat")), paramC(sid(i, "bModel")));
+        if (t == 2) return modAccent(paramC(sid(i, "mType")));
+        if (t == 3) return delayAccent(paramC(sid(i, "pModel")));
+        return colors::AccentPair{colors::outline, colors::outline.darker(0.4f)};
+    }
+    static const char *typeShort(int t)
+    {
+        switch (t) { case 1: return "DRIVE"; case 2: return "MOD"; case 3: return "DELAY"; default: return ""; }
+    }
+
+    // ============================================== repack (reorder / add / remove)
+    // The pool runs free slots in INDEX order per lane, so structure edits rewrite the
+    // slot unions: snapshot -> rearrange -> write back (only changed params). Vacated
+    // slots reset to defaults so the next add starts from a clean pedal.
+    struct Entry
+    {
+        int src;                      // >=0: existing slot; -1: new pedal from the palette
+        int family = 0, cat = 0, model = 0; // used when src < 0
+    };
+
+    void commitArrangement(const std::vector<Entry> (&lanes)[3])
+    {
+        // snapshot every slot's natural values first (sources may be overwritten)
+        float snap[kSlots][kU];
+        auto *const *u = unionSuffixes();
+        for (int i = 0; i < kSlots; ++i)
+            for (int j = 0; j < kU; ++j)
+                snap[i][j] = paramF(sid(i, u[j]));
+
+        int t = 0;
+        for (int lane = 0; lane < 3; ++lane)
+            for (const auto &e : lanes[lane])
             {
-                const auto k = (nam_rig::DriveBlock::Kind)cat;
-                const int n = nam_rig::DriveBlock::modelCount(k);
-                juce::PopupMenu sub;
-                for (int mdl = 0; mdl < n; ++mdl)
-                    sub.addItem(cat * 100 + mdl + 1, nam_rig::DriveBlock::modelName(k, mdl));
-                static const char *catNm[] = {"", "Boost", "Overdrive", "Distortion", "Fuzz"};
-                m.addSubMenu(catNm[cat], sub);
+                if (t >= kSlots) break;
+                if (e.src >= 0)
+                {
+                    for (int j = 0; j < kU; ++j)
+                    {
+                        float v = snap[e.src][j];
+                        if (j == 1) v = (float)lane; // union[1] == "Lane"
+                        writeNat(sid(t, u[j]), v);
+                    }
+                }
+                else // new pedal: defaults, then the identity fields
+                {
+                    resetSlotToDefaults(t);
+                    writeChoice(sid(t, "Type"), e.family);
+                    writeChoice(sid(t, "Lane"), lane);
+                    writeBool(sid(t, "On"), true);
+                    if (e.family == 1)
+                    {
+                        writeChoice(sid(t, "dCat"), e.cat);
+                        writeNat(sid(t, "bModel"), (float)e.model);
+                    }
+                    else if (e.family == 2) writeChoice(sid(t, "mType"), e.model);
+                    else writeChoice(sid(t, "pModel"), e.model);
+                }
+                ++t;
             }
-        }
-        else if (family == 2)
-        {
-            static const char *m2[] = {"Chorus", "Phaser", "Flanger", "Tremolo", "Uni-Vibe"};
-            for (int i = 0; i < 5; ++i) m.addItem(200 + i + 1, m2[i]);
-        }
-        else
-        {
-            static const char *m3[] = {"Boss DD-7", "Carbon Copy", "Memory Man"};
-            for (int i = 0; i < 3; ++i) m.addItem(300 + i + 1, m3[i]);
-        }
-        juce::Component::SafePointer<PedalboardPanel> sp(this);
-        auto anchor = (family == 1 ? mPalDrive : family == 2 ? mPalMod : mPalDelay);
-        m.showMenuAsync(juce::PopupMenu::Options().withTargetScreenArea(localAreaToGlobalRect(anchor)),
-                        [sp, family](int r)
-                        {
-                            if (sp == nullptr || r <= 0) return;
-                            sp->addPedal(family, r);
-                        });
+        for (; t < kSlots; ++t)
+            resetSlotToDefaults(t); // Type back to Off + clean knobs
+    }
+    void resetSlotToDefaults(int i)
+    {
+        auto *const *u = unionSuffixes();
+        for (int j = 0; j < kU; ++j)
+            if (auto *pr = mApvts.getParameter(sid(i, u[j])))
+                writeNorm(sid(i, u[j]), pr->getDefaultValue());
     }
 
-    void addPedal(int family, int r)
+    // Remove slot s from the lists (helper for the ops below).
+    static void eraseSlot(std::vector<Entry> (&lanes)[3], int s)
     {
-        // target slot: the selected free slot if it's empty, else the first empty.
-        int slot = (mSelType == 2 && slotType(mSelSlot) == 0) ? mSelSlot : firstFreeSlot();
-        if (slot < 0) return; // board full
-        if (family == 1)
-        {
-            const int cat = r / 100, mdl = (r % 100) - 1; // cat 1..4 = Boost..Fuzz = dCat/Kind
-            setC(sid(slot, "Type"), 1);
-            setC(sid(slot, "dCat"), cat);
-            setC(sid(slot, "bModel"), mdl);
-        }
-        else if (family == 2)
-        {
-            setC(sid(slot, "Type"), 2);
-            setC(sid(slot, "mType"), r - 201);
-        }
-        else
-        {
-            setC(sid(slot, "Type"), 3);
-            setC(sid(slot, "pModel"), r - 301);
-        }
-        setC(sid(slot, "Lane"), 0); // Both
-        if (auto *pr = mApvts.getParameter(sid(slot, "On"))) { pr->beginChangeGesture(); pr->setValueNotifyingHost(1.0f); pr->endChangeGesture(); }
-        if (!enabled()) setBool("pbEnabled", true);
-        mSelType = 2; mSelSlot = slot;
-        buildDetail();
+        for (auto &l : lanes)
+            l.erase(std::remove_if(l.begin(), l.end(),
+                                   [s](const Entry &e) { return e.src == s; }),
+                    l.end());
+    }
+    void entriesNow(std::vector<Entry> (&lanes)[3]) const
+    {
+        const Lanes ln = lanesNow();
+        for (int lane = 0; lane < 3; ++lane)
+            for (int s : ln.l[lane]) lanes[lane].push_back({s});
+    }
+
+public:
+    // ---- structural ops (called by the deck / chain / palette) ----
+    void movePedal(int slot, int lane, int pos)
+    {
+        std::vector<Entry> lanes[3];
+        entriesNow(lanes);
+        eraseSlot(lanes, slot);
+        lane = juce::jlimit(0, 2, lane);
+        auto &dst = lanes[lane];
+        pos = juce::jlimit(0, (int)dst.size(), pos);
+        dst.insert(dst.begin() + pos, Entry{slot});
+        commitArrangement(lanes);
+        // selection follows the moved pedal to its packed index
+        int idx = 0;
+        for (int l = 0; l < lane; ++l) idx += (int)lanes[l].size();
+        mSelSlot = idx + pos;
+        structureChanged();
+    }
+    // Returns the packed slot index the new pedal landed on (-1 when full).
+    int addPedal(int family, int cat, int model, int lane, int pos)
+    {
+        if (boardFull()) return -1;
+        std::vector<Entry> lanes[3];
+        entriesNow(lanes);
+        lane = juce::jlimit(0, 2, lane);
+        auto &dst = lanes[lane];
+        pos = juce::jlimit(0, (int)dst.size(), pos);
+        dst.insert(dst.begin() + pos, Entry{-1, family, cat, model});
+        commitArrangement(lanes);
+        int idx = 0; // packed index = entries before it (trunk, then A, then B)
+        for (int l = 0; l < lane; ++l) idx += (int)lanes[l].size();
+        idx += pos;
+        structureChanged();
+        return idx;
+    }
+    int addPedalToTrunkEnd(int family, int cat, int model)
+    {
+        return addPedal(family, cat, model, 0, (int)lanesNow().l[0].size());
+    }
+    void removePedal(int slot)
+    {
+        std::vector<Entry> lanes[3];
+        entriesNow(lanes);
+        eraseSlot(lanes, slot);
+        commitArrangement(lanes);
+        if (mSelSlot == slot) mSelSlot = kSelNone;
+        structureChanged();
+    }
+    void cycleLane(int slot) // Both -> Amp A -> Amp B -> Both (order kept: index untouched)
+    {
+        writeChoice(sid(slot, "Lane"), (slotLane(slot) + 1) % 3);
+        structureChanged();
+    }
+    void routePedal(int slot, int lane)
+    {
+        writeChoice(sid(slot, "Lane"), juce::jlimit(0, 2, lane));
+        structureChanged();
+    }
+    void swapFrontPair()
+    {
+        writeChoice("pbFrontOrder", frontOrder() == 0 ? 1 : 0);
+        structureChanged();
+    }
+    void selectPedal(int sel, bool scrollTo)
+    {
+        mSelSlot = sel;
+        // Scroll is deferred to the next timer tick: structural edits rebuild the deck
+        // asynchronously, so the target cell may not exist yet.
+        if (scrollTo) mScrollPending = true;
+        repaintZones();
+    }
+    int selectedPedal() const { return mSelSlot; }
+
+    // ---- bin dropzone (appears while a free pedal is dragged on the deck; drop a
+    //      pedal on it to remove it from the chain) ----
+    void deckDragBegan(bool showBin)
+    {
+        mBinVisible = showBin;
+        mBinHot = false;
+        if (showBin) layoutBin();
         repaint();
     }
-    void setBool(const juce::String &id, bool on)
+    void deckDragMoved(juce::Point<int> panelPos)
     {
-        if (auto *pr = mApvts.getParameter(id)) { pr->beginChangeGesture(); pr->setValueNotifyingHost(on ? 1.0f : 0.0f); pr->endChangeGesture(); }
+        if (!mBinVisible) return;
+        const bool hot = mBinRect.expanded(10).contains(panelPos);
+        if (hot != mBinHot) { mBinHot = hot; repaint(mBinRect.expanded(16)); }
     }
-    // Write a raw (natural-units) value to a param, mapped through its range.
-    void setFloatP(const juce::String &id, float val)
+    bool deckDragFinished(juce::Point<int> panelPos) // true = dropped on the bin
     {
-        if (auto *pr = mApvts.getParameter(id)) { pr->beginChangeGesture(); pr->setValueNotifyingHost(pr->convertTo0to1(val)); pr->endChangeGesture(); }
+        const bool hit = mBinVisible && mBinRect.expanded(10).contains(panelPos);
+        mBinVisible = mBinHot = false;
+        repaint();
+        return hit;
     }
-    // Copy one param's value to another (same range/type mirrored across legacy<->pool).
-    void copyP(const juce::String &src, const juce::String &dst) { setFloatP(dst, getF(src)); }
 
-    // ---- Import the (still-live) legacy front chain into the pool (opt-in; nothing is
-    // deleted — the legacy params stay put, this just mirrors them into the pool + turns
-    // the board on so enabling it reproduces the current sound). Env/Comp are shared, so
-    // only the drive rack + premod + predelay need copying. ----
-    void importLegacy()
+private:
+    // Deferred so widget teardown never happens inside a child's own callback.
+    void structureChanged()
     {
-        static const char *driveSuf[] = {"bDrive", "bRange", "bModel", "oDrive", "oTone", "oLevel",
-                                         "dDrive", "dTone", "dLevel", "dMigrate", "fDrive", "fTone", "fLevel", "fGate"};
-        // driveSend: 0 Amp A, 1 Amp B, 2 Both -> Lane: 0 Both, 1 Amp A, 2 Amp B
-        const int ds = getC("driveSend");
-        const int driveLane = ds == 0 ? 1 : ds == 1 ? 2 : 0;
-        for (int n = 1; n <= 3; ++n)
+        juce::Component::SafePointer<PedalboardPanel> sp(this);
+        juce::MessageManager::callAsync([sp] { if (sp != nullptr) sp->syncStructure(true); });
+    }
+
+    // (The compact pedal-face value pill lives in Panels.h now — StompPill — shared
+    // with DrivePedal's per-model toggles so every switch matches across the deck.)
+
+    // ================================================================= StompPedal
+    // The tall stomp enclosure for the NON-drive pedals (Env / Comp / Mod / Delay),
+    // mirroring the DrivePedal face: kind header + jewel LED, the authentic knob
+    // set, a model-name pill (click -> styled picker), circuit subtitle, silkscreen
+    // glyph in the slack above the footswitch. Knobs bind to the pool union
+    // (pbS{i}m*/p*) or to the shared envfilter*/comp* params for the locked pair.
+    class StompPedal : public juce::Component
+    {
+    public:
+        enum Kind { Env, Comp, Mod, Delay };
+
+        StompPedal(PedalboardPanel &b, Kind k, int slot) // slot ignored for Env/Comp
+            : mBoard(b), mKind(k), mSlot(slot)
         {
-            const int slot = n - 1;
-            const juce::String dp = "drv" + juce::String(n);
-            for (auto *suf : driveSuf) copyP(dp + suf, sid(slot, suf));
-            const int dt = getC(dp + "Type"); // 0 Off, 1 Boost, 2 OD, 3 Dist, 4 Fuzz == dCat/Kind
-            if (dt == 0) { setC(sid(slot, "Type"), 0); }
+            mOnAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+                b.mApvts, onParamId(), mOn);
+            mOn.onClick = [this] { refresh(); };
+            addAndMakeVisible(mOn);
+            rebuild();
+        }
+
+        // Param-authoritative refresh, driven by the panel timer (20 Hz).
+        void refresh()
+        {
+            const int key = modelKey();
+            if (key != mLastKey) { rebuild(); return; } // control set follows the model
+            const bool on = mBoard.paramF(onParamId()) >= 0.5f;
+            // tempo-sync owns the time/rate knob (always the first knob) when engaged
+            if ((mKind == Mod || mKind == Delay) && !mRows.empty() && !mRows[0].empty())
+                mRows[0][0]->setEnabled(
+                    mBoard.paramC(pid(mKind == Mod ? "mSync" : "pSync")) == 0);
+            mOn.setLit(on);
+            for (auto *p : mPills) p->repaint(); // live value readouts
+            if (mKind == Comp && mBoard.compGrDbProvider) // live GR meter (header band)
+            {
+                const float gr = juce::jmax(0.0f, mBoard.compGrDbProvider());
+                mGrSm += (gr > mGrSm ? 0.55f : 0.25f) * (gr - mGrSm); // grab fast, fall gently
+                if (std::abs(mGrSm - mGrPainted) > 0.05f)
+                {
+                    mGrPainted = mGrSm;
+                    repaint(mHeaderRect.expanded(2));
+                }
+            }
+            if (on != mLastOn)
+            {
+                mLastOn = on;
+                applyAccents(on);
+                repaint();
+            }
+        }
+
+        void paint(juce::Graphics &g) override
+        {
+            auto b = getLocalBounds().toFloat().reduced(1.0f);
+            const bool on = mLastOn;
+            paintEnclosure(g, b, mAp.tint, on, false, 16.0f);
+
+            // header: kind (left) + GR meter (comp) + jewel LED (right)
+            g.setColour(on ? mAp.accent : colors::caption);
+            g.setFont(fonts::archivo(10.0f, fonts::Bold, 0.13f));
+            g.drawText(mKindStr, mHeaderRect, juce::Justification::centredLeft);
+            auto jewel = juce::Rectangle<float>(13.0f, 13.0f).withCentre(
+                {(float)mHeaderRect.getRight() - 6.5f, (float)mHeaderRect.getCentreY()});
+            if (on) fx::glowEllipse(g, jewel, mAp.led, 13, 0.6f, 6, 0.55f);
+            g.setColour(on ? mAp.led : juce::Colour(0xff2a2f37));
+            g.fillEllipse(jewel);
+            if (mKind == Comp && mBoard.compGrDbProvider) // live gain-reduction bar
+            {
+                auto bar = juce::Rectangle<float>((float)mHeaderRect.getRight() - 74.0f,
+                                                  (float)mHeaderRect.getCentreY() - 2.5f, 52.0f, 5.0f);
+                g.setColour(colors::caption);
+                g.setFont(fonts::archivo(7.0f, fonts::SemiBold, 0.08f));
+                g.drawText("GR", juce::Rectangle<int>((int)bar.getX() - 17, mHeaderRect.getY(),
+                                                      15, mHeaderRect.getHeight()),
+                           juce::Justification::centredRight);
+                g.setColour(colors::track);
+                g.fillRoundedRectangle(bar, 2.5f);
+                const float grNorm = juce::jlimit(0.0f, 1.0f, mGrSm / 18.0f); // 18 dB span
+                if (grNorm > 0.01f)
+                {
+                    g.setColour(on ? mAp.led : colors::textDim);
+                    g.fillRoundedRectangle(bar.withWidth(juce::jmax(3.0f, bar.getWidth() * grNorm)), 2.5f);
+                }
+            }
+
+            // model name PRINTED on the enclosure — a GHOST BUTTON: pure silkscreen
+            // at rest, but on hover it grows button chrome (fill + tint border), the
+            // ▾ brightens and the cursor points, so switching the voice/model is
+            // obviously clickable (it's the only way to change the locked pair).
+            if (mPillHover)
+            {
+                auto pr = mPillRect.toFloat();
+                g.setColour(juce::Colours::white.withAlpha(0.06f));
+                g.fillRoundedRectangle(pr, 11.0f);
+                g.setColour(mAp.tint.withAlpha(0.5f));
+                g.drawRoundedRectangle(pr.reduced(0.5f), 11.0f, 1.0f);
+            }
+            g.setColour(on ? colors::textBright : colors::textDim);
+            g.setFont(fonts::archivo(19.0f, fonts::Bold));
+            g.drawText(mModelStr, mPillRect, juce::Justification::centred);
+            g.setColour(mPillHover ? colors::text : colors::caption);
+            g.setFont(fonts::mono(mPillHover ? 9.0f : 8.0f));
+            g.drawText(juce::String::fromUTF8("\xE2\x96\xBE"),
+                       juce::Rectangle<int>(mPillRect.getCentreX() + mNameW / 2 + 4,
+                                            mPillRect.getY() + 1, 12, mPillRect.getHeight()),
+                       juce::Justification::centredLeft);
+
+            // silkscreen art: the comp-style WATERMARK spanning the whole zone, on
+            // EVERY stomp face (Robbie: the 5-knob comp look is the one — the solid
+            // below-knobs variant read as a different design per model, and the
+            // Q-Tron lost its art entirely). Same rect every time = same scale.
+            // The env's symmetric peak gets a WIDER box — it reads better stretched.
+            if (!mZoneRect.isEmpty())
+            {
+                const float rx = mKind == Env ? 0.13f : 0.26f;
+                paintGlyph(g, mZoneRect.toFloat().reduced(mZoneRect.getWidth() * rx, 6.0f),
+                           (on ? mAp.led : juce::Colour(0xff5a616b)).withAlpha(0.10f));
+            }
+
+            // stomp-plate rule: a hairline seam setting the footswitch zone apart
+            if (mPlateY > 0)
+            {
+                g.setColour(juce::Colours::black.withAlpha(0.35f));
+                g.fillRect(14, mPlateY, getWidth() - 28, 1);
+                g.setColour(juce::Colours::white.withAlpha(0.04f));
+                g.fillRect(14, mPlateY + 1, getWidth() - 28, 1);
+            }
+        }
+
+        void resized() override
+        {
+            // FIXED vertical rhythm, shared with DrivePedal: header / constant-height
+            // zone (knobs + aux pills, centred) / model pill / aux band / footswitch.
+            // The pill, GR bar and footswitch sit at the SAME y on every pedal, and the
+            // art zone is one constant rect so the watermark scale never changes
+            // (Robbie: the 5-knob comp face is the reference — lock everything to it).
+            auto a = getLocalBounds().reduced(10, 8);
+            mHeaderRect = a.removeFromTop(15);
+            a.removeFromTop(6);
+            mZoneRect = a.removeFromTop(kZoneH);
+            a.removeFromTop(6);
+            auto pillRow = a.removeFromTop(28);
+            const int pw = juce::jlimit(80, pillRow.getWidth(),
+                (int)std::ceil(juce::GlyphArrangement::getStringWidth(
+                    fonts::archivo(19.0f, fonts::Bold), mModelStr.isEmpty() ? "-" : mModelStr)) + 34);
+            mPillRect = pillRow.withSizeKeepingCentre(pw, 28);
+            a.removeFromTop(4);
+            auto auxBand = a.removeFromTop(26); // post-pill aux row (2-knob-row faces)
+            a.removeFromTop(8);                 // breathing room over the stomp plate
+            mPlateY = a.getY();                 // the seam line
+            // The WHOLE zone under the seam is the footswitch (stomp anywhere below
+            // the line) — and nothing above it, so the switch can't steal clicks
+            // from the aux pills like an oversized centred button would.
+            mOn.setBounds(a.withTrimmedTop(3));
+
+            // --- fill the zone TOP-DOWN like a real pedal: knob rows first. A single
+            //     aux row (sync / voice / LFO) sits in the post-pill band; a multi-row
+            //     toggle bank (Q-Tron) groups as ONE block right under the knobs.
+            //     Whatever zone is left below belongs to the full-size silkscreen. ---
+            const bool auxAllInZone = (int)mAuxRows.size() >= 2;
+            auto zone = mZoneRect;
+            for (auto &ks : mRows)
+            {
+                auto row = zone.removeFromTop(84);
+                const int n = juce::jmax(1, (int)ks.size());
+                const int kw = juce::jmin(70, row.getWidth() / n);
+                auto grp = row.withSizeKeepingCentre(kw * n, row.getHeight());
+                for (auto *k : ks) k->setBounds(grp.removeFromLeft(kw).reduced(2, 0));
+                zone.removeFromTop(4);
+            }
+            auto layAux = [](juce::Rectangle<int> ar, std::vector<juce::Component *> &row)
+            {
+                const int n = (int)row.size();
+                const int total = n * kPillW + (n - 1) * 6;
+                auto grp = ar.withSizeKeepingCentre(juce::jmin(total, ar.getWidth()), 20);
+                for (int ci = 0; ci < n; ++ci)
+                {
+                    row[(size_t)ci]->setBounds(grp.removeFromLeft(juce::jmin(kPillW, grp.getWidth())));
+                    if (ci + 1 < n) grp.removeFromLeft(6);
+                }
+            };
+            if (auxAllInZone)
+                for (auto &row : mAuxRows) layAux(zone.removeFromTop(26), row);
+            else if (!mAuxRows.empty())
+                layAux(auxBand, mAuxRows[0]);
+        }
+
+        void mouseUp(const juce::MouseEvent &e) override
+        {
+            // click (not a deck drag that started on the face) on the printed name
+            if (e.getDistanceFromDragStart() < 5 && mPillRect.contains(e.getPosition()))
+                showModelMenu();
+        }
+
+        void mouseMove(const juce::MouseEvent &e) override
+        {
+            const bool over = mPillRect.contains(e.getPosition());
+            if (over != mPillHover)
+            {
+                mPillHover = over;
+                setMouseCursor(over ? juce::MouseCursor::PointingHandCursor
+                                    : juce::MouseCursor::NormalCursor);
+                repaint(mPillRect.expanded(6));
+            }
+        }
+        void mouseExit(const juce::MouseEvent &) override
+        {
+            if (mPillHover)
+            {
+                mPillHover = false;
+                setMouseCursor(juce::MouseCursor::NormalCursor);
+                repaint(mPillRect.expanded(6));
+            }
+        }
+
+    private:
+        static constexpr int kPillW = 96;  // aux StompPill width (two fit a 220px face)
+        static constexpr int kZoneH = 172; // the constant knob/art zone (2 knob rows) —
+                                           // DrivePedal::resized mirrors this number
+        juce::String pid(const char *suf) const { return mBoard.sid(mSlot, suf); }
+        juce::String onParamId() const
+        {
+            if (mKind == Env) return "envfilterOn";
+            if (mKind == Comp) return "compOn";
+            return pid("On");
+        }
+        int modelKey() const
+        {
+            if (mKind == Env) return mBoard.paramC("envfilterVoice");
+            if (mKind == Comp) return mBoard.paramC("compMode");
+            if (mKind == Mod) return mBoard.paramC(pid("mType"));
+            return mBoard.paramC(pid("pModel"));
+        }
+        void paintGlyph(juce::Graphics &g, juce::Rectangle<float> box, juce::Colour c)
+        {
+            if (mKind == Env) paintEnvGlyph(g, box, c);
+            else if (mKind == Comp) paintCompGlyph(g, box, c);
+            else if (mKind == Mod) paintModGlyph(g, box, c);
+            else paintDelayGlyph(g, box, c);
+        }
+
+        LabeledKnob *addKnob(int row, const juce::String &paramId, const juce::String &cap)
+        {
+            auto k = std::make_unique<LabeledKnob>(mBoard.mApvts, paramId, cap);
+            k->setCaptionHeight(13);
+            k->setValueOnDragOnly(); // real pedals don't display numbers at rest
+            auto *raw = k.get();
+            addAndMakeVisible(*raw);
+            while ((int)mRows.size() <= row) mRows.emplace_back();
+            mRows[(size_t)row].push_back(raw);
+            mOwned.push_back(std::move(k));
+            return raw;
+        }
+        StompPill *addPill(int auxRow, const juce::String &paramId, const juce::String &caption,
+                           juce::StringArray items)
+        {
+            auto p = std::make_unique<StompPill>(mBoard.mApvts, paramId, caption, std::move(items));
+            auto *raw = p.get();
+            addAndMakeVisible(*raw);
+            while ((int)mAuxRows.size() <= auxRow) mAuxRows.emplace_back();
+            mAuxRows[(size_t)auxRow].push_back(raw);
+            mPills.push_back(raw);
+            mOwned.push_back(std::move(p));
+            return raw;
+        }
+        StompPill *addSync(int auxRow, const juce::String &paramId)
+        {
+            return addPill(auxRow, paramId, "SYNC",
+                           {"Off", "1/1", "1/2", "1/4", "1/4.", "1/4T", "1/8", "1/8.", "1/8T", "1/16"});
+        }
+
+        void rebuild()
+        {
+            mRows.clear();
+            mAuxRows.clear();
+            mPills.clear();
+            mOwned.clear();
+
+            const int key = modelKey();
+            mLastKey = key;
+
+            switch (mKind)
+            {
+            case Env:
+            {
+                mKindStr = "ENV FILTER";
+                mModelStr = key == 1 ? "Q-Tron" : "FX25";
+                mAp = envAccent();
+                if (key == 1) // Q-Tron+: Gain/Peak + the real toggle bank (as mini pills)
+                {
+                    addKnob(0, "envfilterSens", "Gain");
+                    addKnob(0, "envfilterReso", "Peak");
+                    addPill(0, "envfilterMode", "MODE", {"LP", "BP", "HP", "MIX"});
+                    addPill(0, "envfilterDir", "DRIVE", {"Up", "Down"});
+                    addPill(1, "envfilterQRange", "RANGE", {"Lo", "Hi"});
+                    addPill(1, "envfilterBoost", "BOOST", {"Norm", "Boost"});
+                    addPill(2, "envfilterResponse", "RESP", {"Fast", "Slow"});
+                }
+                else // FX25B: Sensitivity/Range/Blend
+                {
+                    addKnob(0, "envfilterSens", "Sens");
+                    addKnob(0, "envfilterRange", "Range");
+                    addKnob(0, "envfilterMix", "Blend");
+                }
+                break;
+            }
+            case Comp:
+            {
+                using CB = nam_rig::CompBlock;
+                const auto mode = (CB::Mode)juce::jlimit(0, 3, key);
+                mKindStr = "COMPRESSOR";
+                mModelStr = compModeName(key);
+                mAp = compAccent();
+                int row = 0, inRow = 0;
+                auto place = [&](const char *id, const char *cap) -> LabeledKnob * {
+                    auto *k = addKnob(row, id, cap);
+                    if (++inRow == 3) { ++row; inRow = 0; }
+                    return k;
+                };
+                place("compSustain", "Sustain");
+                LabeledKnob *att = CB::attackExposed(mode) ? place("compAttack", "Attack") : nullptr;
+                LabeledKnob *rat = CB::ratioExposed(mode) ? place("compRatio", "Ratio") : nullptr;
+                LabeledKnob *rel = CB::releaseExposed(mode) ? place("compRelease", "Release") : nullptr;
+                place("compLevel", "Level");
+                if (CB::dryBlendExposed(mode)) place("compDry", "Dry");
+                // true effective readouts per voicing (single source of truth = CompBlock)
+                if (att != nullptr)
+                    att->setReadoutFn([mode](double v) {
+                        const float ms = CB::effectiveAttackMs(mode, (float)v);
+                        return ms < 1.0f ? juce::String(ms * 1000.0f, 0) + juce::String::fromUTF8(" \xC2\xB5s")
+                                         : juce::String(ms, ms < 10.0f ? 2 : 1) + " ms";
+                    });
+                if (rel != nullptr)
+                    rel->setReadoutFn([mode](double v) {
+                        const float ms = CB::effectiveReleaseMs(mode, (float)v);
+                        return ms >= 1000.0f ? juce::String(ms / 1000.0f, 2) + " s"
+                                             : juce::String(ms, 0) + " ms";
+                    });
+                if (rat != nullptr)
+                    rat->setReadoutFn([mode](double v) {
+                        const float r = (mode == CB::Mode::FET) ? CB::snapRatioFet((float)v) : (float)v;
+                        return juce::String(r, (r == (float)(int)r) ? 0 : 1) + ":1";
+                    });
+                break;
+            }
+            case Mod:
+            {
+                const int t = juce::jlimit(0, 4, key);
+                mKindStr = "MOD";
+                mModelStr = modName(t);
+                mAp = modAccent(t);
+                addKnob(0, pid("mRate"), "Rate");
+                if (t != 1) addKnob(0, pid("mDepth"), "Depth");
+                if (t == 2) addKnob(0, pid("mFeedback"), "Regen");
+                if (t == 3) addKnob(0, pid("mWave"), "Wave");
+                if (t == 4) addKnob(0, pid("mMix"), "Mix");
+                addSync(0, pid("mSync"));
+                if (t == 1) addPill(0, pid("mPhaserVoice"), "VOICE", {"Script", "Block"});
+                break;
+            }
+            case Delay:
+            {
+                const int m = juce::jlimit(0, 2, key);
+                mKindStr = "DELAY";
+                mModelStr = delayName(m);
+                mAp = delayAccent(m);
+                if (m == 0) // Boss DD-7: D.TIME / F.BACK / E.LEVEL + the MODE rotary
+                {
+                    addKnob(0, pid("pTime"), "D.Time");
+                    addKnob(0, pid("pFeedback"), "F.Back");
+                    addKnob(0, pid("pMix"), "E.Level");
+                    auto *mode = addKnob(1, pid("pMode"), "Mode");
+                    mode->setValueOnDragOnly(false); // the mode NAME is the display — keep it
+                    mode->setReadoutFn([](double v) {
+                        static const char *const n[8] = {"50 ms", "200 ms", "800 ms", "3200 ms",
+                                                         "Hold", "Modulate", "Analog", "Reverse"};
+                        return juce::String(n[juce::jlimit(0, 7, (int)std::lround(v))]);
+                    });
+                    mode->setValueMenu({"50 ms", "200 ms", "800 ms", "3200 ms",
+                                        "Hold", "Modulate", "Analog", "Reverse"}); // no header: the knob is labelled MODE
+                }
+                else if (m == 1) // MXR Carbon Copy: Delay / Regen / Mix
+                {
+                    addKnob(0, pid("pTime"), "Delay");
+                    addKnob(0, pid("pFeedback"), "Regen");
+                    addKnob(0, pid("pMix"), "Mix");
+                }
+                else // EHX Deluxe Memory Man: Delay / Feedback / Blend / Depth / Level
+                {
+                    addKnob(0, pid("pTime"), "Delay");
+                    addKnob(0, pid("pFeedback"), "Feedback");
+                    addKnob(0, pid("pMix"), "Blend");
+                    addKnob(1, pid("pMod"), "Depth");
+                    addKnob(1, pid("pLevel"), "Level");
+                }
+                addSync(0, pid("pSync"));
+                if (m == 2) addPill(0, pid("pChorusVib"), "LFO", {"Chorus", "Vibrato"});
+                break;
+            }
+            }
+
+            mNameW = (int)std::ceil(juce::GlyphArrangement::getStringWidth(
+                fonts::archivo(19.0f, fonts::Bold), mModelStr)); // for the ▾ position
+            mLastOn = mBoard.paramF(onParamId()) >= 0.5f;
+            applyAccents(mLastOn);
+            mOn.setLit(mLastOn);
+            resized();
+            repaint();
+        }
+
+        void applyAccents(bool on)
+        {
+            const juce::Colour knobAcc = on ? mAp.led : juce::Colour(0xff5a616b);
+            for (auto &row : mRows)
+                for (auto *k : row) k->setAccent(knobAcc);
+            for (auto *p : mPills) p->setAccent(on ? mAp.led : juce::Colour(0xff5a616b));
+            mOn.setAccent(mAp.led);
+        }
+
+        void showModelMenu()
+        {
+            juce::PopupMenu m;
+            m.setLookAndFeel(&getLookAndFeel());
+            juce::String paramId;
+            juce::StringArray items;
+            juce::String header;
+            switch (mKind)
+            {
+            case Env:   paramId = "envfilterVoice"; header = "CHOOSE VOICE";
+                        items = {"FX25", "Q-Tron"}; break;
+            case Comp:  paramId = "compMode"; header = "CHOOSE COMP";
+                        items = {"Clean", "OTA", "Opto", "FET"}; break;
+            case Mod:   paramId = pid("mType"); header = "CHOOSE MOD";
+                        for (int i = 0; i < 5; ++i) items.add(modName(i)); break;
+            case Delay: paramId = pid("pModel"); header = "CHOOSE DELAY";
+                        for (int i = 0; i < 3; ++i) items.add(delayName(i)); break;
+            }
+            m.addCustomItem(-1, std::make_unique<MenuSectionHeader>(header), nullptr, {});
+            const int cur = mBoard.paramC(paramId);
+            for (int i = 0; i < items.size(); ++i)
+                m.addItem(i + 1, items[i], true, i == cur);
+            juce::Component::SafePointer<StompPedal> sp(this);
+            m.showMenuAsync(juce::PopupMenu::Options().withTargetScreenArea(localAreaToGlobal(mPillRect)),
+                            [sp, paramId](int r)
+                            {
+                                if (sp != nullptr && r > 0)
+                                    sp->mBoard.writeChoice(paramId, r - 1);
+                                // the control set follows on the next refresh tick
+                            });
+        }
+
+        PedalboardPanel &mBoard;
+        Kind mKind;
+        int mSlot;
+        Footswitch mOn;
+        std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mOnAtt;
+        std::vector<std::unique_ptr<juce::Component>> mOwned;
+        std::vector<std::vector<LabeledKnob *>> mRows;
+        std::vector<std::vector<juce::Component *>> mAuxRows;
+        std::vector<StompPill *> mPills;
+        colors::AccentPair mAp;
+        juce::String mKindStr, mModelStr;
+        juce::Rectangle<int> mHeaderRect, mPillRect, mZoneRect;
+        int mPlateY = 0;  // stomp-plate seam y (0 until first layout)
+        int mNameW = 0;   // printed-name text width (positions the ▾)
+        int mLastKey = -1;
+        bool mLastOn = true, mPillHover = false;
+        float mGrSm = 0.0f, mGrPainted = -1.0f; // comp GR meter smoothing / dirty check
+    };
+
+    // ====================================================================== Deck
+    // Every placed pedal, side by side in processing order: [ENV][COMP] locked pair,
+    // then trunk -> Amp A lane -> Amp B lane. Cells are PURE pedal faces (no header
+    // band): grab a pedal anywhere on its enclosure and drag to reorder / regroup
+    // (ghost + caret, edge auto-scroll; ENV/COMP drag only onto each other = swap;
+    // drop on the BIN that appears to remove). Faces render through a uniform
+    // scale-down transform, so the tuned 220px layout just draws smaller. Patch
+    // cables join same-lane neighbours; the split dot marks trunk -> lanes. Also
+    // the palette's drop target.
+    class Deck : public juce::Component, public juce::DragAndDropTarget
+    {
+    public:
+        explicit Deck(PedalboardPanel &b) : mBoard(b) {}
+
+        struct Cell
+        {
+            int sel;  // kSelEnv / kSelComp / slot index
+            int lane; // 0/1/2 (locked pair: 0)
+            juce::Component *widget = nullptr;
+            juce::Rectangle<int> bounds; // deck-space (post-scale) cell rect
+        };
+
+        static int cellW() { return (int)std::lround(kCellW * kPedalScale); }
+        static int cellH() { return (int)std::lround(kPedalDesignH * kPedalScale); }
+
+        int preferredWidth() const
+        {
+            const int n = 2 + mBoard.usedCount();
+            const bool ghost = mBoard.usedCount() == 0;
+            return kCellGap + n * (cellW() + kCellGap) + (ghost ? 150 + kCellGap : 0);
+        }
+
+        void rebuild()
+        {
+            mCells.clear();
+            mWidgets.clear();
+
+            const int fo = mBoard.frontOrder();
+            addLocked(fo == 0 ? kSelEnv : kSelComp);
+            addLocked(fo == 0 ? kSelComp : kSelEnv);
+
+            const Lanes ln = mBoard.lanesNow();
+            for (int lane = 0; lane < 3; ++lane)
+                for (int s : ln.l[lane])
+                {
+                    Cell c;
+                    c.sel = s;
+                    c.lane = lane;
+                    if (mBoard.slotType(s) == 1) // the REAL drive pedal widget
+                    {
+                        auto w = std::make_unique<DrivePedal>(mBoard.mApvts,
+                                                              "pbS" + juce::String(s),
+                                                              mBoard.sid(s, "dCat"));
+                        c.widget = w.get();
+                        addAndMakeVisible(*c.widget);
+                        mWidgets.push_back(std::move(w));
+                    }
+                    else
+                    {
+                        const auto kind = mBoard.slotType(s) == 2 ? StompPedal::Mod : StompPedal::Delay;
+                        auto w = std::make_unique<StompPedal>(mBoard, kind, s);
+                        c.widget = w.get();
+                        addAndMakeVisible(*c.widget);
+                        mWidgets.push_back(std::move(w));
+                    }
+                    mCells.push_back(c);
+                }
+            // Grab-anywhere dragging: the deck listens to each pedal face's OWN mouse
+            // events (children — knobs, pills, footswitch — keep theirs), so a click-
+            // hold on the enclosure drags the pedal.
+            for (auto &w : mWidgets)
+                w->addMouseListener(this, false);
+            layoutCells();
+            repaint();
+        }
+
+        void refreshPedals()
+        {
+            for (auto &w : mWidgets)
+            {
+                if (auto *d = dynamic_cast<DrivePedal *>(w.get())) d->refresh();
+                else if (auto *s = dynamic_cast<StompPedal *>(w.get())) s->refresh();
+            }
+        }
+
+        void resized() override { layoutCells(); }
+
+        void paint(juce::Graphics &g) override
+        {
+            // patch cables between same-lane neighbours + the split after the trunk
+            for (size_t i = 0; i + 1 < mCells.size(); ++i)
+            {
+                const auto &a = mCells[i];
+                const auto &b = mCells[i + 1];
+                const int cableY = a.bounds.getCentreY();
+                const int x0 = a.bounds.getRight(), x1 = b.bounds.getX();
+                if (a.lane == b.lane)
+                {
+                    g.setColour(laneCol(b.lane).withAlpha(0.75f));
+                    g.fillRect(x0 + 4, cableY - 1, x1 - x0 - 8, 2);
+                }
+                else if (a.lane == 0) // trunk ends -> split dot in the gap
+                {
+                    const float cx = (float)(x0 + x1) * 0.5f;
+                    g.setColour(colors::titleAccent.withAlpha(0.8f));
+                    g.fillRect(x0 + 4, cableY - 1, (int)cx - x0 - 8, 2);
+                    g.setColour(colors::accent);
+                    g.fillEllipse(cx - 3.5f, (float)cableY - 3.5f, 7.0f, 7.0f);
+                }
+                else // Amp A group -> Amp B group: different buses, draw a divider
+                {
+                    g.setColour(colors::divider);
+                    g.fillRect((x0 + x1) / 2, a.bounds.getY() + 6, 1, a.bounds.getHeight() - 12);
+                }
+            }
+
+            if (!mGhost.isEmpty()) // empty board hint
+            {
+                juce::Path outline;
+                outline.addRoundedRectangle(mGhost.toFloat().reduced(1.0f), 14.0f);
+                juce::Path dashed;
+                const float d[2] = {5.0f, 4.0f};
+                juce::PathStrokeType(1.2f).createDashedStroke(dashed, outline, d, 2);
+                g.setColour(colors::outline);
+                g.fillPath(dashed);
+                g.setColour(colors::textDim);
+                g.setFont(fonts::archivo(11.0f, fonts::SemiBold, 0.04f));
+                g.drawText("drag a pedal here", mGhost, juce::Justification::centred);
+            }
+        }
+
+        // Drag + selection visuals sit ABOVE the pedal widgets.
+        void paintOverChildren(juce::Graphics &g) override
+        {
+            if (!mDragging && mBoard.selectedPedal() != kSelNone) // selection ring
+                for (const auto &c : mCells)
+                    if (c.sel == mBoard.selectedPedal())
+                    {
+                        g.setColour(colors::accent.withAlpha(0.55f));
+                        g.drawRoundedRectangle(c.bounds.toFloat().expanded(2.0f), 15.0f, 1.4f);
+                    }
+            const int caret = mDragging && mPressSel >= 0 ? mDragCaretX : mCaretX;
+            if (caret >= 0) // insertion caret (cell move or palette drop)
+            {
+                g.setColour(colors::accent);
+                g.fillRoundedRectangle((float)caret - 1.5f, 4.0f, 3.0f,
+                                       (float)getHeight() - 8.0f, 1.5f);
+            }
+            if (!mDragging) return;
+            for (const auto &c : mCells) // dim the cell being moved
+                if (c.sel == mPressSel)
+                {
+                    g.setColour(colors::panel.withAlpha(0.55f));
+                    g.fillRoundedRectangle(c.bounds.toFloat(), 10.0f);
+                }
+            if (mPressSel < 0) // locked drag: ring the swap partner
+                for (const auto &c : mCells)
+                    if (c.sel < 0 && c.sel != mPressSel)
+                    {
+                        g.setColour(colors::accent.withAlpha(0.9f));
+                        g.drawRoundedRectangle(c.bounds.toFloat().reduced(1.5f), 10.0f, 1.6f);
+                    }
+            if (mDragImg.isValid()) // floating half-size ghost under the cursor
+            {
+                auto dst = juce::Rectangle<float>((float)mDragImg.getWidth() * 0.5f,
+                                                  (float)mDragImg.getHeight() * 0.5f)
+                               .withCentre(mDragPos.toFloat());
+                g.setOpacity(0.88f);
+                g.drawImage(mDragImg, dst);
+                g.setOpacity(1.0f);
+            }
+        }
+
+        // NB: these also receive the pedal widgets' own mouse events (the deck is a
+        // MouseListener on every face), so everything works in DECK space via
+        // getEventRelativeTo — grab a pedal anywhere on its enclosure to drag it.
+        void mouseDown(const juce::MouseEvent &e) override
+        {
+            mPressSel = kSelNone;
+            if (e.mods.isPopupMenu()) return; // right-click never arms a drag
+            const auto p = e.getEventRelativeTo(this).getPosition();
+            for (const auto &c : mCells)
+                if (c.bounds.contains(p)) { mPressSel = c.sel; return; }
+        }
+
+        void mouseDrag(const juce::MouseEvent &e) override
+        {
+            if (mPressSel == kSelNone) return;
+            if (!mDragging && e.getDistanceFromDragStart() < 5) return;
+            const auto p = e.getEventRelativeTo(this).getPosition();
+            if (!mDragging)
+            {
+                mDragging = true;
+                mDragImg = juce::Image();
+                for (const auto &c : mCells) // one-shot ghost snapshot of the pedal face
+                    if (c.sel == mPressSel && c.widget != nullptr)
+                    {
+                        mDragImg = c.widget->createComponentSnapshot(c.widget->getLocalBounds());
+                        break;
+                    }
+                juce::Component::beginDragAutoRepeat(60); // keeps drags ticking for edge-scroll
+                mBoard.deckDragBegan(mPressSel >= 0);     // the BIN appears for free pedals
+            }
+            mDragPos = p;
+            mDragCaretX = mPressSel >= 0 ? caretXFor(mDragPos, mPressSel) : -1;
+            mBoard.deckDragMoved(mBoard.getLocalPoint(this, p));
+            autoScroll(p);
+            repaint();
+        }
+
+        void mouseUp(const juce::MouseEvent &e) override
+        {
+            const auto p = e.getEventRelativeTo(this).getPosition();
+            if (mDragging) // finish a cell move / bin drop
+            {
+                juce::Component::beginDragAutoRepeat(0);
+                const int dragged = mPressSel;
+                mDragging = false;
+                mPressSel = kSelNone;
+                mDragCaretX = -1;
+                mDragImg = juce::Image();
+                const bool binHit = mBoard.deckDragFinished(mBoard.getLocalPoint(this, p));
+                if (dragged >= 0 && binHit)
+                {
+                    mBoard.removePedal(dragged); // dropped on the bin
+                }
+                else if (dragged < 0) // locked pair: drop on the partner swaps the order
+                {
+                    for (const auto &c : mCells)
+                        if (c.sel < 0 && c.sel != dragged && c.bounds.expanded(8).contains(p))
+                        {
+                            mBoard.swapFrontPair();
+                            break;
+                        }
+                }
+                else
+                {
+                    const auto tgt = moveTarget(p, dragged);
+                    mBoard.movePedal(dragged, tgt.first, tgt.second);
+                }
+                repaint();
+                return;
+            }
+            mPressSel = kSelNone;
+            for (const auto &c : mCells) // plain click on a pedal = select it
+                if (c.bounds.contains(p))
+                {
+                    mBoard.selectPedal(c.sel, false);
+                    return;
+                }
+        }
+
+        // ---- palette drop target ----
+        bool isInterestedInDragSource(const SourceDetails &d) override
+        {
+            return d.description.toString().startsWith("pbadd:") && !mBoard.boardFull();
+        }
+        void itemDragMove(const SourceDetails &d) override { updateCaret(d.localPosition); }
+        void itemDragExit(const SourceDetails &) override { mCaretX = -1; repaint(); }
+        void itemDropped(const SourceDetails &d) override
+        {
+            const auto pos = moveTarget(d.localPosition, kSelNone);
+            mCaretX = -1;
+            repaint();
+            int f = 0, c = 0, m = 0;
+            if (!parseAdd(d.description.toString(), f, c, m)) return;
+            const int slot = mBoard.addPedal(f, c, m, pos.first, pos.second);
+            if (slot >= 0) mBoard.selectPedal(slot, true);
+        }
+
+        const std::vector<Cell> &cells() const { return mCells; }
+
+    private:
+        static juce::Colour laneCol(int lane)
+        {
+            return lane == 0 ? colors::titleAccent : colors::laneColour(lane - 1);
+        }
+
+        void addLocked(int sel)
+        {
+            Cell c;
+            c.sel = sel;
+            c.lane = 0;
+            auto w = std::make_unique<StompPedal>(
+                mBoard, sel == kSelEnv ? StompPedal::Env : StompPedal::Comp, -1);
+            c.widget = w.get();
+            addAndMakeVisible(*c.widget);
+            mWidgets.push_back(std::move(w));
+            mCells.push_back(c);
+        }
+
+        void layoutCells()
+        {
+            const int cw = cellW(), ch = cellH();
+            const int yTop = juce::jmax(0, (getHeight() - ch) / 2);
+            int x = kCellGap;
+            for (auto &c : mCells)
+            {
+                c.bounds = {x, yTop, cw, ch};
+                if (c.widget != nullptr)
+                {
+                    // faces are laid out at DESIGN size and drawn through a uniform
+                    // scale-down — the tuned 220px skeleton, just smaller
+                    c.widget->setTransform(juce::AffineTransform::scale(kPedalScale)
+                                               .translated((float)x, (float)yTop));
+                    c.widget->setBounds(0, 0, kCellW, kPedalDesignH);
+                }
+                x += cw + kCellGap;
+            }
+            mGhost = mBoard.usedCount() == 0 && !mCells.empty()
+                         ? juce::Rectangle<int>(x, yTop, 150, ch)
+                         : juce::Rectangle<int>();
+        }
+
+        static bool parseAdd(const juce::String &desc, int &f, int &c, int &m)
+        {
+            auto t = juce::StringArray::fromTokens(desc, ":", {});
+            if (t.size() != 4 || t[0] != "pbadd") return false;
+            f = t[1].getIntValue();
+            c = t[2].getIntValue();
+            m = t[3].getIntValue();
+            return f >= 1 && f <= 3;
+        }
+
+        // Map a point to (lane, position within that lane), ignoring `excludeSel`
+        // (the cell being moved; kSelNone for palette adds). Drops on the locked
+        // pair clamp to trunk pos 0.
+        std::pair<int, int> moveTarget(juce::Point<int> p, int excludeSel) const
+        {
+            int lane = 0, pos = 0, cnt[3] = {0, 0, 0};
+            for (const auto &c : mCells)
+            {
+                if (c.sel < 0 || c.sel == excludeSel) continue;
+                if (p.x > c.bounds.getCentreX()) { lane = c.lane; pos = cnt[c.lane] + 1; }
+                ++cnt[c.lane];
+            }
+            return {lane, pos};
+        }
+        // Insertion caret x for a point, ignoring `excludeSel`.
+        int caretXFor(juce::Point<int> p, int excludeSel) const
+        {
+            int x = kCellGap / 2;
+            for (const auto &c : mCells)
+                if (c.sel != excludeSel && p.x > c.bounds.getCentreX())
+                    x = c.bounds.getRight() + kCellGap / 2;
+            // never left of the locked pair
+            if (mCells.size() >= 2) x = juce::jmax(x, mCells[1].bounds.getRight() + kCellGap / 2);
+            return x;
+        }
+        void updateCaret(juce::Point<int> p)
+        {
+            const int x = caretXFor(p, kSelNone);
+            if (x != mCaretX) { mCaretX = x; repaint(); }
+        }
+        // Nudge the deck viewport while dragging near its edges (beginDragAutoRepeat
+        // keeps mouseDrag ticking so the scroll continues while the mouse is held).
+        void autoScroll(juce::Point<int> p)
+        {
+            auto *vp = findParentComponentOfClass<juce::Viewport>();
+            if (vp == nullptr) return;
+            const auto vpt = vp->getLocalPoint(this, p);
+            const int edge = 48;
+            int dx = 0;
+            if (vpt.x < edge) dx = -14;
+            else if (vpt.x > vp->getWidth() - edge) dx = 14;
+            if (dx != 0)
+                vp->setViewPosition(juce::jmax(0, vp->getViewPositionX() + dx),
+                                    vp->getViewPositionY());
+        }
+
+        PedalboardPanel &mBoard;
+        std::vector<Cell> mCells;
+        std::vector<std::unique_ptr<juce::Component>> mWidgets;
+        juce::Rectangle<int> mGhost;
+        int mCaretX = -1;      // palette-drop caret
+        int mPressSel = kSelNone; // band pressed (potential cell drag)
+        bool mDragging = false;
+        juce::Point<int> mDragPos;
+        juce::Image mDragImg;  // ghost snapshot of the dragged pedal face
+        int mDragCaretX = -1;  // insertion caret while moving a cell
+    };
+
+    // ================================================================= ChainStrip
+    // The signal-flow footer: IN -> [ENV][COMP] -> trunk nodes -> split -> lane A
+    // (top) / lane B (bottom) -> AMP A/B. Nodes are mini enclosures. Drag a free
+    // node to reorder / change lane; drag ENV or COMP onto its partner to swap the
+    // locked pair; right-click for Route / Remove. Also a palette drop target.
+    class ChainStrip : public juce::Component, public juce::DragAndDropTarget
+    {
+    public:
+        explicit ChainStrip(PedalboardPanel &b) : mBoard(b) {}
+
+        struct Node
+        {
+            int sel;  // kSelEnv / kSelComp / slot
+            int lane; // 0/1/2
+            juce::Rectangle<int> rect;
+        };
+
+        void refreshLayout()
+        {
+            layoutNodes();
+            repaint();
+        }
+
+        void resized() override { layoutNodes(); }
+
+        void paint(juce::Graphics &g) override
+        {
+            const int cy = trunkY();
+            // trunk cable + split
+            g.setColour(colors::titleAccent.withAlpha(0.9f));
+            g.drawLine((float)mIn.getRight(), (float)cy, (float)mSplitX, (float)cy, 2.0f);
+            drawLaneCable(g, mAmpA.getCentreY(), colors::laneColour(0));
+            drawLaneCable(g, mAmpB.getCentreY(), colors::laneColour(1));
+            g.setColour(colors::accent);
+            g.fillEllipse((float)mSplitX - 3.0f, (float)cy - 3.0f, 6.0f, 6.0f);
+
+            drawPill(g, mIn, "IN", colors::textDim, colors::outline);
+            drawPill(g, mAmpA, "A", colors::laneColour(0), colors::laneColour(0));
+            drawPill(g, mAmpB, "B", colors::laneColour(1), colors::laneColour(1));
+
+            for (const auto &n : mNodes)
+                if (!(mDragging && n.sel == mDragSel))
+                    drawNode(g, n, false);
+
+            if (mDragging)
+            {
+                if (mDragSel < 0) // locked-pair drag: highlight the swap partner
+                {
+                    for (const auto &n : mNodes)
+                        if (n.sel < 0 && n.sel != mDragSel)
+                        {
+                            g.setColour(colors::accent.withAlpha(0.9f));
+                            g.drawRoundedRectangle(n.rect.toFloat().expanded(3.0f), 9.0f, 1.6f);
+                        }
+                }
+                else if (mCaret.x >= 0) // insertion caret
+                {
+                    g.setColour(colors::accent);
+                    g.fillRoundedRectangle((float)mCaret.x - 1.5f, (float)mCaret.y - 16.0f, 3.0f, 32.0f, 1.5f);
+                }
+                for (const auto &n : mNodes) // ghost follows the cursor
+                    if (n.sel == mDragSel)
+                    {
+                        auto gh = n;
+                        gh.rect = n.rect.withCentre(mDragPos);
+                        drawNode(g, gh, true);
+                    }
+            }
+            else if (mDropCaret.x >= 0) // palette drop caret
+            {
+                g.setColour(colors::accent);
+                g.fillRoundedRectangle((float)mDropCaret.x - 1.5f, (float)mDropCaret.y - 16.0f, 3.0f, 32.0f, 1.5f);
+            }
+        }
+
+        void mouseDown(const juce::MouseEvent &e) override
+        {
+            mDragging = false;
+            mDragSel = kSelNone;
+            const auto *n = nodeAt(e.getPosition());
+            if (n == nullptr) return;
+            if (e.mods.isPopupMenu()) { showNodeMenu(*n); return; }
+            mDragSel = n->sel;
+        }
+        void mouseDrag(const juce::MouseEvent &e) override
+        {
+            if (mDragSel == kSelNone) return;
+            if (!mDragging && e.getDistanceFromDragStart() < 5) return;
+            mDragging = true;
+            mDragPos = e.getPosition();
+            if (mDragSel >= 0) mCaret = caretFor(mDragPos).first;
+            repaint();
+        }
+        void mouseUp(const juce::MouseEvent &e) override
+        {
+            if (!mDragging)
+            {
+                if (const auto *n = nodeAt(e.getPosition()); n != nullptr && mDragSel == n->sel)
+                    mBoard.selectPedal(n->sel, true); // click = select + scroll the deck there
+                mDragSel = kSelNone;
+                repaint();
+                return;
+            }
+            mDragging = false;
+            const auto p = e.getPosition();
+            if (!getLocalBounds().expanded(24).contains(p)) // released way outside = cancel
+            {
+                mDragSel = kSelNone;
+                mCaret = {-1, 0};
+                repaint();
+                return;
+            }
+            if (mDragSel < 0) // locked pair: drop on the partner swaps the order
+            {
+                for (const auto &n : mNodes)
+                    if (n.sel < 0 && n.sel != mDragSel && n.rect.expanded(6).contains(p))
+                    {
+                        mBoard.swapFrontPair();
+                        break;
+                    }
+            }
             else
             {
-                setC(sid(slot, "Type"), 1);
-                setC(sid(slot, "dCat"), dt);
-                setC(sid(slot, "Lane"), driveLane);
-                setBool(sid(slot, "On"), getF(dp + "On") >= 0.5f);
+                const auto tgt = caretFor(p).second;
+                mBoard.movePedal(mDragSel, tgt.first, tgt.second);
             }
-        }
-        // premod -> slot 3 (Mod)
-        copyP("premodRate", sid(3, "mRate")); copyP("premodDepth", sid(3, "mDepth"));
-        copyP("premodMix", sid(3, "mMix")); copyP("premodFeedback", sid(3, "mFeedback"));
-        copyP("premodWave", sid(3, "mWave"));
-        setC(sid(3, "mType"), getC("premodType")); setC(sid(3, "mSync"), getC("premodSync"));
-        setC(sid(3, "mPhaserVoice"), getC("premodPhaserVoice"));
-        const bool premodOn = getF("premodOn") >= 0.5f;
-        setC(sid(3, "Type"), premodOn ? 2 : 0); setC(sid(3, "Lane"), 0); setBool(sid(3, "On"), premodOn);
-        // predelay -> slot 4 (Delay)
-        copyP("predelayTime", sid(4, "pTime")); copyP("predelayFeedback", sid(4, "pFeedback"));
-        copyP("predelayMix", sid(4, "pMix")); copyP("predelayMod", sid(4, "pMod"));
-        copyP("predelayTone", sid(4, "pTone")); copyP("predelayLevel", sid(4, "pLevel"));
-        setC(sid(4, "pModel"), getC("predelayModel")); setC(sid(4, "pMode"), getC("predelayMode"));
-        setC(sid(4, "pSync"), getC("predelaySync")); setC(sid(4, "pChorusVib"), getC("predelayChorusVib"));
-        const bool predelayOn = getF("predelayOn") >= 0.5f;
-        setC(sid(4, "Type"), predelayOn ? 3 : 0); setC(sid(4, "Lane"), 0); setBool(sid(4, "On"), predelayOn);
-
-        setBool("pbEnabled", true); // now the board reproduces the imported chain
-        mSelType = 2; mSelSlot = 0;
-        buildDetail();
-        repaint();
-    }
-    void removeSelected()
-    {
-        if (mSelType != 2) return;
-        setC(sid(mSelSlot, "Type"), 0);
-        buildDetail();
-        repaint();
-    }
-
-    juce::Rectangle<int> localAreaToGlobalRect(juce::Rectangle<int> r)
-    {
-        return localAreaToGlobal(r);
-    }
-
-    // ---------------------------------------------------------------- detail zone
-    std::vector<std::unique_ptr<juce::Component>> mDetailOwned;
-    std::vector<LabeledKnob *> mKnobs;
-    std::unique_ptr<SegmentedControl> mTypeSeg;  // category / mod-type / delay-model
-    std::unique_ptr<SegmentedControl> mAuxSeg;   // range / gate / migrate / mode / voice / phaser-voice
-    std::unique_ptr<SegmentedControl> mRouteSeg; // pbS{i}Lane (bound)
-    std::unique_ptr<ToggleSwitch> mOnSw;
-    DrivePedal *mDrivePedal = nullptr; // the REAL drive-pedal widget, hosted for drive slots
-    bool mHasModel = false, mHasRemove = false;
-    juce::Rectangle<int> mModelRect, mRemoveRect;
-    juce::String mModelLabel, mDetailTitle;
-
-    LabeledKnob *makeKnob(const juce::String &id, const juce::String &cap)
-    {
-        auto k = std::make_unique<LabeledKnob>(mApvts, id, cap);
-        auto *raw = k.get();
-        addAndMakeVisible(*raw);
-        mKnobs.push_back(raw);
-        mDetailOwned.push_back(std::move(k));
-        return raw;
-    }
-
-    void buildDetail()
-    {
-        // tear down previous detail widgets
-        mKnobs.clear();
-        mTypeSeg.reset(); mAuxSeg.reset(); mRouteSeg.reset(); mOnSw.reset();
-        mDrivePedal = nullptr; // owned via mDetailOwned; cleared below
-        mDetailOwned.clear();
-        mHasModel = mHasRemove = false;
-        mModelLabel.clear();
-
-        if (mSelType == 0) buildEnv();
-        else if (mSelType == 1) buildComp();
-        else buildFree(mSelSlot);
-
-        layoutDetail();
-        repaint();
-    }
-
-    void buildEnv()
-    {
-        mDetailTitle = "ENV FILTER  (locked front)";
-        mTypeSeg = std::make_unique<SegmentedControl>(mApvts, "envfilterVoice", juce::StringArray{"FX25", "Q-Tron"});
-        addAndMakeVisible(*mTypeSeg);
-        mAuxSeg = std::make_unique<SegmentedControl>(mApvts, "envfilterMode", juce::StringArray{"LP", "BP", "HP", "MIX"});
-        addAndMakeVisible(*mAuxSeg);
-        mOnSw = std::make_unique<ToggleSwitch>(mApvts, "envfilterOn"); addAndMakeVisible(*mOnSw);
-        makeKnob("envfilterSens", "SENS");
-        makeKnob("envfilterRange", "RANGE");
-        makeKnob("envfilterReso", "PEAK");
-        makeKnob("envfilterMix", "BLEND");
-    }
-    void buildComp()
-    {
-        mDetailTitle = "COMPRESSOR  (locked front)";
-        mTypeSeg = std::make_unique<SegmentedControl>(mApvts, "compMode", juce::StringArray{"Clean", "OTA", "Opto", "FET"});
-        addAndMakeVisible(*mTypeSeg);
-        mOnSw = std::make_unique<ToggleSwitch>(mApvts, "compOn"); addAndMakeVisible(*mOnSw);
-        makeKnob("compSustain", "SUSTAIN");
-        makeKnob("compRatio", "RATIO");
-        makeKnob("compAttack", "ATTACK");
-        makeKnob("compRelease", "RELEASE");
-        makeKnob("compLevel", "LEVEL");
-        makeKnob("compDry", "DRY");
-    }
-    void buildFree(int i)
-    {
-        const int type = slotType(i);
-        if (type == 0) { mDetailTitle = "EMPTY SLOT  -  add a pedal from the palette"; return; }
-
-        mHasRemove = true;
-        mRouteSeg = std::make_unique<SegmentedControl>(mApvts, sid(i, "Lane"), juce::StringArray{"Both", "Amp A", "Amp B"});
-        addAndMakeVisible(*mRouteSeg);
-
-        if (type == 1) { buildDrive(i); return; } // the real DrivePedal owns Type/model/knobs/On
-
-        // mod / delay get their own footswitch (drive's lives inside the DrivePedal)
-        mOnSw = std::make_unique<ToggleSwitch>(mApvts, sid(i, "On")); addAndMakeVisible(*mOnSw);
-        if (type == 2) buildMod(i);
-        else buildDelay(i);
-    }
-
-    // manual selector (unbound) that writes a param + rebuilds the detail on change.
-    std::unique_ptr<SegmentedControl> makeRebuildSeg(const juce::String &paramId, juce::StringArray opts)
-    {
-        auto seg = std::make_unique<SegmentedControl>(opts); // manual mode
-        seg->setActive(juce::jlimit(0, opts.size() - 1, getC(paramId)));
-        juce::Component::SafePointer<PedalboardPanel> sp(this);
-        seg->onChange = [sp, paramId](int idx)
-        {
-            if (sp == nullptr) return;
-            sp->setC(paramId, idx);
-            sp->scheduleRebuild();
-        };
-        addAndMakeVisible(*seg);
-        return seg;
-    }
-    void scheduleRebuild()
-    {
-        juce::Component::SafePointer<PedalboardPanel> sp(this);
-        juce::MessageManager::callAsync([sp] { if (sp) sp->buildDetail(); });
-    }
-
-    void buildDrive(int i)
-    {
-        // Host the REAL DrivePedal widget (identical to the old DRIVE panel), bound to this
-        // slot's pool params via the prefix + the 5-value dCat selector. It owns the pedal
-        // enclosure, silkscreen art, model pill/picker, Drive/Tone/Level knobs, footswitch,
-        // and the Range/Gate/Migrate segs. The pool only adds Route + Remove around it.
-        mDetailTitle = "DRIVE  -  slot " + juce::String(i + 1);
-        auto dp = std::make_unique<DrivePedal>(mApvts, "pbS" + juce::String(i), sid(i, "dCat"));
-        mDrivePedal = dp.get();
-        addAndMakeVisible(*dp);
-        mDetailOwned.push_back(std::move(dp));
-    }
-    void buildMod(int i)
-    {
-        const int mt = juce::jlimit(0, 4, getC(sid(i, "mType")));
-        mDetailTitle = "MODULATION  -  slot " + juce::String(i + 1);
-        mTypeSeg = makeRebuildSeg(sid(i, "mType"), juce::StringArray{"Chorus", "Phaser", "Flanger", "Tremolo", "Uni-Vibe"});
-        makeKnob(sid(i, "mRate"), "RATE");
-        if (mt == 3) makeKnob(sid(i, "mWave"), "SHAPE"); else makeKnob(sid(i, "mDepth"), "DEPTH");
-        makeKnob(sid(i, "mMix"), "MIX");
-        if (mt == 1 || mt == 2) makeKnob(sid(i, "mFeedback"), mt == 2 ? "REGEN" : "RESO");
-        if (mt == 1)
-        {
-            mAuxSeg = std::make_unique<SegmentedControl>(mApvts, sid(i, "mPhaserVoice"), juce::StringArray{"Script", "Block"});
-            addAndMakeVisible(*mAuxSeg);
-        }
-    }
-    void buildDelay(int i)
-    {
-        mDetailTitle = "DELAY  -  slot " + juce::String(i + 1);
-        mTypeSeg = makeRebuildSeg(sid(i, "pModel"), juce::StringArray{"DD-7", "Carbon", "Mem Man"});
-        makeKnob(sid(i, "pTime"), "TIME");
-        makeKnob(sid(i, "pFeedback"), "FEEDBK");
-        makeKnob(sid(i, "pMix"), "MIX");
-        makeKnob(sid(i, "pMod"), "MOD");
-        makeKnob(sid(i, "pTone"), "TONE");
-        makeKnob(sid(i, "pLevel"), "LEVEL");
-    }
-
-    void showModelMenu()
-    {
-        if (mSelType != 2 || slotType(mSelSlot) != 1) return;
-        const int i = mSelSlot;
-        const auto k = (nam_rig::DriveBlock::Kind)(getC(sid(i, "dCat")));
-        const int n = nam_rig::DriveBlock::modelCount(k);
-        juce::PopupMenu m;
-        for (int mdl = 0; mdl < n; ++mdl) m.addItem(mdl + 1, nam_rig::DriveBlock::modelName(k, mdl));
-        juce::Component::SafePointer<PedalboardPanel> sp(this);
-        m.showMenuAsync(juce::PopupMenu::Options().withTargetScreenArea(localAreaToGlobalRect(mModelRect)),
-                        [sp, i](int r) { if (sp && r > 0) { sp->setC(sp->sid(i, "bModel"), r - 1); sp->scheduleRebuild(); } });
-    }
-
-    // ---------------------------------------------------------------- detail layout
-    // Everything sits on ONE centred pedal-shaped enclosure (a real stompbox on the dark
-    // stage): header -> category selector -> model -> big silkscreen glyph -> knob row ->
-    // aux selector -> bottom route/on/remove. Mirrors the DrivePedal face so it reads as
-    // a pedal instead of a lonely knob in a void.
-    void layoutDetail()
-    {
-        if (mDetailRect.isEmpty()) return;
-        const int pw = juce::jmin(520, mDetailRect.getWidth() - 40);
-        const int ph = juce::jmax(60, mDetailRect.getHeight() - 14);
-        mPedalRect = {mDetailRect.getCentreX() - pw / 2, mDetailRect.getY() + 7, pw, ph};
-
-        // Drive slots host the real DrivePedal (it paints/lays out its own face); the pool
-        // only frames it with a Route + Remove row along the bottom.
-        if (mDrivePedal)
-        {
-            auto area = mDetailRect.reduced(8, 8);
-            auto bot = area.removeFromBottom(30);
-            auto brow = bot.withSizeKeepingCentre(juce::jmin(bot.getWidth(), 380), 26);
-            mRemoveRect = {};
-            if (mHasRemove) { mRemoveRect = brow.removeFromRight(74).withSizeKeepingCentre(70, 26); brow.removeFromRight(10); }
-            if (mRouteSeg) { const int w = juce::jmin(brow.getWidth(), 220); mRouteSeg->setBounds(brow.removeFromLeft(w).withSizeKeepingCentre(w, 24)); }
-            area.removeFromBottom(8);
-            const int dw = juce::jmin(360, area.getWidth());
-            mDrivePedal->setBounds(area.withSizeKeepingCentre(dw, area.getHeight()));
-            return;
+            mDragSel = kSelNone;
+            mCaret = {-1, 0};
+            repaint();
         }
 
-        auto in = mPedalRect.reduced(24, 16);
-        in.removeFromTop(24); // header band (drawn in paint)
-
-        if (mTypeSeg)
+        // ---- palette drop target ----
+        bool isInterestedInDragSource(const SourceDetails &d) override
         {
-            auto row = in.removeFromTop(26);
-            const int w = juce::jlimit(200, row.getWidth(), mTypeSeg->idealWidth() > 0 ? mTypeSeg->idealWidth() + 12 : 280);
-            mTypeSeg->setBounds(row.withSizeKeepingCentre(w, 24));
-            in.removeFromTop(9);
+            return d.description.toString().startsWith("pbadd:") && !mBoard.boardFull();
         }
-        mModelRect = {};
-        if (mHasModel) { auto row = in.removeFromTop(26); mModelRect = row.withSizeKeepingCentre(juce::jmin(row.getWidth(), 240), 24); in.removeFromTop(12); }
-
-        mGlyphRect = in.removeFromTop(juce::jlimit(40, 130, in.getHeight() / 3));
-        in.removeFromTop(6);
-
-        // bottom row reserved FIRST (so it hugs the base of the pedal), then knobs/aux fill the middle.
-        auto bot = in.removeFromBottom(28);
-        mRemoveRect = {};
-        if (mHasRemove) { mRemoveRect = bot.removeFromRight(74).withSizeKeepingCentre(70, 26); bot.removeFromRight(8); }
-        if (mOnSw) { mOnSw->setBounds(bot.removeFromRight(50).withSizeKeepingCentre(46, 24)); bot.removeFromRight(10); }
-        if (mRouteSeg) { const int w = juce::jmin(bot.getWidth(), 220); mRouteSeg->setBounds(bot.removeFromLeft(w).withSizeKeepingCentre(w, 24)); }
-        in.removeFromBottom(8);
-
-        if (mAuxSeg)
+        void itemDragMove(const SourceDetails &d) override
         {
-            auto ar = in.removeFromBottom(26);
-            mAuxSeg->setBounds(ar.withSizeKeepingCentre(juce::jmin(ar.getWidth(), 220), 22));
-            in.removeFromBottom(8);
+            mDropCaret = caretFor(d.localPosition).first;
+            repaint();
         }
-
-        // knob row centred in whatever's left
-        if (!mKnobs.empty())
+        void itemDragExit(const SourceDetails &) override
         {
-            const int rh = juce::jlimit(60, 108, in.getHeight());
-            auto row = in.withSizeKeepingCentre(in.getWidth(), rh);
-            const int n = (int)mKnobs.size();
-            const int kw = juce::jmin(92, row.getWidth() / juce::jmax(1, n));
-            int x = row.getCentreX() - kw * n / 2;
-            for (auto *k : mKnobs) { k->setBounds(x, row.getY(), kw, row.getHeight()); x += kw; }
+            mDropCaret = {-1, 0};
+            repaint();
         }
-    }
-
-    void paintDetailCard(juce::Graphics &g)
-    {
-        // Drive slots: the hosted DrivePedal paints its own enclosure/art/knobs; the pool
-        // only owns the Remove button here (Route seg is a child component).
-        if (mDrivePedal)
+        void itemDropped(const SourceDetails &d) override
         {
-            if (mHasRemove && !mRemoveRect.isEmpty())
+            const auto tgt = caretFor(d.localPosition).second;
+            mDropCaret = {-1, 0};
+            auto t = juce::StringArray::fromTokens(d.description.toString(), ":", {});
+            if (t.size() == 4 && t[0] == "pbadd")
             {
-                auto rr = mRemoveRect.toFloat();
-                g.setColour(colors::tile); g.fillRoundedRectangle(rr, 6.0f);
-                g.setColour(colors::red.withAlpha(0.6f)); g.drawRoundedRectangle(rr.reduced(0.5f), 6.0f, 1.0f);
-                g.setColour(colors::red); g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.03f));
-                g.drawText("REMOVE", mRemoveRect, juce::Justification::centred);
+                const int slot = mBoard.addPedal(t[1].getIntValue(), t[2].getIntValue(),
+                                                 t[3].getIntValue(), tgt.first, tgt.second);
+                if (slot >= 0) mBoard.selectPedal(slot, true);
             }
-            return;
+            repaint();
         }
 
-        colors::AccentPair pair; int selType = 2;
-        if (mSelType == 0) pair = lockedPair(0);
-        else if (mSelType == 1) pair = lockedPair(1);
-        else { selType = slotType(mSelSlot); pair = slotAccent(selType, mSelSlot); }
+    private:
+        int trunkY() const { return getHeight() / 2 + 4; }
+        int laneAY() const { return getHeight() / 4 + 6; }
+        int laneBY() const { return (3 * getHeight()) / 4 + 2; }
 
-        if (mPedalRect.isEmpty()) return;
-        auto r = mPedalRect.toFloat();
-        paintEnclosure(g, r, pair.tint, true, false, 16.0f); // the pedal enclosure
-
-        // header: title (accent silkscreen) + jewel LED
-        auto head = mPedalRect.reduced(22, 13).removeFromTop(22);
-        g.setColour(pair.accent);
-        g.setFont(fonts::archivo(13.5f, fonts::Bold, 0.07f));
-        g.drawText(mDetailTitle, head, juce::Justification::centredLeft);
-        auto jewel = juce::Rectangle<float>(12.0f, 12.0f).withCentre({(float)head.getRight() - 3.0f, (float)head.getCentreY()});
-        fx::glowEllipse(g, jewel, pair.led, 12, 0.6f, 6, 0.5f);
-        g.setColour(pair.led); g.fillEllipse(jewel);
-
-        // big silkscreen art glyph on the pedal face
-        if (!mGlyphRect.isEmpty())
+        void layoutNodes()
         {
-            const float gw = juce::jmin(130.0f, (float)mGlyphRect.getWidth());
-            const float gh = juce::jmin(96.0f, (float)mGlyphRect.getHeight());
-            paintSlotGlyph(g, mSelType == 0 ? 0 : mSelType == 1 ? 1 : 2, selType, mSelSlot,
-                           mGlyphRect.toFloat().withSizeKeepingCentre(gw, gh), pair.led.withAlpha(0.9f));
+            mNodes.clear();
+            if (getWidth() <= 0) return;
+            const Lanes ln = mBoard.lanesNow();
+            const int nTrunk = 2 + (int)ln.l[0].size();
+            const int nLane = juce::jmax(1, juce::jmax((int)ln.l[1].size(), (int)ln.l[2].size()));
+            const int gap = 8, inW = 26, ampW = 40, splitPad = 24;
+            const int avail = getWidth() - inW - ampW - splitPad - gap * (nTrunk + nLane + 2);
+            const int nodeW = juce::jlimit(44, 76, avail / juce::jmax(1, nTrunk + nLane));
+            const int nodeH = 34;
+
+            const int cy = trunkY();
+            mIn = {0, cy - 12, inW, 24};
+            int x = inW + gap;
+
+            const int fo = mBoard.frontOrder();
+            mNodes.push_back({fo == 0 ? kSelEnv : kSelComp, 0, {x, cy - nodeH / 2, nodeW, nodeH}});
+            x += nodeW + gap;
+            mNodes.push_back({fo == 0 ? kSelComp : kSelEnv, 0, {x, cy - nodeH / 2, nodeW, nodeH}});
+            x += nodeW + gap;
+            for (int s : ln.l[0])
+            {
+                mNodes.push_back({s, 0, {x, cy - nodeH / 2, nodeW, nodeH}});
+                x += nodeW + gap;
+            }
+            mSplitX = x + splitPad / 2 - gap / 2;
+
+            int xa = mSplitX + splitPad / 2, xb = xa;
+            for (int s : ln.l[1])
+            {
+                mNodes.push_back({s, 1, {xa, laneAY() - nodeH / 2, nodeW, nodeH}});
+                xa += nodeW + gap;
+            }
+            for (int s : ln.l[2])
+            {
+                mNodes.push_back({s, 2, {xb, laneBY() - nodeH / 2, nodeW, nodeH}});
+                xb += nodeW + gap;
+            }
+
+            const int ampX = juce::jmin(getWidth() - ampW, juce::jmax(juce::jmax(xa, xb) + gap, mSplitX + splitPad));
+            mAmpA = {ampX, laneAY() - 12, ampW, 24};
+            mAmpB = {ampX, laneBY() - 12, ampW, 24};
         }
 
-        if (mHasModel && !mModelRect.isEmpty())
+        void drawLaneCable(juce::Graphics &g, int laneY, juce::Colour c)
         {
-            auto mr = mModelRect.toFloat();
-            g.setColour(colors::tile); g.fillRoundedRectangle(mr, 6.0f);
-            g.setColour(colors::outline); g.drawRoundedRectangle(mr.reduced(0.5f), 6.0f, 1.0f);
-            g.setColour(colors::text); g.setFont(fonts::mono(9.5f, fonts::Medium, 0.02f));
-            g.drawText(mModelLabel, mModelRect.reduced(8, 0), juce::Justification::centredLeft);
+            g.setColour(c.withAlpha(0.9f));
+            juce::Path p;
+            p.startNewSubPath((float)mSplitX, (float)trunkY());
+            p.lineTo((float)mSplitX, (float)laneY);
+            p.lineTo((float)mAmpA.getX(), (float)laneY);
+            g.strokePath(p, juce::PathStrokeType(2.0f));
         }
-        if (mHasRemove && !mRemoveRect.isEmpty())
+        static void drawPill(juce::Graphics &g, juce::Rectangle<int> ri, const juce::String &txt,
+                             juce::Colour txtCol, juce::Colour border)
         {
-            auto rr = mRemoveRect.toFloat();
-            g.setColour(colors::tile); g.fillRoundedRectangle(rr, 6.0f);
-            g.setColour(colors::red.withAlpha(0.6f)); g.drawRoundedRectangle(rr.reduced(0.5f), 6.0f, 1.0f);
-            g.setColour(colors::red); g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.03f));
-            g.drawText("REMOVE", mRemoveRect, juce::Justification::centred);
+            auto r = ri.toFloat();
+            g.setColour(colors::tile);
+            g.fillRoundedRectangle(r, 7.0f);
+            g.setColour(border);
+            g.drawRoundedRectangle(r.reduced(0.5f), 7.0f, 1.2f);
+            g.setColour(txtCol);
+            g.setFont(fonts::archivo(10.0f, fonts::Bold, 0.06f));
+            g.drawText(txt, ri, juce::Justification::centred);
+        }
+
+        void drawNode(juce::Graphics &g, const Node &n, bool ghost)
+        {
+            colors::AccentPair ap;
+            juce::String name;
+            bool on = true;
+            if (n.sel == kSelEnv) { ap = envAccent(); name = "ENV"; on = mBoard.paramF("envfilterOn") >= 0.5f; }
+            else if (n.sel == kSelComp) { ap = compAccent(); name = "COMP"; on = mBoard.paramF("compOn") >= 0.5f; }
+            else
+            {
+                ap = mBoard.slotAccent(n.sel);
+                name = typeShort(mBoard.slotType(n.sel));
+                on = mBoard.slotOn(n.sel);
+            }
+            const bool sel = !ghost && mBoard.selectedPedal() == n.sel && n.sel != kSelNone;
+            auto r = n.rect.toFloat();
+            if (ghost) g.setOpacity(0.85f);
+            paintEnclosure(g, r, ap.tint, on, sel, 7.0f);
+            g.setColour(on ? ap.accent : colors::textDim);
+            g.setFont(fonts::archivo(7.5f, fonts::Bold, 0.08f));
+            g.drawText(name, n.rect.withHeight(11).translated(0, 2), juce::Justification::centred);
+            auto gbox = r.withTrimmedTop(13.0f).withTrimmedBottom(4.0f).reduced(r.getWidth() * 0.22f, 0.0f);
+            mBoard.paintPedalGlyph(g, n.sel, gbox, (on ? ap.led : juce::Colour(0xff5a616b)).withAlpha(0.9f));
+            auto led = juce::Rectangle<float>(5.0f, 5.0f).withPosition(r.getRight() - 9.0f, r.getY() + 4.0f);
+            g.setColour(on ? ap.led : colors::ledOff);
+            g.fillEllipse(led);
+            if (ghost) g.setOpacity(1.0f);
+        }
+
+        const Node *nodeAt(juce::Point<int> p) const
+        {
+            for (const auto &n : mNodes)
+                if (n.rect.expanded(2).contains(p)) return &n;
+            return nullptr;
+        }
+
+        // Insertion caret for a point: returns {caret pixel pos, {lane, posInLane}}.
+        std::pair<juce::Point<int>, std::pair<int, int>> caretFor(juce::Point<int> p) const
+        {
+            const int lane = p.x <= mSplitX ? 0 : (p.y <= getHeight() / 2 ? 1 : 2);
+            const int laneY = lane == 0 ? trunkY() : (lane == 1 ? laneAY() : laneBY());
+            int pos = 0, caretX = 0;
+            const Node *last = nullptr;
+            for (const auto &n : mNodes)
+            {
+                if (n.lane != lane || n.sel < 0 || (mDragging && n.sel == mDragSel)) continue;
+                if (p.x > n.rect.getCentreX()) { ++pos; last = &n; }
+            }
+            if (last != nullptr)
+                caretX = last->rect.getRight() + 4;
+            else if (lane == 0)
+                caretX = (mNodes.size() >= 2 ? mNodes[1].rect.getRight() : mIn.getRight()) + 4;
+            else
+                caretX = mSplitX + 14;
+            return {{caretX, laneY}, {lane, pos}};
+        }
+
+        void showNodeMenu(const Node &n)
+        {
+            juce::PopupMenu m;
+            m.setLookAndFeel(&getLookAndFeel());
+            if (n.sel < 0)
+            {
+                m.addCustomItem(-1, std::make_unique<MenuSectionHeader>("LOCKED FRONT PAIR"), nullptr, {});
+                m.addItem(1, "Swap Env / Comp order");
+                juce::Component::SafePointer<ChainStrip> sp(this);
+                m.showMenuAsync(juce::PopupMenu::Options().withTargetScreenArea(localAreaToGlobal(n.rect)),
+                                [sp](int r) { if (sp != nullptr && r == 1) sp->mBoard.swapFrontPair(); });
+                return;
+            }
+            const int slot = n.sel;
+            m.addCustomItem(-1, std::make_unique<MenuSectionHeader>(mBoard.slotModelName(slot).toUpperCase()),
+                            nullptr, {});
+            const int lane = mBoard.slotLane(slot);
+            m.addItem(1, "Route: Both amps", true, lane == 0);
+            m.addItem(2, "Route: Amp A", true, lane == 1);
+            m.addItem(3, "Route: Amp B", true, lane == 2);
+            m.addSeparator();
+            m.addItem(4, "Remove pedal");
+            juce::Component::SafePointer<ChainStrip> sp(this);
+            m.showMenuAsync(juce::PopupMenu::Options().withTargetScreenArea(localAreaToGlobal(n.rect)),
+                            [sp, slot](int r)
+                            {
+                                if (sp == nullptr || r <= 0) return;
+                                if (r >= 1 && r <= 3) sp->mBoard.routePedal(slot, r - 1);
+                                else if (r == 4) sp->mBoard.removePedal(slot);
+                            });
+        }
+
+        PedalboardPanel &mBoard;
+        std::vector<Node> mNodes;
+        juce::Rectangle<int> mIn, mAmpA, mAmpB;
+        int mSplitX = 0;
+        bool mDragging = false;
+        int mDragSel = kSelNone;
+        juce::Point<int> mDragPos, mCaret{-1, 0}, mDropCaret{-1, 0};
+    };
+
+    // ================================================================ PaletteList
+    // The pedal rack: category headers with the individual pedals underneath. Drag a
+    // row onto the deck/chain (payload "pbadd:family:cat:model"), or click to add it
+    // to the end of the trunk. Lives inside a vertical Viewport.
+    class PaletteList : public juce::Component
+    {
+    public:
+        explicit PaletteList(PedalboardPanel &b) : mBoard(b), mItems(b.buildCatalogue())
+        {
+            buildRows();
+        }
+
+        static constexpr int kHeaderRowH = 20, kItemRowH = 38;
+
+        int contentHeight() const { return mRows.empty() ? 0 : mRows.back().rect.getBottom() + 6; }
+
+        void paint(juce::Graphics &g) override
+        {
+            const bool full = mBoard.boardFull();
+            for (const auto &r : mRows)
+            {
+                if (r.item < 0) // category header
+                {
+                    g.setColour(colors::caption);
+                    g.setFont(fonts::archivo(9.0f, fonts::SemiBold, 0.14f));
+                    g.drawText(r.header, r.rect.reduced(10, 0), juce::Justification::bottomLeft);
+                    g.setColour(colors::divider);
+                    g.fillRect(r.rect.getX() + 8, r.rect.getBottom() - 1, r.rect.getWidth() - 16, 1);
+                    continue;
+                }
+                const auto &it = mItems[(size_t)r.item];
+                const bool hov = mHover == r.item && !full;
+                if (hov)
+                {
+                    g.setColour(colors::tileSel);
+                    g.fillRoundedRectangle(r.rect.toFloat().reduced(4.0f, 1.0f), 7.0f);
+                }
+                // livery bar
+                g.setColour(it.ap.accent.withAlpha(full ? 0.35f : 0.95f));
+                g.fillRoundedRectangle((float)r.rect.getX() + 8.0f, (float)r.rect.getY() + 7.0f,
+                                       3.0f, (float)r.rect.getHeight() - 14.0f, 1.5f);
+                auto tx = r.rect.reduced(19, 2);
+                // mini glyph, right
+                auto gb = tx.removeFromRight(30).toFloat().reduced(2.0f, 7.0f);
+                const juce::Colour gc = it.ap.led.withAlpha(full ? 0.3f : (hov ? 0.95f : 0.6f));
+                if (it.family == 1) paintDriveGlyph(g, it.cat, it.model, gb, gc);
+                else if (it.family == 2) paintModGlyph(g, gb, gc);
+                else paintDelayGlyph(g, gb, gc);
+                g.setColour(full ? colors::captionDim : colors::text);
+                g.setFont(fonts::archivo(12.0f, fonts::SemiBold));
+                g.drawText(it.name, tx.removeFromTop(tx.getHeight() / 2 + 2), juce::Justification::bottomLeft);
+                g.setColour(full ? colors::captionDim : colors::caption);
+                g.setFont(fonts::mono(9.0f));
+                g.drawText(it.sub, tx, juce::Justification::topLeft);
+            }
+            if (full)
+            {
+                g.setColour(colors::textDim);
+                g.setFont(fonts::mono(8.5f, fonts::Medium));
+                g.drawText("board full (8)", getLocalBounds().removeFromTop(14).reduced(10, 0),
+                           juce::Justification::centredRight);
+            }
+        }
+
+        void resized() override { buildRows(); }
+
+        void mouseMove(const juce::MouseEvent &e) override { setHover(itemAt(e.getPosition())); }
+        void mouseExit(const juce::MouseEvent &) override { setHover(-1); }
+
+        void mouseDrag(const juce::MouseEvent &e) override
+        {
+            if (mBoard.boardFull() || mDragItem >= 0) return;
+            if (e.getDistanceFromDragStart() < 6) return;
+            const int it = itemAt(e.getMouseDownPosition());
+            if (it < 0) return;
+            mDragItem = it;
+            const auto &item = mItems[(size_t)it];
+            const juce::String desc = "pbadd:" + juce::String(item.family) + ":"
+                                    + juce::String(item.cat) + ":" + juce::String(item.model);
+            if (auto *dnd = juce::DragAndDropContainer::findParentDragContainerFor(this))
+            {
+                // drag image = a snapshot of just this row
+                for (const auto &r : mRows)
+                    if (r.item == it)
+                    {
+                        auto img = createComponentSnapshot(r.rect, true);
+                        dnd->startDragging(desc, this, juce::ScaledImage(img), false);
+                        break;
+                    }
+            }
+        }
+        void mouseUp(const juce::MouseEvent &e) override
+        {
+            const bool dragged = mDragItem >= 0;
+            mDragItem = -1;
+            if (dragged || mBoard.boardFull()) return;
+            const int it = itemAt(e.getPosition());
+            if (it < 0 || it != itemAt(e.getMouseDownPosition())) return;
+            const auto &item = mItems[(size_t)it]; // plain click: append to the trunk
+            const int slot = mBoard.addPedalToTrunkEnd(item.family, item.cat, item.model);
+            if (slot >= 0) mBoard.selectPedal(slot, true);
+        }
+
+    private:
+        struct Row
+        {
+            int item; // -1 = header
+            juce::String header;
+            juce::Rectangle<int> rect;
+        };
+
+        void buildRows()
+        {
+            mRows.clear();
+            int y = 2;
+            juce::String lastHeader;
+            for (int i = 0; i < (int)mItems.size(); ++i)
+            {
+                const juce::String h = paletteHeaderFor(mItems[(size_t)i]);
+                if (h != lastHeader)
+                {
+                    lastHeader = h;
+                    mRows.push_back({-1, h, {0, y, getWidth(), kHeaderRowH}});
+                    y += kHeaderRowH + 2;
+                }
+                mRows.push_back({i, {}, {0, y, getWidth(), kItemRowH}});
+                y += kItemRowH;
+            }
+        }
+        int itemAt(juce::Point<int> p) const
+        {
+            for (const auto &r : mRows)
+                if (r.item >= 0 && r.rect.contains(p)) return r.item;
+            return -1;
+        }
+        void setHover(int h)
+        {
+            if (h != mHover) { mHover = h; repaint(); }
+        }
+
+        PedalboardPanel &mBoard;
+        std::vector<Item> mItems;
+        std::vector<Row> mRows;
+        int mHover = -1, mDragItem = -1;
+    };
+
+public:
+    // ================================================================== the panel
+    explicit PedalboardPanel(juce::AudioProcessorValueTreeState &apvts)
+        : BlockPanel("PEDALBOARD"), mApvts(apvts)
+    {
+        mDeck = std::make_unique<Deck>(*this);
+        mDeckView = std::make_unique<juce::Viewport>();
+        mDeckView->setViewedComponent(mDeck.get(), false);
+        mDeckView->setScrollBarsShown(false, true);
+        mDeckView->setScrollBarThickness(8);
+        addAndMakeVisible(*mDeckView);
+
+        mChain = std::make_unique<ChainStrip>(*this);
+        addAndMakeVisible(*mChain);
+
+        mPalette = std::make_unique<PaletteList>(*this);
+        mPaletteView = std::make_unique<juce::Viewport>();
+        mPaletteView->setViewedComponent(mPalette.get(), false);
+        mPaletteView->setScrollBarsShown(true, false);
+        mPaletteView->setScrollBarThickness(8);
+        addAndMakeVisible(*mPaletteView);
+
+        syncStructure(true);
+        startTimerHz(20);
+    }
+
+    void refresh() { repaint(); } // editor-compat hook (the panel self-times)
+
+    void resized() override
+    {
+        auto body = bodyArea().reduced(14, 8);
+
+        auto right = body.removeFromRight(kPalW);
+        right.removeFromTop(14); // "PEDAL RACK" caption drawn in paint()
+        mPaletteView->setBounds(right);
+        mPalette->setSize(right.getWidth() - mPaletteView->getScrollBarThickness(), 100);
+        mPalette->setSize(mPalette->getWidth(), juce::jmax(right.getHeight(), mPalette->contentHeight()));
+        body.removeFromRight(12);
+
+        mChain->setBounds(body.removeFromBottom(kChainH));
+        body.removeFromBottom(8);
+        mDeckView->setBounds(body);
+        layoutDeckSize();
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        BlockPanel::paint(g);
+        // palette caption
+        if (mPaletteView != nullptr)
+        {
+            g.setColour(colors::caption);
+            g.setFont(fonts::archivo(9.0f, fonts::SemiBold, 0.14f));
+            g.drawText("PEDAL RACK  -  drag or click",
+                       juce::Rectangle<int>(mPaletteView->getX(), mPaletteView->getY() - 13,
+                                            mPaletteView->getWidth(), 12),
+                       juce::Justification::centredLeft);
         }
     }
 
-    // ------------------------------------------------------------------- live sync
+    // The bin floats above the deck viewport while a pedal is being dragged.
+    void paintOverChildren(juce::Graphics &g) override
+    {
+        if (!mBinVisible) return;
+        auto r = mBinRect.toFloat();
+        g.setColour(colors::panel);
+        g.fillRoundedRectangle(r, 12.0f);
+        g.setColour(mBinHot ? colors::red : colors::outline);
+        g.drawRoundedRectangle(r.reduced(0.75f), 12.0f, mBinHot ? 1.8f : 1.2f);
+        const juce::Colour c = mBinHot ? colors::red : colors::textDim;
+        g.setColour(c);
+        auto b = r.withSizeKeepingCentre(24.0f, 26.0f); // trash-can glyph, no label
+        juce::Path p;
+        p.addRoundedRectangle(b.getX() + 3.0f, b.getY() + 7.0f,
+                              b.getWidth() - 6.0f, b.getHeight() - 7.0f, 2.5f);
+        p.startNewSubPath(b.getX(), b.getY() + 4.5f);
+        p.lineTo(b.getRight(), b.getY() + 4.5f);
+        p.startNewSubPath(b.getCentreX() - 4.0f, b.getY() + 4.5f);
+        p.lineTo(b.getCentreX() - 4.0f, b.getY() + 1.0f);
+        p.lineTo(b.getCentreX() + 4.0f, b.getY() + 1.0f);
+        p.lineTo(b.getCentreX() + 4.0f, b.getY() + 4.5f);
+        p.startNewSubPath(b.getCentreX() - 4.0f, b.getY() + 11.0f);
+        p.lineTo(b.getCentreX() - 4.0f, b.getBottom() - 4.0f);
+        p.startNewSubPath(b.getCentreX() + 4.0f, b.getY() + 11.0f);
+        p.lineTo(b.getCentreX() + 4.0f, b.getBottom() - 4.0f);
+        g.strokePath(p, juce::PathStrokeType(1.6f, juce::PathStrokeType::curved,
+                                             juce::PathStrokeType::rounded));
+    }
+
+private:
+    void layoutBin()
+    {
+        if (mDeckView != nullptr)
+            mBinRect = {mDeckView->getRight() - 74, mDeckView->getBottom() - 74, 60, 60};
+    }
+
+    void layoutDeckSize()
+    {
+        if (mDeckView == nullptr || mDeck == nullptr) return;
+        const int h = mDeckView->getHeight() - mDeckView->getScrollBarThickness();
+        mDeck->setSize(juce::jmax(mDeck->preferredWidth(), mDeckView->getWidth()), juce::jmax(60, h));
+    }
+
+    void scrollDeckToSelection()
+    {
+        if (mDeckView == nullptr || mDeck == nullptr) return;
+        for (const auto &c : mDeck->cells())
+            if (c.sel == mSelSlot)
+            {
+                const int want = c.bounds.getCentreX() - mDeckView->getWidth() / 2;
+                mDeckView->setViewPosition(juce::jlimit(0, juce::jmax(0, mDeck->getWidth() - mDeckView->getWidth()), want),
+                                           0);
+                break;
+            }
+    }
+
+    void repaintZones()
+    {
+        if (mDeck != nullptr) mDeck->repaint();
+        if (mChain != nullptr) mChain->refreshLayout();
+    }
+
+    // Structure signature: anything that changes the deck/chain SHAPE (not knob values).
+    std::uint64_t structureSig() const
+    {
+        std::uint64_t sig = (std::uint64_t)(frontOrder() + 1);
+        for (int i = 0; i < kSlots; ++i)
+        {
+            std::uint64_t s = (std::uint64_t)(slotType(i) * 4 + slotLane(i)) + 1;
+            s = s * 131u + (std::uint64_t)paramC(sid(i, "dCat")) + 1;
+            s = s * 131u + (std::uint64_t)paramC(sid(i, "bModel")) + 1;
+            s = s * 131u + (std::uint64_t)paramC(sid(i, "mType")) + 1;
+            s = s * 131u + (std::uint64_t)paramC(sid(i, "pModel")) + 1;
+            sig = sig * 1000003u + s;
+        }
+        sig = sig * 131u + (std::uint64_t)paramC("envfilterVoice");
+        sig = sig * 131u + (std::uint64_t)paramC("compMode");
+        return sig;
+    }
+    // Cosmetic signature: per-pedal On states (chain LEDs / cable dimming).
+    std::uint64_t ledSig() const
+    {
+        std::uint64_t sig = 0;
+        for (int i = 0; i < kSlots; ++i) sig = sig * 3u + (slotOn(i) ? 1u : 0u) + 1u;
+        sig = sig * 3u + (paramF("envfilterOn") >= 0.5f ? 1u : 0u);
+        sig = sig * 3u + (paramF("compOn") >= 0.5f ? 1u : 0u);
+        return sig;
+    }
+
+    void syncStructure(bool force)
+    {
+        const std::uint64_t sig = structureSig();
+        if (!force && sig == mLastStructureSig) return;
+        mLastStructureSig = sig;
+        if (mDeck != nullptr)
+        {
+            mDeck->rebuild();
+            layoutDeckSize();
+        }
+        if (mChain != nullptr) mChain->refreshLayout();
+        const int n = usedCount();
+        const Lanes ln = lanesNow();
+        juce::String hdr = juce::String(n) + (n == 1 ? " PEDAL" : " PEDALS");
+        if (!ln.l[1].empty() || !ln.l[2].empty()) hdr += "  -  A/B SPLIT";
+        setHeaderRight(hdr);
+    }
+
     void timerCallback() override
     {
-        // repaint on any change that affects the chain / node LEDs / selectors.
-        std::uint64_t sig = enabled() ? 1u : 0u;
-        sig = sig * 131u + (std::uint64_t)(getC("pbFrontOrder") + 1);
-        for (int i = 0; i < 8; ++i)
-            sig = sig * 131u + (std::uint64_t)(slotType(i) * 8 + slotLane(i) * 2 + (slotOn(i) ? 1 : 0));
-        sig = sig * 131u + (std::uint64_t)((getF("envfilterOn") >= 0.5f ? 2 : 0) + (getF("compOn") >= 0.5f ? 1 : 0));
-        if (sig != mLastSig)
+        syncStructure(false);
+        if (mScrollPending)
         {
-            mLastSig = sig;
-            setHeaderRight(enabled() ? "ON" : "OFF");
-            layoutChain();
-            repaint();
+            mScrollPending = false;
+            scrollDeckToSelection();
+        }
+        if (mDeck != nullptr) mDeck->refreshPedals();
+        const std::uint64_t led = ledSig();
+        if (led != mLastLedSig)
+        {
+            mLastLedSig = led;
+            if (mChain != nullptr) mChain->repaint();
+            if (mDeck != nullptr) mDeck->repaint();
         }
     }
 
     juce::AudioProcessorValueTreeState &mApvts;
-    std::unique_ptr<ToggleSwitch> mEnable;
-    std::unique_ptr<SegmentedControl> mFrontOrder;
+    std::unique_ptr<Deck> mDeck;
+    std::unique_ptr<juce::Viewport> mDeckView;
+    std::unique_ptr<ChainStrip> mChain;
+    std::unique_ptr<PaletteList> mPalette;
+    std::unique_ptr<juce::Viewport> mPaletteView;
+    int mSelSlot = kSelNone;
+    bool mScrollPending = false;
+    juce::Rectangle<int> mBinRect;          // remove-dropzone (drag a pedal onto it)
+    bool mBinVisible = false, mBinHot = false;
+    std::uint64_t mLastStructureSig = ~0ull, mLastLedSig = ~0ull;
 
-    juce::Rectangle<int> mChainRect, mPaletteRect, mDetailRect;
-    juce::Rectangle<int> mPedalRect, mGlyphRect; // the focused pedal enclosure + its silkscreen art
-    juce::Rectangle<int> mInRect, mAmpARect, mAmpBRect;
-    int mSplitX = 0, mAmpX = 0;
-    std::uint64_t mLastSig = ~0ull;
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PedalboardPanel)
 };
 
 } // namespace nam_rig::ui
