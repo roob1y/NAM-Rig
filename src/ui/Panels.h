@@ -1552,27 +1552,34 @@ public:
         setWantsKeyboardFocus(true);
     }
 
-    // Pill rect expressed in THIS overlay's coordinate space.
-    void setAnchor(juce::Rectangle<int> a)
+    // Pill rect in the PILL's own coordinate space + the transform that maps that
+    // space onto this overlay (identity when the face renders 1:1; the deck's
+    // scale-down when it doesn't). The menu is laid out and painted THROUGH that
+    // transform, so it inherits the face's scale exactly: same width and edges as
+    // the switch to the pixel, text at the face's size.
+    void setAnchor(juce::Rectangle<int> pillLocal, juce::AffineTransform pillToOverlay = {})
     {
-        mAnchor = a;
+        mAnchor = pillLocal;
+        mXf = pillToOverlay;
+        mInv = pillToOverlay.inverted();
         layout();
         repaint();
     }
     void resized() override { layout(); }
-    void mouseMove(const juce::MouseEvent &e) override { setHover(rowAt(e.getPosition())); }
-    void mouseDrag(const juce::MouseEvent &e) override { setHover(rowAt(e.getPosition())); }
+    void mouseMove(const juce::MouseEvent &e) override { setHover(rowAt(local(e))); }
+    void mouseDrag(const juce::MouseEvent &e) override { setHover(rowAt(local(e))); }
 
     void mouseDown(const juce::MouseEvent &e) override
     {
-        const int r = rowAt(e.getPosition());
+        const auto p = local(e);
+        const int r = rowAt(p);
         if (r >= 0)
         {
             if (onPick) onPick(r);
             dismiss();
             return;
         }
-        if (!mPanel.contains(e.getPosition())) dismiss(); // click-away closes
+        if (!mPanel.toFloat().contains(p)) dismiss(); // click-away closes
     }
     bool keyPressed(const juce::KeyPress &k) override
     {
@@ -1582,6 +1589,12 @@ public:
 
     void paint(juce::Graphics &g) override
     {
+        // Painted in the pill's coordinate space (mXf = its render transform), so
+        // the menu is a true continuation of the scaled face rather than a full-
+        // size panel floating over a smaller pedal.
+        juce::Graphics::ScopedSaveState ss(g);
+        g.addTransform(mXf);
+
         // Continuation of the engraved slot: same fill + lips as StompPill, square
         // corners on the edge that touches the switch, no accent border (the accent
         // lives only in the selection dot — exactly like the switch itself).
@@ -1593,10 +1606,44 @@ public:
                                  !mAbove, !mAbove); // rounded on the bottom when it hangs below
         g.setColour(juce::Colour(0xff14171d));
         g.fillPath(body);
+
+        // Border: sides + outer edge ONLY — the joining edge stays open so the
+        // switch's well continues straight into the menu (stroking the closed body
+        // drew a divider line across the seam). Inset a full pixel to sit INSIDE
+        // the fill like the switch's own drawRect border: the previous centre-
+        // stroked path poked 0.5px past the fill on each side, which is what read
+        // as the menu being a pixel wider than the button.
+        const auto panel = mPanel.toFloat();
+        const auto e = panel.reduced(1.0f);
+        const float er = rad - 0.5f;
+        constexpr float pi = juce::MathConstants<float>::pi;
+        juce::Path edge;
+        if (mAbove) // rounded top corners, open bottom (seam) edge
+        {
+            edge.startNewSubPath(e.getX(), panel.getBottom());
+            edge.lineTo(e.getX(), e.getY() + er);
+            edge.addArc(e.getX(), e.getY(), er * 2.0f, er * 2.0f, 1.5f * pi, 2.0f * pi);
+            edge.addArc(e.getRight() - er * 2.0f, e.getY(), er * 2.0f, er * 2.0f, 0.0f, 0.5f * pi);
+            edge.lineTo(e.getRight(), panel.getBottom());
+        }
+        else // open top (seam) edge, rounded bottom corners
+        {
+            edge.startNewSubPath(e.getX(), panel.getY());
+            edge.lineTo(e.getX(), e.getBottom() - er);
+            edge.addArc(e.getX(), e.getBottom() - er * 2.0f, er * 2.0f, er * 2.0f,
+                        1.5f * pi, 1.0f * pi);
+            edge.addArc(e.getRight() - er * 2.0f, e.getBottom() - er * 2.0f, er * 2.0f, er * 2.0f,
+                        1.0f * pi, 0.5f * pi);
+            edge.lineTo(e.getRight(), panel.getY());
+        }
         g.setColour(juce::Colours::black.withAlpha(0.5f));
-        g.strokePath(body, juce::PathStrokeType(1.0f));
-        g.setColour(juce::Colours::white.withAlpha(0.05f));
-        g.drawLine(b.getX() + 5.0f, b.getBottom(), b.getRight() - 5.0f, b.getBottom(), 1.0f);
+        g.strokePath(edge, juce::PathStrokeType(1.0f));
+
+        if (!mAbove) // engraved light lower lip on the outer edge, like the switch's
+        {
+            g.setColour(juce::Colours::white.withAlpha(0.05f));
+            g.drawLine(b.getX() + 5.0f, b.getBottom(), b.getRight() - 5.0f, b.getBottom(), 1.0f);
+        }
 
         for (int i = 0; i < mItems.size(); ++i)
         {
@@ -1625,7 +1672,8 @@ private:
     {
         // Exactly the switch's footprint: same width and left edge as the pill, so the
         // menu reads as the slot extending downward. (Do NOT grow to fit item text —
-        // that's what made RANGE's menu wider than its button.)
+        // that's what made RANGE's menu wider than its button.) Everything here is in
+        // the pill's own space; mXf renders it onto the face at the face's scale.
         const int w = mAnchor.getWidth();
         const int h = kPad * 2 + mItems.size() * kRowH;
         // tucked 2px UNDER the switch so they touch; flips above when out of room
@@ -1634,13 +1682,19 @@ private:
         mAbove = false;
         if (auto *par = getParentComponent())
         {
-            if (y + h > par->getHeight() - 4)
+            // host bounds seen from the pill's space (scale+translate only -> exact)
+            const auto lim = juce::Rectangle<float>((float)par->getWidth(),
+                                                    (float)par->getHeight())
+                                 .transformedBy(mInv);
+            const int lx = (int)std::ceil(lim.getX()), ly = (int)std::ceil(lim.getY());
+            const int rx = (int)std::floor(lim.getRight()), by = (int)std::floor(lim.getBottom());
+            if (y + h > by - 4)
             {
                 mAbove = true;
                 y = mAnchor.getY() - h + 2;
             }
-            x = juce::jlimit(4, juce::jmax(4, par->getWidth() - w - 4), x);
-            y = juce::jlimit(4, juce::jmax(4, par->getHeight() - h - 4), y);
+            x = juce::jlimit(lx + 4, juce::jmax(lx + 4, rx - w - 4), x);
+            y = juce::jlimit(ly + 4, juce::jmax(ly + 4, by - h - 4), y);
         }
         mPanel = {x, y, w, h};
     }
@@ -1648,10 +1702,15 @@ private:
     {
         return {mPanel.getX() + 4, mPanel.getY() + kPad + i * kRowH, mPanel.getWidth() - 8, kRowH};
     }
-    int rowAt(juce::Point<int> p) const
+    // Mouse points arrive in overlay space; hit-test in the pill's space.
+    juce::Point<float> local(const juce::MouseEvent &e) const
+    {
+        return e.position.transformedBy(mInv);
+    }
+    int rowAt(juce::Point<float> p) const
     {
         for (int i = 0; i < mItems.size(); ++i)
-            if (rowRect(i).contains(p)) return i;
+            if (rowRect(i).toFloat().contains(p)) return i;
         return -1;
     }
     void setHover(int h)
@@ -1674,7 +1733,8 @@ private:
     int mCurrent, mHover = -1;
     juce::Colour mAccent;
     bool mDismissing = false, mAbove = false;
-    juce::Rectangle<int> mAnchor, mPanel;
+    juce::Rectangle<int> mAnchor, mPanel;   // in the pill's coordinate space
+    juce::AffineTransform mXf, mInv;        // pill space -> overlay space + inverse
 };
 
 // A compact pedal-face value pill: caption left, current choice right. Two-item
@@ -1759,7 +1819,14 @@ public:
         mMenu = std::move(ov);
         host->addAndMakeVisible(*raw);
         raw->setBounds(host->getLocalBounds());
-        raw->setAnchor(host->getLocalArea(this, getLocalBounds()));
+        // Accumulate the pill -> host render transform (deck faces draw through a
+        // scale-down setTransform). getLocalArea can't be used here: it integer-
+        // rounds the scaled rect (menu lands a couple px wide of the switch) and
+        // loses the scale, so the menu drew full-size over an 85% face.
+        juce::AffineTransform xf;
+        for (const juce::Component *c = this; c != host && c != nullptr; c = c->getParentComponent())
+            xf = xf.followedBy(c->getTransform().translated((float)c->getX(), (float)c->getY()));
+        raw->setAnchor(getLocalBounds(), xf);
         raw->grabKeyboardFocus();
     }
 
