@@ -4,17 +4,38 @@
 // a DAW, comparing the board against manual sequential runs of the board's OWN engine
 // instances (same code path -> bit-exact by construction, immune to /fp:fast FMA):
 //
-//   T1  default routing (Env,Comp + Drive,Drive,Drive,Mod,Delay all Trunk) ==
-//       manual env->comp->d0->d1->d2->mod->delay (BIT-EXACT, multi-block) + vA==vB.
-//   T2  locked-pair order swap (Env-first vs Comp-first) changes the result and each
-//       matches its manual order.
+//   T1  legacy-chain regression: setLegacyChainRouting() (Env,Comp + Drive,Drive,
+//       Drive,Mod,Delay all Trunk) == manual env->comp->d0->d1->d2->mod->delay
+//       (BIT-EXACT, multi-block) + vA==vB.
+//   T2  Env/Comp are ORDINARY poolable slots now (2026-07-11): Env-in-slot0/Comp-in-
+//       slot1 vs the reverse changes the result, each matching its manual order — no
+//       more locked front pair / frontOrder, order is just slot index like any pedal.
 //   T3  routing truth table: a Trunk pedal feeds both, Lane A only vA, Lane B only vB.
 //   T4  Solo gating leaves the inactive amp buffer untouched.
 //   T5  multiple drives (a real POOL): 3 independent drive slots == manual series.
 //   T6  reorder (swap two slots' Types) changes the result and matches manual.
 //   T7  a slot set to Off is skipped (== the board without it).
 //   T8  each engine advances EXACTLY once per buffer (state continuity).
-//   T9  default board adds no PDC (latencySamples()==0, matching the legacy chain).
+//   T9  a fresh/empty board (clearRouting(), nothing placed) has latencySamples()==0;
+//       the legacy-equivalent full board (setLegacyChainRouting()) also adds no PDC.
+//   T10 STEREO Trunk SPLITTER (Dual) == manual mod.processStereo on split copies.
+//   T11 STEREO slot in Solo collapses to the BIT-EXACT mono path.
+//   T12 STEREO BRIDGE after a Lane-A mono pedal (stereo-in / stereo-out).
+//   T13 STEREO OFF is unchanged; a Trunk stereo splitter reports lane routing.
+//   T14 Env/Comp are LANE-ROUTABLE now (the old locked pair was Trunk-only): Env on
+//       Lane A only, Comp on Lane B only, vA/vB each reflect only their own engine.
+//   T15 singleton defensive guard: if routing is ever corrupted into TWO slots both
+//       claiming TypeEnv, only the lower-index slot actually runs (process() must not
+//       advance the shared engine's state twice in one block).
+//   T16 removing Env (Type -> Off) makes it fully inert: latency drops to 0 and the
+//       Trunk becomes pure passthrough again (nothing else was placed).
+//
+// NOTE on T3-T13's isolation: earlier versions of this file bypassed b.env/b.comp
+// explicitly to isolate the free-slot pool, because the locked pair was ALWAYS in the
+// signal path regardless of bypass state. Now that Env/Comp are ordinary poolable
+// slots, clearRouting() alone leaves them unplaced (Type stays Off for every slot) —
+// structurally absent from process(), not just bypassed — so no extra isolation call
+// is needed.
 //
 // Build: added to CMakeLists.txt. Offline: g++ -std=c++17 -I src -I<stub> ...
 #include "rig/PedalboardBlock.h"
@@ -99,12 +120,14 @@ int main()
     std::printf("pedalboard_test (owning pool, real engines)\n");
     const int K = 6; // blocks (state continuity)
 
-    // ---- T1: default routing == manual legacy order, bit-exact + vA==vB ----
+    // ---- T1: legacy-chain regression == manual legacy order, bit-exact + vA==vB ----
     {
-        PedalboardBlock b; b.prepare(ctx); b.setDefaultRouting();
+        PedalboardBlock b; b.prepare(ctx); b.setLegacyChainRouting();
         cfgEnv(b.env); cfgComp(b.comp);
-        cfgDrive(b.drive[0], 2, 0, 0.6f); cfgDrive(b.drive[1], 3, 0, 0.5f); cfgDrive(b.drive[2], 4, 1, 0.5f);
-        cfgMod(b.mod[3]); cfgDelay(b.delay[4]);
+        // setLegacyChainRouting() places slot0=Env, slot1=Comp, slot2..4=Drive,
+        // slot5=Mod, slot6=Delay (Env/Comp now occupy real pool slots).
+        cfgDrive(b.drive[2], 2, 0, 0.6f); cfgDrive(b.drive[3], 3, 0, 0.5f); cfgDrive(b.drive[4], 4, 1, 0.5f);
+        cfgMod(b.mod[5]); cfgDelay(b.delay[6]);
 
         std::vector<float> boardA, boardB;
         std::vector<float> trunk(N), vA(N), vB(N);
@@ -131,23 +154,25 @@ int main()
             m2.process(buf.data(), N); p2.process(buf.data(), N);
             man.insert(man.end(), buf.begin(), buf.end());
         }
-        check(bitEqV(boardA, man), "T1 default board == manual env->comp->d0->d1->d2->mod->delay (bit-exact, multi-block)");
+        check(bitEqV(boardA, man), "T1 legacy-chain board == manual env->comp->d0->d1->d2->mod->delay (bit-exact, multi-block)");
         check(bitEqV(boardA, boardB), "T1 pure-Trunk board: vA == vB");
     }
 
-    // ---- T2: locked-pair order swap changes the result and matches manual ----
+    // ---- T2: Env/Comp are ORDINARY poolable slots — order is just slot index ----
     {
         std::vector<float> ef, cf;
-        // Env-first
+        // Env in slot0, Comp in slot1 (both Trunk)
         {
-            PedalboardBlock b; b.prepare(ctx); b.clearRouting(); b.setEnvFirst(true);
+            PedalboardBlock b; b.prepare(ctx); b.clearRouting();
+            b.setSlotType(0, PedalboardBlock::TypeEnv);  b.setSlotType(1, PedalboardBlock::TypeComp);
             cfgEnv(b.env); cfgComp(b.comp);
             std::vector<float> t(N), vA(N), vB(N);
             for (int k = 0; k < K; ++k) { fillBlock(t.data(), N, k); b.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal); ef.insert(ef.end(), vA.begin(), vA.end()); }
         }
-        // Comp-first
+        // Comp in slot0, Env in slot1 (both Trunk) — the reverse order
         {
-            PedalboardBlock b; b.prepare(ctx); b.clearRouting(); b.setEnvFirst(false);
+            PedalboardBlock b; b.prepare(ctx); b.clearRouting();
+            b.setSlotType(0, PedalboardBlock::TypeComp); b.setSlotType(1, PedalboardBlock::TypeEnv);
             cfgEnv(b.env); cfgComp(b.comp);
             std::vector<float> t(N), vA(N), vB(N);
             for (int k = 0; k < K; ++k) { fillBlock(t.data(), N, k); b.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal); cf.insert(cf.end(), vA.begin(), vA.end()); }
@@ -159,14 +184,13 @@ int main()
             std::vector<float> buf(N);
             for (int k = 0; k < K; ++k) { fillBlock(buf.data(), N, k); e.process(buf.data(), N); c.process(buf.data(), N); manEF.insert(manEF.end(), buf.begin(), buf.end()); }
         }
-        check(bitEqV(ef, manEF), "T2 Env-first board == manual env->comp");
-        check(!bitEqV(ef, cf), "T2 Env-first != Comp-first (locked-pair order matters)");
+        check(bitEqV(ef, manEF), "T2 Env(slot0)->Comp(slot1) board == manual env->comp");
+        check(!bitEqV(ef, cf), "T2 Env-first != Comp-first (order still matters, now via slot index)");
     }
 
     // ---- T3: routing truth table (Trunk both / A only / B only) ----
     {
         PedalboardBlock b; b.prepare(ctx); b.clearRouting();
-        b.env.setBypassed(true); b.comp.setBypassed(true); // isolate the free slots
         // slot0 Drive on Trunk, slot1 Mod on Lane A, slot2 Delay on Lane B
         b.setSlotType(0, PedalboardBlock::TypeDrive); b.setSlotLane(0, PedalboardBlock::Trunk);
         b.setSlotType(1, PedalboardBlock::TypeMod);   b.setSlotLane(1, PedalboardBlock::LaneA);
@@ -193,7 +217,6 @@ int main()
     // ---- T4: Solo gating leaves the inactive amp untouched ----
     {
         PedalboardBlock b; b.prepare(ctx); b.clearRouting();
-        b.env.setBypassed(true); b.comp.setBypassed(true);
         b.setSlotType(0, PedalboardBlock::TypeDrive); b.setSlotLane(0, PedalboardBlock::Trunk);
         b.setSlotType(1, PedalboardBlock::TypeMod);   b.setSlotLane(1, PedalboardBlock::LaneA);
         b.setSlotType(2, PedalboardBlock::TypeDelay); b.setSlotLane(2, PedalboardBlock::LaneB);
@@ -216,7 +239,6 @@ int main()
     // ---- T5: multiple drives (a real pool) == manual series ----
     {
         PedalboardBlock b; b.prepare(ctx); b.clearRouting();
-        b.env.setBypassed(true); b.comp.setBypassed(true);
         for (int i = 0; i < 3; ++i) { b.setSlotType(i, PedalboardBlock::TypeDrive); b.setSlotLane(i, PedalboardBlock::Trunk); }
         cfgDrive(b.drive[0], 2, 0, 0.55f); cfgDrive(b.drive[1], 4, 0, 0.5f); cfgDrive(b.drive[2], 3, 0, 0.6f);
 
@@ -233,7 +255,7 @@ int main()
         // config A: slot0 Drive, slot1 Mod ; config B: slot0 Mod, slot1 Drive
         std::vector<float> oAB, oBA;
         {
-            PedalboardBlock b; b.prepare(ctx); b.clearRouting(); b.env.setBypassed(true); b.comp.setBypassed(true);
+            PedalboardBlock b; b.prepare(ctx); b.clearRouting();
             b.setSlotType(0, PedalboardBlock::TypeDrive); b.setSlotType(1, PedalboardBlock::TypeMod);
             cfgDrive(b.drive[0], 2, 0, 0.6f); cfgMod(b.mod[1]);
             std::vector<float> t(N), vA(N), vB(N); fillBlock(t.data(), N, 0);
@@ -243,7 +265,7 @@ int main()
             check(bitEq(oAB.data(), m.data(), N), "T6 [Drive,Mod] == manual drive->mod");
         }
         {
-            PedalboardBlock b; b.prepare(ctx); b.clearRouting(); b.env.setBypassed(true); b.comp.setBypassed(true);
+            PedalboardBlock b; b.prepare(ctx); b.clearRouting();
             b.setSlotType(0, PedalboardBlock::TypeMod); b.setSlotType(1, PedalboardBlock::TypeDrive);
             cfgMod(b.mod[0]); cfgDrive(b.drive[1], 2, 0, 0.6f);
             std::vector<float> t(N), vA(N), vB(N); fillBlock(t.data(), N, 0);
@@ -256,14 +278,14 @@ int main()
     {
         std::vector<float> withOff, without;
         {
-            PedalboardBlock b; b.prepare(ctx); b.clearRouting(); b.env.setBypassed(true); b.comp.setBypassed(true);
+            PedalboardBlock b; b.prepare(ctx); b.clearRouting();
             b.setSlotType(0, PedalboardBlock::TypeDrive); b.setSlotType(1, PedalboardBlock::TypeOff); b.setSlotType(2, PedalboardBlock::TypeDrive);
             cfgDrive(b.drive[0], 2, 0, 0.6f); cfgDrive(b.drive[1], 3, 0, 0.9f /*loud, but Off so ignored*/); cfgDrive(b.drive[2], 4, 0, 0.5f);
             std::vector<float> t(N), vA(N), vB(N); fillBlock(t.data(), N, 0);
             b.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal); withOff.assign(vA.begin(), vA.end());
         }
         {
-            PedalboardBlock b; b.prepare(ctx); b.clearRouting(); b.env.setBypassed(true); b.comp.setBypassed(true);
+            PedalboardBlock b; b.prepare(ctx); b.clearRouting();
             b.setSlotType(0, PedalboardBlock::TypeDrive); b.setSlotType(2, PedalboardBlock::TypeDrive); // slot1 left Off
             cfgDrive(b.drive[0], 2, 0, 0.6f); cfgDrive(b.drive[2], 4, 0, 0.5f);
             std::vector<float> t(N), vA(N), vB(N); fillBlock(t.data(), N, 0);
@@ -274,7 +296,7 @@ int main()
 
     // ---- T8: engine advanced exactly once per buffer ----
     {
-        PedalboardBlock b; b.prepare(ctx); b.clearRouting(); b.env.setBypassed(true); b.comp.setBypassed(true);
+        PedalboardBlock b; b.prepare(ctx); b.clearRouting();
         b.setSlotType(0, PedalboardBlock::TypeDelay); b.setSlotLane(0, PedalboardBlock::Trunk); // delay = obvious state
         cfgDelay(b.delay[0]);
         PreDelayBlock ref; ref.prepare(ctx); cfgDelay(ref);
@@ -289,17 +311,20 @@ int main()
         check(eq, "T8 engine advanced exactly once per buffer (state continuity)");
     }
 
-    // ---- T9: default board adds no PDC ----
+    // ---- T9: a fresh/empty board adds no PDC; neither does the legacy-chain board ----
     {
-        PedalboardBlock b; b.prepare(ctx); b.setDefaultRouting();
-        cfgEnv(b.env); cfgComp(b.comp); cfgDrive(b.drive[0], 2, 0, 0.6f); cfgMod(b.mod[3]); cfgDelay(b.delay[4]);
-        check(b.latencySamples() == 0.0, "T9 default board latency == 0 (matches legacy chain)");
+        PedalboardBlock b; b.prepare(ctx); b.clearRouting();
+        check(b.latencySamples() == 0.0, "T9 fresh/empty board latency == 0 (nothing placed)");
+    }
+    {
+        PedalboardBlock b; b.prepare(ctx); b.setLegacyChainRouting();
+        cfgEnv(b.env); cfgComp(b.comp); cfgDrive(b.drive[2], 2, 0, 0.6f); cfgMod(b.mod[5]); cfgDelay(b.delay[6]);
+        check(b.latencySamples() == 0.0, "T9 legacy-chain board latency == 0 (matches pre-pedalboard chain)");
     }
 
     // ---- T10: STEREO Trunk SPLITTER (Dual) == manual mod.processStereo on split copies ----
     {
         PedalboardBlock b; b.prepare(ctx); b.clearRouting();
-        b.env.setBypassed(true); b.comp.setBypassed(true);
         b.setSlotType(0, PedalboardBlock::TypeMod); b.setSlotLane(0, PedalboardBlock::Trunk);
         b.setSlotStereo(0, true);
         cfgMod(b.mod[0]); b.mod[0].setType(0 /*chorus*/); b.mod[0].setSpread(0.8f);
@@ -331,7 +356,6 @@ int main()
     // ---- T11: STEREO slot in Solo collapses to the BIT-EXACT mono path ----
     {
         PedalboardBlock b; b.prepare(ctx); b.clearRouting();
-        b.env.setBypassed(true); b.comp.setBypassed(true);
         b.setSlotType(0, PedalboardBlock::TypeDelay); b.setSlotLane(0, PedalboardBlock::Trunk);
         b.setSlotStereo(0, true);
         cfgDelay(b.delay[0]);
@@ -350,7 +374,6 @@ int main()
     // ---- T12: STEREO BRIDGE after a Lane-A mono pedal (stereo-in / stereo-out) ----
     {
         PedalboardBlock b; b.prepare(ctx); b.clearRouting();
-        b.env.setBypassed(true); b.comp.setBypassed(true);
         b.setSlotType(0, PedalboardBlock::TypeMod);   b.setSlotLane(0, PedalboardBlock::LaneA);
         b.setSlotType(1, PedalboardBlock::TypeDelay); b.setSlotLane(1, PedalboardBlock::LaneA); b.setSlotStereo(1, true);
         cfgMod(b.mod[0]); cfgDelay(b.delay[1]);
@@ -383,7 +406,6 @@ int main()
     // ---- T13: STEREO OFF is unchanged; a Trunk stereo splitter reports lane routing ----
     {
         PedalboardBlock b; b.prepare(ctx); b.clearRouting();
-        b.env.setBypassed(true); b.comp.setBypassed(true);
         b.setSlotType(0, PedalboardBlock::TypeMod); b.setSlotLane(0, PedalboardBlock::Trunk);
         cfgMod(b.mod[0]);
         std::vector<float> t(N), vA(N), vB(N);
@@ -393,6 +415,75 @@ int main()
         check(!b.hasLaneRouting(), "T13 stereo OFF Trunk slot: no lane routing");
         b.setSlotStereo(0, true);
         check(b.hasLaneRouting(), "T13 stereo ON Trunk splitter: reports lane routing (vA!=vB)");
+    }
+
+    // ---- T14: Env/Comp are LANE-ROUTABLE now (the old locked pair was Trunk-only) ----
+    {
+        PedalboardBlock b; b.prepare(ctx); b.clearRouting();
+        b.setSlotType(0, PedalboardBlock::TypeEnv);  b.setSlotLane(0, PedalboardBlock::LaneA);
+        b.setSlotType(1, PedalboardBlock::TypeComp); b.setSlotLane(1, PedalboardBlock::LaneB);
+        cfgEnv(b.env); cfgComp(b.comp);
+
+        std::vector<float> t(N), vA(N), vB(N);
+        fillBlock(t.data(), N, 0);
+        b.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal);
+
+        // manual: independent fresh engines (see T1) so reset() semantics can't skew this.
+        EnvFilterBlock e2; CompBlock c2; e2.prepare(ctx); c2.prepare(ctx); cfgEnv(e2); cfgComp(c2);
+        std::vector<float> eA(N), eB(N);
+        fillBlock(eA.data(), N, 0); fillBlock(eB.data(), N, 0);
+        e2.process(eA.data(), N);
+        c2.process(eB.data(), N);
+
+        check(bitEq(vA.data(), eA.data(), N), "T14 vA == env(trunk) (Lane A)");
+        check(bitEq(vB.data(), eB.data(), N), "T14 vB == comp(trunk) (Lane B)");
+        check(!bitEq(vA.data(), vB.data(), N), "T14 Lane A and Lane B diverge");
+        check(b.hasLaneRouting(), "T14 hasLaneRouting() true (Env/Comp can now route per-lane)");
+    }
+
+    // ---- T15: singleton guard — two slots both claiming TypeEnv, only the lower
+    //      index actually runs (process() must not advance the shared engine twice) ----
+    {
+        PedalboardBlock b; b.prepare(ctx); b.clearRouting();
+        // Pathological routing the UI should never produce (it enforces one-of-each),
+        // but process() must defend against it: force TWO slots to TypeEnv directly.
+        b.setSlotType(0, PedalboardBlock::TypeEnv); b.setSlotLane(0, PedalboardBlock::Trunk);
+        b.setSlotType(1, PedalboardBlock::TypeEnv); b.setSlotLane(1, PedalboardBlock::Trunk);
+        cfgEnv(b.env);
+
+        EnvFilterBlock ref; ref.prepare(ctx); cfgEnv(ref);
+        bool eq = true; std::vector<float> t(N), vA(N), vB(N), r(N);
+        for (int k = 0; k < K; ++k)
+        {
+            fillBlock(t.data(), N, k); r.assign(t.begin(), t.end());
+            b.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal);
+            ref.process(r.data(), N); // the shared engine should only ever advance ONCE per block
+            if (!bitEq(vA.data(), r.data(), N)) eq = false;
+        }
+        check(eq, "T15 duplicate Env claim: shared engine advances exactly once (singleton guard holds)");
+    }
+
+    // ---- T16: removing Env (Type -> Off) makes it fully inert ----
+    {
+        PedalboardBlock b; b.prepare(ctx); b.clearRouting();
+        b.setSlotType(0, PedalboardBlock::TypeEnv); b.setSlotLane(0, PedalboardBlock::Trunk);
+        cfgEnv(b.env);
+        check(b.latencySamples() == b.env.latencySamples(), "T16 Env placed: board latency == env's own latency");
+
+        std::vector<float> t(N), vA(N), vB(N), inCopy(N);
+        fillBlock(t.data(), N, 0);
+        inCopy = t;
+        b.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal);
+        check(!bitEq(vA.data(), inCopy.data(), N), "T16 Env placed: audibly alters the signal");
+
+        b.setSlotType(0, PedalboardBlock::TypeOff); // remove it
+        check(b.latencySamples() == 0.0, "T16 Env removed: board latency back to 0");
+
+        std::vector<float> t2(N), vA2(N), vB2(N);
+        fillBlock(t2.data(), N, 0);
+        std::vector<float> inCopy2 = t2;
+        b.process(t2.data(), vA2.data(), vB2.data(), N, true, true, noHeal);
+        check(bitEq(vA2.data(), inCopy2.data(), N), "T16 Env removed: signal passes through unchanged (Trunk had nothing else)");
     }
 
     std::printf("%s (%d failure%s)\n", gFail == 0 ? "ALL PASS" : "FAILURES", gFail, gFail == 1 ? "" : "s");

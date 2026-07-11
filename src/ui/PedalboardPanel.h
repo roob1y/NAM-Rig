@@ -1,7 +1,8 @@
 #pragma once
-// PedalboardPanel — the front-of-amp PEDALBOARD editor (full redesign, 2026-07-10).
-// Drives the Stage-B pool on rig/PedalboardBlock.h (pbS{i}* params + the shared
-// envfilter*/comp* pair). Three zones, AmpliTube-style:
+// PedalboardPanel — the front-of-amp PEDALBOARD editor (full redesign, 2026-07-10;
+// Env/Comp folded into the generic pool, 2026-07-11). Drives the Stage-B pool on
+// rig/PedalboardBlock.h (pbS{i}* params + the shared envfilter*/comp* pair for the
+// two singleton types). Three zones, AmpliTube-style:
 //
 //   DECK (middle)   : EVERY placed pedal at once, left-to-right in processing order,
 //                     each drawn as the tall stomp enclosure (drives host the REAL
@@ -9,23 +10,26 @@
 //                     StompPedal face). All knobs live — edit in place, scroll when
 //                     the board outgrows the view.
 //   RACK (right)    : the pedal palette — category headers with the ACTUAL pedals
-//                     underneath (Green Drive, Gold Horse, Digi Delay, ...). DRAG one onto
-//                     the deck or the chain to place it; CLICK adds to the trunk end.
-//   CHAIN (bottom)  : the signal-flow graph — IN -> locked ENV/COMP pair -> trunk
-//                     pedals -> split -> Amp A / Amp B lanes. DRAG nodes to reorder
-//                     and to move between trunk/lanes. ENV and COMP only swap with
-//                     each other (locked front pair -> pbFrontOrder). Right-click a
-//                     node for Route / Remove.
+//                     underneath (Green Drive, Gold Horse, Digi Delay, Envelope
+//                     Filter, Compressor, ...). DRAG one onto the deck or the chain
+//                     to place it; CLICK adds to the trunk end. Env/Comp are
+//                     SINGLETONS — their row greys out once already on the board.
+//   CHAIN (bottom)  : the signal-flow graph — IN -> trunk pedals -> split -> Amp A /
+//                     Amp B lanes. DRAG nodes to reorder and to move between
+//                     trunk/lanes; every pedal (including Env/Comp) is a full
+//                     citizen here. Right-click a node for Route / Remove.
 //
 // Removed on purpose (board is now ALWAYS the front section — the processor forces
-// the board path on): the ENABLE toggle, the Env 1st/Comp 1st buttons (drag in the
-// chain instead) and the IMPORT LEGACY button. pbEnabled/pbFrontOrder stay
-// registered (automation-index stability); only pbFrontOrder is still written.
+// the board path on): the ENABLE toggle, the Env 1st/Comp 1st buttons (Env/Comp are
+// independently placeable/reorderable now, no fixed relative order) and the IMPORT
+// LEGACY button. pbEnabled/pbFrontOrder stay registered (automation-index
+// stability) but neither is read or written anymore.
 //
 // Reordering: the pool processes free slots in INDEX order per lane, so a reorder
 // REPACKS the pbS{i}* unions — snapshot all 8 slots, rearrange, write back only the
 // params that changed (message thread, full change gestures). Removed slots reset
-// to defaults so the next add starts clean.
+// to defaults so the next add starts clean — for Env/Comp that also resets their
+// shared envfilter*/comp* params (outside the per-slot union), see resetSlotToDefaults.
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <algorithm>
@@ -54,8 +58,9 @@ public:
     static constexpr float kPedalScale = 0.85f; // deck render scale — same face, smaller
     static constexpr int kCellGap = 16;       // deck cell gap (patch cable lives here)
 
-    // selection ids for the non-slot pedals
-    static constexpr int kSelNone = -9, kSelEnv = -2, kSelComp = -3;
+    // "nothing selected" sentinel. Every placed pedal (including Env/Comp, now
+    // poolable) has a real slot index >= 0 — there are no other sentinel selections.
+    static constexpr int kSelNone = -9;
 
     // Set by the editor: live compressor gain reduction (dB >= 0) for the comp
     // pedal's GR meter (reads the ACTIVE board comp via the processor).
@@ -158,12 +163,19 @@ private:
             v.push_back({2, 0, m, modName(m), modSub(m), modAccent(m)});
         for (int m = 0; m < 3; ++m)
             v.push_back({3, 0, m, delayName(m), delaySub(m), delayAccent(m)});
+        // Env/Comp are SINGLETONS (one physical engine each) — a single palette row per
+        // type, not one per voice/mode (those are chosen via the pedal's own model pill
+        // once it's placed). family 4 = Env, 5 = Comp; cat/model unused for both.
+        v.push_back({4, 0, 0, "Envelope Filter", "FX25 / Q-Tron auto-wah", envAccent()});
+        v.push_back({5, 0, 0, "Compressor", "Clean / OTA / Opto / FET", compAccent()});
         return v;
     }
     static const char *paletteHeaderFor(const Item &it)
     {
         if (it.family == 2) return "MODULATION";
         if (it.family == 3) return "DELAY";
+        if (it.family == 4) return "ENV FILTER";
+        if (it.family == 5) return "DYNAMICS";
         static const char *cn[5] = {"", "BOOST", "OVERDRIVE", "DISTORTION", "FUZZ"};
         return cn[juce::jlimit(0, 4, it.cat)];
     }
@@ -350,15 +362,15 @@ private:
                   b.getRight(), b.getBottom());
         g.strokePath(p, glyphStroke(juce::jmax(1.4f, b.getHeight() * 0.06f)));
     }
-    // Family glyph dispatch. kind: kSelEnv / kSelComp / slot>=0 (uses that slot's type).
+    // Family glyph dispatch by the slot's own Type.
     void paintPedalGlyph(juce::Graphics &g, int sel, juce::Rectangle<float> box, juce::Colour col) const
     {
-        if (sel == kSelEnv) { paintEnvGlyph(g, box, col); return; }
-        if (sel == kSelComp) { paintCompGlyph(g, box, col); return; }
         const int t = slotType(sel);
         if (t == 1) paintDriveGlyph(g, paramC(sid(sel, "dCat")), paramC(sid(sel, "bModel")), box, col);
         else if (t == 2) paintModGlyph(g, paramC(sid(sel, "mType")), box, col);
         else if (t == 3) paintDelayGlyph(g, paramC(sid(sel, "pModel")), box, col);
+        else if (t == 4) paintEnvGlyph(g, box, col);
+        else if (t == 5) paintCompGlyph(g, box, col);
     }
 
     // The DrivePedal enclosure body recipe (neutral base + tint wash, dithered).
@@ -385,13 +397,19 @@ private:
     int paramC(const juce::String &id) const { return (int)paramF(id); }
     juce::String sid(int slot, const char *suf) const { return "pbS" + juce::String(slot) + suf; }
 
-    int slotType(int i) const { return paramC(sid(i, "Type")); } // 0 Off, 1 Drive, 2 Mod, 3 Delay
+    int slotType(int i) const { return paramC(sid(i, "Type")); } // 0 Off,1 Drive,2 Mod,3 Delay,4 Env,5 Comp
     int slotLane(int i) const { return paramC(sid(i, "Lane")); } // 0 Both, 1 A, 2 B
     bool slotOn(int i) const { return paramF(sid(i, "On")) >= 0.5f; }
     bool slotUsed(int i) const { return slotType(i) != 0; }
     bool slotCanStereo(int i) const { const int t = slotType(i); return t == 2 || t == 3; } // Mod/Delay only
     bool slotStereo(int i) const { return slotCanStereo(i) && paramF(sid(i, "Stereo")) >= 0.5f; } // spans both amps
-    int frontOrder() const { return paramC("pbFrontOrder"); } // 0 Env first, 1 Comp first
+    // Env(4)/Comp(5) are SINGLETONS — only one physical engine each — so at most one
+    // slot may hold each type. Used to gate the palette row and reject a second add.
+    bool typePlaced(int type) const
+    {
+        for (int i = 0; i < kSlots; ++i) if (slotType(i) == type) return true;
+        return false;
+    }
 
     void writeNorm(const juce::String &id, float norm)
     {
@@ -451,6 +469,8 @@ private:
         }
         if (t == 2) return modName(paramC(sid(i, "mType")));
         if (t == 3) return delayName(paramC(sid(i, "pModel")));
+        if (t == 4) return paramC("envfilterVoice") == 1 ? "Q-Tron" : "FX25"; // current voice
+        if (t == 5) return compModeName(paramC("compMode")); // current mode
         return {};
     }
     colors::AccentPair slotAccent(int i) const
@@ -459,11 +479,17 @@ private:
         if (t == 1) return colors::driveModelAccent(paramC(sid(i, "dCat")), paramC(sid(i, "bModel")));
         if (t == 2) return modAccent(paramC(sid(i, "mType")));
         if (t == 3) return delayAccent(paramC(sid(i, "pModel")));
+        if (t == 4) return envAccent();
+        if (t == 5) return compAccent();
         return colors::AccentPair{colors::outline, colors::outline.darker(0.4f)};
     }
     static const char *typeShort(int t)
     {
-        switch (t) { case 1: return "DRIVE"; case 2: return "MOD"; case 3: return "DELAY"; default: return ""; }
+        switch (t)
+        {
+        case 1: return "DRIVE"; case 2: return "MOD"; case 3: return "DELAY";
+        case 4: return "ENV";   case 5: return "COMP"; default: return "";
+        }
     }
 
     // ============================================== repack (reorder / add / remove)
@@ -511,7 +537,11 @@ private:
                         writeNat(sid(t, "bModel"), (float)e.model);
                     }
                     else if (e.family == 2) writeChoice(sid(t, "mType"), e.model);
-                    else writeChoice(sid(t, "pModel"), e.model);
+                    else if (e.family == 3) writeChoice(sid(t, "pModel"), e.model);
+                    // family 4 (Env) / 5 (Comp): singleton — no per-slot sub-params to
+                    // seed, the shared envfilter*/comp* params are already at whatever
+                    // resetSlotToDefaults left them (or the user's prior settings, if
+                    // this is a re-add without an intervening remove).
                 }
                 ++t;
             }
@@ -520,10 +550,38 @@ private:
     }
     void resetSlotToDefaults(int i)
     {
+        const int wasType = slotType(i); // capture before the union reset clears "Type"
         auto *const *u = unionSuffixes();
         for (int j = 0; j < kU; ++j)
             if (auto *pr = mApvts.getParameter(sid(i, u[j])))
                 writeNorm(sid(i, u[j]), pr->getDefaultValue());
+        // Env/Comp are SINGLETONS whose real params (envfilter*/comp*) live OUTSIDE
+        // the per-slot union — vacating their slot must reset those too, or the next
+        // add would inherit whatever tone was last dialed in instead of starting
+        // clean like every other pedal type does.
+        if (wasType == 4) resetParamGroup(envParamIds());
+        else if (wasType == 5) resetParamGroup(compParamIds());
+    }
+    static const std::vector<juce::String> &envParamIds()
+    {
+        static const std::vector<juce::String> ids{
+            "envfilterOn", "envfilterVoice", "envfilterSens", "envfilterRange", "envfilterMix",
+            "envfilterReso", "envfilterMode", "envfilterDir", "envfilterQRange", "envfilterBoost",
+            "envfilterResponse", "envfilterPos"};
+        return ids;
+    }
+    static const std::vector<juce::String> &compParamIds()
+    {
+        static const std::vector<juce::String> ids{
+            "compOn", "compSustain", "compAttack", "compLevel", "compRatio",
+            "compRelease", "compMode", "compDry"};
+        return ids;
+    }
+    void resetParamGroup(const std::vector<juce::String> &ids)
+    {
+        for (const auto &pid : ids)
+            if (auto *pr = mApvts.getParameter(pid))
+                writeNorm(pid, pr->getDefaultValue());
     }
 
     // Remove slot s from the lists (helper for the ops below).
@@ -559,10 +617,12 @@ public:
         mSelSlot = idx + pos;
         structureChanged();
     }
-    // Returns the packed slot index the new pedal landed on (-1 when full).
+    // Returns the packed slot index the new pedal landed on (-1 when full, or when
+    // family is the Env/Comp singleton and it's already placed elsewhere).
     int addPedal(int family, int cat, int model, int lane, int pos)
     {
         if (boardFull()) return -1;
+        if ((family == 4 || family == 5) && typePlaced(family)) return -1;
         std::vector<Entry> lanes[3];
         entriesNow(lanes);
         lane = juce::jlimit(0, 2, lane);
@@ -607,20 +667,17 @@ public:
         structureChanged();
     }
     void togglePedalStereo(int slot) { setPedalStereo(slot, !slotStereo(slot)); }
-    // Bypass/activate any chain node: the locked pair map to their shared params,
-    // free slots to their pbS{i}On.
+    // Bypass/activate any placed pedal: Env/Comp map to their shared envfilterOn/
+    // compOn params (the LED's actual authority even though they're now a normal
+    // slot), everything else to its own pbS{i}On.
     void togglePedalOn(int sel)
     {
-        if (sel >= 0 && !slotUsed(sel)) return;
-        const juce::String id = sel == kSelEnv ? "envfilterOn"
-                              : sel == kSelComp ? "compOn"
-                                                : sid(sel, "On");
+        if (sel < 0 || !slotUsed(sel)) return;
+        const int t = slotType(sel);
+        const juce::String id = t == 4 ? "envfilterOn"
+                              : t == 5 ? "compOn"
+                                       : sid(sel, "On");
         writeBool(id, paramF(id) < 0.5f);
-    }
-    void swapFrontPair()
-    {
-        writeChoice("pbFrontOrder", frontOrder() == 0 ? 1 : 0);
-        structureChanged();
     }
     void selectPedal(int sel, bool scrollTo)
     {
@@ -672,7 +729,9 @@ private:
     // mirroring the DrivePedal face: kind header + jewel LED, the authentic knob
     // set, a model-name pill (click -> styled picker), circuit subtitle, silkscreen
     // glyph in the slack above the footswitch. Knobs bind to the pool union
-    // (pbS{i}m*/p*) or to the shared envfilter*/comp* params for the locked pair.
+    // (pbS{i}m*/p*) for Mod/Delay, or to the shared envfilter*/comp* params for
+    // Env/Comp (singleton engines — the slot index they happen to occupy is only
+    // used for placement/selection, never for param IDs).
     class StompPedal : public juce::Component
     {
     public:
@@ -768,7 +827,8 @@ private:
             // model name PRINTED on the enclosure — a GHOST BUTTON: pure silkscreen
             // at rest, but on hover it grows button chrome (fill + tint border), the
             // ▾ brightens and the cursor points, so switching the voice/model is
-            // obviously clickable (it's the only way to change the locked pair).
+            // obviously clickable (it's the only way to change Env's FX25/Q-Tron
+            // voice or Comp's Clean/OTA/Opto/FET mode).
             if (mPillHover)
             {
                 auto pr = mPillRect.toFloat();
@@ -1176,14 +1236,14 @@ private:
     };
 
     // ====================================================================== Deck
-    // Every placed pedal, side by side in processing order: [ENV][COMP] locked pair,
-    // then trunk -> Amp A lane -> Amp B lane. Cells are PURE pedal faces (no header
-    // band): grab a pedal anywhere on its enclosure and drag to reorder / regroup
-    // (ghost + caret, edge auto-scroll; ENV/COMP drag only onto each other = swap;
-    // drop on the BIN that appears to remove). Faces render through a uniform
-    // scale-down transform, so the tuned 220px layout just draws smaller. Patch
-    // cables join same-lane neighbours; the split dot marks trunk -> lanes. Also
-    // the palette's drop target.
+    // Every placed pedal, side by side in processing order: trunk -> Amp A lane ->
+    // Amp B lane. Cells are PURE pedal faces (no header band): grab a pedal anywhere
+    // on its enclosure and drag to reorder / regroup (ghost + caret, edge auto-scroll;
+    // drop on the BIN that appears to remove). Env/Comp are full citizens here too —
+    // just two more pedal kinds in the same cell list. Faces render through a
+    // uniform scale-down transform, so the tuned 220px layout just draws smaller.
+    // Patch cables join same-lane neighbours; the split dot marks trunk -> lanes.
+    // Also the palette's drop target.
     class Deck : public juce::Component, public juce::DragAndDropTarget
     {
     public:
@@ -1191,8 +1251,8 @@ private:
 
         struct Cell
         {
-            int sel;  // kSelEnv / kSelComp / slot index
-            int lane; // 0/1/2 (locked pair: 0)
+            int sel;  // pool slot index — every pedal, including Env/Comp, is a real slot
+            int lane; // 0/1/2
             juce::Component *widget = nullptr;
             juce::Rectangle<int> bounds; // deck-space (post-scale) cell rect
         };
@@ -1202,8 +1262,8 @@ private:
 
         int preferredWidth() const
         {
-            const int n = 2 + mBoard.usedCount();
-            const bool ghost = mBoard.usedCount() == 0;
+            const int n = mBoard.usedCount();
+            const bool ghost = n == 0;
             return kCellGap + n * (cellW() + kCellGap) + (ghost ? 150 + kCellGap : 0);
         }
 
@@ -1211,10 +1271,6 @@ private:
         {
             mCells.clear();
             mWidgets.clear();
-
-            const int fo = mBoard.frontOrder();
-            addLocked(fo == 0 ? kSelEnv : kSelComp);
-            addLocked(fo == 0 ? kSelComp : kSelEnv);
 
             const Lanes ln = mBoard.lanesNow();
             for (int lane = 0; lane < 3; ++lane)
@@ -1234,7 +1290,9 @@ private:
                     }
                     else
                     {
-                        const auto kind = mBoard.slotType(s) == 2 ? StompPedal::Mod : StompPedal::Delay;
+                        const int t = mBoard.slotType(s);
+                        const auto kind = t == 2 ? StompPedal::Mod : t == 3 ? StompPedal::Delay
+                                        : t == 4 ? StompPedal::Env : StompPedal::Comp;
                         auto w = std::make_unique<StompPedal>(mBoard, kind, s);
                         c.widget = w.get();
                         addAndMakeVisible(*c.widget);
@@ -1330,13 +1388,6 @@ private:
                     g.setColour(juce::Colour(0xff14171d).withAlpha(0.6f));
                     g.fillRoundedRectangle(c.bounds.toFloat(), 10.0f);
                 }
-            if (mPressSel < 0) // locked drag: ring the swap partner
-                for (const auto &c : mCells)
-                    if (c.sel < 0 && c.sel != mPressSel)
-                    {
-                        g.setColour(colors::accent.withAlpha(0.9f));
-                        g.drawRoundedRectangle(c.bounds.toFloat().reduced(1.5f), 10.0f, 1.6f);
-                    }
             if (mDragImg.isValid()) // floating half-size ghost under the cursor
             {
                 auto dst = juce::Rectangle<float>((float)mDragImg.getWidth() * 0.5f,
@@ -1401,15 +1452,6 @@ private:
                 {
                     mBoard.removePedal(dragged); // dropped on the bin
                 }
-                else if (dragged < 0) // locked pair: drop on the partner swaps the order
-                {
-                    for (const auto &c : mCells)
-                        if (c.sel < 0 && c.sel != dragged && c.bounds.expanded(8).contains(p))
-                        {
-                            mBoard.swapFrontPair();
-                            break;
-                        }
-                }
                 else
                 {
                     const auto tgt = moveTarget(p, dragged);
@@ -1430,7 +1472,10 @@ private:
         // ---- palette drop target ----
         bool isInterestedInDragSource(const SourceDetails &d) override
         {
-            return d.description.toString().startsWith("pbadd:") && !mBoard.boardFull();
+            if (!d.description.toString().startsWith("pbadd:") || mBoard.boardFull()) return false;
+            int f = 0, c = 0, m = 0;
+            if (!parseAdd(d.description.toString(), f, c, m)) return false;
+            return !((f == 4 || f == 5) && mBoard.typePlaced(f)); // Env/Comp singleton
         }
         void itemDragMove(const SourceDetails &d) override { updateCaret(d.localPosition); }
         void itemDragExit(const SourceDetails &) override { mCaretX = -1; repaint(); }
@@ -1453,19 +1498,6 @@ private:
             return lane == 0 ? colors::titleAccent : colors::laneColour(lane - 1);
         }
 
-        void addLocked(int sel)
-        {
-            Cell c;
-            c.sel = sel;
-            c.lane = 0;
-            auto w = std::make_unique<StompPedal>(
-                mBoard, sel == kSelEnv ? StompPedal::Env : StompPedal::Comp, -1);
-            c.widget = w.get();
-            addAndMakeVisible(*c.widget);
-            mWidgets.push_back(std::move(w));
-            mCells.push_back(c);
-        }
-
         void layoutCells()
         {
             const int cw = cellW(), ch = cellH();
@@ -1484,7 +1516,9 @@ private:
                 }
                 x += cw + kCellGap;
             }
-            mGhost = mBoard.usedCount() == 0 && !mCells.empty()
+            // "drag a pedal here" hint fills the whole deck once it's truly empty
+            // (a fresh board has no cells at all now that Env/Comp aren't pre-placed).
+            mGhost = mBoard.usedCount() == 0
                          ? juce::Rectangle<int>(x, yTop, 150, ch)
                          : juce::Rectangle<int>();
         }
@@ -1496,18 +1530,17 @@ private:
             f = t[1].getIntValue();
             c = t[2].getIntValue();
             m = t[3].getIntValue();
-            return f >= 1 && f <= 3;
+            return f >= 1 && f <= 5;
         }
 
         // Map a point to (lane, position within that lane), ignoring `excludeSel`
-        // (the cell being moved; kSelNone for palette adds). Drops on the locked
-        // pair clamp to trunk pos 0.
+        // (the cell being moved; kSelNone for palette adds).
         std::pair<int, int> moveTarget(juce::Point<int> p, int excludeSel) const
         {
             int lane = 0, pos = 0, cnt[3] = {0, 0, 0};
             for (const auto &c : mCells)
             {
-                if (c.sel < 0 || c.sel == excludeSel) continue;
+                if (c.sel == excludeSel) continue;
                 if (p.x > c.bounds.getCentreX()) { lane = c.lane; pos = cnt[c.lane] + 1; }
                 ++cnt[c.lane];
             }
@@ -1520,8 +1553,6 @@ private:
             for (const auto &c : mCells)
                 if (c.sel != excludeSel && p.x > c.bounds.getCentreX())
                     x = c.bounds.getRight() + kCellGap / 2;
-            // never left of the locked pair
-            if (mCells.size() >= 2) x = juce::jmax(x, mCells[1].bounds.getRight() + kCellGap / 2);
             return x;
         }
         void updateCaret(juce::Point<int> p)
@@ -1558,10 +1589,10 @@ private:
     };
 
     // ================================================================= ChainStrip
-    // The signal-flow footer: IN -> [ENV][COMP] -> trunk nodes -> split -> lane A
-    // (top) / lane B (bottom) -> AMP A/B. Nodes are mini enclosures. Drag a free
-    // node to reorder / change lane; drag ENV or COMP onto its partner to swap the
-    // locked pair; right-click for Route / Remove. Also a palette drop target.
+    // The signal-flow footer: IN -> trunk nodes -> split -> lane A (top) / lane B
+    // (bottom) -> AMP A/B. Nodes are mini enclosures, one per placed pedal (Env/Comp
+    // included). Drag a node to reorder / change lane; right-click for Route / Remove.
+    // Also a palette drop target.
     class ChainStrip : public juce::Component, public juce::DragAndDropTarget
     {
     public:
@@ -1569,7 +1600,7 @@ private:
 
         struct Node
         {
-            int sel;  // kSelEnv / kSelComp / slot
+            int sel;  // pool slot index — every pedal, including Env/Comp, is a real slot
             int lane; // 0/1/2
             juce::Rectangle<int> rect;
         };
@@ -1603,16 +1634,7 @@ private:
 
             if (mDragging)
             {
-                if (mDragSel < 0) // locked-pair drag: highlight the swap partner
-                {
-                    for (const auto &n : mNodes)
-                        if (n.sel < 0 && n.sel != mDragSel)
-                        {
-                            g.setColour(colors::accent.withAlpha(0.9f));
-                            g.drawRoundedRectangle(n.rect.toFloat().expanded(3.0f), 9.0f, 1.6f);
-                        }
-                }
-                else if (mCaret.x >= 0) // insertion caret
+                if (mCaret.x >= 0) // insertion caret
                 {
                     g.setColour(colors::accent);
                     g.fillRoundedRectangle((float)mCaret.x - 1.5f, (float)mCaret.y - 16.0f, 3.0f, 32.0f, 1.5f);
@@ -1697,16 +1719,6 @@ private:
                 repaint();
                 return;
             }
-            if (mDragSel < 0) // locked pair: drop on the partner swaps the order
-            {
-                for (const auto &n : mNodes)
-                    if (n.sel < 0 && n.sel != mDragSel && n.rect.expanded(6).contains(p))
-                    {
-                        mBoard.swapFrontPair();
-                        break;
-                    }
-            }
-            else
             {
                 const auto tgt = caretFor(p).second;
                 mBoard.movePedal(mDragSel, tgt.first, tgt.second);
@@ -1719,7 +1731,12 @@ private:
         // ---- palette drop target ----
         bool isInterestedInDragSource(const SourceDetails &d) override
         {
-            return d.description.toString().startsWith("pbadd:") && !mBoard.boardFull();
+            const auto desc = d.description.toString();
+            if (!desc.startsWith("pbadd:") || mBoard.boardFull()) return false;
+            auto t = juce::StringArray::fromTokens(desc, ":", {});
+            if (t.size() != 4) return false;
+            const int f = t[1].getIntValue();
+            return !((f == 4 || f == 5) && mBoard.typePlaced(f)); // Env/Comp singleton
         }
         void itemDragMove(const SourceDetails &d) override
         {
@@ -1763,22 +1780,22 @@ private:
             const int allSpans = spansA + spansB;
             const int rowA = (int)ln.l[1].size() - spansA + allSpans;
             const int rowB = (int)ln.l[2].size() - spansB + allSpans;
-            const int nTrunk = 2 + (int)ln.l[0].size();
+            const int nTrunk = (int)ln.l[0].size(); // Env/Comp are regular Trunk-lane entries now
             const int nLane = juce::jmax(1, juce::jmax(rowA, rowB));
             const int gap = 8, inW = 26, ampW = 40, splitPad = 24;
-            const int avail = getWidth() - inW - ampW - splitPad - gap * (nTrunk + nLane + 2);
-            const int nodeW = juce::jlimit(44, 76, avail / juce::jmax(1, nTrunk + nLane));
+            // Fixed node size — the chain's total width grows/shrinks with the pedal
+            // count instead of stretching nodes to fill the strip; the whole block is
+            // then centred in whatever width the strip has.
+            const int nodeW = 60;
             const int nodeH = 34;
+            const int contentW = inW + gap + nTrunk * (nodeW + gap) + splitPad
+                                + nLane * (nodeW + gap) + ampW;
+            const int startX = juce::jmax(0, (getWidth() - contentW) / 2);
 
             const int cy = trunkY();
-            mIn = {0, cy - 12, inW, 24};
-            int x = inW + gap;
+            mIn = {startX, cy - 12, inW, 24};
+            int x = startX + inW + gap;
 
-            const int fo = mBoard.frontOrder();
-            mNodes.push_back({fo == 0 ? kSelEnv : kSelComp, 0, {x, cy - nodeH / 2, nodeW, nodeH}});
-            x += nodeW + gap;
-            mNodes.push_back({fo == 0 ? kSelComp : kSelEnv, 0, {x, cy - nodeH / 2, nodeW, nodeH}});
-            x += nodeW + gap;
             for (int s : ln.l[0])
             {
                 mNodes.push_back({s, 0, {x, cy - nodeH / 2, nodeW, nodeH}});
@@ -1797,9 +1814,9 @@ private:
             {
                 if (mBoard.slotStereo(s))
                 {
-                    const int x0 = juce::jmax(xa, xb);
-                    mNodes.push_back({s, home, {x0, top, nodeW, bot - top}});
-                    xa = xb = x0 + nodeW + gap;
+                    const int sx = juce::jmax(xa, xb);
+                    mNodes.push_back({s, home, {sx, top, nodeW, bot - top}});
+                    xa = xb = sx + nodeW + gap;
                 }
                 else if (home == 1)
                 {
@@ -1815,10 +1832,7 @@ private:
             for (int s : ln.l[1]) placePost(s, 1);
             for (int s : ln.l[2]) placePost(s, 2);
 
-            // Pin the Amp A/B pills to the strip's right edge (not just past the last
-            // node) so the trunk visually spans the full chain-strip width; only give
-            // ground if there are so many pedals the nodes would collide with it.
-            const int ampX = juce::jmax(getWidth() - ampW, juce::jmax(juce::jmax(xa, xb) + gap, mSplitX + splitPad));
+            const int ampX = juce::jmax(juce::jmax(xa, xb) + gap, mSplitX + splitPad);
             mAmpA = {ampX, laneAY() - 12, ampW, 24};
             mAmpB = {ampX, laneBY() - 12, ampW, 24};
         }
@@ -1847,17 +1861,14 @@ private:
 
         void drawNode(juce::Graphics &g, const Node &n, bool ghost)
         {
-            colors::AccentPair ap;
-            juce::String name;
-            bool on = true;
-            if (n.sel == kSelEnv) { ap = envAccent(); name = "ENV"; on = mBoard.paramF("envfilterOn") >= 0.5f; }
-            else if (n.sel == kSelComp) { ap = compAccent(); name = "COMP"; on = mBoard.paramF("compOn") >= 0.5f; }
-            else
-            {
-                ap = mBoard.slotAccent(n.sel);
-                name = typeShort(mBoard.slotType(n.sel));
-                on = mBoard.slotOn(n.sel);
-            }
+            const int t = mBoard.slotType(n.sel);
+            const colors::AccentPair ap = mBoard.slotAccent(n.sel);
+            const juce::String name = typeShort(t);
+            // Env/Comp's bypass authority is their own shared envfilterOn/compOn (the
+            // LED still toggles it via togglePedalOn); every other type uses pbS{i}On.
+            const bool on = t == 4 ? mBoard.paramF("envfilterOn") >= 0.5f
+                          : t == 5 ? mBoard.paramF("compOn") >= 0.5f
+                                   : mBoard.slotOn(n.sel);
             const bool sel = !ghost && mBoard.selectedPedal() == n.sel && n.sel != kSelNone;
             auto r = n.rect.toFloat();
             if (ghost) g.setOpacity(0.85f);
@@ -1898,7 +1909,7 @@ private:
             const Node *last = nullptr;
             for (const auto &n : mNodes)
             {
-                if (n.sel < 0 || (mDragging && n.sel == mDragSel)) continue;
+                if (mDragging && n.sel == mDragSel) continue;
                 const bool span = mBoard.slotStereo(n.sel); // shared column: sits on both rows
                 if (n.lane != lane && !span) continue;
                 if (p.x > n.rect.getCentreX())
@@ -1910,7 +1921,7 @@ private:
             if (last != nullptr)
                 caretX = last->rect.getRight() + 4;
             else if (lane == 0)
-                caretX = (mNodes.size() >= 2 ? mNodes[1].rect.getRight() : mIn.getRight()) + 4;
+                caretX = mIn.getRight() + 4;
             else
                 caretX = mSplitX + 14;
             return {{caretX, laneY}, {lane, pos}};
@@ -1920,15 +1931,6 @@ private:
         {
             juce::PopupMenu m;
             m.setLookAndFeel(&getLookAndFeel());
-            if (n.sel < 0)
-            {
-                m.addCustomItem(-1, std::make_unique<MenuSectionHeader>("LOCKED FRONT PAIR"), nullptr, {});
-                m.addItem(1, "Swap Env / Comp order");
-                juce::Component::SafePointer<ChainStrip> sp(this);
-                m.showMenuAsync(juce::PopupMenu::Options().withTargetScreenArea(localAreaToGlobal(n.rect)),
-                                [sp](int r) { if (sp != nullptr && r == 1) sp->mBoard.swapFrontPair(); });
-                return;
-            }
             const int slot = n.sel;
             m.addCustomItem(-1, std::make_unique<MenuSectionHeader>(mBoard.slotModelName(slot).toUpperCase()),
                             nullptr, {});
@@ -1981,6 +1983,13 @@ private:
 
         int contentHeight() const { return mRows.empty() ? 0 : mRows.back().rect.getBottom() + 6; }
 
+        // Env/Comp rows are SINGLETON — unavailable once already on the board, even
+        // when the board isn't full (which only blocks EVERY row).
+        bool rowDisabled(const Item &it) const
+        {
+            return mBoard.boardFull() || ((it.family == 4 || it.family == 5) && mBoard.typePlaced(it.family));
+        }
+
         void paint(juce::Graphics &g) override
         {
             const bool full = mBoard.boardFull();
@@ -1996,27 +2005,30 @@ private:
                     continue;
                 }
                 const auto &it = mItems[(size_t)r.item];
-                const bool hov = mHover == r.item && !full;
+                const bool disabled = rowDisabled(it);
+                const bool hov = mHover == r.item && !disabled;
                 if (hov)
                 {
                     g.setColour(colors::tileSel);
                     g.fillRoundedRectangle(r.rect.toFloat().reduced(4.0f, 1.0f), 7.0f);
                 }
                 // livery bar
-                g.setColour(it.ap.accent.withAlpha(full ? 0.35f : 0.95f));
+                g.setColour(it.ap.accent.withAlpha(disabled ? 0.35f : 0.95f));
                 g.fillRoundedRectangle((float)r.rect.getX() + 8.0f, (float)r.rect.getY() + 7.0f,
                                        3.0f, (float)r.rect.getHeight() - 14.0f, 1.5f);
                 auto tx = r.rect.reduced(19, 2);
                 // mini glyph, right
                 auto gb = tx.removeFromRight(30).toFloat().reduced(2.0f, 7.0f);
-                const juce::Colour gc = it.ap.led.withAlpha(full ? 0.3f : (hov ? 0.95f : 0.6f));
+                const juce::Colour gc = it.ap.led.withAlpha(disabled ? 0.3f : (hov ? 0.95f : 0.6f));
                 if (it.family == 1) paintDriveGlyph(g, it.cat, it.model, gb, gc);
                 else if (it.family == 2) paintModGlyph(g, it.model, gb, gc);
-                else paintDelayGlyph(g, it.model, gb, gc);
-                g.setColour(full ? colors::captionDim : colors::text);
+                else if (it.family == 3) paintDelayGlyph(g, it.model, gb, gc);
+                else if (it.family == 4) paintEnvGlyph(g, gb, gc);
+                else paintCompGlyph(g, gb, gc);
+                g.setColour(disabled ? colors::captionDim : colors::text);
                 g.setFont(fonts::archivo(12.0f, fonts::SemiBold));
                 g.drawText(it.name, tx.removeFromTop(tx.getHeight() / 2 + 2), juce::Justification::bottomLeft);
-                g.setColour(full ? colors::captionDim : colors::caption);
+                g.setColour(disabled ? colors::captionDim : colors::caption);
                 g.setFont(fonts::mono(9.0f));
                 g.drawText(it.sub, tx, juce::Justification::topLeft);
             }
@@ -2036,12 +2048,13 @@ private:
 
         void mouseDrag(const juce::MouseEvent &e) override
         {
-            if (mBoard.boardFull() || mDragItem >= 0) return;
+            if (mDragItem >= 0) return;
             if (e.getDistanceFromDragStart() < 6) return;
             const int it = itemAt(e.getMouseDownPosition());
             if (it < 0) return;
-            mDragItem = it;
             const auto &item = mItems[(size_t)it];
+            if (rowDisabled(item)) return;
+            mDragItem = it;
             const juce::String desc = "pbadd:" + juce::String(item.family) + ":"
                                     + juce::String(item.cat) + ":" + juce::String(item.model);
             if (auto *dnd = juce::DragAndDropContainer::findParentDragContainerFor(this))
@@ -2060,10 +2073,11 @@ private:
         {
             const bool dragged = mDragItem >= 0;
             mDragItem = -1;
-            if (dragged || mBoard.boardFull()) return;
+            if (dragged) return;
             const int it = itemAt(e.getPosition());
             if (it < 0 || it != itemAt(e.getMouseDownPosition())) return;
             const auto &item = mItems[(size_t)it]; // plain click: append to the trunk
+            if (rowDisabled(item)) return;
             const int slot = mBoard.addPedalToTrunkEnd(item.family, item.cat, item.model);
             if (slot >= 0) mBoard.selectPedal(slot, true);
         }
@@ -2255,7 +2269,7 @@ private:
     // Structure signature: anything that changes the deck/chain SHAPE (not knob values).
     std::uint64_t structureSig() const
     {
-        std::uint64_t sig = (std::uint64_t)(frontOrder() + 1);
+        std::uint64_t sig = 1; // fixed non-zero seed (no more frontOrder to fold in)
         for (int i = 0; i < kSlots; ++i)
         {
             std::uint64_t s = (std::uint64_t)(slotType(i) * 4 + slotLane(i)) + 1;
@@ -2290,6 +2304,11 @@ private:
             layoutDeckSize();
         }
         if (mChain != nullptr) mChain->refreshLayout();
+        // Structure changes can flip a palette row's disabled state (e.g. removing
+        // the placed Comp/Env singleton un-grays its RACK row) — rowDisabled() is
+        // re-evaluated fresh in paint(), so it just needs a nudge; without this the
+        // row stays visually stale until an unrelated repaint (e.g. mouse hover).
+        if (mPalette != nullptr) mPalette->repaint();
         const Lanes ln = lanesNow();
         juce::String hdr = (!ln.l[1].empty() || !ln.l[2].empty()) ? "A/B SPLIT" : juce::String();
         setHeaderRight(hdr);

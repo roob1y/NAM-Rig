@@ -850,15 +850,18 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID("predelayStereo", 1), "Pre Delay Stereo", false));
 
-    // --- Unified PEDALBOARD (opt-in). OFF by default -> the legacy fixed pre-amp chain
-    // runs, byte-exact. ---
-    // Stage B (SCOPE_PEDALBOARD §10): the board is an OWNING POOL. A locked Env+Comp
-    // front pair (reusing the shared comp*/envfilter* params, one instance) + 8 FREE
-    // slots, each of which can be a Drive / Mod / Delay and carries the FULL param union
-    // for all three (the MOD/DRIVE 3-slot-superset precedent, generalised). Defaults:
-    // every free slot Off -> enabling the board reproduces the legacy DEFAULT (comp/env
-    // only), byte-exact. Appended last for automation-index stability. Local helpers keep
-    // the ~300 IDs consistent; ranges mirror the drv*/premod*/predelay* originals.
+    // --- Unified PEDALBOARD. ---
+    // Stage B (SCOPE_PEDALBOARD §10): the board is an OWNING POOL of 8 FREE slots, each
+    // of which can be a Drive / Mod / Delay / Env / Comp and carries the FULL param union
+    // for Drive/Mod/Delay (the MOD/DRIVE 3-slot-superset precedent, generalised). Env and
+    // Comp are POOLABLE SINGLETONS instead: a slot's Type can claim "Env" or "Comp", but
+    // there's only one physical engine of each (PedalboardBlock::env/comp), so at most one
+    // slot may hold each at a time (UI-enforced) — they reuse the existing shared
+    // comp*/envfilter* params rather than a per-slot union, so those IDs are unaffected by
+    // where (or whether) the pedal is placed. Every free slot defaults Off -> a fresh board
+    // starts empty; the user adds only what they want. Appended last for automation-index
+    // stability. Local helpers keep the ~300 IDs consistent; ranges mirror the
+    // drv*/premod*/predelay* originals.
     {
         auto pbF = [&](const juce::String &id, const juce::String &nm, juce::NormalisableRange<float> r, float d, const char *lab = "") {
             params.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID(id, 1), nm, r, d, juce::AudioParameterFloatAttributes().withLabel(lab))); };
@@ -871,13 +874,17 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         auto RR = [](float lo, float hi, float st, float sk = 1.0f) { return juce::NormalisableRange<float>(lo, hi, st, sk); };
         const juce::StringArray syncChoices{"Off", "1/1", "1/2", "1/4", "1/4.", "1/4T", "1/8", "1/8.", "1/8T", "1/16"};
 
+        // pbEnabled/pbFrontOrder are RETIRED (kept registered only for automation-index
+        // stability, per the same precedent as pbEnabled since the always-on board
+        // change) — Env/Comp are now poolable slots with their own Type entries below,
+        // so there's no separate "locked pair order" to store.
         pbB("pbEnabled", "Pedalboard Enable", false);
         pbC("pbFrontOrder", "PB Front Order", juce::StringArray{"Env First", "Comp First"}, 0);
         for (int i = 0; i < 8; ++i)
         {
             auto id = [i](const char *suf) { return "pbS" + juce::String(i) + suf; };
             const juce::String L = "PB" + juce::String(i) + " ";
-            pbC(id("Type"), L + "Type", juce::StringArray{"Off", "Drive", "Mod", "Delay"}, 0);
+            pbC(id("Type"), L + "Type", juce::StringArray{"Off", "Drive", "Mod", "Delay", "Env", "Comp"}, 0);
             pbC(id("Lane"), L + "Route", juce::StringArray{"Both", "Amp A", "Amp B"}, 0);
             pbB(id("On"), L + "On", true);
             // Stereo: Mod/Delay slot spans BOTH amps (L->Amp A, R->Amp B). Off = mono (default,
@@ -1428,19 +1435,21 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
     // --- Unified Pedalboard configuration. The board IS the front-of-amp section now
     // (UI redesign 2026-07-10): the pool always runs — pbEnabled is ignored (kept
     // registered only for automation-index stability) and the legacy fixed pre-amp path
-    // is dead code kept for reference. Configure the board's OWNED pool: the locked
-    // Env+Comp front pair (from the SHARED comp*/envfilter* params) + each of the 8 free
-    // slots' Drive/Mod/Delay engines from their per-slot param union. The board decides
-    // ORDER + LANE + the active engine per slot. ---
+    // is dead code kept for reference. Configure the board's OWNED pool: the Env/Comp
+    // singleton engines (from the SHARED comp*/envfilter* params, regardless of whether
+    // either is currently placed in a slot) + each of the 8 free slots' Drive/Mod/Delay
+    // engines from their per-slot param union. The board decides ORDER + LANE + the
+    // active engine per slot (including which slot, if any, claims Env/Comp). ---
     {
         const bool pbOn = true; // board is the permanent front section (pbEnabled retired)
         if (pbOn)
         {
             auto &bd = mChain.board();
             auto gp = [&](const juce::String &pid) { return apvts.getRawParameterValue(pid)->load(); };
-            bd.setEnvFirst((int)gp("pbFrontOrder") == 0);
 
-            // Locked Env (voice-branched, mirrors the legacy env wiring) + Comp.
+            // Env (voice-branched, mirrors the legacy env wiring) + Comp — configured
+            // unconditionally from their existing shared params; inert unless a slot's
+            // Type actually claims Env/Comp (see PedalboardBlock).
             const int efVoice = (int)gp("envfilterVoice");
             bd.env.setVoice(efVoice);
             bd.env.setSensitivity(gp("envfilterSens"));
