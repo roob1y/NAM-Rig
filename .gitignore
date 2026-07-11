@@ -79,3 +79,10 @@ Guitar plugin design exploration/
 
 *_backup/
 *_demos/
+
+# cab-dyn ear-test renders (large research wavs, regenerable, not shipped)
+docs/cabdyn/renders/
+
+# test-harness OUTPUT fixtures (regenerable). Keep the INPUT fixtures
+# (testdata/chunk_in.f32, testdata/delay11.wav) which the tests read.
+testdata/out_*.f32
