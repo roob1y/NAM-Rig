@@ -2545,6 +2545,193 @@ private:
 };
 
 //==============================================================================
+// Per-amp TONE STACK section inside an amp lane (circuit-exact stacks,
+// rig/TonestackBlock.h; params ts{A,B}*). The knob faces follow the chosen
+// model like the pedalboard's pedal faces: only the controls the real stack
+// has, with its real names — FMV amps get Treble/Mid/Bass, Top Boost gets
+// Treble/Bass/Cut, Graphic 72 gets Treble/Bass, and Tweed 57 (5E3) gets
+// Volume/Tone/Ghost (Ghost = the unused channel's volume, the famous
+// interaction knob). The Mark 5-band graphic appears ONLY on Cali Lead --
+// it is that amp's hardware (the DSP self-gates too); sliders keep the
+// classic panel names. The stack is RELATIVE-only: flat at default knobs
+// (the capture's own baked-in stack is the reference), knob moves add the
+// circuit-exact difference on top.
+class ToneStackSection : public juce::Component
+{
+public:
+    ToneStackSection(juce::AudioProcessorValueTreeState &apvts, int rig)
+        : mApvts(apvts), mS(rig == 0 ? "A" : "B")
+    {
+        mOn = std::make_unique<ToggleSwitch>(mApvts, id("On"));
+        addAndMakeVisible(*mOn);
+
+        mModel.addItemList({"Tweed 59", "Black 65", "Silver 69", "Cali Lead",
+                            "Brit 800", "Brit 45", "Brit Major", "Solo 100",
+                            "Red Star", "Classic 20", "Solid Clean", "Top Boost",
+                            "Graphic 72", "Tweed 57"}, 1); // order = TonestackBlock::Model
+        addAndMakeVisible(mModel);
+        mModelAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            mApvts, id("Model"), mModel);
+        mModel.onChange = [this] { updateFaces(); };
+
+        mPos.addItemList({"Pre Amp", "Post Amp"}, 1);
+        addAndMakeVisible(mPos);
+        mPosAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            mApvts, id("Pos"), mPos);
+
+        mK1 = std::make_unique<LabeledKnob>(mApvts, id("Treble"), "Treble");
+        mK2 = std::make_unique<LabeledKnob>(mApvts, id("Mid"), "Mid");
+        mK3 = std::make_unique<LabeledKnob>(mApvts, id("Bass"), "Bass");
+        mK4 = std::make_unique<LabeledKnob>(mApvts, id("Cut"), "Cut");
+        for (auto *k : {mK1.get(), mK2.get(), mK3.get(), mK4.get()})
+            addAndMakeVisible(*k);
+
+        mGraphicOn = std::make_unique<ToggleSwitch>(mApvts, id("GraphicOn"));
+        addAndMakeVisible(*mGraphicOn);
+        static const char *eqIds[5] = {"Eq1", "Eq2", "Eq3", "Eq4", "Eq5"};
+        for (int b = 0; b < 5; ++b)
+        {
+            auto &s = mEq[b];
+            s.setSliderStyle(juce::Slider::LinearVertical);
+            s.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+            s.setDoubleClickReturnValue(true, 0.0);
+            addAndMakeVisible(s);
+            mEqAtt[b] = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+                mApvts, id(eqIds[b]), s);
+        }
+        updateFaces();
+    }
+
+    // Editor timer: dim the controls when the stack is off (params stay live).
+    void refresh()
+    {
+        const bool on = mApvts.getRawParameterValue(id("On"))->load() >= 0.5f;
+        if (on == mWasOn)
+            return;
+        mWasOn = on;
+        for (auto *k : {mK1.get(), mK2.get(), mK3.get(), mK4.get()})
+            k->setEnabled(on);
+        const bool gOn = on; // sliders follow the master enable; GraphicOn gates DSP
+        for (auto &s : mEq) s.setEnabled(gOn);
+        mModel.setEnabled(on);
+        mPos.setEnabled(on);
+        repaint();
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        g.setColour(colors::divider);
+        g.fillRect(0, 0, getWidth(), 1);
+        g.setColour(colors::caption);
+        g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.12f));
+        g.drawText("TONE STACK", mCaptionRect, juce::Justification::centredLeft);
+        if (mGraphicOn->isVisible()) // Cali Lead only
+        {
+            // band labels (classic silkscreen names; true centres in the doc)
+            static const char *bands[5] = {"80", "240", "750", "2k2", "6k6"};
+            g.setColour(colors::textDim.withMultipliedAlpha(mWasOn ? 1.0f : 0.45f));
+            g.setFont(fonts::mono(9.0f));
+            for (int b = 0; b < 5; ++b)
+                g.drawText(bands[b], mEqLabel[b], juce::Justification::centred);
+            g.setFont(fonts::archivo(9.5f, fonts::SemiBold, 0.1f));
+            g.setColour(colors::caption);
+            g.drawText("GRAPHIC", mGraphicLabel, juce::Justification::centredLeft);
+        }
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds();
+        r.removeFromTop(6); // divider + air
+        auto head = r.removeFromTop(24);
+        mCaptionRect = head.removeFromLeft(84);
+        mOn->setBounds(head.removeFromLeft(42).withSizeKeepingCentre(42, 22));
+        head.removeFromLeft(8);
+        mPos.setBounds(head.removeFromRight(96).withSizeKeepingCentre(96, 22));
+        head.removeFromRight(8);
+        mModel.setBounds(head.withSizeKeepingCentre(head.getWidth(), 24));
+
+        r.removeFromTop(4);
+        auto row = r;
+
+        // graphic zone on the right -- Cali Lead only (hidden elsewhere, the
+        // knob row then keeps the full width)
+        if (mGraphicOn->isVisible())
+        {
+            auto gz = row.removeFromRight(juce::jmin(150, row.getWidth() / 2 - 8));
+            auto gHead = gz.removeFromTop(16);
+            mGraphicLabel = gHead.removeFromLeft(64);
+            mGraphicOn->setBounds(gHead.removeFromLeft(42).withSizeKeepingCentre(42, 16));
+            auto lab = gz.removeFromBottom(12);
+            const int sw = gz.getWidth() / 5;
+            for (int b = 0; b < 5; ++b)
+            {
+                mEq[b].setBounds(gz.removeFromLeft(sw).reduced(2, 0));
+                mEqLabel[b] = lab.removeFromLeft(sw);
+            }
+            row.removeFromRight(10);
+        }
+
+        // knob row: place the visible knobs evenly
+        juce::Component *ks[4] = {mK1.get(), mK2.get(), mK3.get(), mK4.get()};
+        int vis = 0;
+        for (auto *k : ks) if (k->isVisible()) ++vis;
+        const int kw = vis > 0 ? juce::jmin(64, row.getWidth() / vis) : 0;
+        for (auto *k : ks)
+            if (k->isVisible())
+                k->setBounds(row.removeFromLeft(kw).withSizeKeepingCentre(kw, juce::jmin(row.getHeight(), 78)));
+    }
+
+private:
+    juce::String id(const char *suffix) const { return "ts" + mS + suffix; }
+
+    // Re-face the knob row for the chosen model (rebind keeps the params in
+    // place; only caption/visibility change — matches the pedalboard faces).
+    void updateFaces()
+    {
+        const int m = mModel.getSelectedItemIndex();
+        const bool vox = (m == 11), james = (m == 12), e3 = (m == 13);
+        const bool mark = (m == 3); // Cali Lead: the only stack with the graphic
+        mGraphicOn->setVisible(mark);
+        for (auto &s : mEq) s.setVisible(mark);
+        if (e3)
+        {
+            mK1->rebind(mApvts, id("Bass"));   mK1->setCaption("Volume"); // 5E3: signal INTO the wiper
+            mK2->rebind(mApvts, id("Treble")); mK2->setCaption("Tone");
+            mK3->rebind(mApvts, id("Ghost"));  mK3->setCaption("Ghost");  // unused channel's volume
+            mK2->setVisible(true);
+            mK3->setVisible(true);
+            mK4->setVisible(false);
+        }
+        else
+        {
+            mK1->rebind(mApvts, id("Treble")); mK1->setCaption("Treble");
+            mK2->rebind(mApvts, id("Mid"));    mK2->setCaption("Mid");
+            mK3->rebind(mApvts, id("Bass"));   mK3->setCaption("Bass");
+            mK4->rebind(mApvts, id("Cut"));    mK4->setCaption("Cut");    // Top Boost only
+            mK2->setVisible(!vox && !james);   // no mid pot on Top Boost / Graphic 72
+            mK3->setVisible(true);
+            mK4->setVisible(vox);
+        }
+        resized();
+        repaint();
+    }
+
+    juce::AudioProcessorValueTreeState &mApvts;
+    juce::String mS;
+    juce::ComboBox mModel, mPos;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mModelAtt, mPosAtt;
+    std::unique_ptr<ToggleSwitch> mOn, mGraphicOn;
+    std::unique_ptr<LabeledKnob> mK1, mK2, mK3, mK4;
+    juce::Slider mEq[5];
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mEqAtt[5];
+    juce::Rectangle<int> mCaptionRect, mGraphicLabel, mEqLabel[5];
+    bool mWasOn = true;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ToneStackSection)
+};
+
+//==============================================================================
 // One amp "lane" inside the combined AMP panel (no box/title of its own — the
 // parent draws the single "AMP" frame). Holds the model loader, status line,
 // input drive and the per-rig anti-alias quality controls. Dims when its rig is
@@ -2584,6 +2771,10 @@ public:
         mInput = std::make_unique<LabeledKnob>(mProc.apvts,
                                                rig == 0 ? "rigInputA" : "rigInputB", "Input");
         addAndMakeVisible(*mInput);
+
+        // Per-amp tone stack (circuit-exact; see ToneStackSection above).
+        mTone = std::make_unique<ToneStackSection>(mProc.apvts, rig);
+        addAndMakeVisible(*mTone);
     }
 
     // Dim the whole lane when its rig is bypassed or soloed out (matches CabPanel).
@@ -2594,6 +2785,7 @@ public:
     {
         const bool loaded = mProc.isModelLoaded(mRig);
         const bool a2 = loaded && mProc.isA2Model(mRig);
+        mTone->refresh();
         if (loaded != mLoaded) { mLoaded = loaded; repaint(); }
 
         // "Capped at 4x" note when Low Latency holds back a higher live AA setting.
@@ -2779,6 +2971,10 @@ public:
         mTagsRect = area.removeFromBottom(24);
         area.removeFromBottom(6);
 
+        // Tone stack section above the tag pills (divider + header + knobs/graphic).
+        mTone->setBounds(area.removeFromBottom(128));
+        area.removeFromBottom(6);
+
         // Middle: input knob (left) | anti-alias quality (right).
         area.removeFromTop(8);
         auto mid = area;
@@ -2805,6 +3001,7 @@ private:
     juce::ComboBox mLiveAa, mOfflineAa;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mLiveAtt, mOfflineAtt;
     std::unique_ptr<LabeledKnob> mInput;
+    std::unique_ptr<ToneStackSection> mTone;
     std::unique_ptr<juce::FileChooser> mChooser;
     juce::Rectangle<int> mTagRect, mLoaderRect, mRemoveRect, mTagsRect, mCaptionR, mLiveLabel, mOffLabel;
     int mDivX = 0;

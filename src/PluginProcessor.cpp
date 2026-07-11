@@ -930,6 +930,66 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
         }
     }
 
+    // --- Per-amp TONE STACK (circuit-exact; rig/TonestackBlock.h, verified by
+    // tests/tonestack_test.cpp; research: docs/tonestack/RESEARCH.md). One stack
+    // per amp, default OFF so existing presets stay bit-exact. Model order MUST
+    // match TonestackBlock::Model. Knob meanings shift per model (the UI
+    // relabels): Treble = Tone and Bass = Volume on Tweed 57 (5E3), whose Ghost
+    // knob is the unused channel's volume (the famous interaction); Cut is Top
+    // Boost's post-PI cut (authentic: up = darker); Mid is hidden where the
+    // real stack has none (Top Boost, Graphic 72, Tweed 57). Graphic = the Mark
+    // 5-band, always post-amp, usable with any stack (authentic Mark pairing =
+    // Cali Lead + Graphic). Sliders keep the classic panel names even though
+    // the true centres sit elsewhere -- so does the real amp's silkscreen.
+    {
+        const juce::StringArray tsModels{"Tweed 59",  "Black 65",  "Silver 69",
+                                         "Cali Lead", "Brit 800",  "Brit 45",
+                                         "Brit Major", "Solo 100", "Red Star",
+                                         "Classic 20", "Solid Clean", "Top Boost",
+                                         "Graphic 72", "Tweed 57"};
+        const char *eqIds[5] = {"Eq1", "Eq2", "Eq3", "Eq4", "Eq5"};
+        const char *eqNames[5] = {"EQ 80", "EQ 240", "EQ 750", "EQ 2200", "EQ 6600"};
+        for (const char *side : {"A", "B"})
+        {
+            const juce::String S(side);
+            auto id = [&](const char *suffix) { return "ts" + S + suffix; };
+            auto nm = [&](const char *n) { return "Tone " + S + " " + n; };
+            params.push_back(std::make_unique<juce::AudioParameterBool>(
+                juce::ParameterID(id("On"), 1), nm("Enable"), false));
+            params.push_back(std::make_unique<juce::AudioParameterChoice>(
+                juce::ParameterID(id("Model"), 1), nm("Model"), tsModels, 0));
+            params.push_back(std::make_unique<juce::AudioParameterChoice>(
+                juce::ParameterID(id("Pos"), 1), nm("Position"),
+                juce::StringArray{"Pre Amp", "Post Amp"}, 0)); // pre = drives the capture
+            // NOTE (product call 2026-07-11): the stack ships RELATIVE-only --
+            // flat at the default knob positions (the capture's own baked-in
+            // stack is the reference), knob moves add the circuit-exact
+            // difference on top. The block's absolute mode exists solely for
+            // the offline harness; no mode parameter is exposed.
+            params.push_back(std::make_unique<juce::AudioParameterFloat>(
+                juce::ParameterID(id("Treble"), 1), nm("Treble"),
+                juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f, knob10(0.0f, 1.0f)));
+            params.push_back(std::make_unique<juce::AudioParameterFloat>(
+                juce::ParameterID(id("Mid"), 1), nm("Mid"),
+                juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f, knob10(0.0f, 1.0f)));
+            params.push_back(std::make_unique<juce::AudioParameterFloat>(
+                juce::ParameterID(id("Bass"), 1), nm("Bass"),
+                juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f, knob10(0.0f, 1.0f)));
+            params.push_back(std::make_unique<juce::AudioParameterFloat>(
+                juce::ParameterID(id("Cut"), 1), nm("Cut"),
+                juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f, knob10(0.0f, 1.0f)));
+            params.push_back(std::make_unique<juce::AudioParameterFloat>(
+                juce::ParameterID(id("Ghost"), 1), nm("Ghost"),
+                juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f, knob10(0.0f, 1.0f)));
+            params.push_back(std::make_unique<juce::AudioParameterBool>(
+                juce::ParameterID(id("GraphicOn"), 1), nm("Graphic"), false));
+            for (int b2 = 0; b2 < 5; ++b2)
+                params.push_back(std::make_unique<juce::AudioParameterFloat>(
+                    juce::ParameterID(id(eqIds[b2]), 1), nm(eqNames[b2]),
+                    juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 0.0f));
+        }
+    }
+
     return {params.begin(), params.end()};
 }
 
@@ -1431,6 +1491,35 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         mChain.predelay.setBypassed(apvts.getRawParameterValue("predelayOn")->load() < 0.5f);
         mChain.setPredelayPreDrive((int)apvts.getRawParameterValue("predelayPos")->load() == 1);
         mChain.setPredelayStereo(apvts.getRawParameterValue("predelayStereo")->load() >= 0.5f);
+
+    // Per-amp TONE STACKS (circuit-exact; rig/TonestackBlock.h). Knobs land on
+    // the block RAW (0..1) -- the authentic pot tapers are applied inside per
+    // model, so DAW automation reads as pot rotation like on the real panel.
+    // Placement (Pre/Post the capture) is a chain flag; the Mark graphic
+    // section is always post-amp inside the block.
+    {
+        auto pushTs = [&](nam_rig::TonestackBlock &t, const juce::String &S, bool isA)
+        {
+            auto gp = [&](const char *suf) { return apvts.getRawParameterValue("ts" + S + suf)->load(); };
+            t.setModel((int)gp("Model")); // relative-only (block default; see layout note)
+            t.setKnob1(gp("Treble"));
+            t.setKnob2(gp("Mid"));
+            t.setKnob3(gp("Bass"));
+            t.setCut(gp("Cut"));
+            t.setGhost(gp("Ghost"));
+            t.setGraphicOn(gp("GraphicOn") >= 0.5f);
+            t.setGraphicBand(0, gp("Eq1"));
+            t.setGraphicBand(1, gp("Eq2"));
+            t.setGraphicBand(2, gp("Eq3"));
+            t.setGraphicBand(3, gp("Eq4"));
+            t.setGraphicBand(4, gp("Eq5"));
+            t.setBypassed(gp("On") < 0.5f);
+            const bool pre = (int)gp("Pos") == 0;
+            if (isA) mChain.setTonestackPreA(pre); else mChain.setTonestackPreB(pre);
+        };
+        pushTs(mChain.tonestack, "A", true);
+        pushTs(mChain.tonestackB, "B", false);
+    }
 
     // --- Unified Pedalboard configuration. The board IS the front-of-amp section now
     // (UI redesign 2026-07-10): the pool always runs — pbEnabled is ignored (kept

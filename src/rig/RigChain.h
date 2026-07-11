@@ -35,6 +35,7 @@
 #include "PreDelayBlock.h"
 #include "PedalboardBlock.h" // unified reorderable front-of-amp board (routes the engines above)
 #include "AmpBlock.h"
+#include "TonestackBlock.h"
 #include "EqBlock.h"
 #include "CabBlock.h"
 #include "CabDynamicsBlock.h"
@@ -161,6 +162,12 @@ public:
     // Envelope filter position: false = BEFORE the drive rack (default, classic
     // auto-wah-into-drive), true = AFTER the drive rack (wah on the driven signal).
     void setEnvFilterPostDrive(bool b) { mEnvFilterPostDrive = b; }
+    // Per-amp tone stack placement: true (default) = PRE the NAM capture (the
+    // stack shapes what drives the nonlinearity, most amp-like), false = POST
+    // (pure EQ on the amp's output). The Mark graphic section is always POST
+    // (its real position: after the preamp). Enable via tonestack.setBypassed.
+    void setTonestackPreA(bool b) { mTsPreA = b; }
+    void setTonestackPreB(bool b) { mTsPreB = b; }
     void setInTrimA(float g) { mInTrimA = g; }
     void setInTrimB(float g) { mInTrimB = g; }
     void setOutTrimA(float g) { mOutTrimA = g; }
@@ -454,7 +461,19 @@ public:
         if (runA)
         {
             if (mInTrimA != 1.0f) scale(vA, numSamples, mInTrimA);
+            // Per-amp tone stack (circuit-exact, TonestackBlock). PRE = before
+            // the capture; POST = after it (before EQ/cab, like a stack ahead
+            // of the power amp). Graphic section is always post-amp.
+            if (!tonestack.isBypassed() && mTsPreA)
+                { tonestack.processStack(vA, numSamples); heal(tonestack, vA, numSamples); }
             if (!amp.isBypassed()) { amp.process(vA, numSamples); heal(amp, vA, numSamples); }
+            if (!tonestack.isBypassed())
+            {
+                if (!mTsPreA)
+                    { tonestack.processStack(vA, numSamples); heal(tonestack, vA, numSamples); }
+                tonestack.processGraphic(vA, numSamples);
+                heal(tonestack, vA, numSamples);
+            }
             if (!eq.isBypassed())  { eq.process(vA, numSamples);  heal(eq, vA, numSamples); }
             // Dynamic Cab wraps the IR convolution: pre-conv deltas (reactive
             // impedance + cone breakup) -> static IR -> post-conv delta (enclosure
@@ -469,7 +488,16 @@ public:
         if (runB)
         {
             if (mInTrimB != 1.0f) scale(vB, numSamples, mInTrimB);
+            if (!tonestackB.isBypassed() && mTsPreB)
+                { tonestackB.processStack(vB, numSamples); heal(tonestackB, vB, numSamples); }
             if (!ampB.isBypassed()) { ampB.process(vB, numSamples); heal(ampB, vB, numSamples); }
+            if (!tonestackB.isBypassed())
+            {
+                if (!mTsPreB)
+                    { tonestackB.processStack(vB, numSamples); heal(tonestackB, vB, numSamples); }
+                tonestackB.processGraphic(vB, numSamples);
+                heal(tonestackB, vB, numSamples);
+            }
             if (!eqB.isBypassed())  { eqB.process(vB, numSamples);  heal(eqB, vB, numSamples); }
             cabDynB.processPre(vB, numSamples);
             if (!cabB.isBypassed()) { cabB.process(vB, numSamples); heal(cabB, vB, numSamples); }
@@ -554,6 +582,8 @@ public:
     DriveBlock drive; // 3-slot drive rack (shared, before split)
     PreModBlock premod; // mono front-of-amp modulation pedal (after drive, before split)
     PreDelayBlock predelay; // mono front-of-amp delay pedal (after premod, before split)
+    TonestackBlock tonestack;  // Rig A per-amp tone stack (pre/post via setTonestackPreA)
+    TonestackBlock tonestackB; // Rig B
     AmpBlock amp;   // Rig A
     EqBlock eq;
     CabBlock cab;
@@ -858,10 +888,10 @@ private:
         }
     }
 
-    std::array<MonoBlock *, 12> allMonoBlocks()
+    std::array<MonoBlock *, 14> allMonoBlocks()
     {
         return {&gate, &envfilter, &comp, &drive, &premod, &predelay,
-                &amp, &eq, &cab, &ampB, &eqB, &cabB};
+                &tonestack, &tonestackB, &amp, &eq, &cab, &ampB, &eqB, &cabB};
     }
 
     std::array<StereoBlock *, 3> stereoBlocks() { return {&mod, &delay, &reverb}; }
@@ -880,6 +910,7 @@ private:
     bool mPredelayPreDrive = false; // pre-amp delay pedal: before (true) / after (false) the drive rack
     bool mPredelayStereo = false;   // Dual + post-drive: predelay is mono-in/stereo-out ping-pong (L=Amp A, R=Amp B)
     bool mEnvFilterPostDrive = false; // env filter: before (false, default) / after (true) the drive rack
+    bool mTsPreA = true, mTsPreB = true; // tone stack PRE (true) / POST the capture
     float mInTrimA = 1.0f, mInTrimB = 1.0f;
     float mOutTrimA = 1.0f, mOutTrimB = 1.0f;
     double mAlignA = 0.0, mAlignB = 0.0; // fractional align delay (samples)
