@@ -1815,7 +1815,10 @@ private:
             for (int s : ln.l[1]) placePost(s, 1);
             for (int s : ln.l[2]) placePost(s, 2);
 
-            const int ampX = juce::jmin(getWidth() - ampW, juce::jmax(juce::jmax(xa, xb) + gap, mSplitX + splitPad));
+            // Pin the Amp A/B pills to the strip's right edge (not just past the last
+            // node) so the trunk visually spans the full chain-strip width; only give
+            // ground if there are so many pedals the nodes would collide with it.
+            const int ampX = juce::jmax(getWidth() - ampW, juce::jmax(juce::jmax(xa, xb) + gap, mSplitX + splitPad));
             mAmpA = {ampX, laneAY() - 12, ampW, 24};
             mAmpB = {ampX, laneBY() - 12, ampW, 24};
         }
@@ -2153,13 +2156,16 @@ public:
     {
         auto body = bodyArea().reduced(14, 8);
 
+        // Palette spans the FULL body height (top to bottom, alongside the chain
+        // strip too) — carve it off first so nothing below it eats into its column.
         auto right = body.removeFromRight(kPalW);
-        right.removeFromTop(14); // "PEDAL RACK" caption drawn in paint()
         mPaletteView->setBounds(right);
         mPalette->setSize(right.getWidth() - mPaletteView->getScrollBarThickness(), 100);
         mPalette->setSize(mPalette->getWidth(), juce::jmax(right.getHeight(), mPalette->contentHeight()));
         body.removeFromRight(12);
 
+        // Chain strip's right edge now stops at the palette's left edge instead of
+        // running the full panel width.
         mChain->setBounds(body.removeFromBottom(kChainH));
         body.removeFromBottom(8);
         mDeckView->setBounds(body);
@@ -2181,16 +2187,6 @@ public:
             g.drawRoundedRectangle(w.reduced(0.5f), 10.0f, 1.0f);
             g.setColour(juce::Colours::white.withAlpha(0.05f));
             g.drawRoundedRectangle(w.expanded(0.5f), 11.0f, 1.0f);
-        }
-        // palette caption
-        if (mPaletteView != nullptr)
-        {
-            g.setColour(colors::caption);
-            g.setFont(fonts::archivo(9.0f, fonts::SemiBold, 0.14f));
-            g.drawText("PEDAL RACK  -  drag or click",
-                       juce::Rectangle<int>(mPaletteView->getX(), mPaletteView->getY() - 13,
-                                            mPaletteView->getWidth(), 12),
-                       juce::Justification::centredLeft);
         }
     }
 
@@ -2294,10 +2290,8 @@ private:
             layoutDeckSize();
         }
         if (mChain != nullptr) mChain->refreshLayout();
-        const int n = usedCount();
         const Lanes ln = lanesNow();
-        juce::String hdr = juce::String(n) + (n == 1 ? " PEDAL" : " PEDALS");
-        if (!ln.l[1].empty() || !ln.l[2].empty()) hdr += "  -  A/B SPLIT";
+        juce::String hdr = (!ln.l[1].empty() || !ln.l[2].empty()) ? "A/B SPLIT" : juce::String();
         setHeaderRight(hdr);
     }
 
