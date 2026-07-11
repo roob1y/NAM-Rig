@@ -129,7 +129,9 @@ their real Rk = 1k. Q at full boost ~1.1-2.1 per band from the real parts
 CIRCUIT with a linear slider -- no fake taper. Digital: per-band bilinear
 prewarped at w0 so centres land exactly (harness T9). Band-to-band bus
 interaction approximated by cascade -- the one non-exactness, documented.
-Authentic Mark pairing = Mark TMB (pre) + graphic (post) + V shape.
+MARK-ONLY like the hardware (processGraphic self-gates on the model, T9e;
+the UI shows the sliders only on Cali Lead), so the authentic pairing --
+Mark TMB (pre) + graphic (post) + the V -- is automatic.
 
 ## 7. 5E3 tweed Deluxe (kTweed5E3) -- the interactive one
 
@@ -181,6 +183,49 @@ blackface dropout; T5 value-table liveness; T6 James anchors; T7 5E3 quirks;
 T8 cut; T9 graphic rails/detent/reciprocity/centres; T10 400-config
 stability sweep; T11 de-zipper; T12 determinism; T13 static makeup; T14 5E3
 transparency; T15 44.1/48/96k.
+
+## 10a. DELTA MODE (added same day -- the usability default)
+
+Robbie's call: enabling a stack shouldn't re-EQ the capture (its own stack is
+already baked in); the knobs should add DIFFERENCES on top of a flat default.
+Implemented exactly: delta mode applies H(knobs)/H(reference) where reference
+= the model's default positions (noon, Cut/Ghost 0).
+
+* At the defaults the ratio is unity and the block hands back a BIT-EXACT
+  passthrough (T16) -- switch it on, nothing changes.
+* Off the defaults you get the circuit-exact RELATIVE response of the real
+  control geometry (T17, worst 0.032 dB vs the analytic ratio), layered on the
+  capture. All knob interaction survives division by a fixed reference --
+  mid/treble interplay, 5E3 ghost loading, even the blackface dropout.
+* Insertion loss cancels, so no makeup in the shipping mode. PRODUCT CALL
+  (same day): relative-only ships -- no mode parameter, "delta"/"full" never
+  appear in the UI. setDeltaMode(false) (absolute circuit + static makeup)
+  remains as a HARNESS HOOK: T1b/T2/T3/T13/T15 pin the absolute response
+  against the paper and the independent MNA, which is what proves the netlists.
+* Engine change is small: the same MNA samples are DIVIDED by a cached
+  reference response before the same rational fit; ratio order can reach 2N so
+  kMaxOrder is 8 and the ascending search may climb (usually still lands 3-5).
+  VoxTB's cut gets a fixed inverse-of-open stage so Cut 0 is exactly flat.
+* Correctness caveat: the delta is exactly "the amp's knobs moved from X to Y"
+  when the capture was made at the reference settings; for captures made
+  elsewhere it is still the amp's own control geometry applied relatively --
+  which is precisely the requested behaviour.
+
+Two more numerics war stories while making it safe (extends section 8):
+smallest-sufficient-order had to LOSE its state-zeroing on order flips (each
+flip mid-glide reset TDF2 state = crackle) -- the recursion now always runs at
+kMaxOrder with zero-padded high slots so state slots never change meaning, and
+every coefficient commit crossfades old->new filters over one 64-sample chunk
+(knob-jump step now measures EQUAL to a steady sine, T11). And state only
+TRANSFERS between commits when the coefficient sets are close (small glide
+steps); on big jumps it starts clean under the fade, because TDF2 state is
+coefficient-scaled and inherited garbage at 5E3-delta's scales rang for
+seconds (T10's last two failures). A 256-sample impulse probe also gates every
+candidate fit against near-cancelling pole/zero pairs that pass frequency
+checks but ring internally.
+
+Bench after: 0.60% of a core worst-case (5E3 delta, knobs gliding), 0.04%
+idle. Harness: 36 checks ALL PASS.
 
 ## 10. Deferred / open
 

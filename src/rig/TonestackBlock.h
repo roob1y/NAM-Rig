@@ -51,8 +51,9 @@
 //    centres 88/372/723/1576/4823 Hz), MXR-style op-amp bus, closed-form
 //    per-band boost/cut biquads sharing w0 (max +/-17 dB low bands, +/-12 dB
 //    top two -- that asymmetry is in the real circuit's Rk). Band-to-band bus
-//    interaction is approximated by cascading (documented). Pairs post-amp
-//    with any stack; authentic Mark = Mark TMB (pre) + graphic (post).
+//    interaction is approximated by cascading (documented). MARK-ONLY, like
+//    the hardware: processGraphic() self-gates on the model, so the authentic
+//    pairing (Mark TMB pre + graphic post) is automatic.
 //
 // Level: per-model STATIC makeup (computed once per model at prepare/model
 // change from the noon-settings response, 300-1200 Hz geometric mean) so
@@ -89,9 +90,29 @@ public:
         kNumModels
     };
 
-    static constexpr int kMaxOrder = 5;
+    static constexpr int kMaxOrder = 8; // delta mode fits a RATIO of two
+                                        // same-topology responses (worst case
+                                        // order 2N); smallest-sufficient-order
+                                        // still lands at 3-5 in typical use
 
     // ---------------- public control surface ----------------
+    // The SHIPPING behaviour is relative ("delta") and there is NO user-facing
+    // mode: apply H(knobs)/H(ref), ref = the model's default control positions
+    // (noon; Cut/Ghost at 0). At the defaults the stack is an EXACT passthrough
+    // -- the capture's baked-in stack IS the reference -- and moving a knob
+    // applies the circuit-exact DIFFERENCE the real control geometry produces,
+    // layered on top of the capture. All knob interaction survives (only a
+    // fixed normalisation divides out); insertion loss cancels, so no makeup.
+    // setDeltaMode(false) switches to the ABSOLUTE circuit response (static
+    // makeup): kept as a harness hook -- tests/tonestack_test.cpp pins the
+    // absolute response against the paper + an independent MNA. Product call
+    // 2026-07-11: not exposed as a parameter.
+    void setDeltaMode(bool d)
+    {
+        if (d != mDelta) { mDelta = d; mModelDirty = true; mDirty = true; }
+    }
+    bool deltaMode() const { return mDelta; }
+
     void setModel(int m)
     {
         int mm = std::min(std::max(m, 0), (int)kNumModels - 1);
@@ -137,7 +158,10 @@ public:
     void reset() override
     {
         for (double &z : mZ) z = 0.0;
+        for (double &z : mZOld) z = 0.0;
         for (double &z : mZCut) z = 0.0;
+        for (double &z : mZCut0) z = 0.0;
+        mFadePending = false;
         for (auto &b : mBands) { b.z1 = b.z2 = 0.0; }
         // snap smoothers to targets
         mK1 = mK1t; mK2 = mK2t; mK3 = mK3t; mCut = mCutT; mGhost = mGhostT;
@@ -162,35 +186,87 @@ public:
             const int n2 = std::min(numSamples - done, 64);
             updateIfNeeded(n2);
             float *seg = mono + done;
-            const int n = mOrder;
-            for (int i = 0; i < n2; ++i)
-            {
-                double x = (double)seg[i] * mMakeup;
-                // transposed direct form II, order n
-                double y = mB[0] * x + mZ[0];
-                for (int k = 1; k <= n; ++k)
-                    mZ[k - 1] = mB[k] * x - mA[k] * y + (k < n ? mZ[k] : 0.0);
-                seg[i] = (float)y;
-            }
-            if (mModel == (int)kVoxTB)
+            // The recursion ALWAYS runs at kMaxOrder: unused high slots carry
+            // zero coefficients (arithmetically identical to the fitted order),
+            // so state slots never change meaning when the fitted order moves
+            // during a knob glide -- no state resets, no zipper (T11).
+            const int n = kMaxOrder;
+            if (!mFadePending)
             {
                 for (int i = 0; i < n2; ++i)
                 {
-                    double x = (double)seg[i];
-                    double y = mBCut[0] * x + mZCut[0];
-                    for (int k = 1; k <= 3; ++k)
-                        mZCut[k - 1] = mBCut[k] * x - mACut[k] * y + (k < 3 ? mZCut[k] : 0.0);
+                    double x = (double)seg[i] * mMakeup;
+                    // transposed direct form II, order n
+                    double y = mB[0] * x + mZ[0];
+                    for (int k = 1; k <= n; ++k)
+                        mZ[k - 1] = mB[k] * x - mA[k] * y + (k < n ? mZ[k] : 0.0);
                     seg[i] = (float)y;
+                }
+            }
+            else
+            {
+                // coefficient change this chunk: run the snapshot (old) and the
+                // live (new) filter in parallel and equal-power-free linear-fade
+                // across the chunk -- clickless by construction, and repeated
+                // chunk-rate commits during a glide chain into a smooth ramp.
+                mFadePending = false;
+                const double wStep = 1.0 / (double)n2;
+                double w = 0.0;
+                for (int i = 0; i < n2; ++i)
+                {
+                    w += wStep;
+                    double x = (double)seg[i] * mMakeup;
+                    double yNew = mB[0] * x + mZ[0];
+                    for (int k = 1; k <= n; ++k)
+                        mZ[k - 1] = mB[k] * x - mA[k] * yNew + (k < n ? mZ[k] : 0.0);
+                    double yOld = mBOld[0] * x + mZOld[0];
+                    for (int k = 1; k <= n; ++k)
+                        mZOld[k - 1] = mBOld[k] * x - mAOld[k] * yOld + (k < n ? mZOld[k] : 0.0);
+                    seg[i] = (float)(yOld + w * (yNew - yOld));
+                }
+            }
+            if (mModel == (int)kVoxTB)
+            {
+                if (mDelta && mCut == 0.0f)
+                {
+                    // delta + knob at reference: exactly flat, skip both stages
+                    for (double &z : mZCut) z = 0.0;
+                    for (double &z : mZCut0) z = 0.0;
+                }
+                else
+                {
+                    for (int i = 0; i < n2; ++i)
+                    {
+                        double x = (double)seg[i];
+                        double y = mBCut[0] * x + mZCut[0];
+                        for (int k = 1; k <= 3; ++k)
+                            mZCut[k - 1] = mBCut[k] * x - mACut[k] * y + (k < 3 ? mZCut[k] : 0.0);
+                        seg[i] = (float)y;
+                    }
+                    if (mDelta)
+                    {
+                        for (int i = 0; i < n2; ++i)
+                        {
+                            double x = (double)seg[i];
+                            double y = mBCut0[0] * x + mZCut0[0];
+                            for (int k = 1; k <= 3; ++k)
+                                mZCut0[k - 1] = mBCut0[k] * x - mACut0[k] * y + (k < 3 ? mZCut0[k] : 0.0);
+                            seg[i] = (float)y;
+                        }
+                    }
                 }
             }
             done += n2;
         }
     }
 
-    // graphic section: authentic position is POST (after the amp).
+    // graphic section: authentic position is POST (after the amp), and it
+    // only exists where the real hardware has it -- the Mark. Selecting any
+    // other model silently disables it (params stay live for preset recall).
     void processGraphic(float *mono, int numSamples)
     {
         if (!mGraphicOn) return;
+        if (mModel != (int)kMarkTMB) return;
         if (mGraphicDirty) designGraphic();
         for (int b = 0; b < 5; ++b)
         {
@@ -525,15 +601,40 @@ private:
         if (!mDirty && !moving) return;
         mDirty = false;
 
-        identifyStack();
-        if (mModel == (int)kVoxTB) designCut();
         if (mModelDirty)
         {
-            computeMakeup();
+            computeReference();               // delta divisor (also on mode flip)
+            if (mDelta) mMakeup = 1.0;        // flat-at-defaults by construction
+            else computeMakeup();
             for (double &z : mZ) z = 0.0;
             for (double &z : mZCut) z = 0.0;
+            for (double &z : mZCut0) z = 0.0;
             mModelDirty = false;
         }
+
+        // Delta shortcut: at the exact reference settings the ratio is unity,
+        // so hand back a true passthrough (enable the stack -> zero change).
+        if (mDelta && mK1 == 0.5f && mK2 == 0.5f && mK3 == 0.5f && mGhost == 0.0f)
+        {
+            double one[kMaxOrder + 1] = {}, id_[kMaxOrder + 1] = {};
+            one[0] = 1.0; id_[0] = 1.0;
+            commitStack(one, id_, 0);
+        }
+        else
+            identifyStack();
+        if (mModel == (int)kVoxTB) designCut();
+    }
+
+    // Solve the reference (default-knobs) circuit at the fit + validation
+    // frequencies. Cheap (one identify's worth of MNA); model/mode change only.
+    void computeReference()
+    {
+        Net net;
+        buildNet(net, mModel, 0.5, 0.5, 0.5, 0.0);
+        for (int i = 0; i < kNumFitC; ++i)
+            mRefFit[i] = solveNet(net, 2.0 * kPi * kFitFreqs[i]);
+        for (int v = 0; v < 4; ++v)
+            mRefVal[v] = solveNet(net, 2.0 * kPi * kValidateFreqs[v]);
     }
 
     // Routh-Hurwitz: true iff all roots of sum a_k s^k (ascending, a0 > 0)
@@ -541,10 +642,10 @@ private:
     static bool isHurwitz(const double *a, int N)
     {
         // build descending coefficient list c[0] = a_N ... c[N] = a_0
-        double c[6];
+        double c[kMaxOrder + 1];
         for (int k = 0; k <= N; ++k) c[k] = a[N - k];
         if (c[0] == 0.0) return false;
-        double row0[6] = {}, row1[6] = {};
+        double row0[kMaxOrder + 1] = {}, row1[kMaxOrder + 1] = {};
         int n0 = 0, n1 = 0;
         for (int k = 0; k <= N; k += 2) row0[n0++] = c[k];
         for (int k = 1; k <= N; k += 2) row1[n1++] = c[k];
@@ -554,10 +655,10 @@ private:
         {
             if (row1[0] == 0.0) return false;
             if ((first > 0.0) != (row1[0] > 0.0)) return false;
-            double next[6] = {};
-            for (int k2 = 0; k2 + 1 < 6; ++k2)
+            double next[kMaxOrder + 1] = {};
+            for (int k2 = 0; k2 + 1 < kMaxOrder + 1; ++k2)
                 next[k2] = (row1[0] * row0[k2 + 1] - row0[0] * row1[k2 + 1]) / row1[0];
-            for (int k2 = 0; k2 < 6; ++k2) { row0[k2] = row1[k2]; row1[k2] = next[k2]; }
+            for (int k2 = 0; k2 < kMaxOrder + 1; ++k2) { row0[k2] = row1[k2]; row1[k2] = next[k2]; }
             first = row0[0];
         }
         return true;
@@ -580,7 +681,12 @@ private:
         double bestErr = 1e30;
         double bestB[kMaxOrder + 1], bestA[kMaxOrder + 1];
         int bestN = 0;
-        for (int N = 1; N <= orderOf(mModel); ++N)
+        // delta mode fits a RATIO of two same-topology responses, which is up
+        // to order 2N (shared poles usually cancel, so the ascending search
+        // still lands low -- but it must be ALLOWED to climb when they don't).
+        const int maxN = mDelta ? std::min(2 * orderOf(mModel), (int)kMaxOrder)
+                                : orderOf(mModel);
+        for (int N = 1; N <= maxN; ++N)
         {
             double cb[kMaxOrder + 1], ca[kMaxOrder + 1];
             const double err = identifyStackOrder(N, cb, ca);
@@ -597,17 +703,34 @@ private:
 
     void commitStack(const double *bs, const double *as, int N)
     {
+        // snapshot the outgoing filter (coefficients + a state COPY) so the
+        // next chunk can crossfade old -> new. The live state array keeps
+        // running under the new coefficients (LF state continuity); whatever
+        // mismatch transient that causes is masked by the fade-in weight.
+        for (int k = 0; k <= kMaxOrder; ++k) { mBOld[k] = mB[k]; mAOld[k] = mA[k]; }
+        for (int k = 0; k < kMaxOrder; ++k) mZOld[k] = mZ[k];
+        mFadePending = true;
+
         for (int k = 0; k <= kMaxOrder; ++k) { mBs[k] = bs[k]; mAs[k] = as[k]; }
         const double w0 = 2.0 * kPi * 1000.0;
         bilinear(mBs, mAs, N, 2.0 * mFs / w0, mB, mA);
-        if (N != mOrder)
+        for (int k = N + 1; k <= kMaxOrder; ++k) { mB[k] = 0.0; mA[k] = 0.0; }
+        mOrder = N; // introspection only; the recursion runs at kMaxOrder
+
+        // State policy: TDF2 state encodes recent input history WEIGHTED BY THE
+        // COEFFICIENTS, so it only transfers between NEARBY filters. Keep it for
+        // small glide steps (preserves the LF tail; no droop while turning), but
+        // start clean on big jumps (model/mode changes, wild automation) where
+        // inherited state is garbage at the new coefficient scale and can ring
+        // for seconds. The old-snapshot fade carries the audio either way.
+        double dist = 0.0, scale = 1e-12;
+        for (int k = 0; k <= kMaxOrder; ++k)
         {
-            // TDF2 state slots are order-specific; reusing stale slots after
-            // an order flip injects garbage. Order changes only happen while a
-            // knob is mid-glide, so the reset transient is masked.
-            for (double &z : mZ) z = 0.0;
-            mOrder = N;
+            dist += std::abs(mB[k] - mBOld[k]) + std::abs(mA[k] - mAOld[k]);
+            scale += std::abs(mB[k]) + std::abs(mA[k]);
         }
+        if (dist > 0.05 * scale)
+            for (double &z : mZ) z = 0.0;
     }
 
     // returns worst held-out validation error in dB, or 1e30 for unsafe fits
@@ -616,17 +739,17 @@ private:
         // 1) sample the circuit
         Net net;
         buildNet(net, mModel, (double)mK1, (double)mK2, (double)mK3, (double)mGhost);
-        // grid reaches below the lowest physical poles (5E3 coupling caps sit
-        // at ~1.6 Hz) -- without LF coverage the fit invents spurious near-DC
-        // pole/zero pairs whose imperfect cancellation wrecks the filter state.
-        static constexpr int kNumFit = 13;
-        static constexpr double kFreqs[kNumFit] = { 0.5, 1.5, 5.0, 12.5, 31.0,
-                                                    78.0, 195.0, 490.0, 1225.0,
-                                                    3050.0, 7625.0, 15250.0,
-                                                    21000.0 };
-        std::complex<double> H[kNumFit];
+        // (grid + validation freqs are class constants: kFitFreqs reaches below
+        // the lowest physical poles -- see the class-scope comment.)
+        static constexpr int kNumFit = kNumFitC;
+        const double *kFreqs = kFitFreqs;
+        std::complex<double> H[kNumFitC];
         for (int i = 0; i < kNumFit; ++i)
+        {
             H[i] = solveNet(net, 2.0 * kPi * kFreqs[i]);
+            if (mDelta)
+                H[i] /= mRefFit[i]; // fit the RATIO -> delta stack
+        }
 
         // 2) exact rational fit in normalised s' = s / w0.
         // Solved as a column-scaled least-squares via modified Gram-Schmidt QR
@@ -635,11 +758,11 @@ private:
         const double w0 = 2.0 * kPi * 1000.0;
         const int nu = 2 * N + 1;          // b0..bN, a1..aN (a0 = 1)
         const int nr = 2 * kNumFit;        // stacked real rows
-        double A[2 * kNumFit][11] = {}, rhs[2 * kNumFit] = {};
+        double A[2 * kNumFit][17] = {}, rhs[2 * kNumFit] = {};
         for (int i = 0; i < kNumFit; ++i)
         {
             std::complex<double> sp_(0.0, 2.0 * kPi * kFreqs[i] / w0);
-            std::complex<double> spow[6];
+            std::complex<double> spow[kMaxOrder + 1];
             spow[0] = 1.0;
             for (int k = 1; k <= N; ++k) spow[k] = spow[k - 1] * sp_;
             const double wgt = 1.0 / std::max(1.0, std::abs(H[i]));
@@ -659,7 +782,7 @@ private:
             rhs[2 * i + 1] = rv.imag();
         }
         // column scaling
-        double cscale[11];
+        double cscale[17];
         for (int c = 0; c < nu; ++c)
         {
             double nrm = 0.0;
@@ -668,7 +791,7 @@ private:
             for (int r = 0; r < nr; ++r) A[r][c] *= cscale[c];
         }
         // modified Gram-Schmidt QR: A = QR, then back-substitute R x = Q^T rhs
-        double Rm[11][11] = {}, qtb[11] = {};
+        double Rm[17][17] = {}, qtb[17] = {};
         for (int c = 0; c < nu; ++c)
         {
             for (int p = 0; p < c; ++p)
@@ -690,7 +813,7 @@ private:
             for (int r = 0; r < nr; ++r) dot += A[r][c] * rhs[r];
             qtb[c] = dot;
         }
-        double sol[11];
+        double sol[17];
         for (int r = nu - 1; r >= 0; --r)
         {
             double acc = qtb[r];
@@ -710,19 +833,43 @@ private:
         if (as[1] > 5e3)   // physical floor: lowest real poles ~1.6 Hz (5E3
             return 1e30;    // coupling caps) put a1 near 1.4e3; 5e3 = 3.5x margin
         // held-out validation: worst error where the fit was NOT sampled
-        static constexpr double kValidate[4] = { 1.0, 60.0, 2500.0, 18000.0 };
         double worst = 0.0;
-        for (double fv : kValidate)
+        for (int v = 0; v < 4; ++v)
         {
+            const double fv = kValidateFreqs[v];
             const std::complex<double> sv(0.0, 2.0 * kPi * fv / w0);
             std::complex<double> num = 0.0, den = 0.0, sp2 = 1.0;
             for (int k = 0; k <= N; ++k) { num += bs[k] * sp2; den += as[k] * sp2; sp2 *= sv; }
             const std::complex<double> Hf = num / den;
-            const std::complex<double> Hc = solveNet(net, 2.0 * kPi * fv);
+            std::complex<double> Hc = solveNet(net, 2.0 * kPi * fv);
+            if (mDelta)
+                Hc /= mRefVal[v];
             const double ma = std::abs(Hf), mc = std::abs(Hc);
             if (mc > 1e-7)
                 worst = std::max(worst, std::abs(20.0 * std::log10(std::max(ma, 1e-12) / mc)));
         }
+        // digital sanity: a near-cancelling pole/zero pair can pass every
+        // frequency-domain gate yet ring with a huge internal response (the
+        // T10 failure mode). Probe the ACTUAL digital impulse response of the
+        // candidate and reject ringers outright.
+        {
+            double Bt[kMaxOrder + 1], At[kMaxOrder + 1];
+            bilinear(bs, as, N, 2.0 * mFs / w0, Bt, At);
+            double z[kMaxOrder] = {};
+            double pk = 0.0;
+            for (int i = 0; i < 256; ++i)
+            {
+                const double x = (i == 0) ? 1.0 : 0.0;
+                const double y = Bt[0] * x + z[0];
+                for (int k = 1; k <= kMaxOrder; ++k)
+                    z[k - 1] = (k <= N ? Bt[k] * x - At[k] * y : 0.0)
+                             + (k < kMaxOrder ? z[k] : 0.0);
+                pk = std::max(pk, std::abs(y));
+            }
+            if (pk > 50.0)
+                return 1e30;
+        }
+
         for (int k = 0; k <= kMaxOrder; ++k)
         {
             outB[k] = bs[k];
@@ -736,9 +883,22 @@ private:
         double num[4], den[4]; // descending in s (rad/s)
         cutAnalogCoeffs((double)mCut, num, den);
         // convert to ascending arrays for bilinear helper
-        double bs[kMaxOrder + 1] = { num[3], num[2], num[1], num[0], 0, 0 };
-        double as[kMaxOrder + 1] = { den[3], den[2], den[1], den[0], 0, 0 };
+        double bs[kMaxOrder + 1] = {};
+        double as[kMaxOrder + 1] = {};
+        bs[0] = num[3]; bs[1] = num[2]; bs[2] = num[1]; bs[3] = num[0];
+        as[0] = den[3]; as[1] = den[2]; as[2] = den[1]; as[3] = den[0];
         bilinear(bs, as, 3, 2.0 * mFs, mBCut, mACut);
+        if (mDelta)
+        {
+            // fixed inverse of the OPEN (knob 0) response: swap num/den.
+            double n0[4], d0[4];
+            cutAnalogCoeffs(0.0, n0, d0);
+            double bs0[kMaxOrder + 1] = {};
+            double as0[kMaxOrder + 1] = {};
+            bs0[0] = d0[3]; bs0[1] = d0[2]; bs0[2] = d0[1]; bs0[3] = d0[0];
+            as0[0] = n0[3]; as0[1] = n0[2]; as0[2] = n0[1]; as0[3] = n0[0];
+            bilinear(bs0, as0, 3, 2.0 * mFs, mBCut0, mACut0);
+        }
     }
 
     static void bilinear(const double *bs, const double *as, int N, double c,
@@ -837,26 +997,49 @@ private:
         }
     }
 
+    // fit grid: reaches below the lowest physical poles (5E3 coupling caps at
+    // ~1.6 Hz) -- without LF coverage the fit invents spurious near-DC
+    // pole/zero pairs whose imperfect cancellation wrecks the filter state.
+    static constexpr int kNumFitC = 13;
+    static constexpr double kFitFreqs[kNumFitC] = { 0.5, 1.5, 5.0, 12.5, 31.0,
+                                                    78.0, 195.0, 490.0, 1225.0,
+                                                    3050.0, 7625.0, 15250.0,
+                                                    21000.0 };
+    static constexpr double kValidateFreqs[4] = { 1.0, 60.0, 2500.0, 18000.0 };
+
     // ---------------- state ----------------
     double mFs = 48000.0;
     int mModel = kTweedBassman;
     bool mModelDirty = true, mDirty = true, mGraphicOn = false, mGraphicDirty = true;
+    bool mDelta = true; // default: EQ-delta on top of the capture (usability)
+    std::complex<double> mRefFit[kNumFitC];
+    std::complex<double> mRefVal[4];
 
     // control targets + smoothed values (raw 0..1)
     float mK1t = 0.5f, mK2t = 0.5f, mK3t = 0.5f, mCutT = 0.0f, mGhostT = 0.0f;
     float mK1 = 0.5f, mK2 = 0.5f, mK3 = 0.5f, mCut = 0.0f, mGhost = 0.0f;
     double mSmoothA = 0.999;
 
-    // identified analog (normalised s) + digital coefficients
+    // identified analog (normalised s) + digital coefficients. mB/mA start as
+    // an identity filter so the very first commit crossfades from passthrough.
     double mBs[kMaxOrder + 1] = {}, mAs[kMaxOrder + 1] = {};
-    double mB[kMaxOrder + 1] = {}, mA[kMaxOrder + 1] = {};
+    double mB[kMaxOrder + 1] = { 1.0 }, mA[kMaxOrder + 1] = { 1.0 };
     double mZ[kMaxOrder] = {};
+    double mBOld[kMaxOrder + 1] = { 1.0 }, mAOld[kMaxOrder + 1] = { 1.0 };
+    double mZOld[kMaxOrder] = {};
+    bool mFadePending = false;
     int mOrder = 3;
     double mMakeup = 1.0;
 
-    // vox cut filter (3rd order)
+    // vox cut filter (3rd order) + the FIXED inverse-of-open stage used by
+    // delta mode (so Cut at 0 is exactly flat instead of the bridge's ~1 dB
+    // open tilt). Inverse denominator = the open-cut numerator; Hurwitz by the
+    // cubic Routh condition a2*a1 > a3*a0 (6.2e-4 * 4.9e-2 >> 6.7e-7), checked
+    // again by the harness stability sweep.
     double mBCut[kMaxOrder + 1] = {}, mACut[kMaxOrder + 1] = {};
     double mZCut[kMaxOrder] = {};
+    double mBCut0[kMaxOrder + 1] = {}, mACut0[kMaxOrder + 1] = {};
+    double mZCut0[kMaxOrder] = {};
 
     // graphic
     struct Band { double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0, z1 = 0, z2 = 0; };

@@ -18,7 +18,8 @@
 //       channel nodes; bright cap bleed appears when bright vol is down
 //   T8  VOX cut: knob up darkens 10 kHz by > 15 dB, leaves 100 Hz nearly
 //       alone, and is transparent-ish fully open
-//   T9  MARK graphic: exact centres (prewarped), +/-17 dB low bands and
+//   T9  MARK graphic (Mark-only, like the hardware -- T9e checks the gate):
+//       exact centres (prewarped), +/-17 dB low bands and
 //       +/-11.8 dB top bands at rail, flat (<0.01 dB) at detent, boost/cut
 //       reciprocal
 //   T10 hygiene: 400 random configs x all models -> finite, bounded, stable
@@ -29,6 +30,14 @@
 //   T14 5E3 full-up is near-transparent (the real amp's controls-dimed voice)
 //   T15 sample-rate independence at 44.1/48/96 kHz (1 kHz gain within 0.05 dB
 //       of analog truth at every rate)
+//   T16 DELTA mode (the default): at the reference settings (noon, Cut/Ghost 0)
+//       the stack is a bit-exact passthrough -- enabling it changes nothing
+//   T17 DELTA correctness: moving knobs applies |H(knobs)|/|H(ref)| exactly
+//       (the circuit's relative response on top of the capture), incl. VoxTB's
+//       cut ratio
+//
+// Absolute-response checks (T1b/T2/T3/T13/T15) pin FULL mode explicitly; the
+// block DEFAULTS to delta mode (the usability default -- see setDeltaMode).
 
 #include "rig/TonestackBlock.h"
 #include <cmath>
@@ -109,6 +118,7 @@ int main()
         // grid leak) which Yeh's SPICE idealised away, so absolute level and
         // deep-bass corners legitimately differ; the tilt must track.
         TonestackBlock ts; ts.prepare(ctx); ts.setModel(TonestackBlock::kTweedBassman);
+        ts.setDeltaMode(false); // absolute response vs the paper
         auto logA = [](double x) { return (std::pow(81.0, x) - 1.0) / 80.0; };
         std::vector<float> dummy(65536, 0.0f);
         ts.process(dummy.data(), (int)dummy.size());
@@ -140,6 +150,7 @@ int main()
         for (const Pin &p : pins)
         {
             TonestackBlock t2; t2.prepare(ctx); t2.setModel(TonestackBlock::kTweedBassman);
+            t2.setDeltaMode(false);
             t2.setKnob1((float)p.t); t2.setKnob2((float)p.m); t2.setKnob3((float)p.l);
             std::vector<float> d(65536, 0.0f);
             t2.process(d.data(), (int)d.size());
@@ -160,6 +171,7 @@ int main()
             for (double kt : kfs) for (double kl : kfs)
             {
                 TonestackBlock t2; t2.prepare(ctx); t2.setModel(m);
+                t2.setDeltaMode(false); // identified rational == RAW circuit here
                 t2.setKnob1((float)kt); t2.setKnob2(0.5f); t2.setKnob3((float)kl);
                 t2.setCut(0.3f); t2.setGhost(0.3f);
                 std::vector<float> dummy(4096, 0.0f);
@@ -183,6 +195,7 @@ int main()
             }
             // T3 on noon settings: digital sine gain vs analog truth at 1 kHz
             TonestackBlock t3; t3.prepare(ctx); t3.setModel(m);
+            t3.setDeltaMode(false);
             std::vector<float> dummy(4096, 0.0f);
             t3.process(dummy.data(), (int)dummy.size());
             const double g = sineGainThrough(t3, 1000.0, ctx.sampleRate);
@@ -305,7 +318,7 @@ int main()
 
     // ---------------- T9 ----------------
     {
-        TonestackBlock ts; ts.prepare(ctx); ts.setModel(TonestackBlock::kBlackface);
+        TonestackBlock ts; ts.prepare(ctx); ts.setModel(TonestackBlock::kMarkTMB);
         ts.setGraphicOn(true);
         const double f0s[5] = { 87.61, 371.74, 723.43, 1575.87, 4822.88 };
         const double rails[5] = { 17.0, 17.0, 17.0, 11.8, 11.8 };
@@ -348,6 +361,19 @@ int main()
         check(worstF < 0.01, "T9b graphic detent is flat");
         check(worstRec < 0.05, "T9c graphic boost/cut reciprocal");
         check(worstC < 0.5, "T9d digital band centres peak at the true frequencies");
+
+        // T9e: the graphic is the Mark's hardware -- on any other model it is
+        // a bit-exact no-op even when switched on with sliders railed.
+        TonestackBlock nb; nb.prepare(ctx); nb.setModel(TonestackBlock::kBlackface);
+        nb.setGraphicOn(true);
+        for (int q = 0; q < 5; ++q) nb.setGraphicBand(q, 1.0f);
+        std::vector<float> gx(1024), gy;
+        for (int i = 0; i < 1024; ++i) gx[(size_t)i] = 0.3f * (float)std::sin(0.05 * i);
+        gy = gx;
+        nb.processGraphic(gy.data(), (int)gy.size());
+        bool same = true;
+        for (int i = 0; i < 1024; ++i) if (gy[(size_t)i] != gx[(size_t)i]) same = false;
+        check(same, "T9e graphic is Mark-only (bit-exact no-op elsewhere)");
     }
 
     // ---------------- T10 + T12 ----------------
@@ -359,6 +385,7 @@ int main()
         {
             TonestackBlock ts; ts.prepare(ctx);
             ts.setModel((int)(frand() * TonestackBlock::kNumModels));
+            ts.setDeltaMode(trial % 2 == 0); // sweep both modes
             ts.setKnob1(frand()); ts.setKnob2(frand()); ts.setKnob3(frand());
             ts.setCut(frand()); ts.setGhost(frand());
             ts.setGraphicOn(trial % 3 == 0);
@@ -434,6 +461,7 @@ int main()
         {
             BlockContext c2; c2.sampleRate = fs; c2.maxBlockSize = 512;
             TonestackBlock ts; ts.prepare(c2); ts.setModel(TonestackBlock::kBlackface);
+            ts.setDeltaMode(false);
             std::vector<float> d(4096, 0.0f); ts.process(d.data(), (int)d.size());
             const double g = sineGainThrough(ts, 1000.0, fs);
             const double want = std::abs(ts.referenceAnalogH(1000.0)) * ts.makeup();
@@ -441,6 +469,56 @@ int main()
         }
         std::printf("  T15 worst 1 kHz gain error across rates = %.4f dB\n", worst);
         check(worst < 0.05, "T15 sample-rate independent at 1 kHz");
+    }
+
+    // ---------------- T16 ----------------
+    {
+        // delta default: at reference settings the stack is a TRUE passthrough
+        bool exact = true;
+        for (int m : { (int)TonestackBlock::kTweedBassman, (int)TonestackBlock::kBlackface,
+                       (int)TonestackBlock::kVoxTB, (int)TonestackBlock::kJames,
+                       (int)TonestackBlock::kTweed5E3 })
+        {
+            TonestackBlock ts; ts.prepare(ctx); ts.setModel(m); // delta is the default
+            std::vector<float> x(4096), y;
+            for (int i = 0; i < 4096; ++i)
+                x[(size_t)i] = 0.4f * (float)std::sin(0.013 * i) + 0.2f * (float)std::sin(0.07 * i);
+            y = x;
+            ts.process(y.data(), (int)y.size());
+            for (int i = 0; i < 4096; ++i)
+                if (y[(size_t)i] != x[(size_t)i]) { exact = false; break; }
+        }
+        check(exact, "T16 delta mode at reference settings is a bit-exact passthrough");
+    }
+
+    // ---------------- T17 ----------------
+    {
+        double worst = 0.0;
+        struct Cfg { int m; float k1, k2, k3, cut; double f; };
+        static const Cfg cfgs[] = {
+            { (int)TonestackBlock::kTweedBassman, 0.85f, 0.30f, 0.70f, 0.0f, 220.0 },
+            { (int)TonestackBlock::kTweedBassman, 0.85f, 0.30f, 0.70f, 0.0f, 4200.0 },
+            { (int)TonestackBlock::kBlackface,    0.20f, 0.80f, 0.90f, 0.0f, 90.0 },
+            { (int)TonestackBlock::kBlackface,    0.20f, 0.80f, 0.90f, 0.0f, 1000.0 },
+            { (int)TonestackBlock::kJames,        0.90f, 0.50f, 0.15f, 0.0f, 500.0 },
+            { (int)TonestackBlock::kTweed5E3,     0.80f, 0.50f, 0.30f, 0.0f, 3000.0 },
+            { (int)TonestackBlock::kVoxTB,        0.75f, 0.50f, 0.40f, 0.6f, 6000.0 },
+        };
+        for (const Cfg &c : cfgs)
+        {
+            TonestackBlock ts; ts.prepare(ctx); ts.setModel(c.m); // delta default
+            ts.setKnob1(c.k1); ts.setKnob2(c.k2); ts.setKnob3(c.k3); ts.setCut(c.cut);
+            std::vector<float> d(8192, 0.0f); ts.process(d.data(), (int)d.size());
+            const double g = sineGainThrough(ts, c.f, ctx.sampleRate);
+            TonestackBlock ref; ref.prepare(ctx); ref.setModel(c.m);
+            std::vector<float> d2(8192, 0.0f); ref.process(d2.data(), (int)d2.size());
+            double want = std::abs(ts.referenceAnalogH(c.f)) / std::abs(ref.referenceAnalogH(c.f));
+            if (c.m == (int)TonestackBlock::kVoxTB)
+                want *= std::abs(ts.referenceCutH(c.f)) / std::abs(ref.referenceCutH(c.f));
+            worst = std::max(worst, std::abs(db(g / want)));
+        }
+        std::printf("  T17 worst delta-vs-ratio error = %.4f dB\n", worst);
+        check(worst < 0.08, "T17 delta mode applies the circuit's relative response exactly");
     }
 
     std::printf("%s (%d failure%s)\n", g_fail == 0 ? "ALL PASS" : "FAILURES",
