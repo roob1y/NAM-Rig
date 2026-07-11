@@ -9,7 +9,7 @@
 //                     StompPedal face). All knobs live — edit in place, scroll when
 //                     the board outgrows the view.
 //   RACK (right)    : the pedal palette — category headers with the ACTUAL pedals
-//                     underneath (Green Drive, Gold Horse, DD-7, ...). DRAG one onto
+//                     underneath (Green Drive, Gold Horse, Digi Delay, ...). DRAG one onto
 //                     the deck or the chain to place it; CLICK adds to the trunk end.
 //   CHAIN (bottom)  : the signal-flow graph — IN -> locked ENV/COMP pair -> trunk
 //                     pedals -> split -> Amp A / Amp B lanes. DRAG nodes to reorder
@@ -72,19 +72,29 @@ private:
         colors::AccentPair ap;
     };
 
+    // Per-MODEL liveries (accent / tint / LED) like colors::driveModelAccent — each
+    // real circuit owns its enclosure colour, so pedals read at a glance on the deck.
     static colors::AccentPair modAccent(int t)
     {
         using C = juce::Colour;
-        static const C mv[5] = {C(0xffc7a6f0), C(0xff9b8ce8), C(0xffb69af0), C(0xffa6c0f0), C(0xffcaa6f0)};
-        const C a = mv[juce::jlimit(0, 4, t)];
-        return colors::AccentPair{a, a.darker(0.72f)};
+        switch (juce::jlimit(0, 4, t))
+        {
+        case 0:  return {C(0xff8ec9ea), C(0xff3f7ba3)}; // Chorus  — pale sky blue (the classic BBD chorus box)
+        case 1:  return {C(0xffff9a45), C(0xffb85f1f)}; // Phaser  — script orange
+        case 2:  return {C(0xff9fb6d4), C(0xff4d6079)}; // Flanger — jet steel
+        case 3:  return {C(0xff46b878), C(0xff256b47)}; // Tremolo — deep leaf green (darker than Green Drive)
+        default: return {C(0xffc9a2f2), C(0xff7e58b8)}; // Vibe    — swirl violet
+        }
     }
     static colors::AccentPair delayAccent(int m)
     {
         using C = juce::Colour;
-        static const C dv[3] = {C(0xff7fd08a), C(0xff62c69a), C(0xff9ad07f)};
-        const C a = dv[juce::jlimit(0, 2, m)];
-        return colors::AccentPair{a, a.darker(0.72f)};
+        switch (juce::jlimit(0, 2, m))
+        {
+        case 0:  return {C(0xffe6ecf2), C(0xff77828f), C(0xff6fd08a)}; // Digi Delay    — pearl body, GREEN LED
+        case 1:  return {C(0xffbfe3cf), C(0xff1f4f3c), C(0xff58d98f)}; // Carbon Echo   — dark-sparkle body, mint print
+        default: return {C(0xffe8dcc0), C(0xff77694f), C(0xffe8705a)}; // Memory Deluxe — cream chassis, warm red LED
+        }
     }
     static colors::AccentPair envAccent()
     {
@@ -97,20 +107,23 @@ private:
         return colors::AccentPair{a, a.darker(0.72f)};
     }
 
+    // User-facing names/subs are BRAND-FREE (like the drive catalogue: evocative
+    // homages, plain circuit descriptors). The circuits they're voiced from stay
+    // in code comments only.
     static const char *modName(int t)
     {
-        static const char *n[5] = {"Chorus", "Phaser", "Flanger", "Tremolo", "Uni-Vibe"};
+        static const char *n[5] = {"Chorus", "Phaser", "Flanger", "Tremolo", "Vibe"};
         return n[juce::jlimit(0, 4, t)];
     }
     static const char *modSub(int t)
     {
-        static const char *n[5] = {"CE-2 bucket-brigade", "Phase 90 four-stage", "EVH117 jet flange",
-                                   "TR-2 opto tremolo", "photocell chorus-vibe"};
+        static const char *n[5] = {"bucket-brigade chorus", "4-stage analog phaser", "analog jet flange",
+                                   "opto volume tremolo", "photocell chorus-vibe"}; // phaser sub stays voice-neutral (Script/Block pill)
         return n[juce::jlimit(0, 4, t)];
     }
     static const char *delayName(int m)
     {
-        static const char *n[3] = {"DD-7", "Carbon Copy", "Memory Man"};
+        static const char *n[3] = {"Digi Delay", "Carbon Echo", "Memory Deluxe"};
         return n[juce::jlimit(0, 2, m)];
     }
     static const char *delaySub(int m)
@@ -118,7 +131,6 @@ private:
         static const char *n[3] = {"pristine digital echo", "dark analog BBD", "warm bucket echo"};
         return n[juce::jlimit(0, 2, m)];
     }
-    static const char *envSub(int voice) { return voice == 1 ? "EHX Q-Tron+ envelope" : "DOD FX25B auto-wah"; }
     static const char *compModeName(int m)
     {
         static const char *n[4] = {"Clean", "OTA", "Opto", "FET"};
@@ -161,30 +173,157 @@ private:
     {
         return {w, juce::PathStrokeType::curved, juce::PathStrokeType::rounded};
     }
-    static void paintModGlyph(juce::Graphics &g, juce::Rectangle<float> b, juce::Colour c)
+    // Per-MODEL mod/delay silkscreens, drawn exactly like paintDriveGlyph: a fixed
+    // 64x48 design space scaled-to-fit (uniform s, centred), minimal line art, the
+    // house stroke (2*s, curved/rounded). One motif per real circuit.
+    static void paintModGlyph(juce::Graphics &g, int type, juce::Rectangle<float> b, juce::Colour c)
     {
+        const float s = juce::jmin(b.getWidth() / 64.0f, b.getHeight() / 48.0f);
+        const auto xf = juce::AffineTransform::scale(s)
+                            .translated(b.getCentreX() - 32.0f * s, b.getCentreY() - 24.0f * s);
+        const float w = 2.0f * s + 0.4f;
         g.setColour(c);
-        juce::Path p;
-        const float y = b.getCentreY(), amp = b.getHeight() * 0.32f;
-        const int N = 40;
-        for (int k = 0; k <= N; ++k)
+        auto sine = [](float x0, float x1, float yC, float amp, float cycles, int n)
         {
-            const float x = b.getX() + b.getWidth() * (float)k / N;
-            const float yy = y - amp * std::sin((float)k / N * juce::MathConstants<float>::twoPi * 1.5f);
-            if (k == 0) p.startNewSubPath(x, yy); else p.lineTo(x, yy);
+            juce::Path sp;
+            for (int k = 0; k <= n; ++k)
+            {
+                const float t = (float)k / (float)n;
+                const float x = x0 + (x1 - x0) * t;
+                const float y = yC - amp * std::sin(cycles * juce::MathConstants<float>::twoPi * t);
+                if (k == 0) sp.startNewSubPath(x, y); else sp.lineTo(x, y);
+            }
+            return sp;
+        };
+        switch (juce::jlimit(0, 4, type))
+        {
+        case 0: // Chorus — a voice and its shimmering double
+        {
+            g.strokePath(sine(6.0f, 54.0f, 22.0f, 9.0f, 1.25f, 40), glyphStroke(w), xf);
+            g.strokePath(sine(10.0f, 58.0f, 28.0f, 9.0f, 1.25f, 40), glyphStroke(w * 0.55f), xf);
+            break;
         }
-        g.strokePath(p, glyphStroke(juce::jmax(1.4f, b.getHeight() * 0.06f)));
-    }
-    static void paintDelayGlyph(juce::Graphics &g, juce::Rectangle<float> b, juce::Colour c)
-    {
-        const int n = 4;
-        const float bw = b.getWidth() * 0.11f;
-        for (int k = 0; k < n; ++k)
+        case 1: // Phaser — the sweep with its four all-pass stages riding it
         {
-            const float h = b.getHeight() * (0.92f - 0.19f * k);
-            const float x = b.getX() + b.getWidth() * (0.14f + 0.24f * k);
-            g.setColour(c.withAlpha(1.0f - 0.18f * k));
-            g.fillRoundedRectangle(x, b.getCentreY() - h * 0.5f, bw, h, bw * 0.4f);
+            g.strokePath(sine(8.0f, 56.0f, 24.0f, 8.0f, 1.25f, 48), glyphStroke(w), xf);
+            juce::Path dots;
+            for (int k = 0; k < 4; ++k)
+            {
+                const float t = 0.125f + 0.25f * (float)k;
+                const float x = 8.0f + 48.0f * t;
+                const float y = 24.0f - 8.0f * std::sin(1.25f * juce::MathConstants<float>::twoPi * t);
+                dots.addEllipse(x - 2.6f, y - 2.6f, 5.2f, 5.2f);
+            }
+            g.fillPath(dots, xf);
+            break;
+        }
+        case 2: // Flanger — jet dart + swept contrails
+        {
+            juce::Path jet;
+            jet.startNewSubPath(58.0f, 22.0f);
+            jet.lineTo(38.0f, 13.0f); jet.lineTo(43.5f, 22.0f); jet.lineTo(38.0f, 31.0f);
+            jet.closeSubPath();
+            g.fillPath(jet, xf);
+            juce::Path trail;
+            trail.startNewSubPath(8.0f, 36.0f);  trail.quadraticTo(22.0f, 35.0f, 34.0f, 28.0f);
+            trail.startNewSubPath(6.0f, 28.0f);  trail.quadraticTo(20.0f, 27.0f, 33.0f, 23.0f);
+            trail.startNewSubPath(10.0f, 20.0f); trail.quadraticTo(22.0f, 19.0f, 33.0f, 17.5f);
+            g.strokePath(trail, glyphStroke(w * 0.8f), xf);
+            break;
+        }
+        case 3: // Tremolo — the signal chopped on/off (dashed wave)
+        {
+            juce::Path p;
+            const int n = 55;
+            bool pen = false;
+            for (int k = 0; k <= n; ++k)
+            {
+                if ((k / 7) % 2 == 1) { pen = false; continue; } // 7-on / 7-off chop
+                const float t = (float)k / (float)n;
+                const float x = 6.0f + 52.0f * t;
+                const float y = 24.0f - 9.0f * std::sin(1.5f * juce::MathConstants<float>::twoPi * t);
+                if (!pen) { p.startNewSubPath(x, y); pen = true; } else p.lineTo(x, y);
+            }
+            g.strokePath(p, glyphStroke(w), xf);
+            break;
+        }
+        default: // Vibe — the pulsing lamp at the heart of the photocell circuit
+        {
+            juce::Path lamp;
+            lamp.addEllipse(32.0f - 7.5f, 24.0f - 7.5f, 15.0f, 15.0f);
+            g.strokePath(lamp, glyphStroke(w), xf);
+            juce::Path core;
+            core.addEllipse(32.0f - 2.4f, 24.0f - 2.4f, 4.8f, 4.8f);
+            g.fillPath(core, xf);
+            juce::Path rays;
+            for (int k = 0; k < 6; ++k)
+            {
+                const float a = juce::MathConstants<float>::pi * ((float)k / 3.0f + 1.0f / 6.0f);
+                const float ca = std::cos(a), sa = std::sin(a);
+                rays.startNewSubPath(32.0f + ca * 11.0f, 24.0f + sa * 11.0f);
+                rays.lineTo(32.0f + ca * 15.5f, 24.0f + sa * 15.5f);
+            }
+            g.strokePath(rays, glyphStroke(w * 0.8f), xf);
+            break;
+        }
+        }
+    }
+    static void paintDelayGlyph(juce::Graphics &g, int model, juce::Rectangle<float> b, juce::Colour c)
+    {
+        const float s = juce::jmin(b.getWidth() / 64.0f, b.getHeight() / 48.0f);
+        const auto xf = juce::AffineTransform::scale(s)
+                            .translated(b.getCentreX() - 32.0f * s, b.getCentreY() - 24.0f * s);
+        const float w = 2.0f * s + 0.4f;
+        switch (juce::jlimit(0, 2, model))
+        {
+        case 0: // Digi Delay — crisp square repeats, barely decaying (pristine digital)
+            for (int k = 0; k < 4; ++k)
+            {
+                const float h = 34.0f - 6.5f * (float)k;
+                juce::Path bar;
+                bar.addRoundedRectangle(11.0f + 12.0f * (float)k, 24.0f - h * 0.5f, 6.5f, h, 1.8f);
+                g.setColour(c.withMultipliedAlpha(1.0f - 0.15f * (float)k));
+                g.fillPath(bar, xf);
+            }
+            break;
+        case 1: // Carbon Echo — the bucket brigade, passed hand to hand
+        {
+            for (int k = 0; k < 3; ++k)
+            {
+                const float cx = 13.0f + 19.0f * (float)k;
+                const float half = 6.5f - 1.1f * (float)k;   // shrinking buckets
+                const float depth = 13.0f - 1.8f * (float)k;
+                juce::Path bk;
+                bk.startNewSubPath(cx - half, 17.0f);
+                bk.lineTo(cx - half + 1.8f, 17.0f + depth - 2.5f);
+                bk.quadraticTo(cx, 17.0f + depth + 2.0f, cx + half - 1.8f, 17.0f + depth - 2.5f);
+                bk.lineTo(cx + half, 17.0f);
+                g.setColour(c.withMultipliedAlpha(1.0f - 0.22f * (float)k));
+                g.strokePath(bk, glyphStroke(w * 0.9f), xf);
+            }
+            juce::Path drops; // the signal mid-pass between buckets
+            drops.addEllipse(21.5f, 9.5f, 3.4f, 3.4f);
+            drops.addEllipse(40.5f, 11.0f, 3.4f, 3.4f);
+            g.setColour(c.withMultipliedAlpha(0.85f));
+            g.fillPath(drops, xf);
+            break;
+        }
+        default: // Memory Deluxe — a note and its warm ripples
+        {
+            juce::Path dot;
+            dot.addEllipse(13.0f, 21.0f, 6.0f, 6.0f);
+            g.setColour(c);
+            g.fillPath(dot, xf);
+            for (int k = 0; k < 3; ++k)
+            {
+                const float r = 12.0f + 12.0f * (float)k;
+                juce::Path arc; // opens rightward (JUCE angles: 0 = 12 o'clock, clockwise)
+                arc.addCentredArc(16.0f, 24.0f, r, r, 0.0f, 0.873f, 2.269f, true);
+                g.setColour(c.withMultipliedAlpha(1.0f - 0.26f * (float)k));
+                g.strokePath(arc, glyphStroke(w * 0.9f), xf);
+            }
+            break;
+        }
         }
     }
     static void paintCompGlyph(juce::Graphics &g, juce::Rectangle<float> b, juce::Colour c)
@@ -218,8 +357,8 @@ private:
         if (sel == kSelComp) { paintCompGlyph(g, box, col); return; }
         const int t = slotType(sel);
         if (t == 1) paintDriveGlyph(g, paramC(sid(sel, "dCat")), paramC(sid(sel, "bModel")), box, col);
-        else if (t == 2) paintModGlyph(g, box, col);
-        else if (t == 3) paintDelayGlyph(g, box, col);
+        else if (t == 2) paintModGlyph(g, paramC(sid(sel, "mType")), box, col);
+        else if (t == 3) paintDelayGlyph(g, paramC(sid(sel, "pModel")), box, col);
     }
 
     // The DrivePedal enclosure body recipe (neutral base + tint wash, dithered).
@@ -468,6 +607,16 @@ public:
         structureChanged();
     }
     void togglePedalStereo(int slot) { setPedalStereo(slot, !slotStereo(slot)); }
+    // Bypass/activate any chain node: the locked pair map to their shared params,
+    // free slots to their pbS{i}On.
+    void togglePedalOn(int sel)
+    {
+        if (sel >= 0 && !slotUsed(sel)) return;
+        const juce::String id = sel == kSelEnv ? "envfilterOn"
+                              : sel == kSelComp ? "compOn"
+                                                : sid(sel, "On");
+        writeBool(id, paramF(id) < 0.5f);
+    }
     void swapFrontPair()
     {
         writeChoice("pbFrontOrder", frontOrder() == 0 ? 1 : 0);
@@ -479,6 +628,7 @@ public:
         // Scroll is deferred to the next timer tick: structural edits rebuild the deck
         // asynchronously, so the target cell may not exist yet.
         if (scrollTo) mScrollPending = true;
+        if (isShowing()) grabKeyboardFocus(); // so Delete lands on the panel right away
         repaintZones();
     }
     int selectedPedal() const { return mSelSlot; }
@@ -637,14 +787,18 @@ private:
                                             mPillRect.getY() + 1, 12, mPillRect.getHeight()),
                        juce::Justification::centredLeft);
 
-            // silkscreen art: the comp-style WATERMARK spanning the whole zone, on
-            // EVERY stomp face (Robbie: the 5-knob comp look is the one — the solid
-            // below-knobs variant read as a different design per model, and the
-            // Q-Tron lost its art entirely). Same rect every time = same scale.
-            // The env's symmetric peak gets a WIDER box — it reads better stretched.
-            if (!mZoneRect.isEmpty())
+            // silkscreen art. MOD/DELAY faces get the DRIVE treatment — the model's
+            // full-size solid silkscreen on the free face below the knobs (same box
+            // + colour recipe as DrivePedal::paint), so their art takes the same
+            // space as the drive pedals'. Faces with no free face (the two 2-knob-row
+            // delays) fall back to the zone-spanning watermark, as do Env/Comp
+            // (Robbie's locked 5-knob-comp reference look).
+            if ((mKind == Mod || mKind == Delay) && mArtRect.getHeight() >= 40)
+                paintGlyph(g, mArtRect.toFloat().reduced(mArtRect.getWidth() * 0.16f, 0.0f),
+                           on ? mAp.led.withAlpha(0.95f) : juce::Colour(0xff5a616b));
+            else if (!mZoneRect.isEmpty())
             {
-                const float rx = mKind == Env ? 0.13f : 0.26f;
+                const float rx = mKind == Comp ? 0.26f : 0.13f; // wide box: fixed-aspect art reads better
                 paintGlyph(g, mZoneRect.toFloat().reduced(mZoneRect.getWidth() * rx, 6.0f),
                            (on ? mAp.led : juce::Colour(0xff5a616b)).withAlpha(0.10f));
             }
@@ -707,6 +861,9 @@ private:
                 for (auto *k : ks) k->setBounds(grp.removeFromLeft(kw).reduced(2, 0));
                 zone.removeFromTop(4);
             }
+            // Whatever zone is left below the knobs = the full-size silkscreen face
+            // for Mod/Delay (mirrors DrivePedal's mArtRect). Empty on 2-row faces.
+            mArtRect = (mKind == Mod || mKind == Delay) ? zone : juce::Rectangle<int>();
             auto layAux = [](juce::Rectangle<int> ar, std::vector<juce::Component *> &row)
             {
                 const int n = (int)row.size();
@@ -784,8 +941,8 @@ private:
         {
             if (mKind == Env) paintEnvGlyph(g, box, c);
             else if (mKind == Comp) paintCompGlyph(g, box, c);
-            else if (mKind == Mod) paintModGlyph(g, box, c);
-            else paintDelayGlyph(g, box, c);
+            else if (mKind == Mod) paintModGlyph(g, mLastKey, box, c);   // per-model silkscreen
+            else paintDelayGlyph(g, mLastKey, box, c);
         }
 
         LabeledKnob *addKnob(int row, const juce::String &paramId, const juce::String &cap)
@@ -1010,6 +1167,7 @@ private:
         colors::AccentPair mAp;
         juce::String mKindStr, mModelStr;
         juce::Rectangle<int> mHeaderRect, mPillRect, mZoneRect, mStereoTagRect;
+        juce::Rectangle<int> mArtRect; // Mod/Delay: zone slack below the knobs (solid silkscreen)
         int mPlateY = 0;  // stomp-plate seam y (0 until first layout)
         int mNameW = 0;   // printed-name text width (positions the ▾)
         int mLastKey = -1;
@@ -1166,10 +1324,10 @@ private:
                                        (float)getHeight() - 8.0f, 1.5f);
             }
             if (!mDragging) return;
-            for (const auto &c : mCells) // dim the cell being moved
+            for (const auto &c : mCells) // dim the cell being moved (fade into the dark well)
                 if (c.sel == mPressSel)
                 {
-                    g.setColour(colors::panel.withAlpha(0.55f));
+                    g.setColour(juce::Colour(0xff14171d).withAlpha(0.6f));
                     g.fillRoundedRectangle(c.bounds.toFloat(), 10.0f);
                 }
             if (mPressSel < 0) // locked drag: ring the swap partner
@@ -1474,13 +1632,25 @@ private:
             }
         }
 
+        // The LED dot doubles as the bypass switch — a padded hit zone around the
+        // 5px dot (top-right of the node), so it's actually clickable.
+        static juce::Rectangle<int> ledZone(const juce::Rectangle<int> &nr)
+        {
+            return {nr.getRight() - 16, nr.getY(), 16, 16};
+        }
+
         void mouseDown(const juce::MouseEvent &e) override
         {
             mDragging = false;
-            mDragSel = kSelNone;
+            mDragSel = mLedSel = kSelNone;
             const auto *n = nodeAt(e.getPosition());
             if (n == nullptr) return;
             if (e.mods.isPopupMenu()) { showNodeMenu(*n); return; }
+            if (ledZone(n->rect).contains(e.getPosition()))
+            {
+                mLedSel = n->sel; // bypass click — never arms a drag or selects
+                return;
+            }
             mDragSel = n->sel;
         }
         void mouseDrag(const juce::MouseEvent &e) override
@@ -1492,8 +1662,24 @@ private:
             if (mDragSel >= 0) mCaret = caretFor(mDragPos).first;
             repaint();
         }
+        void mouseMove(const juce::MouseEvent &e) override
+        {
+            const auto *n = nodeAt(e.getPosition()); // hand over the LED = it's a switch
+            setMouseCursor(n != nullptr && ledZone(n->rect).contains(e.getPosition())
+                               ? juce::MouseCursor::PointingHandCursor
+                               : juce::MouseCursor::NormalCursor);
+        }
         void mouseUp(const juce::MouseEvent &e) override
         {
+            if (mLedSel != kSelNone) // LED click = toggle bypass (release must stay on the dot)
+            {
+                if (const auto *n = nodeAt(e.getPosition());
+                    n != nullptr && n->sel == mLedSel && ledZone(n->rect).contains(e.getPosition()))
+                    mBoard.togglePedalOn(mLedSel);
+                mLedSel = kSelNone;
+                repaint();
+                return;
+            }
             if (!mDragging)
             {
                 if (const auto *n = nodeAt(e.getPosition()); n != nullptr && mDragSel == n->sel)
@@ -1678,15 +1864,17 @@ private:
             g.drawText(name, n.rect.withHeight(11).translated(0, 2), juce::Justification::centred);
             auto gbox = r.withTrimmedTop(13.0f).withTrimmedBottom(4.0f).reduced(r.getWidth() * 0.22f, 0.0f);
             mBoard.paintPedalGlyph(g, n.sel, gbox, (on ? ap.led : juce::Colour(0xff5a616b)).withAlpha(0.9f));
+            // LED = the node's bypass switch (click toggles; hit zone in ledZone()).
             auto led = juce::Rectangle<float>(5.0f, 5.0f).withPosition(r.getRight() - 9.0f, r.getY() + 4.0f);
             g.setColour(on ? ap.led : colors::ledOff);
             g.fillEllipse(led);
-            // STEREO span: an "ST" tag so the tall node reads as feeding both amps.
+            // STEREO span: an "ST" tag in the BOTTOM-RIGHT corner (clear of the
+            // glyph and the LED) so the tall node reads as feeding both amps.
             if (n.sel >= 0 && mBoard.slotStereo(n.sel))
             {
                 g.setColour(on ? ap.accent : colors::textDim);
                 g.setFont(fonts::archivo(7.0f, fonts::Bold, 0.08f));
-                g.drawText("ST", r.removeFromBottom(11.0f).toNearestInt(), juce::Justification::centred);
+                g.drawText("ST", n.rect.reduced(6, 3), juce::Justification::bottomRight);
             }
             if (ghost) g.setOpacity(1.0f);
         }
@@ -1770,6 +1958,7 @@ private:
         int mSplitX = 0;
         bool mDragging = false;
         int mDragSel = kSelNone;
+        int mLedSel = kSelNone; // armed by a press on a node's LED (bypass click)
         juce::Point<int> mDragPos, mCaret{-1, 0}, mDropCaret{-1, 0};
     };
 
@@ -1819,8 +2008,8 @@ private:
                 auto gb = tx.removeFromRight(30).toFloat().reduced(2.0f, 7.0f);
                 const juce::Colour gc = it.ap.led.withAlpha(full ? 0.3f : (hov ? 0.95f : 0.6f));
                 if (it.family == 1) paintDriveGlyph(g, it.cat, it.model, gb, gc);
-                else if (it.family == 2) paintModGlyph(g, gb, gc);
-                else paintDelayGlyph(g, gb, gc);
+                else if (it.family == 2) paintModGlyph(g, it.model, gb, gc);
+                else paintDelayGlyph(g, it.model, gb, gc);
                 g.setColour(full ? colors::captionDim : colors::text);
                 g.setFont(fonts::archivo(12.0f, fonts::SemiBold));
                 g.drawText(it.name, tx.removeFromTop(tx.getHeight() / 2 + 2), juce::Justification::bottomLeft);
@@ -1941,11 +2130,24 @@ public:
         mPaletteView->setScrollBarThickness(8);
         addAndMakeVisible(*mPaletteView);
 
+        setWantsKeyboardFocus(true); // Delete/Backspace removes the selected pedal
         syncStructure(true);
         startTimerHz(20);
     }
 
     void refresh() { repaint(); } // editor-compat hook (the panel self-times)
+
+    // Delete (or Backspace) removes the selected FREE pedal immediately. The locked
+    // ENV/COMP pair (sel < 0) can't be deleted — the keypress just falls through.
+    bool keyPressed(const juce::KeyPress &k) override
+    {
+        if (k.getKeyCode() != juce::KeyPress::deleteKey
+            && k.getKeyCode() != juce::KeyPress::backspaceKey)
+            return false;
+        if (mSelSlot < 0 || !slotUsed(mSelSlot)) return false;
+        removePedal(mSelSlot);
+        return true;
+    }
 
     void resized() override
     {
@@ -1967,6 +2169,19 @@ public:
     void paint(juce::Graphics &g) override
     {
         BlockPanel::paint(g);
+        // Recessed DECK WELL: the pedal shelf is a near-black engraved surface
+        // (StompPill slot family) so the enclosures stand off it — bypassed
+        // pedals' neutral grey wash was near-invisible on the plain panel bg.
+        if (mDeckView != nullptr)
+        {
+            auto w = mDeckView->getBounds().toFloat().expanded(4.0f);
+            g.setColour(juce::Colour(0xff14171d));
+            g.fillRoundedRectangle(w, 10.0f);
+            g.setColour(juce::Colours::black.withAlpha(0.45f)); // engraved lip
+            g.drawRoundedRectangle(w.reduced(0.5f), 10.0f, 1.0f);
+            g.setColour(juce::Colours::white.withAlpha(0.05f));
+            g.drawRoundedRectangle(w.expanded(0.5f), 11.0f, 1.0f);
+        }
         // palette caption
         if (mPaletteView != nullptr)
         {

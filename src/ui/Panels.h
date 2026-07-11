@@ -6509,7 +6509,7 @@ public:
         : BlockPanel("PRE MOD"), mApvts(apvts)
     {
         // Type picker — order MUST match PreModBlock::Type / the premodType StringArray.
-        mType.addItemList({"Chorus", "Phaser", "Flanger", "Tremolo", "Uni-Vibe"}, 1);
+        mType.addItemList({"Chorus", "Phaser", "Flanger", "Tremolo", "Vibe"}, 1);
         addAndMakeVisible(mType);
         mTypeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
             apvts, "premodType", mType);
@@ -6569,7 +6569,7 @@ public:
         const bool synced = (int)mApvts.getRawParameterValue("premodSync")->load() > 0;
         if (mKnobs.size() > 0) mKnobs[0]->setEnabled(!synced); // Rate follows the host when synced
         const int t = (int)mApvts.getRawParameterValue("premodType")->load();
-        static const char *const kNames[] = {"Chorus", "Phaser", "Flanger", "Tremolo", "Uni-Vibe"};
+        static const char *const kNames[] = {"Chorus", "Phaser", "Flanger", "Tremolo", "Vibe"};
         setHeaderRight(kNames[juce::jlimit(0, 4, t)]);
         const bool stereoOn = (int)mApvts.getRawParameterValue("premodStereo")->load() > 0;
         if (t == mLastType && stereoOn == mLastStereo)
@@ -6649,7 +6649,7 @@ public:
         : BlockPanel("PRE DELAY"), mApvts(apvts)
     {
         // Model picker — order MUST match PreDelayBlock::Model / the predelayModel StringArray.
-        mModel.addItemList({"Boss DD-7", "Carbon Copy", "Memory Man"}, 1);
+        mModel.addItemList({"Digi Delay", "Carbon Echo", "Memory Deluxe"}, 1);
         addAndMakeVisible(mModel);
         mModelAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
             apvts, "predelayModel", mModel);
@@ -6715,7 +6715,7 @@ public:
         const bool synced = (int)mApvts.getRawParameterValue("predelaySync")->load() > 0;
         if (mKnobs.size() > 0) mKnobs[0]->setEnabled(!synced); // Time owned by the host division when synced
         const int m = (int)mApvts.getRawParameterValue("predelayModel")->load();
-        static const char *const kNames[] = {"Boss DD-7", "Carbon Copy", "Memory Man"};
+        static const char *const kNames[] = {"Digi Delay", "Carbon Echo", "Memory Deluxe"};
         setHeaderRight(kNames[juce::jlimit(0, 2, m)]);
         if (m == mLastModel)
             return; // control set only changes with the pedal model

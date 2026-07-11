@@ -257,7 +257,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     // PreModBlock::Type (Chorus, Phaser, Flanger, Tremolo, Uni-Vibe).
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("premodType", 1), "Pre Mod Type",
-        juce::StringArray{"Chorus", "Phaser", "Flanger", "Tremolo", "Uni-Vibe"}, 0));
+        juce::StringArray{"Chorus", "Phaser", "Flanger", "Tremolo", "Vibe"}, 0)); // display strings BRAND-FREE (indices unchanged)
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("premodSync", 1), "Pre Mod Sync",
         juce::StringArray{"Off", "1/1", "1/2", "1/4", "1/4.", "1/4T",
@@ -306,7 +306,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     // (new block). Time is shared free/sync (the Sync choice mirrors PreMod).
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("predelayModel", 1), "Pre Delay Model",
-        juce::StringArray{"Boss DD-7", "Carbon Copy", "Memory Man"}, 0));
+        juce::StringArray{"Digi Delay", "Carbon Echo", "Memory Deluxe"}, 0)); // display strings BRAND-FREE (indices unchanged)
     // DD-7 MODE rotary (only the DD-7 uses it): four normal-delay time ranges, then the
     // special modes. Order MUST match PreDelayBlock::Dd7Mode.
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
@@ -901,7 +901,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
             pbF(id("fLevel"), L + "Fuzz Volume", RR(0.0f, 1.0f, 0.01f), 0.5f);
             pbB(id("fGate"), L + "Fuzz Gate", true);
             // --- Mod union (mirrors premod* suffixes; Manual is fixed at 0.15 like legacy) ---
-            pbC(id("mType"), L + "Mod", juce::StringArray{"Chorus", "Phaser", "Flanger", "Tremolo", "Uni-Vibe"}, 0);
+            pbC(id("mType"), L + "Mod", juce::StringArray{"Chorus", "Phaser", "Flanger", "Tremolo", "Vibe"}, 0);
             pbF(id("mRate"), L + "Mod Rate", RR(0.03f, 20.0f, 0.01f, 0.35f), 0.8f, "Hz");
             pbC(id("mSync"), L + "Mod Sync", syncChoices, 0);
             pbF(id("mDepth"), L + "Mod Depth", RR(0.0f, 1.0f, 0.01f), 0.5f);
@@ -910,7 +910,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
             pbF(id("mWave"), L + "Mod Wave", RR(0.0f, 1.0f, 0.01f), 0.3f);
             pbC(id("mPhaserVoice"), L + "Phaser Voice", juce::StringArray{"Script", "Block"}, 0);
             // --- Delay union (mirrors predelay* suffixes) ---
-            pbC(id("pModel"), L + "Delay", juce::StringArray{"Boss DD-7", "Carbon Copy", "Memory Man"}, 0);
+            pbC(id("pModel"), L + "Delay", juce::StringArray{"Digi Delay", "Carbon Echo", "Memory Deluxe"}, 0);
             pbC(id("pMode"), L + "Delay Mode", juce::StringArray{"50 ms", "200 ms", "800 ms", "3200 ms", "Hold", "Modulate", "Analog", "Reverse"}, 3);
             pbF(id("pTime"), L + "Delay Time", RR(20.0f, 2000.0f, 1.0f, 0.35f), 350.0f, "ms");
             pbC(id("pSync"), L + "Delay Sync", syncChoices, 0);
