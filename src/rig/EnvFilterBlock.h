@@ -23,7 +23,17 @@
 // FRONT-END: per-voice input-Z loading (high-shelf CUT = delta from the ~1 MΩ
 // interface), input+output coupling HPs. DRY blend stays true -> mix=0 bit-exact.
 //
-// JUCE-free core; verified offline by tests/env_filter_test.cpp.
+// STEREO (pedalboard pool, added 2026-07-11): mono process() drives Lane L ONLY,
+// bit-exact to the pre-stereo block. processStereo() runs Lane L and Lane R fully
+// INDEPENDENTLY (own envelope/SVF/filter state each, from the SAME shared coeffs)
+// — no cross-lane linking, the same "independent per-lane" approach PreModBlock /
+// PreDelayBlock already use for their pedalboard stereo span. On the mono->stereo
+// rising edge Lane R is reseeded from Lane L's CURRENT state (mStereoRunning edge
+// detect) so it starts from a sensible value instead of resuming whatever it was
+// frozen at the last time it ran (a stale envelope would otherwise snap the filter
+// to an old cutoff for a moment).
+//
+// JUCE-free core; verified offline by tests/env_filter_test.cpp + tests/pedalboard_test.cpp.
 
 #include "Blocks.h"
 #include "Svf.h"
@@ -66,10 +76,13 @@ public:
     void prepare(const BlockContext &ctx) override
     {
         mSampleRate = ctx.sampleRate;
-        mSvf.prepare(mSampleRate);
-        mWork.assign((size_t)std::max(1, ctx.maxBlockSize), 0.0f);
-        mInHp = Biquad::highpass1(mSampleRate, 8.0);
-        mOutHp = Biquad::highpass1(mSampleRate, 12.0);
+        for (Lane *ln : {&mLaneL, &mLaneR})
+        {
+            ln->svf.prepare(mSampleRate);
+            ln->work.assign((size_t)std::max(1, ctx.maxBlockSize), 0.0f);
+            ln->inHp = Biquad::highpass1(mSampleRate, 8.0);
+            ln->outHp = Biquad::highpass1(mSampleRate, 12.0);
+        }
         mLastVoice = -1;
         reset();
         mPrepared = true;
@@ -77,103 +90,44 @@ public:
 
     void reset() override
     {
-        mSvf.reset(); mInHp.reset(); mInShelf.reset(); mOutHp.reset();
-        mEnv = 0.0f; mLag = 0.0f;
-        mU1 = 0.0; mU2 = 0.0;
+        for (Lane *ln : {&mLaneL, &mLaneR})
+        {
+            ln->svf.reset(); ln->inHp.reset(); ln->inShelf.reset(); ln->outHp.reset();
+            ln->env = 0.0f; ln->lag = 0.0f;
+            ln->u1 = 0.0; ln->u2 = 0.0;
+        }
         mCutoffPub.store(200.0f);
+        mStereoRunning = false; // next processStereo() is a fresh rising edge
     }
 
     double latencySamples() const override { return 0.0; }
 
+    // MONO: drive Lane L ONLY -> bit-exact to the pre-stereo block.
     void process(float *mono, int numSamples) override
     {
         if (!mPrepared) return;
-        if (numSamples > (int)mWork.size()) return;
-
-        const double sr = mSampleRate;
-        const int voice = mVoice.load();
-        const bool up = mUp.load();
-        const int mode = mMode.load();
-        const bool boost = mBoost.load() && voice == kQTron;
-        const int adaa = mAdaaOrder.load();
-        const float mix = mMix.load();
-
-        const float inShelfHz = (voice == kQTron) ? 3500.0f : 4000.0f;
-        const float inShelfDb = (voice == kQTron) ? -1.2f   : -0.7f;
-        if (voice != mLastVoice)
-        {
-            mInShelf.copyCoeffsFrom(Biquad::highshelf(sr, inShelfHz, inShelfDb));
-            mLastVoice = voice;
-        }
-
-        const float sensGain = std::pow(2.0f, mSensitivity.load() * 6.0f);
-        const float baseCut = 80.0f * std::pow(2.0f, mRange.load() * 4.0f);
-        const float sweepOct = 1.5f + mDepth.load() * 2.5f;
-        const float qMax = (voice == kQTron) ? 16.0f : 8.0f;
-        const float Q = 0.7f * std::pow(qMax / 0.7f, mResonance.load());
-        const float relMs = (voice == kQTron) ? 250.0f : 150.0f;
-        const float lagMs = (voice == kQTron) ? 25.0f  : 2.0f;
-        const float attCoef = coefForMs(mAttackMs.load(), sr);
-        const float relCoef = coefForMs(relMs, sr);
-        const float lagCoef = coefForMs(lagMs, sr);
-        const float outLevel = boost ? 1.3f : 1.0f;
-
-        // ---- input front-end: coupling HP + input-Z shelf (detector + filter see THIS) ----
-        float *w = mWork.data();
-        for (int i = 0; i < numSamples; ++i) w[i] = mono[i];
-        mInHp.process(w, numSamples);
-        mInShelf.process(w, numSamples);
-
-        float env = mEnv, lag = mLag;
-        double u1 = mU1, u2 = mU2; // Boost soft-clip ADAA history
+        if (numSamples > (int)mLaneL.work.size()) return;
+        mStereoRunning = false; // record that the last pass was mono (only Lane L advanced)
+        const Cfg cfg = computeCfg();
         float lastCut = mCutoffPub.load();
-
-        for (int i = 0; i < numSamples; ++i)
-        {
-            const float x = w[i];
-
-            const float driven = x * sensGain;
-            const float det = (voice == kQTron) ? (driven > 0.0f ? driven : 0.0f)
-                                                : std::abs(driven);
-            env += (det > env ? attCoef : relCoef) * (det - env);
-            lag += lagCoef * (env - lag);
-
-            const float env01 = lag > 1.0f ? 1.0f : lag;
-            const float envEff = up ? env01 : (1.0f - env01);
-            const float fc = baseCut * std::pow(2.0f, envEff * sweepOct);
-
-            mSvf.setCoeffs(fc, Q);
-            // BOOST: anti-aliased cubic soft-clip of the preamp-driven signal.
-            const double u = (double)x * kBoostDrive;
-            double finD = (double)x;
-            if (boost)
-                finD = (adaa >= 2) ? sat::cubicADAA2(u, u1, u2)
-                     : (adaa == 1) ? sat::cubicADAA1(u, u1)
-                     : sat::cubF(u); // 0 = naive (for A/B)
-            u2 = u1; u1 = u; // keep history fresh even when not boosting
-
-            const Svf::Out o = mSvf.tick((float)finD);
-            const float wet = (mode == kLP) ? o.lp
-                            : (mode == kHP) ? o.hp
-                            : (mode == kMix) ? (0.5f * o.bp + 0.5f * (float)finD)
-                            : o.bp;
-            w[i] = wet;
-            lastCut = fc;
-        }
-
-        mOutHp.process(w, numSamples);
-        if (outLevel != 1.0f)
-            for (int i = 0; i < numSamples; ++i) w[i] *= outLevel;
-
-        if (mix >= 1.0f)
-            for (int i = 0; i < numSamples; ++i) mono[i] = w[i];
-        else if (mix > 0.0f)
-            for (int i = 0; i < numSamples; ++i) mono[i] = mono[i] * (1.0f - mix) + w[i] * mix;
-
-        mSvf.flushDenorms();
-        mEnv = flush(env); mLag = flush(lag);
-        mU1 = u1; mU2 = u2;
+        processLane(mLaneL, mono, numSamples, cfg, lastCut);
         mCutoffPub.store(lastCut);
+    }
+
+    // Mono-in / stereo-out front pedal (pedalboard Stereo span): L -> Amp A, R ->
+    // Amp B, each lane fully independent (own envelope/SVF/filter state) — no
+    // cross-lane linking. See the class comment for the mono->stereo reseed.
+    void processStereo(float *L, float *R, int numSamples)
+    {
+        if (!mPrepared) return;
+        if (numSamples > (int)mLaneL.work.size()) return;
+        if (!mStereoRunning) { mLaneR = mLaneL; mStereoRunning = true; }
+        const Cfg cfg = computeCfg();
+        float lastCutL = mCutoffPub.load();
+        float lastCutR = lastCutL;
+        processLane(mLaneL, L, numSamples, cfg, lastCutL);
+        processLane(mLaneR, R, numSamples, cfg, lastCutR);
+        mCutoffPub.store(lastCutL); // meter reflects Lane L (single-channel readout)
     }
 
     float currentCutoffHz() const { return mCutoffPub.load(); }
@@ -184,6 +138,127 @@ private:
     static float coefForMs(float ms, double sr)
     {
         return 1.0f - (float)std::exp(-1.0 / (std::max(0.05f, ms) * 0.001 * sr));
+    }
+
+    // Per-lane mutable state: everything that carries memory sample-to-sample.
+    // process() uses mLaneL ONLY (bit-exact to the pre-stereo block); processStereo
+    // runs both lanes fully independently from the SAME shared coefficients (Cfg).
+    struct Lane
+    {
+        Svf svf;
+        Biquad inHp, inShelf, outHp;
+        std::vector<float> work;
+        float env = 0.0f, lag = 0.0f;
+        double u1 = 0.0, u2 = 0.0; // Boost ADAA history
+    };
+
+    // Per-block shared config, derived once from the atomic params and identical
+    // for both lanes (only the per-sample STATE in Lane differs between them).
+    struct Cfg
+    {
+        int voice; bool up; int mode; bool boost; int adaa; float mix;
+        float sensGain, baseCut, sweepOct, Q;
+        float attCoef, relCoef, lagCoef, outLevel;
+    };
+
+    Cfg computeCfg()
+    {
+        const double sr = mSampleRate;
+        const int voice = mVoice.load();
+        const bool boost = mBoost.load() && voice == kQTron;
+
+        const float inShelfHz = (voice == kQTron) ? 3500.0f : 4000.0f;
+        const float inShelfDb = (voice == kQTron) ? -1.2f   : -0.7f;
+        if (voice != mLastVoice)
+        {
+            const Biquad shelf = Biquad::highshelf(sr, inShelfHz, inShelfDb);
+            mLaneL.inShelf.copyCoeffsFrom(shelf);
+            mLaneR.inShelf.copyCoeffsFrom(shelf);
+            mLastVoice = voice;
+        }
+
+        const float qMax = (voice == kQTron) ? 16.0f : 8.0f;
+        const float relMs = (voice == kQTron) ? 250.0f : 150.0f;
+        const float lagMs = (voice == kQTron) ? 25.0f  : 2.0f;
+
+        Cfg c;
+        c.voice = voice;
+        c.up = mUp.load();
+        c.mode = mMode.load();
+        c.boost = boost;
+        c.adaa = mAdaaOrder.load();
+        c.mix = mMix.load();
+        c.sensGain = std::pow(2.0f, mSensitivity.load() * 6.0f);
+        c.baseCut = 80.0f * std::pow(2.0f, mRange.load() * 4.0f);
+        c.sweepOct = 1.5f + mDepth.load() * 2.5f;
+        c.Q = 0.7f * std::pow(qMax / 0.7f, mResonance.load());
+        c.attCoef = coefForMs(mAttackMs.load(), sr);
+        c.relCoef = coefForMs(relMs, sr);
+        c.lagCoef = coefForMs(lagMs, sr);
+        c.outLevel = boost ? 1.3f : 1.0f;
+        return c;
+    }
+
+    // Process one lane in place. Byte-identical maths to the pre-stereo single-lane
+    // body (mSvf/mInHp/mInShelf/mOutHp -> ln.svf/ln.inHp/ln.inShelf/ln.outHp), so
+    // Lane L alone reproduces the pre-refactor mono output exactly.
+    void processLane(Lane &ln, float *buf, int numSamples, const Cfg &cfg, float &lastCutInOut)
+    {
+        float *w = ln.work.data();
+        for (int i = 0; i < numSamples; ++i) w[i] = buf[i];
+        ln.inHp.process(w, numSamples);
+        ln.inShelf.process(w, numSamples);
+
+        float env = ln.env, lag = ln.lag;
+        double u1 = ln.u1, u2 = ln.u2; // Boost soft-clip ADAA history
+        float lastCut = lastCutInOut;
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float x = w[i];
+
+            const float driven = x * cfg.sensGain;
+            const float det = (cfg.voice == kQTron) ? (driven > 0.0f ? driven : 0.0f)
+                                                     : std::abs(driven);
+            env += (det > env ? cfg.attCoef : cfg.relCoef) * (det - env);
+            lag += cfg.lagCoef * (env - lag);
+
+            const float env01 = lag > 1.0f ? 1.0f : lag;
+            const float envEff = cfg.up ? env01 : (1.0f - env01);
+            const float fc = cfg.baseCut * std::pow(2.0f, envEff * cfg.sweepOct);
+
+            ln.svf.setCoeffs(fc, cfg.Q);
+            // BOOST: anti-aliased cubic soft-clip of the preamp-driven signal.
+            const double u = (double)x * kBoostDrive;
+            double finD = (double)x;
+            if (cfg.boost)
+                finD = (cfg.adaa >= 2) ? sat::cubicADAA2(u, u1, u2)
+                     : (cfg.adaa == 1) ? sat::cubicADAA1(u, u1)
+                     : sat::cubF(u); // 0 = naive (for A/B)
+            u2 = u1; u1 = u; // keep history fresh even when not boosting
+
+            const Svf::Out o = ln.svf.tick((float)finD);
+            const float wet = (cfg.mode == kLP) ? o.lp
+                            : (cfg.mode == kHP) ? o.hp
+                            : (cfg.mode == kMix) ? (0.5f * o.bp + 0.5f * (float)finD)
+                            : o.bp;
+            w[i] = wet;
+            lastCut = fc;
+        }
+
+        ln.outHp.process(w, numSamples);
+        if (cfg.outLevel != 1.0f)
+            for (int i = 0; i < numSamples; ++i) w[i] *= cfg.outLevel;
+
+        if (cfg.mix >= 1.0f)
+            for (int i = 0; i < numSamples; ++i) buf[i] = w[i];
+        else if (cfg.mix > 0.0f)
+            for (int i = 0; i < numSamples; ++i) buf[i] = buf[i] * (1.0f - cfg.mix) + w[i] * cfg.mix;
+
+        ln.svf.flushDenorms();
+        ln.env = flush(env); ln.lag = flush(lag);
+        ln.u1 = u1; ln.u2 = u2;
+        lastCutInOut = lastCut;
     }
 
     std::atomic<float> mSensitivity{0.5f};
@@ -198,12 +273,9 @@ private:
     std::atomic<float> mMix{1.0f};
     std::atomic<int>   mVoice{kFX25};
 
-    Svf mSvf;
-    Biquad mInHp, mInShelf, mOutHp;
-    std::vector<float> mWork;
+    Lane mLaneL, mLaneR;
     int mLastVoice = -1;
-    float mEnv = 0.0f, mLag = 0.0f;
-    double mU1 = 0.0, mU2 = 0.0; // Boost ADAA history
+    bool mStereoRunning = false; // was the last pass processStereo()? false -> next stereo block reseeds Lane R from Lane L
     std::atomic<float> mCutoffPub{200.0f};
     double mSampleRate = 48000.0;
     bool mPrepared = false;

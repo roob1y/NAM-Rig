@@ -401,7 +401,7 @@ private:
     int slotLane(int i) const { return paramC(sid(i, "Lane")); } // 0 Both, 1 A, 2 B
     bool slotOn(int i) const { return paramF(sid(i, "On")) >= 0.5f; }
     bool slotUsed(int i) const { return slotType(i) != 0; }
-    bool slotCanStereo(int i) const { const int t = slotType(i); return t == 2 || t == 3; } // Mod/Delay only
+    bool slotCanStereo(int i) const { const int t = slotType(i); return t == 2 || t == 3 || t == 4 || t == 5; } // Mod/Delay/Env/Comp
     bool slotStereo(int i) const { return slotCanStereo(i) && paramF(sid(i, "Stereo")) >= 0.5f; } // spans both amps
     // Env(4)/Comp(5) are SINGLETONS — only one physical engine each — so at most one
     // slot may hold each type. Used to gate the palette row and reject a second add.
@@ -759,14 +759,14 @@ private:
                     mBoard.paramC(pid(mKind == Mod ? "mSync" : "pSync")) == 0);
             mOn.setLit(on);
             for (auto *p : mPills) p->repaint(); // live value readouts
-            if (mKind == Comp && mBoard.compGrDbProvider) // live GR meter (header band)
+            if (mKind == Comp && mBoard.compGrDbProvider) // live GR meter (aux band, see resized())
             {
                 const float gr = juce::jmax(0.0f, mBoard.compGrDbProvider());
                 mGrSm += (gr > mGrSm ? 0.55f : 0.25f) * (gr - mGrSm); // grab fast, fall gently
                 if (std::abs(mGrSm - mGrPainted) > 0.05f)
                 {
                     mGrPainted = mGrSm;
-                    repaint(mHeaderRect.expanded(2));
+                    repaint(mGrRect.expanded(2));
                 }
             }
             if (on != mLastOn)
@@ -783,12 +783,12 @@ private:
             const bool on = mLastOn;
             paintEnclosure(g, b, mAp.tint, on, false, 16.0f);
 
-            // header: kind (left) + GR meter (comp) + jewel LED (right)
+            // header: kind (left) + STEREO chip (Mod/Delay/Env/Comp) + jewel LED (right)
             g.setColour(on ? mAp.accent : colors::caption);
             g.setFont(fonts::archivo(10.0f, fonts::Bold, 0.13f));
             g.drawText(mKindStr, mHeaderRect, juce::Justification::centredLeft);
-            // MONO/STEREO state chip (Mod/Delay). Lit accent = STEREO (spans both amps);
-            // dim = MONO. Click toggles it (handled in mouseUp).
+            // MONO/STEREO state chip (Mod/Delay/Env/Comp). Lit accent = STEREO (spans
+            // both amps); dim = MONO. Click toggles it (handled in mouseUp).
             if (!mStereoTagRect.isEmpty())
             {
                 const bool st = mBoard.slotStereo(mSlot);
@@ -805,22 +805,22 @@ private:
             if (on) fx::glowEllipse(g, jewel, mAp.led, 13, 0.6f, 6, 0.55f);
             g.setColour(on ? mAp.led : juce::Colour(0xff2a2f37));
             g.fillEllipse(jewel);
-            if (mKind == Comp && mBoard.compGrDbProvider) // live gain-reduction bar
+            if (!mGrRect.isEmpty()) // live gain-reduction bar — lives in Comp's aux band,
+                                    // not the header (see resized())
             {
-                auto bar = juce::Rectangle<float>((float)mHeaderRect.getRight() - 74.0f,
-                                                  (float)mHeaderRect.getCentreY() - 2.5f, 52.0f, 5.0f);
+                auto r = mGrRect;
+                auto labelR = r.removeFromLeft(22);
                 g.setColour(colors::caption);
-                g.setFont(fonts::archivo(7.0f, fonts::SemiBold, 0.08f));
-                g.drawText("GR", juce::Rectangle<int>((int)bar.getX() - 17, mHeaderRect.getY(),
-                                                      15, mHeaderRect.getHeight()),
-                           juce::Justification::centredRight);
+                g.setFont(fonts::archivo(8.0f, fonts::SemiBold, 0.08f));
+                g.drawText("GR", labelR, juce::Justification::centredLeft);
+                auto bar = r.withSizeKeepingCentre(r.getWidth() - 4, 6).toFloat();
                 g.setColour(colors::track);
-                g.fillRoundedRectangle(bar, 2.5f);
+                g.fillRoundedRectangle(bar, 3.0f);
                 const float grNorm = juce::jlimit(0.0f, 1.0f, mGrSm / 18.0f); // 18 dB span
                 if (grNorm > 0.01f)
                 {
                     g.setColour(on ? mAp.led : colors::textDim);
-                    g.fillRoundedRectangle(bar.withWidth(juce::jmax(3.0f, bar.getWidth() * grNorm)), 2.5f);
+                    g.fillRoundedRectangle(bar.withWidth(juce::jmax(3.0f, bar.getWidth() * grNorm)), 3.0f);
                 }
             }
 
@@ -882,13 +882,13 @@ private:
             // (Robbie: the 5-knob comp face is the reference — lock everything to it).
             auto a = getLocalBounds().reduced(10, 8);
             mHeaderRect = a.removeFromTop(15);
-            // MONO/STEREO tag: a small clickable chip in the header, left of the jewel LED.
-            // Only Mod/Delay can span both amps (Env/Comp/Drive never show it).
-            if (mKind == Mod || mKind == Delay)
-                mStereoTagRect = {mHeaderRect.getRight() - 16 - 54, mHeaderRect.getY() - 1,
-                                  54, mHeaderRect.getHeight() + 2};
-            else
-                mStereoTagRect = {};
+            // MONO/STEREO tag: a small clickable chip, left of the jewel LED — same
+            // spot in the header for every stereo-capable kind (Mod/Delay/Env/Comp).
+            const bool canStereo = (mKind == Mod || mKind == Delay || mKind == Env || mKind == Comp);
+            mStereoTagRect = canStereo
+                ? juce::Rectangle<int>(mHeaderRect.getRight() - 16 - 54, mHeaderRect.getY() - 1,
+                                        54, mHeaderRect.getHeight() + 2)
+                : juce::Rectangle<int>();
             a.removeFromTop(6);
             mZoneRect = a.removeFromTop(kZoneH);
             a.removeFromTop(6);
@@ -899,6 +899,9 @@ private:
             mPillRect = pillRow.withSizeKeepingCentre(pw, 28);
             a.removeFromTop(4);
             auto auxBand = a.removeFromTop(26); // post-pill aux row (2-knob-row faces)
+            // Comp has no aux pills to fill this band (see rebuild()) — its live GR
+            // meter lives here instead, freeing the header for the STEREO chip above.
+            mGrRect = (mKind == Comp && mBoard.compGrDbProvider) ? auxBand : juce::Rectangle<int>();
             a.removeFromTop(8);                 // breathing room over the stomp plate
             mPlateY = a.getY();                 // the seam line
             // The WHOLE zone under the seam is the footswitch (stomp anywhere below
@@ -944,7 +947,7 @@ private:
         void mouseUp(const juce::MouseEvent &e) override
         {
             if (e.getDistanceFromDragStart() >= 5) return; // a deck drag, not a click
-            // click the MONO/STEREO chip toggles the span (Mod/Delay only)
+            // click the MONO/STEREO chip toggles the span
             if (!mStereoTagRect.isEmpty() && mStereoTagRect.contains(e.getPosition()))
                 { mBoard.togglePedalStereo(mSlot); return; }
             // click the printed name opens the model/voice menu
@@ -1226,7 +1229,7 @@ private:
         std::vector<StompPill *> mPills;
         colors::AccentPair mAp;
         juce::String mKindStr, mModelStr;
-        juce::Rectangle<int> mHeaderRect, mPillRect, mZoneRect, mStereoTagRect;
+        juce::Rectangle<int> mHeaderRect, mPillRect, mZoneRect, mStereoTagRect, mGrRect;
         juce::Rectangle<int> mArtRect; // Mod/Delay: zone slack below the knobs (solid silkscreen)
         int mPlateY = 0;  // stomp-plate seam y (0 until first layout)
         int mNameW = 0;   // printed-name text width (positions the ▾)
@@ -1537,7 +1540,16 @@ private:
         // (the cell being moved; kSelNone for palette adds).
         std::pair<int, int> moveTarget(juce::Point<int> p, int excludeSel) const
         {
-            int lane = 0, pos = 0, cnt[3] = {0, 0, 0};
+            // Default lane = the first (non-excluded) cell's OWN lane. Cells render
+            // Trunk-then-A-then-B, so this is Trunk in the common case -- but when
+            // Trunk is empty and the deck starts with a Lane-A/B pedal (e.g. a stereo
+            // bridge with nothing before it), dropping BEFORE everything must still
+            // target THAT pedal's lane, not silently fall back to Trunk just because
+            // the scan below never passes a cell to update it from.
+            int lane = 0;
+            for (const auto &c : mCells)
+                if (c.sel != excludeSel) { lane = c.lane; break; }
+            int pos = 0, cnt[3] = {0, 0, 0};
             for (const auto &c : mCells)
             {
                 if (c.sel == excludeSel) continue;

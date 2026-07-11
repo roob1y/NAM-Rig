@@ -18,7 +18,7 @@
 //           PRE-gain transconductance tanh driven by the *calibrated input*
 //           level (so it tracks how hard you play, not the makeup output),
 //           plus control-ripple IMD (the signature Dyna Comp odd-harmonic
-//           grit, worse on low notes). See the OTA block in process().
+//           grit, worse on low notes). See the OTA block in processLane().
 //   Opto  : LA-2A optical. Gentle ~3:1, RMS detector, ~10 ms fixed attack, and NO
 //           release knob -- a fixed two-stage program-dependent T4 release (fast
 //           initial recovery then a long tail that lengthens the longer/harder it
@@ -35,6 +35,16 @@
 //      curve: adds back the GR at kMakeupRefDb) -> Level trim -> voicing colour.
 //
 // Latency: zero (chain-bypass via compOn is safe). Verified by tests/comp_test.cpp.
+//
+// STEREO (pedalboard pool, added 2026-07-11): mono process() drives Lane L ONLY,
+// bit-exact to the pre-stereo block. processStereo() runs Lane L and Lane R fully
+// INDEPENDENTLY (own detector/GR-follower/colour state each, from the SAME shared
+// config) — UNLINKED gain reduction, not a stereo-bus-linked compressor. Matches
+// this pedalboard's existing precedent (Mod's decorrelated LFO phase, Delay's
+// independent ping-pong lanes): Amp A/Amp B are usually deliberately different
+// tone paths here, not a stereo pair needing a shared detector. On the mono->
+// stereo rising edge Lane R is reseeded from Lane L's current state so it doesn't
+// resume from a stale/frozen GR value left over from the last time it ran.
 
 #include "Blocks.h"
 #include <atomic>
@@ -139,7 +149,7 @@ public:
                         // max. The Cali76 is a TRANSFORMERLESS discrete Class-A pedal, so
                         // iron + grit are pulled right back (clean, presence-forward, not
                         // the slammed-transformer rack sound); the top-end sheen is added
-                        // in process(). driveTrack keeps a hint of bite only when slammed.
+                        // in processLane(). driveTrack keeps a hint of bite only when slammed.
             return {12.0f, 3.0f, 0.45f, false, 60.0f, 0.016f, 0.02f,
                     50.0f, 380.0f, 0.55f, 0.12f, 0.10f, 0.45f, 0.12f, 0.00f, 0.35f};
         case Mode::Clean: // transparent VCA: no colour
@@ -228,21 +238,95 @@ public:
 
     void reset() override
     {
-        mGrDb = 0.0f;
-        mRelMem = 0.0f;
-        mScHp = 0.0f;
-        mRms2 = 0.0f;
-        mIronLpf = 0.0f;
-        mRipCap = 0.0f;
-        mRipMean = 0.0f;
-        mFetHf = 0.0f;
+        mLaneL = Lane{};
+        mLaneR = Lane{};
+        mStereoRunning = false; // next processStereo() is a fresh rising edge
     }
 
+    // MONO: drive Lane L ONLY -> bit-exact to the pre-stereo block.
     void process(float *mono, int numSamples) override
     {
         if (!mPrepared)
             return;
+        mStereoRunning = false; // record that the last pass was mono (only Lane L advanced)
+        const Cfg cfg = computeCfg();
+        float gr, inDb, outDb;
+        processLane(mLaneL, mono, numSamples, cfg, gr, inDb, outDb);
+        mGrDbPub.store(gr); // published for the editor's GR meter
+        mInPeakDbPub.store(inDb);
+        mOutPeakDbPub.store(outDb);
+    }
 
+    // Mono-in / stereo-out front pedal (pedalboard Stereo span): L -> Amp A, R ->
+    // Amp B, each lane fully independent (own detector/GR-follower/colour state) —
+    // UNLINKED gain reduction. See the class comment for why, and for the mono->
+    // stereo reseed. Meter publishes reflect Lane L only (single-channel readout).
+    void processStereo(float *L, float *R, int numSamples)
+    {
+        if (!mPrepared)
+            return;
+        if (!mStereoRunning) { mLaneR = mLaneL; mStereoRunning = true; }
+        const Cfg cfg = computeCfg();
+        float grL, inL, outL, grR, inR, outR;
+        processLane(mLaneL, L, numSamples, cfg, grL, inL, outL);
+        processLane(mLaneR, R, numSamples, cfg, grR, inR, outR);
+        mGrDbPub.store(grL);
+        mInPeakDbPub.store(inL);
+        mOutPeakDbPub.store(outL);
+    }
+
+    // Last block's gain reduction in dB (>= 0). UI thread.
+    float grDb() const { return mGrDbPub.load(); }
+    // Last block's input / output peak in dBFS (-120 = silence). UI thread.
+    float inPeakDb() const { return mInPeakDbPub.load(); }
+    float outPeakDb() const { return mOutPeakDbPub.load(); }
+
+private:
+    std::atomic<float> mGrDbPub{0.0f};
+    std::atomic<float> mInPeakDbPub{-120.0f};
+    std::atomic<float> mOutPeakDbPub{-120.0f};
+
+    static float coefForMs(float ms, double sr)
+    {
+        return 1.0f - (float)std::exp(-1.0 / (std::max(0.01f, ms) * 0.001 * sr));
+    }
+    static float coefForHz(double hz, double sr)
+    {
+        return 1.0f - (float)std::exp(-2.0 * 3.14159265358979323846 * hz / sr);
+    }
+    static float flush(float v) { return std::abs(v) < 1.0e-30f ? 0.0f : v; }
+
+    // Per-lane mutable state: everything that carries memory sample-to-sample.
+    // process() uses mLaneL ONLY (bit-exact to the pre-stereo block); processStereo
+    // runs both lanes fully independently from the SAME shared config (Cfg).
+    struct Lane
+    {
+        float grDb = 0.0f;
+        float relMem = 0.0f;  // slow follower of GR (duration memory)
+        float scHp = 0.0f;    // sidechain HPF state
+        float rms2 = 0.0f;    // RMS detector state
+        float ironLpf = 0.0f; // transformer low-band state
+        float ripCap = 0.0f;  // OTA control-ripple: rectified cap follower
+        float ripMean = 0.0f; // OTA control-ripple: slow mean
+        float fetHf = 0.0f;   // FET HF-sheen shelf state
+    };
+
+    // Per-block shared config, derived once from the atomic params + voicing and
+    // identical for both lanes (only the per-sample STATE in Lane differs).
+    struct Cfg
+    {
+        Mode mode; Voicing v;
+        float t, ratio, relFastMs, relSlowMs, outLin, attCoef;
+        bool simpleRelease; float relCoefConst, relMemCoef;
+        bool scOn; float scCoef; bool useRms; float rmsCoef;
+        float ch, ironCoef;
+        bool otaMode, otaCell; float otaDrv, otaBias, otaTanhBias, otaInvDrv, ripCapCoef, ripMeanCoef;
+        bool fetMode; float fetRatioProg, fetBright, fetHfCoef;
+        float dryBlend;
+    };
+
+    Cfg computeCfg() const
+    {
         const double sr = mSampleRate;
         const Mode mode = (Mode)mMode.load();
         const Voicing v = voicingFor(mode);
@@ -309,48 +393,57 @@ public:
         const float ripMeanCoef = coefForMs(40.0f, sr);  // slow mean the ripple rides on
 
         // ---- FET (1176) authenticity: program-dependent ratio + transformer sheen ----
-        // The 1176 is a feedback limiter whose ratio "always increases a bit after the
-        // transient" at every setting (UA/Wikipedia) — approximated here by creeping the
-        // effective ratio up as compression sustains (driven by relMem, the slow GR
-        // follower). Its Class-A amp + input/output transformers are the source of the
-        // bright, clear top end every engineer describes: a gentle fixed HF shelf baked
-        // into the path. (A true feedback detector + all-buttons mode are larger,
-        // separate structural changes — see notes.)
         const bool fetMode = (mode == Mode::FET);
         const float fetRatioProg = fetMode ? 0.5f : 0.0f; // ratio creep after transient
         const float fetBright = fetMode ? 0.12f : 0.0f;   // HF-sheen depth (0 = off)
         const float fetHfCoef = coefForHz(3500.0, sr);    // sheen shelf corner
 
-        // Cali76 Dry / parallel-compression blend (FET only): sum an uncompressed copy
-        // of the input back over the compressed signal so pick transients and natural
-        // dynamics poke through (0 = pure compressed). The dry copy shares the wet's
-        // output gain (outLin = auto-makeup + Level) so the makeup lifts BOTH paths
-        // equally -- otherwise the made-up wet buries an unboosted dry.
+        // Cali76 Dry / parallel-compression blend (FET only).
         const float dryBlend = fetMode ? std::min(1.0f, std::max(0.0f, mDryBlend.load())) : 0.0f;
 
-        float gr = mGrDb, relMem = mRelMem, scHp = mScHp, rms2 = mRms2, ironLpf = mIronLpf;
-        float ripCap = mRipCap, ripMean = mRipMean; // OTA control-ripple detector state
-        float fetHf = mFetHf;                       // FET HF-sheen shelf state
+        Cfg c;
+        c.mode = mode; c.v = v;
+        c.t = t; c.ratio = ratio; c.relFastMs = relFastMs; c.relSlowMs = relSlowMs;
+        c.outLin = outLin; c.attCoef = attCoef;
+        c.simpleRelease = simpleRelease; c.relCoefConst = relCoefConst; c.relMemCoef = relMemCoef;
+        c.scOn = scOn; c.scCoef = scCoef; c.useRms = useRms; c.rmsCoef = rmsCoef;
+        c.ch = ch; c.ironCoef = ironCoef;
+        c.otaMode = otaMode; c.otaCell = otaCell; c.otaDrv = otaDrv; c.otaBias = otaBias;
+        c.otaTanhBias = otaTanhBias; c.otaInvDrv = otaInvDrv; c.ripCapCoef = ripCapCoef; c.ripMeanCoef = ripMeanCoef;
+        c.fetMode = fetMode; c.fetRatioProg = fetRatioProg; c.fetBright = fetBright; c.fetHfCoef = fetHfCoef;
+        c.dryBlend = dryBlend;
+        return c;
+    }
+
+    // Process one lane in place. Byte-identical maths to the pre-stereo single-lane
+    // body (mGrDb/mRelMem/... -> ln.grDb/ln.relMem/...), so Lane L alone reproduces
+    // the pre-refactor mono output exactly.
+    void processLane(Lane &ln, float *buf, int numSamples, const Cfg &cfg,
+                      float &grPubOut, float &inPkDbOut, float &outPkDbOut)
+    {
+        float gr = ln.grDb, relMem = ln.relMem, scHp = ln.scHp, rms2 = ln.rms2, ironLpf = ln.ironLpf;
+        float ripCap = ln.ripCap, ripMean = ln.ripMean; // OTA control-ripple detector state
+        float fetHf = ln.fetHf;                          // FET HF-sheen shelf state
         float inPk = 0.0f, outPk = 0.0f; // block peaks for the IN/OUT meter modes
 
         for (int i = 0; i < numSamples; ++i)
         {
-            const float x = mono[i];
+            const float x = buf[i];
             const float ax = std::abs(x);
             if (ax > inPk)
                 inPk = ax;
 
             // ---- detector ----
             float xdet = x;
-            if (scOn)
+            if (cfg.scOn)
             {
-                scHp += scCoef * (x - scHp);
+                scHp += cfg.scCoef * (x - scHp);
                 xdet = x - scHp; // high-passed: ignore bass when judging level
             }
             float level;
-            if (useRms)
+            if (cfg.useRms)
             {
-                rms2 += rmsCoef * (xdet * xdet - rms2);
+                rms2 += cfg.rmsCoef * (xdet * xdet - rms2);
                 level = std::sqrt(std::max(rms2, 1.0e-18f));
             }
             else
@@ -358,141 +451,99 @@ public:
             const float aDb = 20.0f * std::log10(std::max(level, 1.0e-9f));
 
             // FET: program-dependent ratio — creeps up as compression sustains (relMem).
-            const float ratEff = fetMode
-                ? ratio * (1.0f + fetRatioProg * std::min(1.0f, relMem * (1.0f / kProgRefDb)))
-                : ratio;
-            const float grTarget = -computeGainDb(aDb, t, ratEff, v.kneeDb); // >= 0
+            const float ratEff = cfg.fetMode
+                ? cfg.ratio * (1.0f + cfg.fetRatioProg * std::min(1.0f, relMem * (1.0f / kProgRefDb)))
+                : cfg.ratio;
+            const float grTarget = -computeGainDb(aDb, cfg.t, ratEff, cfg.v.kneeDb); // >= 0
 
             // ---- attack / program-dependent release smoother ----
             if (grTarget > gr)
-                gr += attCoef * (grTarget - gr);
+                gr += cfg.attCoef * (grTarget - gr);
             else
             {
                 float relCoef;
-                if (simpleRelease)
-                    relCoef = relCoefConst;
+                if (cfg.simpleRelease)
+                    relCoef = cfg.relCoefConst;
                 else
                 {
                     // high GR -> fast recovery; low GR -> slow tail (optical feel)
                     const float b = std::min(1.0f, std::max(0.0f, gr / kRelRefDb));
-                    float relMs = relSlowMs + (relFastMs - relSlowMs) * b;
+                    float relMs = cfg.relSlowMs + (cfg.relFastMs - cfg.relSlowMs) * b;
                     // the longer it's been compressing, the longer the release
-                    relMs *= (1.0f + v.progDepth * (relMem / kProgRefDb));
-                    if (fetMode) relMs = std::min(relMs, 1100.0f); // 1176 max release
-                    relCoef = coefForMs(relMs, sr);
+                    relMs *= (1.0f + cfg.v.progDepth * (relMem / kProgRefDb));
+                    if (cfg.fetMode) relMs = std::min(relMs, 1100.0f); // 1176 max release
+                    relCoef = coefForMs(relMs, mSampleRate);
                 }
                 gr += relCoef * (grTarget - gr);
             }
-            if (!simpleRelease)
-                relMem += relMemCoef * (gr - relMem);
+            if (!cfg.simpleRelease)
+                relMem += cfg.relMemCoef * (gr - relMem);
 
             // ---- gain reduction + instant makeup + Level (one constant gain) ----
             const float grLin = (gr < 1.0e-4f) ? 1.0f : std::pow(10.0f, -gr * 0.05f);
 
             // ---- OTA (CA3080) gain cell: pre-gain grit + control-ripple IMD ----
-            // Real hardware: I_out = I_abc * tanh(V_in / 2Vt). Gain is I_abc (grLin);
-            // distortion is the tanh acting on the attenuated INPUT, so harmonics
-            // grow with how hard you actually hit it. The detector's finite
-            // smoothing cap leaves ripple at 2x the signal freq on I_abc, which
-            // amplitude-modulates the gain -> the signature odd-harmonic Dyna grit
-            // (worse on low notes, where the 2f ripple is smoothed less).
             float src = x;
             float grLinEff = grLin;
-            if (otaCell)
+            if (cfg.otaCell)
             {
-                src = (std::tanh((x + otaBias) * otaDrv) - otaTanhBias) * otaInvDrv;
+                src = (std::tanh((x + cfg.otaBias) * cfg.otaDrv) - cfg.otaTanhBias) * cfg.otaInvDrv;
 
-                ripCap += ripCapCoef * (ax - ripCap);      // rectified follower (the cap)
-                ripMean += ripMeanCoef * (ripCap - ripMean); // slow mean it rides on
+                ripCap += cfg.ripCapCoef * (ax - ripCap);      // rectified follower (the cap)
+                ripMean += cfg.ripMeanCoef * (ripCap - ripMean); // slow mean it rides on
                 const float rip = (ripMean > 1.0e-6f) ? (ripCap - ripMean) / ripMean : 0.0f;
                 // ripple bites harder the more the cell is working (low I_abc).
-                const float ripAmt = ch * v.ripple * (0.25f + 0.75f * std::min(1.0f, gr * (1.0f / 8.0f)));
+                const float ripAmt = cfg.ch * cfg.v.ripple * (0.25f + 0.75f * std::min(1.0f, gr * (1.0f / 8.0f)));
                 grLinEff = grLin * (1.0f + ripAmt * rip);
             }
 
-            float y = src * grLinEff * outLin;
+            float y = src * grLinEff * cfg.outLin;
 
             // ---- analog colour for the post-gain voicings (Opto/FET) ----
             // (OTA is handled by the pre-gain cell above; Clean has no colour.)
-            if (!otaMode && ch > 0.0f && (v.drive > 0.0f || v.iron > 0.0f))
+            if (!cfg.otaMode && cfg.ch > 0.0f && (cfg.v.drive > 0.0f || cfg.v.iron > 0.0f))
             {
-                // gain cell: asymmetric soft saturation. k>1 = odd grit, the
-                // DC bias b = even (tube/transformer) harmonics, both grow with
-                // GR so it bites harder when slammed (driveTrack). /k keeps the
-                // small-signal gain ~unity so gain staging is preserved.
-                if (v.drive > 0.0f)
+                if (cfg.v.drive > 0.0f)
                 {
-                    const float drv = ch * v.drive * (1.0f + v.driveTrack * gr * (1.0f / 12.0f));
+                    const float drv = cfg.ch * cfg.v.drive * (1.0f + cfg.v.driveTrack * gr * (1.0f / 12.0f));
                     const float k = 1.0f + drv * 6.0f;
-                    const float b = v.driveAsym * drv * 3.0f;
+                    const float b = cfg.v.driveAsym * drv * 3.0f;
                     y = (std::tanh((y + b) * k) - std::tanh(b * k)) / k;
                 }
-                // transformer iron: low-frequency-weighted core saturation. Adds
-                // low-order harmonics + thickness on bass/transients (the "big
-                // iron" sound). Symmetric -> no DC. Opto/FET only.
-                if (v.iron > 0.0f)
+                if (cfg.v.iron > 0.0f)
                 {
-                    ironLpf += ironCoef * (y - ironLpf);
+                    ironLpf += cfg.ironCoef * (y - ironLpf);
                     const float flux = ironLpf * 2.0f;
-                    y += (ch * v.iron) * (std::tanh(flux) - flux) * 0.5f;
+                    y += (cfg.ch * cfg.v.iron) * (std::tanh(flux) - flux) * 0.5f;
                 }
-                // FET transformer/Class-A sheen: a gentle fixed HF shelf (the "bright,
-                // clear top end"). fetHf low-passes y; adding back (y - fetHf) lifts the
-                // highs above ~3.5 kHz.
-                if (fetBright > 0.0f)
+                if (cfg.fetBright > 0.0f)
                 {
-                    fetHf += fetHfCoef * (y - fetHf);
-                    y += fetBright * (y - fetHf);
+                    fetHf += cfg.fetHfCoef * (y - fetHf);
+                    y += cfg.fetBright * (y - fetHf);
                 }
             }
 
-            // FET parallel dry blend: add the uncompressed input at the SAME output gain
-            // as the wet (outLin = makeup + Level), so the dry sits level with the
-            // compressed signal instead of buried under the makeup. The /(1 + dryBlend)
-            // keeps the OUTPUT level ~constant as you blend (wet+dry are correlated, so
-            // linear normalisation holds loudness) -- the dry restores dynamics without
-            // getting louder. dryBlend == 0 elsewhere (no-op, /1).
-            const float out = (y + dryBlend * outLin * x) / (1.0f + dryBlend);
-            mono[i] = out;
+            // FET parallel dry blend: see class comment above process().
+            const float out = (y + cfg.dryBlend * cfg.outLin * x) / (1.0f + cfg.dryBlend);
+            buf[i] = out;
             const float ay = std::abs(out);
             if (ay > outPk)
                 outPk = ay;
         }
 
-        mGrDb = (gr < 1.0e-7f) ? 0.0f : gr; // flush
-        mRelMem = (relMem < 1.0e-7f) ? 0.0f : relMem;
-        mScHp = flush(scHp);
-        mRms2 = flush(rms2);
-        mIronLpf = flush(ironLpf);
-        mRipCap = flush(ripCap);
-        mRipMean = flush(ripMean);
-        mFetHf = flush(fetHf);
-        mGrDbPub.store(mGrDb); // published for the editor's GR meter
+        ln.grDb = (gr < 1.0e-7f) ? 0.0f : gr; // flush
+        ln.relMem = (relMem < 1.0e-7f) ? 0.0f : relMem;
+        ln.scHp = flush(scHp);
+        ln.rms2 = flush(rms2);
+        ln.ironLpf = flush(ironLpf);
+        ln.ripCap = flush(ripCap);
+        ln.ripMean = flush(ripMean);
+        ln.fetHf = flush(fetHf);
+        grPubOut = ln.grDb;
         // Block peaks in dBFS for the IN/OUT meter modes (UI thread reads these).
-        mInPeakDbPub.store(inPk > 1.0e-9f ? 20.0f * std::log10(inPk) : -120.0f);
-        mOutPeakDbPub.store(outPk > 1.0e-9f ? 20.0f * std::log10(outPk) : -120.0f);
+        inPkDbOut = inPk > 1.0e-9f ? 20.0f * std::log10(inPk) : -120.0f;
+        outPkDbOut = outPk > 1.0e-9f ? 20.0f * std::log10(outPk) : -120.0f;
     }
-
-    // Last block's gain reduction in dB (>= 0). UI thread.
-    float grDb() const { return mGrDbPub.load(); }
-    // Last block's input / output peak in dBFS (-120 = silence). UI thread.
-    float inPeakDb() const { return mInPeakDbPub.load(); }
-    float outPeakDb() const { return mOutPeakDbPub.load(); }
-
-private:
-    std::atomic<float> mGrDbPub{0.0f};
-    std::atomic<float> mInPeakDbPub{-120.0f};
-    std::atomic<float> mOutPeakDbPub{-120.0f};
-
-    static float coefForMs(float ms, double sr)
-    {
-        return 1.0f - (float)std::exp(-1.0 / (std::max(0.01f, ms) * 0.001 * sr));
-    }
-    static float coefForHz(double hz, double sr)
-    {
-        return 1.0f - (float)std::exp(-2.0 * 3.14159265358979323846 * hz / sr);
-    }
-    static float flush(float v) { return std::abs(v) < 1.0e-30f ? 0.0f : v; }
 
     std::atomic<float> mSustain{0.5f};
     std::atomic<float> mAttackMs{15.0f};
@@ -502,14 +553,8 @@ private:
     std::atomic<float> mDryBlend{0.0f}; // FET parallel dry-blend (0..1)
     std::atomic<int> mMode{0};          // Clean
 
-    float mGrDb = 0.0f;
-    float mRelMem = 0.0f;  // slow follower of GR (duration memory)
-    float mScHp = 0.0f;    // sidechain HPF state
-    float mRms2 = 0.0f;    // RMS detector state
-    float mIronLpf = 0.0f; // transformer low-band state
-    float mRipCap = 0.0f;  // OTA control-ripple: rectified cap follower
-    float mRipMean = 0.0f; // OTA control-ripple: slow mean
-    float mFetHf = 0.0f;   // FET HF-sheen shelf state
+    Lane mLaneL, mLaneR;
+    bool mStereoRunning = false; // was the last pass processStereo()? false -> next stereo block reseeds Lane R from Lane L
     double mSampleRate = 48000.0;
     bool mPrepared = false;
 };

@@ -26,7 +26,11 @@
 //     against two slots claiming the same singleton type (see the `live()` guard) —
 //     that should never happen (the UI enforces one-of-each), but the guard keeps the
 //     shared engine's internal state from being advanced twice in one block if it did.
-//   - Neither Env nor Comp support the Stereo span (stereoAt() only allows Mod/Delay).
+//   - Every free type supports the Stereo span (2026-07-11): Mod/Delay/Env/Comp can
+//     all be placed as a stereo-spanning pedal (stereoAt()); Drive cannot (no
+//     processStereo(), a drive's asymmetric clipping is a deliberately per-amp
+//     choice). Env/Comp's stereo lanes are UNLINKED (independent detector/GR-
+//     follower state per lane, no shared sidechain) — see each engine's header.
 //
 // Header-only DSP: all five engine headers are dependency-light (local headers + std,
 // no JUCE), so the whole pool compiles in the offline harness tests/pedalboard_test.cpp
@@ -81,11 +85,12 @@ public:
     void setSlotType(int i, int type) { if (valid(i)) mType[i] = clampType(type); }
     void setSlotLane(int i, int lane) { if (valid(i)) mLane[i] = clampLane(lane); }
     void setSlotOn(int i, bool on)    { if (valid(i)) mOn[i] = on; }
-    // STEREO: a Mod/Delay slot that SPANS both amps. It runs AFTER the split with the
-    // engine's stereo path (processStereo): L feeds Amp A, R feeds Amp B. On the Trunk it
-    // seeds both lanes from the (mono) trunk -> a SPLITTER (mono in, decorrelated A/B out);
-    // after lane pedals it processes an existing A/B image -> a BRIDGE. Ignored on Drive/Off.
-    // Engages only when BOTH amps run (Dual); Solo collapses to the mono path (bit-exact).
+    // STEREO: a stereo-capable slot (Mod/Delay/Env/Comp) that SPANS both amps. It runs
+    // AFTER the split with the engine's stereo path (processStereo): L feeds Amp A, R
+    // feeds Amp B. On the Trunk it seeds both lanes from the (mono) trunk -> a SPLITTER
+    // (mono in, decorrelated A/B out); after lane pedals it processes an existing A/B
+    // image -> a BRIDGE. Ignored on Drive/Off. Engages only when BOTH amps run (Dual);
+    // Solo collapses to the mono path (bit-exact).
     void setSlotStereo(int i, bool on) { if (valid(i)) mStereo[i] = on; }
 
     int  slotType(int i) const { return valid(i) ? mType[i] : (int)TypeOff; }
@@ -226,8 +231,12 @@ private:
         }
     }
 
-    // Only Mod/Delay have a stereo path; Drive/Off ignore the stereo flag.
-    bool stereoAt(int i) const { return mStereo[i] && (mType[i] == TypeMod || mType[i] == TypeDelay); }
+    // Mod/Delay/Env/Comp all have a stereo path; Drive/Off ignore the stereo flag.
+    bool stereoAt(int i) const
+    {
+        return mStereo[i] && (mType[i] == TypeMod || mType[i] == TypeDelay
+                            || mType[i] == TypeEnv || mType[i] == TypeComp);
+    }
 
     template <class Heal>
     void runSlot(int i, float *buf, int n, Heal &heal)
@@ -258,6 +267,20 @@ private:
             if (delay[i].isBypassed()) { mWasStereo[i] = false; return; }
             delay[i].processStereo(vA, vB, n);
             heal(delay[i], vA, n); heal(delay[i], vB, n);
+            mWasStereo[i] = true;
+        }
+        else if (mType[i] == TypeEnv)
+        {
+            if (env.isBypassed()) { mWasStereo[i] = false; return; }
+            env.processStereo(vA, vB, n);
+            heal(env, vA, n); heal(env, vB, n);
+            mWasStereo[i] = true;
+        }
+        else if (mType[i] == TypeComp)
+        {
+            if (comp.isBypassed()) { mWasStereo[i] = false; return; }
+            comp.processStereo(vA, vB, n);
+            heal(comp, vA, n); heal(comp, vB, n);
             mWasStereo[i] = true;
         }
     }

@@ -29,6 +29,17 @@
 //       advance the shared engine's state twice in one block).
 //   T16 removing Env (Type -> Off) makes it fully inert: latency drops to 0 and the
 //       Trunk becomes pure passthrough again (nothing else was placed).
+//   T17 STEREO Trunk SPLITTER (Env, Dual) == manual env.processStereo on split copies.
+//       Unlike Mod's Spread, Env/Comp have no decorrelation mechanism, so identical
+//       L/R input produces identical L/R output -- verified explicitly (not a bug).
+//   T18 same shape as T17, for Comp.
+//   T19 STEREO BRIDGE (Comp) after DIVERGENT Lane-A/Lane-B drives proves the stereo
+//       lanes are UNLINKED (independent detector/GR per lane, no shared sidechain):
+//       the board matches TWO SEPARATELY-run single-lane Comp references fed the same
+//       divergent content -- a linked/stereo-bus detector could not reproduce this.
+//   T20 STEREO Env/Comp slot in Solo collapses to the BIT-EXACT mono path (mirrors T11).
+//   T21 STEREO OFF is unchanged for Env/Comp; turning it ON reports lane routing
+//       (mirrors T13).
 //
 // NOTE on T3-T13's isolation: earlier versions of this file bypassed b.env/b.comp
 // explicitly to isolate the free-slot pool, because the locked pair was ALWAYS in the
@@ -484,6 +495,170 @@ int main()
         std::vector<float> inCopy2 = t2;
         b.process(t2.data(), vA2.data(), vB2.data(), N, true, true, noHeal);
         check(bitEq(vA2.data(), inCopy2.data(), N), "T16 Env removed: signal passes through unchanged (Trunk had nothing else)");
+    }
+
+    // ---- T17: STEREO Trunk SPLITTER (Env, Dual) == manual env.processStereo on split
+    //      copies. Unlike Mod's Spread, Env has no decorrelation mechanism, so a
+    //      splitter fed identical L/R content produces IDENTICAL L/R output -- that's
+    //      the correct, expected behaviour (proven explicitly below), not a bug. ----
+    {
+        PedalboardBlock b; b.prepare(ctx); b.clearRouting();
+        b.setSlotType(0, PedalboardBlock::TypeEnv); b.setSlotLane(0, PedalboardBlock::Trunk);
+        b.setSlotStereo(0, true);
+        cfgEnv(b.env);
+
+        std::vector<float> boardA, boardB, t(N), vA(N), vB(N);
+        for (int k = 0; k < K; ++k)
+        {
+            fillBlock(t.data(), N, k);
+            b.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal);
+            boardA.insert(boardA.end(), vA.begin(), vA.end());
+            boardB.insert(boardB.end(), vB.begin(), vB.end());
+        }
+        // reference: a splitter seeds BOTH lanes from the same trunk, then processStereo.
+        EnvFilterBlock e; e.prepare(ctx); cfgEnv(e);
+        std::vector<float> refA, refB, ta(N), tb(N);
+        for (int k = 0; k < K; ++k)
+        {
+            fillBlock(ta.data(), N, k); tb = ta; // both lanes = the mono trunk
+            e.processStereo(ta.data(), tb.data(), N);
+            refA.insert(refA.end(), ta.begin(), ta.end());
+            refB.insert(refB.end(), tb.begin(), tb.end());
+        }
+        check(bitEqV(boardA, refA), "T17 Env splitter vA == manual processStereo L (bit-exact, multi-block)");
+        check(bitEqV(boardB, refB), "T17 Env splitter vB == manual processStereo R (bit-exact, multi-block)");
+        check(bitEqV(boardA, boardB), "T17 Env splitter: identical L/R in -> identical L/R out (no decorrelation, unlike Mod)");
+        check(b.hasLaneRouting(), "T17 hasLaneRouting() true with an Env stereo splitter");
+    }
+
+    // ---- T18: same shape as T17, for Comp ----
+    {
+        PedalboardBlock b; b.prepare(ctx); b.clearRouting();
+        b.setSlotType(0, PedalboardBlock::TypeComp); b.setSlotLane(0, PedalboardBlock::Trunk);
+        b.setSlotStereo(0, true);
+        cfgComp(b.comp);
+
+        std::vector<float> boardA, boardB, t(N), vA(N), vB(N);
+        for (int k = 0; k < K; ++k)
+        {
+            fillBlock(t.data(), N, k);
+            b.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal);
+            boardA.insert(boardA.end(), vA.begin(), vA.end());
+            boardB.insert(boardB.end(), vB.begin(), vB.end());
+        }
+        CompBlock c; c.prepare(ctx); cfgComp(c);
+        std::vector<float> refA, refB, ta(N), tb(N);
+        for (int k = 0; k < K; ++k)
+        {
+            fillBlock(ta.data(), N, k); tb = ta;
+            c.processStereo(ta.data(), tb.data(), N);
+            refA.insert(refA.end(), ta.begin(), ta.end());
+            refB.insert(refB.end(), tb.begin(), tb.end());
+        }
+        check(bitEqV(boardA, refA), "T18 Comp splitter vA == manual processStereo L (bit-exact, multi-block)");
+        check(bitEqV(boardB, refB), "T18 Comp splitter vB == manual processStereo R (bit-exact, multi-block)");
+        check(bitEqV(boardA, boardB), "T18 Comp splitter: identical L/R in -> identical L/R out (no decorrelation)");
+        check(b.hasLaneRouting(), "T18 hasLaneRouting() true with a Comp stereo splitter");
+    }
+
+    // ---- T19: STEREO BRIDGE (Comp) after DIVERGENT Lane-A/Lane-B drives proves the
+    //      stereo lanes are UNLINKED -- independent detector/GR per lane, no shared
+    //      sidechain. If GR were linked (stereo-bus style), the board's output would
+    //      NOT match two SEPARATELY-run single-lane references fed the same divergent
+    //      content, because a linked detector reacts to BOTH channels' level. ----
+    {
+        PedalboardBlock b; b.prepare(ctx); b.clearRouting();
+        b.setSlotType(0, PedalboardBlock::TypeDrive); b.setSlotLane(0, PedalboardBlock::LaneA);
+        b.setSlotType(1, PedalboardBlock::TypeDrive); b.setSlotLane(1, PedalboardBlock::LaneB);
+        b.setSlotType(2, PedalboardBlock::TypeComp);  b.setSlotLane(2, PedalboardBlock::LaneA); b.setSlotStereo(2, true);
+        cfgDrive(b.drive[0], 2, 0, 0.9f  /*hot*/); cfgDrive(b.drive[1], 3, 0, 0.15f /*quiet, different kind*/);
+        cfgComp(b.comp);
+
+        std::vector<float> boardA, boardB, t(N), vA(N), vB(N);
+        for (int k = 0; k < K; ++k)
+        {
+            fillBlock(t.data(), N, k);
+            b.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal);
+            boardA.insert(boardA.end(), vA.begin(), vA.end());
+            boardB.insert(boardB.end(), vB.begin(), vB.end());
+        }
+        // reference: split -> driveA(A) / driveB(B) -> TWO SEPARATE single-lane Comp
+        // engines, one per lane, run independently (this IS "unlinked" by construction).
+        DrivePedalEngine dA, dB; dA.prepare(ctx); dB.prepare(ctx);
+        cfgDrive(dA, 2, 0, 0.9f); cfgDrive(dB, 3, 0, 0.15f);
+        CompBlock cA, cB; cA.prepare(ctx); cB.prepare(ctx); cfgComp(cA); cfgComp(cB);
+        std::vector<float> refA, refB, ta(N), tb(N);
+        for (int k = 0; k < K; ++k)
+        {
+            fillBlock(ta.data(), N, k); tb = ta; // split
+            dA.process(ta.data(), N); dB.process(tb.data(), N);
+            cA.process(ta.data(), N); cB.process(tb.data(), N);
+            refA.insert(refA.end(), ta.begin(), ta.end());
+            refB.insert(refB.end(), tb.begin(), tb.end());
+        }
+        check(bitEqV(boardA, refA), "T19 Comp bridge vA == independent single-lane reference (bit-exact)");
+        check(bitEqV(boardB, refB), "T19 Comp bridge vB == independent single-lane reference (bit-exact)");
+        check(!bitEqV(boardA, boardB), "T19 divergent lane content -> divergent GR (unlinked, not averaged)");
+    }
+
+    // ---- T20: STEREO Env/Comp slot in Solo collapses to the BIT-EXACT mono path ----
+    {
+        PedalboardBlock b; b.prepare(ctx); b.clearRouting();
+        b.setSlotType(0, PedalboardBlock::TypeEnv); b.setSlotLane(0, PedalboardBlock::Trunk);
+        b.setSlotStereo(0, true);
+        cfgEnv(b.env);
+        EnvFilterBlock refE; refE.prepare(ctx); cfgEnv(refE);
+        bool eqE = true; std::vector<float> t(N), vA(N), vB(N, 222.0f), r(N);
+        for (int k = 0; k < K; ++k)
+        {
+            fillBlock(t.data(), N, k); r.assign(t.begin(), t.end());
+            b.process(t.data(), vA.data(), vB.data(), N, /*runA*/ true, /*runB*/ false, noHeal);
+            refE.process(r.data(), N);
+            if (!bitEq(vA.data(), r.data(), N)) eqE = false;
+        }
+        check(eqE, "T20 stereo Env slot in Solo A collapses to bit-exact mono");
+    }
+    {
+        PedalboardBlock b; b.prepare(ctx); b.clearRouting();
+        b.setSlotType(0, PedalboardBlock::TypeComp); b.setSlotLane(0, PedalboardBlock::Trunk);
+        b.setSlotStereo(0, true);
+        cfgComp(b.comp);
+        CompBlock refC; refC.prepare(ctx); cfgComp(refC);
+        bool eqC = true; std::vector<float> t(N), vA(N), vB(N, 222.0f), r(N);
+        for (int k = 0; k < K; ++k)
+        {
+            fillBlock(t.data(), N, k); r.assign(t.begin(), t.end());
+            b.process(t.data(), vA.data(), vB.data(), N, /*runA*/ true, /*runB*/ false, noHeal);
+            refC.process(r.data(), N);
+            if (!bitEq(vA.data(), r.data(), N)) eqC = false;
+        }
+        check(eqC, "T20 stereo Comp slot in Solo A collapses to bit-exact mono");
+    }
+
+    // ---- T21: STEREO OFF is unchanged for Env/Comp; turning it ON reports lane routing ----
+    {
+        PedalboardBlock b; b.prepare(ctx); b.clearRouting();
+        b.setSlotType(0, PedalboardBlock::TypeEnv); b.setSlotLane(0, PedalboardBlock::Trunk);
+        cfgEnv(b.env);
+        std::vector<float> t(N), vA(N), vB(N);
+        fillBlock(t.data(), N, 0);
+        b.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal);
+        check(bitEq(vA.data(), vB.data(), N), "T21 Trunk Env, stereo OFF: vA == vB (mono, unchanged)");
+        check(!b.hasLaneRouting(), "T21 stereo OFF Trunk Env slot: no lane routing");
+        b.setSlotStereo(0, true);
+        check(b.hasLaneRouting(), "T21 stereo ON Trunk Env splitter: reports lane routing");
+    }
+    {
+        PedalboardBlock b; b.prepare(ctx); b.clearRouting();
+        b.setSlotType(0, PedalboardBlock::TypeComp); b.setSlotLane(0, PedalboardBlock::Trunk);
+        cfgComp(b.comp);
+        std::vector<float> t(N), vA(N), vB(N);
+        fillBlock(t.data(), N, 0);
+        b.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal);
+        check(bitEq(vA.data(), vB.data(), N), "T21 Trunk Comp, stereo OFF: vA == vB (mono, unchanged)");
+        check(!b.hasLaneRouting(), "T21 stereo OFF Trunk Comp slot: no lane routing");
+        b.setSlotStereo(0, true);
+        check(b.hasLaneRouting(), "T21 stereo ON Trunk Comp splitter: reports lane routing");
     }
 
     std::printf("%s (%d failure%s)\n", gFail == 0 ? "ALL PASS" : "FAILURES", gFail, gFail == 1 ? "" : "s");
