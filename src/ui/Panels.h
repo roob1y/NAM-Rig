@@ -1623,10 +1623,10 @@ private:
 
     void layout()
     {
-        int w = juce::jmax(mAnchor.getWidth(), 64); // same width as the switch (wider only if an item needs it)
-        for (auto &it : mItems)
-            w = juce::jmax(w, (int)std::ceil(juce::GlyphArrangement::getStringWidth(
-                                  fonts::mono(9.5f, fonts::SemiBold), it)) + 36);
+        // Exactly the switch's footprint: same width and left edge as the pill, so the
+        // menu reads as the slot extending downward. (Do NOT grow to fit item text —
+        // that's what made RANGE's menu wider than its button.)
+        const int w = mAnchor.getWidth();
         const int h = kPad * 2 + mItems.size() * kRowH;
         // tucked 2px UNDER the switch so they touch; flips above when out of room
         int x = mAnchor.getX();
