@@ -250,6 +250,8 @@ private:
     int slotLane(int i) const { return paramC(sid(i, "Lane")); } // 0 Both, 1 A, 2 B
     bool slotOn(int i) const { return paramF(sid(i, "On")) >= 0.5f; }
     bool slotUsed(int i) const { return slotType(i) != 0; }
+    bool slotCanStereo(int i) const { const int t = slotType(i); return t == 2 || t == 3; } // Mod/Delay only
+    bool slotStereo(int i) const { return slotCanStereo(i) && paramF(sid(i, "Stereo")) >= 0.5f; } // spans both amps
     int frontOrder() const { return paramC("pbFrontOrder"); } // 0 Env first, 1 Comp first
 
     void writeNorm(const juce::String &id, float norm)
@@ -270,11 +272,11 @@ private:
     void writeBool(const juce::String &id, bool on) { writeNorm(id, on ? 1.0f : 0.0f); }
 
     // The per-slot param union (everything a slot owns; order irrelevant, Lane at [1]).
-    static constexpr int kU = 36;
+    static constexpr int kU = 37;
     static const char *const *unionSuffixes()
     {
         static const char *const u[kU] = {
-            "Type", "Lane", "On",
+            "Type", "Lane", "On", "Stereo",
             "dCat", "bModel", "bDrive", "bRange", "oDrive", "oTone", "oLevel",
             "dDrive", "dTone", "dLevel", "dMigrate", "fDrive", "fTone", "fLevel", "fGate",
             "mType", "mRate", "mSync", "mDepth", "mMix", "mFeedback", "mWave", "mPhaserVoice",
@@ -458,6 +460,14 @@ public:
         writeChoice(sid(slot, "Lane"), juce::jlimit(0, 2, lane));
         structureChanged();
     }
+    // Toggle a Mod/Delay slot's stereo span (L->Amp A, R->Amp B). No-op on Drive/Off.
+    void setPedalStereo(int slot, bool on)
+    {
+        if (!slotCanStereo(slot)) return;
+        writeBool(sid(slot, "Stereo"), on);
+        structureChanged();
+    }
+    void togglePedalStereo(int slot) { setPedalStereo(slot, !slotStereo(slot)); }
     void swapFrontPair()
     {
         writeChoice("pbFrontOrder", frontOrder() == 0 ? 1 : 0);
@@ -568,6 +578,19 @@ private:
             g.setColour(on ? mAp.accent : colors::caption);
             g.setFont(fonts::archivo(10.0f, fonts::Bold, 0.13f));
             g.drawText(mKindStr, mHeaderRect, juce::Justification::centredLeft);
+            // MONO/STEREO state chip (Mod/Delay). Lit accent = STEREO (spans both amps);
+            // dim = MONO. Click toggles it (handled in mouseUp).
+            if (!mStereoTagRect.isEmpty())
+            {
+                const bool st = mBoard.slotStereo(mSlot);
+                auto tr = mStereoTagRect.toFloat();
+                g.setColour(st ? mAp.led.withAlpha(0.20f) : juce::Colours::black.withAlpha(0.18f));
+                g.fillRoundedRectangle(tr, 6.0f);
+                g.setColour((st ? mAp.led : colors::caption).withAlpha(mStereoHover ? 0.95f : 0.7f));
+                g.drawRoundedRectangle(tr.reduced(0.5f), 6.0f, 1.0f);
+                g.setFont(fonts::archivo(7.5f, fonts::Bold, 0.10f));
+                g.drawText(st ? "STEREO" : "MONO", mStereoTagRect, juce::Justification::centred);
+            }
             auto jewel = juce::Rectangle<float>(13.0f, 13.0f).withCentre(
                 {(float)mHeaderRect.getRight() - 6.5f, (float)mHeaderRect.getCentreY()});
             if (on) fx::glowEllipse(g, jewel, mAp.led, 13, 0.6f, 6, 0.55f);
@@ -645,6 +668,13 @@ private:
             // (Robbie: the 5-knob comp face is the reference — lock everything to it).
             auto a = getLocalBounds().reduced(10, 8);
             mHeaderRect = a.removeFromTop(15);
+            // MONO/STEREO tag: a small clickable chip in the header, left of the jewel LED.
+            // Only Mod/Delay can span both amps (Env/Comp/Drive never show it).
+            if (mKind == Mod || mKind == Delay)
+                mStereoTagRect = {mHeaderRect.getRight() - 16 - 54, mHeaderRect.getY() - 1,
+                                  54, mHeaderRect.getHeight() + 2};
+            else
+                mStereoTagRect = {};
             a.removeFromTop(6);
             mZoneRect = a.removeFromTop(kZoneH);
             a.removeFromTop(6);
@@ -696,29 +726,39 @@ private:
 
         void mouseUp(const juce::MouseEvent &e) override
         {
-            // click (not a deck drag that started on the face) on the printed name
-            if (e.getDistanceFromDragStart() < 5 && mPillRect.contains(e.getPosition()))
+            if (e.getDistanceFromDragStart() >= 5) return; // a deck drag, not a click
+            // click the MONO/STEREO chip toggles the span (Mod/Delay only)
+            if (!mStereoTagRect.isEmpty() && mStereoTagRect.contains(e.getPosition()))
+                { mBoard.togglePedalStereo(mSlot); return; }
+            // click the printed name opens the model/voice menu
+            if (mPillRect.contains(e.getPosition()))
                 showModelMenu();
         }
 
         void mouseMove(const juce::MouseEvent &e) override
         {
             const bool over = mPillRect.contains(e.getPosition());
+            const bool overTag = !mStereoTagRect.isEmpty() && mStereoTagRect.contains(e.getPosition());
+            if (overTag != mStereoHover)
+            {
+                mStereoHover = overTag;
+                repaint(mStereoTagRect.expanded(4));
+            }
             if (over != mPillHover)
             {
                 mPillHover = over;
-                setMouseCursor(over ? juce::MouseCursor::PointingHandCursor
-                                    : juce::MouseCursor::NormalCursor);
                 repaint(mPillRect.expanded(6));
             }
+            setMouseCursor((over || overTag) ? juce::MouseCursor::PointingHandCursor
+                                             : juce::MouseCursor::NormalCursor);
         }
         void mouseExit(const juce::MouseEvent &) override
         {
-            if (mPillHover)
+            if (mPillHover || mStereoHover)
             {
-                mPillHover = false;
+                mPillHover = mStereoHover = false;
                 setMouseCursor(juce::MouseCursor::NormalCursor);
-                repaint(mPillRect.expanded(6));
+                repaint();
             }
         }
 
@@ -969,11 +1009,11 @@ private:
         std::vector<StompPill *> mPills;
         colors::AccentPair mAp;
         juce::String mKindStr, mModelStr;
-        juce::Rectangle<int> mHeaderRect, mPillRect, mZoneRect;
+        juce::Rectangle<int> mHeaderRect, mPillRect, mZoneRect, mStereoTagRect;
         int mPlateY = 0;  // stomp-plate seam y (0 until first layout)
         int mNameW = 0;   // printed-name text width (positions the ▾)
         int mLastKey = -1;
-        bool mLastOn = true, mPillHover = false;
+        bool mLastOn = true, mPillHover = false, mStereoHover = false;
         float mGrSm = 0.0f, mGrPainted = -1.0f; // comp GR meter smoothing / dirty check
     };
 
@@ -1529,8 +1569,16 @@ private:
             mNodes.clear();
             if (getWidth() <= 0) return;
             const Lanes ln = mBoard.lanesNow();
+            // A STEREO pedal is a SHARED column both lanes flow through, so it counts on
+            // BOTH rows. Width the rows for the longer path (mono-on-that-row + every span).
+            auto spanCount = [&](const std::vector<int> &v) {
+                int s = 0; for (int i : v) if (mBoard.slotStereo(i)) ++s; return s; };
+            const int spansA = spanCount(ln.l[1]), spansB = spanCount(ln.l[2]);
+            const int allSpans = spansA + spansB;
+            const int rowA = (int)ln.l[1].size() - spansA + allSpans;
+            const int rowB = (int)ln.l[2].size() - spansB + allSpans;
             const int nTrunk = 2 + (int)ln.l[0].size();
-            const int nLane = juce::jmax(1, juce::jmax((int)ln.l[1].size(), (int)ln.l[2].size()));
+            const int nLane = juce::jmax(1, juce::jmax(rowA, rowB));
             const int gap = 8, inW = 26, ampW = 40, splitPad = 24;
             const int avail = getWidth() - inW - ampW - splitPad - gap * (nTrunk + nLane + 2);
             const int nodeW = juce::jlimit(44, 76, avail / juce::jmax(1, nTrunk + nLane));
@@ -1552,17 +1600,34 @@ private:
             }
             mSplitX = x + splitPad / 2 - gap / 2;
 
+            // Post-split walk in INDEX order (l[1] then l[2] == index order, since packing
+            // keeps all Amp-A indices below all Amp-B). Amp-A pedals advance the xA cursor,
+            // Amp-B the xB cursor; a STEREO pedal is a tall SHARED column placed at max(xA,xB)
+            // that advances BOTH — so anything after it on EITHER lane is drawn to its right
+            // (you can place a pedal after the stereo on the lane that was empty before it).
+            const int top = laneAY() - nodeH / 2, bot = laneBY() + nodeH / 2;
             int xa = mSplitX + splitPad / 2, xb = xa;
-            for (int s : ln.l[1])
+            auto placePost = [&](int s, int home)
             {
-                mNodes.push_back({s, 1, {xa, laneAY() - nodeH / 2, nodeW, nodeH}});
-                xa += nodeW + gap;
-            }
-            for (int s : ln.l[2])
-            {
-                mNodes.push_back({s, 2, {xb, laneBY() - nodeH / 2, nodeW, nodeH}});
-                xb += nodeW + gap;
-            }
+                if (mBoard.slotStereo(s))
+                {
+                    const int x0 = juce::jmax(xa, xb);
+                    mNodes.push_back({s, home, {x0, top, nodeW, bot - top}});
+                    xa = xb = x0 + nodeW + gap;
+                }
+                else if (home == 1)
+                {
+                    mNodes.push_back({s, 1, {xa, laneAY() - nodeH / 2, nodeW, nodeH}});
+                    xa += nodeW + gap;
+                }
+                else
+                {
+                    mNodes.push_back({s, 2, {xb, laneBY() - nodeH / 2, nodeW, nodeH}});
+                    xb += nodeW + gap;
+                }
+            };
+            for (int s : ln.l[1]) placePost(s, 1);
+            for (int s : ln.l[2]) placePost(s, 2);
 
             const int ampX = juce::jmin(getWidth() - ampW, juce::jmax(juce::jmax(xa, xb) + gap, mSplitX + splitPad));
             mAmpA = {ampX, laneAY() - 12, ampW, 24};
@@ -1616,6 +1681,13 @@ private:
             auto led = juce::Rectangle<float>(5.0f, 5.0f).withPosition(r.getRight() - 9.0f, r.getY() + 4.0f);
             g.setColour(on ? ap.led : colors::ledOff);
             g.fillEllipse(led);
+            // STEREO span: an "ST" tag so the tall node reads as feeding both amps.
+            if (n.sel >= 0 && mBoard.slotStereo(n.sel))
+            {
+                g.setColour(on ? ap.accent : colors::textDim);
+                g.setFont(fonts::archivo(7.0f, fonts::Bold, 0.08f));
+                g.drawText("ST", r.removeFromBottom(11.0f).toNearestInt(), juce::Justification::centred);
+            }
             if (ghost) g.setOpacity(1.0f);
         }
 
@@ -1635,8 +1707,14 @@ private:
             const Node *last = nullptr;
             for (const auto &n : mNodes)
             {
-                if (n.lane != lane || n.sel < 0 || (mDragging && n.sel == mDragSel)) continue;
-                if (p.x > n.rect.getCentreX()) { ++pos; last = &n; }
+                if (n.sel < 0 || (mDragging && n.sel == mDragSel)) continue;
+                const bool span = mBoard.slotStereo(n.sel); // shared column: sits on both rows
+                if (n.lane != lane && !span) continue;
+                if (p.x > n.rect.getCentreX())
+                {
+                    last = &n;                 // caret x may land AFTER a stereo pedal on either row
+                    if (n.lane == lane) ++pos; // but position counts only this lane's own list
+                }
             }
             if (last != nullptr)
                 caretX = last->rect.getRight() + 4;
@@ -1667,6 +1745,12 @@ private:
             m.addItem(1, "Route: Both amps", true, lane == 0);
             m.addItem(2, "Route: Amp A", true, lane == 1);
             m.addItem(3, "Route: Amp B", true, lane == 2);
+            if (mBoard.slotCanStereo(slot))
+            {
+                m.addSeparator();
+                // Stereo span: L -> Amp A, R -> Amp B (splitter on Both, bridge on a lane).
+                m.addItem(5, "Stereo (span both amps)", true, mBoard.slotStereo(slot));
+            }
             m.addSeparator();
             m.addItem(4, "Remove pedal");
             juce::Component::SafePointer<ChainStrip> sp(this);
@@ -1675,6 +1759,7 @@ private:
                             {
                                 if (sp == nullptr || r <= 0) return;
                                 if (r >= 1 && r <= 3) sp->mBoard.routePedal(slot, r - 1);
+                                else if (r == 5) sp->mBoard.togglePedalStereo(slot);
                                 else if (r == 4) sp->mBoard.removePedal(slot);
                             });
         }

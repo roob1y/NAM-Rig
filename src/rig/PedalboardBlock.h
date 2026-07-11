@@ -63,7 +63,7 @@ public:
     void setDefaultRouting()
     {
         mEnvFirst = true;
-        for (int i = 0; i < kFreeSlots; ++i) { mLane[i] = Trunk; mOn[i] = true; }
+        for (int i = 0; i < kFreeSlots; ++i) { mLane[i] = Trunk; mOn[i] = true; mStereo[i] = false; }
         mType[0] = TypeDrive; mType[1] = TypeDrive; mType[2] = TypeDrive;
         mType[3] = TypeMod;   mType[4] = TypeDelay;
         for (int i = 5; i < kFreeSlots; ++i) mType[i] = TypeOff;
@@ -73,17 +73,24 @@ public:
     void clearRouting()
     {
         mEnvFirst = true;
-        for (int i = 0; i < kFreeSlots; ++i) { mType[i] = TypeOff; mLane[i] = Trunk; mOn[i] = true; }
+        for (int i = 0; i < kFreeSlots; ++i) { mType[i] = TypeOff; mLane[i] = Trunk; mOn[i] = true; mStereo[i] = false; }
     }
 
     void setEnvFirst(bool envFirst) { mEnvFirst = envFirst; } // locked-pair order swap
     void setSlotType(int i, int type) { if (valid(i)) mType[i] = clampType(type); }
     void setSlotLane(int i, int lane) { if (valid(i)) mLane[i] = clampLane(lane); }
     void setSlotOn(int i, bool on)    { if (valid(i)) mOn[i] = on; }
+    // STEREO: a Mod/Delay slot that SPANS both amps. It runs AFTER the split with the
+    // engine's stereo path (processStereo): L feeds Amp A, R feeds Amp B. On the Trunk it
+    // seeds both lanes from the (mono) trunk -> a SPLITTER (mono in, decorrelated A/B out);
+    // after lane pedals it processes an existing A/B image -> a BRIDGE. Ignored on Drive/Off.
+    // Engages only when BOTH amps run (Dual); Solo collapses to the mono path (bit-exact).
+    void setSlotStereo(int i, bool on) { if (valid(i)) mStereo[i] = on; }
 
     int  slotType(int i) const { return valid(i) ? mType[i] : (int)TypeOff; }
     int  slotLane(int i) const { return valid(i) ? mLane[i] : (int)Trunk; }
     bool slotOn(int i)   const { return valid(i) ? mOn[i] : false; }
+    bool slotStereo(int i) const { return valid(i) ? mStereo[i] : false; }
     bool envFirst()      const { return mEnvFirst; }
 
     // ---- lifecycle ----
@@ -95,7 +102,7 @@ public:
     void reset()
     {
         env.reset(); comp.reset();
-        for (int i = 0; i < kFreeSlots; ++i) { drive[i].reset(); mod[i].reset(); delay[i].reset(); }
+        for (int i = 0; i < kFreeSlots; ++i) { drive[i].reset(); mod[i].reset(); delay[i].reset(); mWasStereo[i] = false; }
     }
 
     // ---- processing ----
@@ -112,23 +119,37 @@ public:
         if (mEnvFirst) { runLocked(env, trunk, n, heal); runLocked(comp, trunk, n, heal); }
         else           { runLocked(comp, trunk, n, heal); runLocked(env, trunk, n, heal); }
 
-        // 2) Free Trunk slots (feed both amps), in index order, on the shared bus.
+        // 2) Free MONO Trunk slots (feed both amps), in index order, on the shared bus.
+        //    STEREO Trunk slots are NOT pre-split -> they defer to the post-split pass below
+        //    as splitters (they need the two lane buffers to write L/R).
         for (int i = 0; i < kFreeSlots; ++i)
-            if (mLane[i] == Trunk) runSlot(i, trunk, n, heal);
+            if (mLane[i] == Trunk && !stereoAt(i)) runSlot(i, trunk, n, heal);
 
         // 3) Split: each live amp starts from the trunk result.
         if (runA) std::memcpy(vA, trunk, (size_t)n * sizeof(float));
         if (runB) std::memcpy(vB, trunk, (size_t)n * sizeof(float));
 
-        // 4) Amp-A lane, in index order, on vA (only if Amp A is running).
-        if (runA)
-            for (int i = 0; i < kFreeSlots; ++i)
-                if (mLane[i] == LaneA) runSlot(i, vA, n, heal);
-
-        // 5) Amp-B lane, in index order, on vB (only if Amp B is running).
-        if (runB)
-            for (int i = 0; i < kFreeSlots; ++i)
-                if (mLane[i] == LaneB) runSlot(i, vB, n, heal);
+        // 4) Post-split pass, ONE index-ordered walk (was two lane loops; unifying is
+        //    bit-exact for independent A/B content and lets a STEREO slot be invoked once
+        //    with BOTH buffers at its position in the flow):
+        //      - Lane-A mono slot  -> vA         - Lane-B mono slot -> vB
+        //      - STEREO slot (Dual) -> processStereo(vA, vB)  (spans both amps)
+        //      - STEREO slot (Solo) -> mono path on the single live amp (bit-exact)
+        for (int i = 0; i < kFreeSlots; ++i)
+        {
+            if (mType[i] == TypeOff || !mOn[i]) { mWasStereo[i] = false; continue; }
+            if (stereoAt(i) && runA && runB)
+            {
+                runSlotStereo(i, vA, vB, n, heal); // mWasStereo updated inside
+                continue;
+            }
+            // Mono placement. A stereo slot in Solo collapses to the live amp's lane.
+            const int lane = stereoAt(i) ? (runA ? LaneA : LaneB) : mLane[i];
+            if (lane == LaneA) { if (runA) runSlot(i, vA, n, heal); }
+            else if (lane == LaneB) { if (runB) runSlot(i, vB, n, heal); }
+            // lane == Trunk (mono) already ran pre-split -> nothing here.
+            mWasStereo[i] = false;
+        }
     }
 
     // Board PDC = locked pair + Trunk slots + the heavier of the two lane branches.
@@ -141,7 +162,8 @@ public:
         {
             const double l = engineLatency(i);
             if (l == 0.0) continue;
-            if (mLane[i] == LaneA) a += l;
+            if (stereoAt(i)) { a += l; b += l; } // spans both amps -> counts on each lane
+            else if (mLane[i] == LaneA) a += l;
             else if (mLane[i] == LaneB) b += l;
             else trunk += l;
         }
@@ -154,7 +176,7 @@ public:
     bool hasLaneRouting() const
     {
         for (int i = 0; i < kFreeSlots; ++i)
-            if (mType[i] != TypeOff && mOn[i] && mLane[i] != Trunk) return true;
+            if (mType[i] != TypeOff && mOn[i] && (mLane[i] != Trunk || stereoAt(i))) return true;
         return false;
     }
 
@@ -185,6 +207,9 @@ private:
         }
     }
 
+    // Only Mod/Delay have a stereo path; Drive/Off ignore the stereo flag.
+    bool stereoAt(int i) const { return mStereo[i] && (mType[i] == TypeMod || mType[i] == TypeDelay); }
+
     template <class Heal>
     void runSlot(int i, float *buf, int n, Heal &heal)
     {
@@ -193,6 +218,29 @@ private:
         if (e == nullptr || e->isBypassed()) return;
         e->process(buf, n);
         heal(*e, buf, n);
+    }
+    // Stereo span: run the slot's engine as L=Amp A / R=Amp B. The engines read independent
+    // L/R input, so this serves BOTH the splitter (vA==vB seeded from trunk) and the bridge
+    // (vA!=vB from upstream lane pedals). Delay self-reseeds its R lane on the mono->stereo
+    // edge; Mod snaps its Spread so the first stereo block honours the width exactly.
+    template <class Heal>
+    void runSlotStereo(int i, float *vA, float *vB, int n, Heal &heal)
+    {
+        if (mType[i] == TypeMod)
+        {
+            if (mod[i].isBypassed()) { mWasStereo[i] = false; return; }
+            if (!mWasStereo[i]) mod[i].snapSpread();
+            mod[i].processStereo(vA, vB, n);
+            heal(mod[i], vA, n); heal(mod[i], vB, n);
+            mWasStereo[i] = true;
+        }
+        else if (mType[i] == TypeDelay)
+        {
+            if (delay[i].isBypassed()) { mWasStereo[i] = false; return; }
+            delay[i].processStereo(vA, vB, n);
+            heal(delay[i], vA, n); heal(delay[i], vB, n);
+            mWasStereo[i] = true;
+        }
     }
     template <class Heal>
     void runLocked(MonoBlock &e, float *buf, int n, Heal &heal)
@@ -206,6 +254,10 @@ private:
     int  mType[kFreeSlots] = { TypeOff, TypeOff, TypeOff, TypeOff, TypeOff, TypeOff, TypeOff, TypeOff };
     int  mLane[kFreeSlots] = { Trunk, Trunk, Trunk, Trunk, Trunk, Trunk, Trunk, Trunk };
     bool mOn[kFreeSlots]   = { true, true, true, true, true, true, true, true };
+    bool mStereo[kFreeSlots] = { false, false, false, false, false, false, false, false };
+    // Per-slot "was stereo last block" edge tracker (NOT routing state): drives the one-shot
+    // reseed/Spread-snap when a slot first engages its stereo path. Mutated during process().
+    bool mWasStereo[kFreeSlots] = { false, false, false, false, false, false, false, false };
 };
 
 } // namespace nam_rig

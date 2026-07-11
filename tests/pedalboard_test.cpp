@@ -296,6 +296,105 @@ int main()
         check(b.latencySamples() == 0.0, "T9 default board latency == 0 (matches legacy chain)");
     }
 
+    // ---- T10: STEREO Trunk SPLITTER (Dual) == manual mod.processStereo on split copies ----
+    {
+        PedalboardBlock b; b.prepare(ctx); b.clearRouting();
+        b.env.setBypassed(true); b.comp.setBypassed(true);
+        b.setSlotType(0, PedalboardBlock::TypeMod); b.setSlotLane(0, PedalboardBlock::Trunk);
+        b.setSlotStereo(0, true);
+        cfgMod(b.mod[0]); b.mod[0].setType(0 /*chorus*/); b.mod[0].setSpread(0.8f);
+
+        std::vector<float> boardA, boardB, t(N), vA(N), vB(N);
+        for (int k = 0; k < K; ++k)
+        {
+            fillBlock(t.data(), N, k);
+            b.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal);
+            boardA.insert(boardA.end(), vA.begin(), vA.end());
+            boardB.insert(boardB.end(), vB.begin(), vB.end());
+        }
+        // reference: a splitter seeds BOTH lanes from the same trunk, then processStereo.
+        PreModBlock m; m.prepare(ctx); cfgMod(m); m.setType(0); m.setSpread(0.8f);
+        std::vector<float> refA, refB, ta(N), tb(N);
+        for (int k = 0; k < K; ++k)
+        {
+            fillBlock(ta.data(), N, k); tb = ta; // both lanes = the mono trunk
+            if (k == 0) m.snapSpread();          // board snaps Spread on the first stereo block
+            m.processStereo(ta.data(), tb.data(), N);
+            refA.insert(refA.end(), ta.begin(), ta.end());
+            refB.insert(refB.end(), tb.begin(), tb.end());
+        }
+        check(bitEqV(boardA, refA), "T10 splitter vA == manual processStereo L (bit-exact, multi-block)");
+        check(bitEqV(boardB, refB), "T10 splitter vB == manual processStereo R (bit-exact, multi-block)");
+        check(!bitEqV(boardA, boardB), "T10 splitter decorrelates Amp A vs Amp B (Spread>0)");
+    }
+
+    // ---- T11: STEREO slot in Solo collapses to the BIT-EXACT mono path ----
+    {
+        PedalboardBlock b; b.prepare(ctx); b.clearRouting();
+        b.env.setBypassed(true); b.comp.setBypassed(true);
+        b.setSlotType(0, PedalboardBlock::TypeDelay); b.setSlotLane(0, PedalboardBlock::Trunk);
+        b.setSlotStereo(0, true);
+        cfgDelay(b.delay[0]);
+        PreDelayBlock ref; ref.prepare(ctx); cfgDelay(ref);
+        bool eq = true; std::vector<float> t(N), vA(N), vB(N, 222.0f), r(N);
+        for (int k = 0; k < K; ++k)
+        {
+            fillBlock(t.data(), N, k); r.assign(t.begin(), t.end());
+            b.process(t.data(), vA.data(), vB.data(), N, /*runA*/ true, /*runB*/ false, noHeal);
+            ref.process(r.data(), N); // mono path
+            if (!bitEq(vA.data(), r.data(), N)) eq = false;
+        }
+        check(eq, "T11 stereo slot in Solo A collapses to bit-exact mono");
+    }
+
+    // ---- T12: STEREO BRIDGE after a Lane-A mono pedal (stereo-in / stereo-out) ----
+    {
+        PedalboardBlock b; b.prepare(ctx); b.clearRouting();
+        b.env.setBypassed(true); b.comp.setBypassed(true);
+        b.setSlotType(0, PedalboardBlock::TypeMod);   b.setSlotLane(0, PedalboardBlock::LaneA);
+        b.setSlotType(1, PedalboardBlock::TypeDelay); b.setSlotLane(1, PedalboardBlock::LaneA); b.setSlotStereo(1, true);
+        cfgMod(b.mod[0]); cfgDelay(b.delay[1]);
+
+        std::vector<float> boardA, boardB, t(N), vA(N), vB(N);
+        for (int k = 0; k < K; ++k)
+        {
+            fillBlock(t.data(), N, k);
+            b.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal);
+            boardA.insert(boardA.end(), vA.begin(), vA.end());
+            boardB.insert(boardB.end(), vB.begin(), vB.end());
+        }
+        // reference: split; A = mod(trunk), B = trunk; then delay.processStereo(A, B).
+        PreModBlock m; m.prepare(ctx); cfgMod(m);
+        PreDelayBlock d; d.prepare(ctx); cfgDelay(d);
+        std::vector<float> refA, refB, ta(N), tb(N);
+        for (int k = 0; k < K; ++k)
+        {
+            fillBlock(ta.data(), N, k); tb = ta; // split
+            m.process(ta.data(), N);             // Lane-A mono mod on vA only
+            d.processStereo(ta.data(), tb.data(), N); // bridge spans both lanes
+            refA.insert(refA.end(), ta.begin(), ta.end());
+            refB.insert(refB.end(), tb.begin(), tb.end());
+        }
+        check(bitEqV(boardA, refA), "T12 bridge vA == mod(A) then processStereo L (bit-exact)");
+        check(bitEqV(boardB, refB), "T12 bridge vB == trunk then processStereo R (bit-exact)");
+        check(b.hasLaneRouting(), "T12 hasLaneRouting() true with a stereo bridge");
+    }
+
+    // ---- T13: STEREO OFF is unchanged; a Trunk stereo splitter reports lane routing ----
+    {
+        PedalboardBlock b; b.prepare(ctx); b.clearRouting();
+        b.env.setBypassed(true); b.comp.setBypassed(true);
+        b.setSlotType(0, PedalboardBlock::TypeMod); b.setSlotLane(0, PedalboardBlock::Trunk);
+        cfgMod(b.mod[0]);
+        std::vector<float> t(N), vA(N), vB(N);
+        fillBlock(t.data(), N, 0);
+        b.process(t.data(), vA.data(), vB.data(), N, true, true, noHeal);
+        check(bitEq(vA.data(), vB.data(), N), "T13 Trunk Mod, stereo OFF: vA == vB (mono, unchanged)");
+        check(!b.hasLaneRouting(), "T13 stereo OFF Trunk slot: no lane routing");
+        b.setSlotStereo(0, true);
+        check(b.hasLaneRouting(), "T13 stereo ON Trunk splitter: reports lane routing (vA!=vB)");
+    }
+
     std::printf("%s (%d failure%s)\n", gFail == 0 ? "ALL PASS" : "FAILURES", gFail, gFail == 1 ? "" : "s");
     return gFail == 0 ? 0 : 1;
 }

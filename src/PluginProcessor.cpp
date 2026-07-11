@@ -880,6 +880,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
             pbC(id("Type"), L + "Type", juce::StringArray{"Off", "Drive", "Mod", "Delay"}, 0);
             pbC(id("Lane"), L + "Route", juce::StringArray{"Both", "Amp A", "Amp B"}, 0);
             pbB(id("On"), L + "On", true);
+            // Stereo: Mod/Delay slot spans BOTH amps (L->Amp A, R->Amp B). Off = mono (default,
+            // bit-exact). Engages only in Dual with both amps live; Solo collapses to mono.
+            pbB(id("Stereo"), L + "Stereo", false);
             // --- Drive union (mirrors drv{n}* incl. its 5-value Off/Boost/OD/Dist/Fuzz "Type",
             //     so the real DrivePedal widget can bind to pbS{i}dCat directly). dCat == Kind. ---
             pbC(id("dCat"), L + "Drive Type", juce::StringArray{"Off", "Boost", "Overdrive", "Distortion", "Fuzz"}, 0);
@@ -1471,6 +1474,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
                 bd.setSlotType(i, (int)s("Type"));
                 bd.setSlotLane(i, (int)s("Lane"));
                 bd.setSlotOn(i, s("On") >= 0.5f);
+                bd.setSlotStereo(i, s("Stereo") >= 0.5f);
 
                 // Drive engine. dCat is now the 5-value Off/Boost/OD/Dist/Fuzz selector = Kind directly.
                 auto &dr = bd.drive[i];
@@ -1492,6 +1496,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
                 const int mt = (int)s("mType");
                 md.setType(mt); md.setSyncIndex((int)s("mSync")); md.setRateHz(s("mRate"));
                 md.setWave(s("mWave")); md.setManual(0.15f);
+                md.setSpread(0.75f); // stereo width when this slot spans both amps (mono ignores it)
                 md.setDepth(mt == 1 ? 0.60f : s("mDepth"));
                 const float phFb = (int)s("mPhaserVoice") == 1 ? 0.35f : 0.0f;
                 md.setFeedback(mt == 2 ? s("mFeedback") : (mt == 1 ? phFb : 0.0f));
