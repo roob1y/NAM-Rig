@@ -500,9 +500,14 @@ private:
     {
         int src;                      // >=0: existing slot; -1: new pedal from the palette
         int family = 0, cat = 0, model = 0; // used when src < 0
+        int lane = 0;                 // routing lane (0 trunk, 1 Amp A, 2 Amp B)
     };
 
-    void commitArrangement(const std::vector<Entry> (&lanes)[3])
+    // Pack the board as ONE global processing order: the trunk list first, then a
+    // SINGLE post-split list (Amp A / Amp B / stereo pedals interleaved). Index
+    // order == process order, so a stereo pedal can sit anywhere in the split and
+    // split BOTH lanes at that point (the pool/DSP already walk post-split by index).
+    void commitLists(const std::vector<Entry> &trunk, const std::vector<Entry> &post)
     {
         // snapshot every slot's natural values first (sources may be overwritten)
         float snap[kSlots][kU];
@@ -512,39 +517,40 @@ private:
                 snap[i][j] = paramF(sid(i, u[j]));
 
         int t = 0;
-        for (int lane = 0; lane < 3; ++lane)
-            for (const auto &e : lanes[lane])
+        auto place = [&](const Entry &e, int lane)
+        {
+            if (t >= kSlots) return;
+            if (e.src >= 0)
             {
-                if (t >= kSlots) break;
-                if (e.src >= 0)
+                for (int j = 0; j < kU; ++j)
                 {
-                    for (int j = 0; j < kU; ++j)
-                    {
-                        float v = snap[e.src][j];
-                        if (j == 1) v = (float)lane; // union[1] == "Lane"
-                        writeNat(sid(t, u[j]), v);
-                    }
+                    float v = snap[e.src][j];
+                    if (j == 1) v = (float)lane; // union[1] == "Lane"
+                    writeNat(sid(t, u[j]), v);
                 }
-                else // new pedal: defaults, then the identity fields
-                {
-                    resetSlotToDefaults(t);
-                    writeChoice(sid(t, "Type"), e.family);
-                    writeChoice(sid(t, "Lane"), lane);
-                    writeBool(sid(t, "On"), true);
-                    if (e.family == 1)
-                    {
-                        writeChoice(sid(t, "dCat"), e.cat);
-                        writeNat(sid(t, "bModel"), (float)e.model);
-                    }
-                    else if (e.family == 2) writeChoice(sid(t, "mType"), e.model);
-                    else if (e.family == 3) writeChoice(sid(t, "pModel"), e.model);
-                    // family 4 (Env) / 5 (Comp): singleton — no per-slot sub-params to
-                    // seed, the shared envfilter*/comp* params are already at whatever
-                    // resetSlotToDefaults left them (or the user's prior settings, if
-                    // this is a re-add without an intervening remove).
-                }
-                ++t;
             }
+            else // new pedal: defaults, then the identity fields
+            {
+                resetSlotToDefaults(t);
+                writeChoice(sid(t, "Type"), e.family);
+                writeChoice(sid(t, "Lane"), lane);
+                writeBool(sid(t, "On"), true);
+                if (e.family == 1)
+                {
+                    writeChoice(sid(t, "dCat"), e.cat);
+                    writeNat(sid(t, "bModel"), (float)e.model);
+                }
+                else if (e.family == 2) writeChoice(sid(t, "mType"), e.model);
+                else if (e.family == 3) writeChoice(sid(t, "pModel"), e.model);
+                // family 4 (Env) / 5 (Comp): singleton — no per-slot sub-params to
+                // seed, the shared envfilter*/comp* params are already at whatever
+                // resetSlotToDefaults left them (or the user's prior settings, if
+                // this is a re-add without an intervening remove).
+            }
+            ++t;
+        };
+        for (const auto &e : trunk) place(e, 0);
+        for (const auto &e : post) place(e, e.lane); // e.lane is 1 or 2
         for (; t < kSlots; ++t)
             resetSlotToDefaults(t); // Type back to Off + clean knobs
     }
@@ -584,37 +590,64 @@ private:
                 writeNorm(pid, pr->getDefaultValue());
     }
 
-    // Remove slot s from the lists (helper for the ops below).
-    static void eraseSlot(std::vector<Entry> (&lanes)[3], int s)
+    // Remove slot s from both lists (helper for the ops below).
+    static void eraseFromLists(std::vector<Entry> &trunk, std::vector<Entry> &post, int s)
     {
-        for (auto &l : lanes)
-            l.erase(std::remove_if(l.begin(), l.end(),
+        auto rm = [s](std::vector<Entry> &v)
+        {
+            v.erase(std::remove_if(v.begin(), v.end(),
                                    [s](const Entry &e) { return e.src == s; }),
-                    l.end());
+                    v.end());
+        };
+        rm(trunk);
+        rm(post);
     }
-    void entriesNow(std::vector<Entry> (&lanes)[3]) const
+    // Snapshot the current arrangement as (trunk, post) lists in INDEX (= process)
+    // order. Post entries carry their routing lane so commitLists can preserve it.
+    void listsNow(std::vector<Entry> &trunk, std::vector<Entry> &post) const
     {
-        const Lanes ln = lanesNow();
-        for (int lane = 0; lane < 3; ++lane)
-            for (int s : ln.l[lane]) lanes[lane].push_back({s});
+        for (int i = 0; i < kSlots; ++i)
+            if (slotUsed(i))
+            {
+                if (slotLane(i) == 0) trunk.push_back({i});
+                else                  post.push_back({i, 0, 0, 0, slotLane(i)});
+            }
     }
 
 public:
+    // Post-split slot indices (Amp A / B / stereo) in INDEX (= process) order, so
+    // the footer/deck can lay them out on one shared timeline.
+    std::vector<int> postOrder() const
+    {
+        std::vector<int> v;
+        for (int i = 0; i < kSlots; ++i)
+            if (slotUsed(i) && slotLane(i) != 0) v.push_back(i);
+        return v;
+    }
+
     // ---- structural ops (called by the deck / chain / palette) ----
+    // pos is a GLOBAL position: within the trunk list when lane==0, otherwise within
+    // the single post-split list. This lets a stereo pedal land between A/B pedals
+    // and split both lanes at that point.
     void movePedal(int slot, int lane, int pos)
     {
-        std::vector<Entry> lanes[3];
-        entriesNow(lanes);
-        eraseSlot(lanes, slot);
+        std::vector<Entry> trunk, post;
+        listsNow(trunk, post);
+        eraseFromLists(trunk, post, slot);
         lane = juce::jlimit(0, 2, lane);
-        auto &dst = lanes[lane];
-        pos = juce::jlimit(0, (int)dst.size(), pos);
-        dst.insert(dst.begin() + pos, Entry{slot});
-        commitArrangement(lanes);
-        // selection follows the moved pedal to its packed index
-        int idx = 0;
-        for (int l = 0; l < lane; ++l) idx += (int)lanes[l].size();
-        mSelSlot = idx + pos;
+        if (lane == 0)
+        {
+            pos = juce::jlimit(0, (int)trunk.size(), pos);
+            trunk.insert(trunk.begin() + pos, Entry{slot});
+            mSelSlot = pos; // trunk block comes first
+        }
+        else
+        {
+            pos = juce::jlimit(0, (int)post.size(), pos);
+            post.insert(post.begin() + pos, Entry{slot, 0, 0, 0, lane});
+            mSelSlot = (int)trunk.size() + pos; // post block follows the trunk
+        }
+        commitLists(trunk, post);
         structureChanged();
     }
     // Returns the packed slot index the new pedal landed on (-1 when full, or when
@@ -623,16 +656,23 @@ public:
     {
         if (boardFull()) return -1;
         if ((family == 4 || family == 5) && typePlaced(family)) return -1;
-        std::vector<Entry> lanes[3];
-        entriesNow(lanes);
+        std::vector<Entry> trunk, post;
+        listsNow(trunk, post);
         lane = juce::jlimit(0, 2, lane);
-        auto &dst = lanes[lane];
-        pos = juce::jlimit(0, (int)dst.size(), pos);
-        dst.insert(dst.begin() + pos, Entry{-1, family, cat, model});
-        commitArrangement(lanes);
-        int idx = 0; // packed index = entries before it (trunk, then A, then B)
-        for (int l = 0; l < lane; ++l) idx += (int)lanes[l].size();
-        idx += pos;
+        int idx;
+        if (lane == 0)
+        {
+            pos = juce::jlimit(0, (int)trunk.size(), pos);
+            trunk.insert(trunk.begin() + pos, Entry{-1, family, cat, model});
+            idx = pos;
+        }
+        else
+        {
+            pos = juce::jlimit(0, (int)post.size(), pos);
+            post.insert(post.begin() + pos, Entry{-1, family, cat, model, lane});
+            idx = (int)trunk.size() + pos;
+        }
+        commitLists(trunk, post);
         structureChanged();
         return idx;
     }
@@ -642,12 +682,61 @@ public:
     }
     void removePedal(int slot)
     {
-        std::vector<Entry> lanes[3];
-        entriesNow(lanes);
-        eraseSlot(lanes, slot);
-        commitArrangement(lanes);
+        std::vector<Entry> trunk, post;
+        listsNow(trunk, post);
+        eraseFromLists(trunk, post, slot);
+        commitLists(trunk, post);
         if (mSelSlot == slot) mSelSlot = kSelNone;
         structureChanged();
+    }
+
+    // ---- footer two-row drops (post-split) ----
+    // The footer's A/B rows can place a pedal at a VISUAL x that doesn't match the
+    // stale index order (the dual-cursor layout draws parallel pedals at the same x).
+    // So the caller passes the post-split slots already SORTED BY THEIR ON-SCREEN X
+    // (excluding the moved slot for a move) plus the insertion index k. We rebuild the
+    // post list in that visual order and drop the pedal at k — making a stereo pedal a
+    // true barrier: every A and B pedal left of it stays before, the rest go after.
+    void movePedalPost(int slot, int lane, const std::vector<int> &postXSorted, int k)
+    {
+        lane = juce::jlimit(1, 2, lane);
+        std::vector<Entry> trunk, postCur;
+        listsNow(trunk, postCur);
+        trunk.erase(std::remove_if(trunk.begin(), trunk.end(),
+                                   [slot](const Entry &e) { return e.src == slot; }),
+                    trunk.end()); // moved out of the trunk if it was there
+        std::vector<Entry> post;
+        k = juce::jlimit(0, (int)postXSorted.size(), k);
+        for (int i = 0; i < (int)postXSorted.size(); ++i)
+        {
+            if (i == k) post.push_back(Entry{slot, 0, 0, 0, lane});
+            post.push_back(Entry{postXSorted[i], 0, 0, 0, slotLane(postXSorted[i])});
+        }
+        if (k == (int)postXSorted.size()) post.push_back(Entry{slot, 0, 0, 0, lane});
+        mSelSlot = (int)trunk.size() + k;
+        commitLists(trunk, post);
+        structureChanged();
+    }
+    int addPedalPost(int family, int cat, int model, int lane,
+                     const std::vector<int> &postXSorted, int k)
+    {
+        if (boardFull()) return -1;
+        if ((family == 4 || family == 5) && typePlaced(family)) return -1;
+        lane = juce::jlimit(1, 2, lane);
+        std::vector<Entry> trunk, postCur;
+        listsNow(trunk, postCur);
+        std::vector<Entry> post;
+        k = juce::jlimit(0, (int)postXSorted.size(), k);
+        for (int i = 0; i < (int)postXSorted.size(); ++i)
+        {
+            if (i == k) post.push_back(Entry{-1, family, cat, model, lane});
+            post.push_back(Entry{postXSorted[i], 0, 0, 0, slotLane(postXSorted[i])});
+        }
+        if (k == (int)postXSorted.size()) post.push_back(Entry{-1, family, cat, model, lane});
+        const int idx = (int)trunk.size() + k;
+        commitLists(trunk, post);
+        structureChanged();
+        return idx;
     }
     void cycleLane(int slot) // Both -> Amp A -> Amp B -> Both (order kept: index untouched)
     {
@@ -1275,34 +1364,36 @@ private:
             mCells.clear();
             mWidgets.clear();
 
-            const Lanes ln = mBoard.lanesNow();
-            for (int lane = 0; lane < 3; ++lane)
-                for (int s : ln.l[lane])
+            // Deck cells follow the global process order: trunk first, then the single
+            // post-split list (Amp A / B / stereo interleaved in index order).
+            auto makeCell = [&](int s, int lane)
+            {
+                Cell c;
+                c.sel = s;
+                c.lane = lane;
+                if (mBoard.slotType(s) == 1) // the REAL drive pedal widget
                 {
-                    Cell c;
-                    c.sel = s;
-                    c.lane = lane;
-                    if (mBoard.slotType(s) == 1) // the REAL drive pedal widget
-                    {
-                        auto w = std::make_unique<DrivePedal>(mBoard.mApvts,
-                                                              "pbS" + juce::String(s),
-                                                              mBoard.sid(s, "dCat"));
-                        c.widget = w.get();
-                        addAndMakeVisible(*c.widget);
-                        mWidgets.push_back(std::move(w));
-                    }
-                    else
-                    {
-                        const int t = mBoard.slotType(s);
-                        const auto kind = t == 2 ? StompPedal::Mod : t == 3 ? StompPedal::Delay
-                                        : t == 4 ? StompPedal::Env : StompPedal::Comp;
-                        auto w = std::make_unique<StompPedal>(mBoard, kind, s);
-                        c.widget = w.get();
-                        addAndMakeVisible(*c.widget);
-                        mWidgets.push_back(std::move(w));
-                    }
-                    mCells.push_back(c);
+                    auto w = std::make_unique<DrivePedal>(mBoard.mApvts,
+                                                          "pbS" + juce::String(s),
+                                                          mBoard.sid(s, "dCat"));
+                    c.widget = w.get();
+                    addAndMakeVisible(*c.widget);
+                    mWidgets.push_back(std::move(w));
                 }
+                else
+                {
+                    const int t = mBoard.slotType(s);
+                    const auto kind = t == 2 ? StompPedal::Mod : t == 3 ? StompPedal::Delay
+                                    : t == 4 ? StompPedal::Env : StompPedal::Comp;
+                    auto w = std::make_unique<StompPedal>(mBoard, kind, s);
+                    c.widget = w.get();
+                    addAndMakeVisible(*c.widget);
+                    mWidgets.push_back(std::move(w));
+                }
+                mCells.push_back(c);
+            };
+            for (int s : mBoard.lanesNow().l[0]) makeCell(s, 0);       // trunk
+            for (int s : mBoard.postOrder()) makeCell(s, mBoard.slotLane(s)); // split
             // Grab-anywhere dragging: the deck listens to each pedal face's OWN mouse
             // events (children — knobs, pills, footswitch — keep theirs), so a click-
             // hold on the enclosure drags the pedal.
@@ -1540,23 +1631,27 @@ private:
         // (the cell being moved; kSelNone for palette adds).
         std::pair<int, int> moveTarget(juce::Point<int> p, int excludeSel) const
         {
-            // Default lane = the first (non-excluded) cell's OWN lane. Cells render
-            // Trunk-then-A-then-B, so this is Trunk in the common case -- but when
-            // Trunk is empty and the deck starts with a Lane-A/B pedal (e.g. a stereo
-            // bridge with nothing before it), dropping BEFORE everything must still
-            // target THAT pedal's lane, not silently fall back to Trunk just because
-            // the scan below never passes a cell to update it from.
+            // pos is a GLOBAL position: within the trunk list (lane 0) or the single
+            // post-split list (lane 1/2), matching commitLists. Cells run trunk-then-
+            // post, so the last cell the point passes decides trunk-vs-split and the
+            // count within that segment; lane is inherited from that neighbour (the
+            // deck is a single strip with no A/B rows to pick from).
             int lane = 0;
             for (const auto &c : mCells)
                 if (c.sel != excludeSel) { lane = c.lane; break; }
-            int pos = 0, cnt[3] = {0, 0, 0};
+            int trunkPos = 0, postPos = 0, trunkCnt = 0, postCnt = 0;
             for (const auto &c : mCells)
             {
                 if (c.sel == excludeSel) continue;
-                if (p.x > c.bounds.getCentreX()) { lane = c.lane; pos = cnt[c.lane] + 1; }
-                ++cnt[c.lane];
+                const bool trunk = (c.lane == 0);
+                if (p.x > c.bounds.getCentreX())
+                {
+                    lane = c.lane;
+                    if (trunk) trunkPos = trunkCnt + 1; else postPos = postCnt + 1;
+                }
+                if (trunk) ++trunkCnt; else ++postCnt;
             }
-            return {lane, pos};
+            return {lane, lane == 0 ? trunkPos : postPos};
         }
         // Insertion caret x for a point, ignoring `excludeSel`.
         int caretXFor(juce::Point<int> p, int excludeSel) const
@@ -1733,7 +1828,13 @@ private:
             }
             {
                 const auto tgt = caretFor(p).second;
-                mBoard.movePedal(mDragSel, tgt.first, tgt.second);
+                if (tgt.first == 0)
+                    mBoard.movePedal(mDragSel, 0, tgt.second); // trunk: single row, index == x
+                else
+                {
+                    const auto pk = postByX(p, mDragSel); // split: order by on-screen x
+                    mBoard.movePedalPost(mDragSel, tgt.first, pk.first, pk.second);
+                }
             }
             mDragSel = kSelNone;
             mCaret = {-1, 0};
@@ -1762,13 +1863,21 @@ private:
         }
         void itemDropped(const SourceDetails &d) override
         {
-            const auto tgt = caretFor(d.localPosition).second;
+            const auto p = d.localPosition;
+            const auto tgt = caretFor(p).second;
             mDropCaret = {-1, 0};
             auto t = juce::StringArray::fromTokens(d.description.toString(), ":", {});
             if (t.size() == 4 && t[0] == "pbadd")
             {
-                const int slot = mBoard.addPedal(t[1].getIntValue(), t[2].getIntValue(),
-                                                 t[3].getIntValue(), tgt.first, tgt.second);
+                const int f = t[1].getIntValue(), c = t[2].getIntValue(), m = t[3].getIntValue();
+                int slot;
+                if (tgt.first == 0)
+                    slot = mBoard.addPedal(f, c, m, 0, tgt.second); // trunk
+                else
+                {
+                    const auto pk = postByX(p, kSelNone); // split: order by on-screen x
+                    slot = mBoard.addPedalPost(f, c, m, tgt.first, pk.first, pk.second);
+                }
                 if (slot >= 0) mBoard.selectPedal(slot, true);
             }
             repaint();
@@ -1841,8 +1950,9 @@ private:
                     xb += nodeW + gap;
                 }
             };
-            for (int s : ln.l[1]) placePost(s, 1);
-            for (int s : ln.l[2]) placePost(s, 2);
+            // ONE walk over the global post-split order (index order across both
+            // lanes) so stereo shared columns sync A/B wherever they actually sit.
+            for (int s : mBoard.postOrder()) placePost(s, mBoard.slotLane(s));
 
             const int ampX = juce::jmax(juce::jmax(xa, xb) + gap, mSplitX + splitPad);
             mAmpA = {ampX, laneAY() - 12, ampW, 24};
@@ -1912,30 +2022,54 @@ private:
             return nullptr;
         }
 
-        // Insertion caret for a point: returns {caret pixel pos, {lane, posInLane}}.
+        // Post-split slots ordered by their ON-SCREEN x (excluding `excl`), plus the
+        // insertion index for point p. The dual-cursor layout can draw a high-index
+        // lane-B pedal at a low x, so dropping by visual position (not stale list
+        // index) is what keeps a stereo pedal's barrier honest — everything visually
+        // left of the drop stays before it.
+        std::pair<std::vector<int>, int> postByX(juce::Point<int> p, int excl) const
+        {
+            std::vector<std::pair<int, int>> v; // (slot, centreX)
+            for (const auto &n : mNodes)
+                if (n.lane != 0 && n.sel != excl)
+                    v.push_back({n.sel, n.rect.getCentreX()});
+            std::stable_sort(v.begin(), v.end(),
+                             [](const auto &a, const auto &b) { return a.second < b.second; });
+            std::vector<int> slots;
+            int k = 0;
+            for (const auto &e : v)
+            {
+                if (p.x > e.second) ++k;
+                slots.push_back(e.first);
+            }
+            return {slots, k};
+        }
+
+        // Insertion caret for a point: returns {caret pixel pos, {lane, pos}}.
+        // pos is a GLOBAL position — within the trunk list for a trunk caret, or the
+        // single post-split list for an Amp A / B caret. Counting ALL post-split nodes
+        // (both rows + stereo columns) left of the point makes a stereo drop a sync
+        // barrier: every A and B pedal to its left runs before it, the rest after.
         std::pair<juce::Point<int>, std::pair<int, int>> caretFor(juce::Point<int> p) const
         {
             const int lane = p.x <= mSplitX ? 0 : (p.y <= getHeight() / 2 ? 1 : 2);
             const int laneY = lane == 0 ? trunkY() : (lane == 1 ? laneAY() : laneBY());
-            int pos = 0, caretX = 0;
-            const Node *last = nullptr;
+            int pos = 0;                 // trunk insertion index (post uses postByX)
+            int caretX = -1;             // rightmost node edge left of the point
             for (const auto &n : mNodes)
             {
                 if (mDragging && n.sel == mDragSel) continue;
-                const bool span = mBoard.slotStereo(n.sel); // shared column: sits on both rows
-                if (n.lane != lane && !span) continue;
+                const bool isTrunk = (n.lane == 0);
+                if (lane == 0) { if (!isTrunk) continue; } // trunk caret: trunk nodes only
+                else if (isTrunk) continue;               // lane caret: post-split nodes only
                 if (p.x > n.rect.getCentreX())
                 {
-                    last = &n;                 // caret x may land AFTER a stereo pedal on either row
-                    if (n.lane == lane) ++pos; // but position counts only this lane's own list
+                    if (lane == 0) ++pos;                 // trunk position counts trunk nodes
+                    caretX = juce::jmax(caretX, n.rect.getRight() + 4); // visual: rightmost so far
                 }
             }
-            if (last != nullptr)
-                caretX = last->rect.getRight() + 4;
-            else if (lane == 0)
-                caretX = mIn.getRight() + 4;
-            else
-                caretX = mSplitX + 14;
+            if (caretX < 0)
+                caretX = lane == 0 ? mIn.getRight() + 4 : mSplitX + 14;
             return {{caretX, laneY}, {lane, pos}};
         }
 
