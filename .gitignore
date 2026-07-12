@@ -82,9 +82,12 @@ Guitar plugin design exploration/
 
 # cab-dyn ear-test renders (large research wavs, regenerable, not shipped)
 docs/cabdyn/renders/
-docs/backlog/SCOPE_PEDALBOARD_2026-07-10.md
-docs/delonge/DELONGE_RIG_HANDOFF.md
-docs/tonestack/RESEARCH.md
+
+# docs
+
+docs/backlog/SCOPE_PEDALBOARD_2026-07-10.md/
+docs/delonge/DELONGE_RIG_HANDOFF.md/
+docs/tonestack/RESEARCH.md/
 
 # test-harness OUTPUT fixtures (regenerable). Keep the INPUT fixtures
 # (testdata/chunk_in.f32, testdata/delay11.wav) which the tests read.
