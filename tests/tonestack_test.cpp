@@ -32,6 +32,8 @@
 //       of analog truth at every rate)
 //   T16 DELTA mode (the default): at the reference settings (noon, Cut/Ghost 0)
 //       the stack is a bit-exact passthrough -- enabling it changes nothing
+//   T18 capture calibration: setReference moves the flat point to the pack
+//       sheet's knob values (bit-exact there; ratios anchor to it)
 //   T17 DELTA correctness: moving knobs applies |H(knobs)|/|H(ref)| exactly
 //       (the circuit's relative response on top of the capture), incl. VoxTB's
 //       cut ratio
@@ -519,6 +521,35 @@ int main()
         }
         std::printf("  T17 worst delta-vs-ratio error = %.4f dB\n", worst);
         check(worst < 0.08, "T17 delta mode applies the circuit's relative response exactly");
+    }
+
+    // ---------------- T18 ----------------
+    {
+        // capture calibration: flat point moves to the sheet values
+        TonestackBlock ts; ts.prepare(ctx); ts.setModel(TonestackBlock::kBlackface);
+        ts.setReference(0.4f, 0.6f, 0.5f, 0.0f); // arbitrary user-entered sheet values
+        ts.setKnob1(0.4f); ts.setKnob2(0.6f); ts.setKnob3(0.5f);
+        ts.reset(); // snap the knob smoothers (skip the 10 ms glide from noon)
+        std::vector<float> x(4096), y;
+        for (int i = 0; i < 4096; ++i)
+            x[(size_t)i] = 0.4f * (float)std::sin(0.017 * i) + 0.15f * (float)std::sin(0.09 * i);
+        y = x;
+        ts.process(y.data(), (int)y.size());
+        bool exact = true;
+        for (int i = 0; i < 4096; ++i)
+            if (y[(size_t)i] != x[(size_t)i]) { exact = false; break; }
+        check(exact, "T18a knobs parked at the calibrated capture values are bit-exact flat");
+
+        ts.setKnob1(0.9f);
+        std::vector<float> d(8192, 0.0f); ts.process(d.data(), (int)d.size());
+        const double g = sineGainThrough(ts, 4000.0, ctx.sampleRate);
+        TonestackBlock ref; ref.prepare(ctx); ref.setModel(TonestackBlock::kBlackface);
+        ref.setKnob1(0.4f); ref.setKnob2(0.6f); ref.setKnob3(0.5f);
+        std::vector<float> d2(8192, 0.0f); ref.process(d2.data(), (int)d2.size());
+        const double want = std::abs(ts.referenceAnalogH(4000.0)) / std::abs(ref.referenceAnalogH(4000.0));
+        const double err = std::abs(db(g / want));
+        std::printf("  T18b calibrated-ratio error = %.4f dB\n", err);
+        check(err < 0.08, "T18b knob moves retune relative to the calibrated capture point");
     }
 
     std::printf("%s (%d failure%s)\n", g_fail == 0 ? "ALL PASS" : "FAILURES",

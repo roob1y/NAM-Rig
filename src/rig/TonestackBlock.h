@@ -120,6 +120,26 @@ public:
     }
     int model() const { return mModel; }
 
+    // CAPTURE CALIBRATION: pack sheets often list the amp's knob positions at
+    // capture time (e.g. Amalgam's "B-5 M-6 T-4"). Setting those here moves
+    // the flat reference from noon to the CAPTURE settings, so knobs parked at
+    // the sheet values are a bit-exact passthrough and any move is the exact
+    // retune of the real amp away from its captured state. Values are raw
+    // knob rotation 0..1 (a sheet "5" on a 1-10 panel = the same rotation the
+    // tone knobs use, so matching numbers is what matters). No smoothing:
+    // these are setup values; the change lands via the commit crossfade.
+    void setReference(float t, float m, float l, float cut)
+    {
+        auto cl = [](float v) { return std::min(std::max(v, 0.0f), 1.0f); };
+        t = cl(t); m = cl(m); l = cl(l); cut = cl(cut);
+        if (t != mRefK1 || m != mRefK2 || l != mRefK3 || cut != mRefCut)
+        {
+            mRefK1 = t; mRefK2 = m; mRefK3 = l; mRefCut = cut;
+            mModelDirty = true; // recompute the cached reference divisor
+            mDirty = true;
+        }
+    }
+
     // Knob meanings per model:
     //   FMV family : k1 = Treble, k2 = Mid (ignored where fixed), k3 = Bass
     //   VoxTB      : k1 = Treble, k3 = Bass, cut = Cut (authentic: up = darker)
@@ -227,7 +247,7 @@ public:
             }
             if (mModel == (int)kVoxTB)
             {
-                if (mDelta && mCut == 0.0f)
+                if (mDelta && mCut == mRefCut)
                 {
                     // delta + knob at reference: exactly flat, skip both stages
                     for (double &z : mZCut) z = 0.0;
@@ -614,7 +634,7 @@ private:
 
         // Delta shortcut: at the exact reference settings the ratio is unity,
         // so hand back a true passthrough (enable the stack -> zero change).
-        if (mDelta && mK1 == 0.5f && mK2 == 0.5f && mK3 == 0.5f && mGhost == 0.0f)
+        if (mDelta && mK1 == mRefK1 && mK2 == mRefK2 && mK3 == mRefK3 && mGhost == 0.0f)
         {
             double one[kMaxOrder + 1] = {}, id_[kMaxOrder + 1] = {};
             one[0] = 1.0; id_[0] = 1.0;
@@ -630,7 +650,7 @@ private:
     void computeReference()
     {
         Net net;
-        buildNet(net, mModel, 0.5, 0.5, 0.5, 0.0);
+        buildNet(net, mModel, (double)mRefK1, (double)mRefK2, (double)mRefK3, 0.0);
         for (int i = 0; i < kNumFitC; ++i)
             mRefFit[i] = solveNet(net, 2.0 * kPi * kFitFreqs[i]);
         for (int v = 0; v < 4; ++v)
@@ -890,9 +910,10 @@ private:
         bilinear(bs, as, 3, 2.0 * mFs, mBCut, mACut);
         if (mDelta)
         {
-            // fixed inverse of the OPEN (knob 0) response: swap num/den.
+            // fixed inverse of the REFERENCE response (default: open) so the
+            // calibrated cut position is exactly flat: swap num/den.
             double n0[4], d0[4];
-            cutAnalogCoeffs(0.0, n0, d0);
+            cutAnalogCoeffs((double)mRefCut, n0, d0);
             double bs0[kMaxOrder + 1] = {};
             double as0[kMaxOrder + 1] = {};
             bs0[0] = d0[3]; bs0[1] = d0[2]; bs0[2] = d0[1]; bs0[3] = d0[0];
@@ -1012,6 +1033,8 @@ private:
     int mModel = kTweedBassman;
     bool mModelDirty = true, mDirty = true, mGraphicOn = false, mGraphicDirty = true;
     bool mDelta = true; // default: EQ-delta on top of the capture (usability)
+    // capture calibration (flat point); defaults = noon, cut open
+    float mRefK1 = 0.5f, mRefK2 = 0.5f, mRefK3 = 0.5f, mRefCut = 0.0f;
     std::complex<double> mRefFit[kNumFitC];
     std::complex<double> mRefVal[4];
 
