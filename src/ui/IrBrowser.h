@@ -148,6 +148,13 @@ public:
         mZoneB.onFile = [this](const juce::File &f) { if (onLoad) onLoad(f, 1); mZoneB.setIrName(f.getFileNameWithoutExtension()); };
     }
 
+    // Update a zone's displayed IR name (e.g. when an A/B link mirrors a load onto
+    // the other cab so both zone labels stay in step). rig 0 = A, 1 = B.
+    void setZoneIrName(int rig, const juce::String &n)
+    {
+        (rig == 0 ? mZoneA : mZoneB).setIrName(n);
+    }
+
     void openFor(int rig, const juce::File &root, const juce::String &irA, const juce::String &irB)
     {
         mActiveRig = rig;

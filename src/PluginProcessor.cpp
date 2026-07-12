@@ -657,6 +657,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
     // the move onto the partner's rigLevel param.
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID("rigLevelLink", 1), "Rig Level Link", false));
+    // UI-only: link the two amps so they act as one. When on, the CombinedAmpPanel
+    // mirrors every edit (model / tonestack / input) from either side onto the
+    // other, keeping A and B identical. No DSP reads this — it drives the UI mirror.
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("ampLinkAB", 1), "Amp Link A/B", false));
+    // UI-only: link the two cabs so they act as one. The CombinedCabPanel mirrors
+    // every edit (IR / cuts / CABDYN settings) between A and B while on.
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID("cabLinkAB", 1), "Cab Link A/B", false));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("rigAlign", 1), "Rig Align",
         juce::NormalisableRange<float>(-256.0f, 256.0f, 0.1f), 0.0f,

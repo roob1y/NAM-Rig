@@ -142,6 +142,13 @@ public:
         mSetRoot = std::move(set);
     }
 
+    // Update a zone's displayed model name (e.g. when an A/B link mirrors a load
+    // onto the other amp so both zone labels stay in step). rig 0 = A, 1 = B.
+    void setZoneModelName(int rig, const juce::String &name)
+    {
+        (rig == 0 ? mZoneA : mZoneB).setModelName(name);
+    }
+
     void resized() override
     {
         auto r = getLocalBounds().reduced(16, 14);

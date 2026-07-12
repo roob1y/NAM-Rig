@@ -1,6 +1,7 @@
 #pragma once
 #include "PluginProcessor.h"
 #include "ui/RigLookAndFeel.h"
+#include "ui/ToneStackFaces.h"
 #include "ui/Meter.h"
 #include "ui/GrMeter.h"
 #include "ui/CompMeter.h"
@@ -70,8 +71,9 @@ public:
                                      : colors::accent;
         const float ga = isEnabled() ? 1.0f : 0.45f;
 
-        g.setColour(colors::textDim.withMultipliedAlpha(ga));
-        g.setFont(fonts::archivo(juce::jmin(10.0f, (float)mCaptionH - 2.0f), fonts::SemiBold, 0.08f));
+        g.setColour((mCaptionCol.isTransparent() ? colors::textDim : mCaptionCol).withMultipliedAlpha(ga));
+        g.setFont(mCapSize > 0.0f ? fonts::archivo(mCapSize, mCapWeight, mCapTrack)
+                                  : fonts::archivo(juce::jmin(10.0f, (float)mCaptionH - 2.0f), fonts::SemiBold, 0.08f));
         g.drawText(mCaption, mCaptionRect, juce::Justification::centred);
 
         if (mShowValue && (!mValueOnDrag || mDragging))
@@ -118,11 +120,24 @@ public:
     void resized() override
     {
         auto b = getLocalBounds();
-        mCaptionRect = b.removeFromTop(mCaptionH);
-        if (mShowValue)
-            mValueRect = b.removeFromBottom(mValueH);
-        const int d = juce::jmin(b.getWidth(), b.getHeight());
-        mSlider.setBounds(b.withSizeKeepingCentre(d, d));
+        if (mCaptionBelow)
+        {
+            // Amp-face knobs: label BELOW the dial, and the on-drag value bubble does
+            // NOT reserve a row (it floats over the dome top). This keeps the dome
+            // riding high so the dome+label read as one vertically-centred unit.
+            mCaptionRect = b.removeFromBottom(mCaptionH);
+            const int d = juce::jmin(b.getWidth(), b.getHeight());
+            auto dial = b.withSizeKeepingCentre(d, d);
+            mSlider.setBounds(dial);
+            mValueRect = juce::Rectangle<int>(dial.getX(), dial.getY() + 1, dial.getWidth(), mValueH);
+        }
+        else
+        {
+            mCaptionRect = b.removeFromTop(mCaptionH);
+            if (mShowValue) mValueRect = b.removeFromBottom(mValueH);
+            const int d = juce::jmin(b.getWidth(), b.getHeight());
+            mSlider.setBounds(b.withSizeKeepingCentre(d, d));
+        }
     }
 
     // JUCE doesn't repaint on setEnabled(), so force it -> the caption, value readout
@@ -140,6 +155,20 @@ public:
         repaint();
     }
 
+    // Tint the caption text (per-model amp-face label colour). Transparent = the
+    // default textDim. Survives rebind()/setCaption().
+    void setCaptionColour(juce::Colour c) { mCaptionCol = c; repaint(); }
+
+    // Put the caption UNDER the dial (amp-face layout) instead of above it.
+    void setCaptionBelow(bool b = true) { if (b != mCaptionBelow) { mCaptionBelow = b; resized(); repaint(); } }
+
+    // Override the caption font (px height, weight, tracking in em). px<=0 restores
+    // the default auto-sized caption. Used to match the amp-face label spec.
+    void setCaptionFont(float px, fonts::Weight w, float tracking)
+    {
+        mCapSize = px; mCapWeight = w; mCapTrack = tracking; repaint();
+    }
+
     // Tint the value arc (per-lane mod colour). The LookAndFeel reads this colour
     // id and falls back to the global accent when it isn't set.
     void setAccent(juce::Colour c) { mSlider.setColour(juce::Slider::rotarySliderFillColourId, c); }
@@ -154,10 +183,16 @@ public:
 
     // Read the value box as a 0..top reading of the knob's ROTATION (pedal-style,
     // "everything goes to 10") instead of raw parameter units. Display only.
-    void setRotationReadout(double top = 10.0)
+    void setRotationReadout(double top = 10.0) { setRotationReadout(0.0, top, 1); }
+
+    // Per-model readout scale: display = lo + proportion*(hi-lo); text entry (incl.
+    // CAL pack-sheet entry) maps back via (v-lo)/(hi-lo). Only the DISPLAY changes --
+    // the pot fraction (0..1) and all DSP are unaffected. Used for the numbered amp
+    // dials that read 1-10 or 1-12 instead of 0-10.
+    void setRotationReadout(double lo, double hi, int decimals)
     {
-        mRotationReadout = true; // 0..10 rotation display -> suppress the unit suffix
-        mRotTop = top;
+        mRotationReadout = true; // rotation display -> suppress the unit suffix
+        mRotLo = lo; mRotHi = hi; mRotDecimals = juce::jmax(0, decimals);
         applyRotationReadout();
     }
 
@@ -169,12 +204,14 @@ public:
     void applyRotationReadout()
     {
         auto *s = &mSlider;
-        const double top = mRotTop;
-        mSlider.textFromValueFunction = [s, top](double v) {
-            return juce::String(s->valueToProportionOfLength(v) * top, 1);
+        const double lo = mRotLo, hi = mRotHi;
+        const int dec = mRotDecimals;
+        mSlider.textFromValueFunction = [s, lo, hi, dec](double v) {
+            return juce::String(lo + s->valueToProportionOfLength(v) * (hi - lo), dec);
         };
-        mSlider.valueFromTextFunction = [s, top](const juce::String &t) {
-            return s->proportionOfLengthToValue(juce::jlimit(0.0, 1.0, t.getDoubleValue() / top));
+        mSlider.valueFromTextFunction = [s, lo, hi](const juce::String &t) {
+            const double f = (hi > lo) ? (t.getDoubleValue() - lo) / (hi - lo) : 0.0;
+            return s->proportionOfLengthToValue(juce::jlimit(0.0, 1.0, f));
         };
         mSlider.updateText();
         repaint();
@@ -223,9 +260,15 @@ private:
     juce::StringArray mValueMenu; // when set, the value readout is a click-to-pick dropdown
     juce::String mValueMenuHeader; // optional title for the click-to-pick menu
     int mCaptionH = 15, mValueH = 16;
-    double mRotTop = 10.0; // rotation-readout top (re-applied after each rebind)
+    double mRotLo = 0.0, mRotHi = 10.0; // rotation-readout scale (re-applied after each rebind)
+    int mRotDecimals = 1;
     bool mShowValue = true, mDragging = false, mRotationReadout = false, mReadoutFn = false;
     bool mValueOnDrag = false; // pedal-face knobs: readout shown only while turning
+    bool mCaptionBelow = false; // amp-face knobs: label under the dial
+    juce::Colour mCaptionCol; // transparent = default caption colour
+    float mCapSize = 0.0f; // >0 overrides the auto caption font
+    fonts::Weight mCapWeight = fonts::SemiBold;
+    float mCapTrack = 0.08f;
 };
 
 // Horizontal knob in a rounded bordered box: knob on the left, caption + value
@@ -478,6 +521,76 @@ public:
 private:
     juce::ToggleButton mBtn;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mAtt;
+};
+
+// A segmented multi-choice control (PRE|POST, the 6-way live anti-alias). Drives
+// a choice parameter through a HIDDEN ComboBox + ComboBoxAttachment, so the param
+// binding, presets and host automation stay bit-identical to a plain combo — only
+// the drawing (a horizontal segment bar) changes. Click a segment to select it.
+class SegChoice : public juce::Component
+{
+public:
+    SegChoice(juce::AudioProcessorValueTreeState &apvts, const juce::String &paramId,
+              juce::StringArray labels)
+        : mLabels(std::move(labels))
+    {
+        mCombo.addItemList(mLabels, 1); // must match the parameter's StringArray order
+        addChildComponent(mCombo);      // hidden — only carries the APVTS attachment
+        mAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, paramId, mCombo);
+        mCombo.onChange = [this] { repaint(); };
+    }
+
+    int index() const { return juce::jmax(0, mCombo.getSelectedItemIndex()); }
+    void setSegAccent(juce::Colour c) { if (c != mAccent) { mAccent = c; repaint(); } }
+
+    void mouseUp(const juce::MouseEvent &e) override
+    {
+        if (!isEnabled() || mLabels.isEmpty() || !getLocalBounds().contains(e.getPosition())) return;
+        const int n = mLabels.size();
+        const int i = juce::jlimit(0, n - 1, e.x * n / juce::jmax(1, getWidth()));
+        mCombo.setSelectedItemIndex(i, juce::sendNotificationSync);
+    }
+
+    void enablementChanged() override { repaint(); }
+
+    void paint(juce::Graphics &g) override
+    {
+        auto b = getLocalBounds().toFloat().reduced(0.5f);
+        const float ga = isEnabled() ? 1.0f : 0.42f;
+        g.setColour(colors::inset.withMultipliedAlpha(ga));
+        g.fillRoundedRectangle(b, 8.0f);
+        g.setColour(colors::outline.withMultipliedAlpha(ga));
+        g.drawRoundedRectangle(b, 8.0f, 1.0f);
+
+        const int n = mLabels.size();
+        if (n <= 0) return;
+        const int cur = index();
+        const float segW = b.getWidth() / (float)n;
+        for (int i = 0; i < n; ++i)
+        {
+            auto seg = juce::Rectangle<float>(b.getX() + segW * i, b.getY(), segW, b.getHeight());
+            if (i == cur)
+            {
+                g.setColour(colors::tileSel.withMultipliedAlpha(ga));
+                g.fillRoundedRectangle(seg.reduced(1.5f), 6.5f);
+            }
+            if (i > 0)
+            {
+                g.setColour(colors::divider.withMultipliedAlpha(ga));
+                g.fillRect(seg.getX(), b.getY() + 3.0f, 1.0f, b.getHeight() - 6.0f);
+            }
+            g.setColour(((i == cur) ? mAccent : colors::textDim).withMultipliedAlpha(ga));
+            g.setFont(fonts::archivo(9.5f, fonts::Bold, 0.05f));
+            g.drawText(mLabels[i], seg.toNearestInt(), juce::Justification::centred);
+        }
+    }
+
+private:
+    juce::StringArray mLabels;
+    juce::ComboBox mCombo;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mAtt;
+    juce::Colour mAccent = colors::accent;
 };
 
 // Common panel chrome: rounded #1d2027 body + 46px header row (title left, an
@@ -2588,10 +2701,20 @@ public:
             mApvts, id("Model"), mModel);
         mModel.onChange = [this] { updateFaces(); };
 
-        mPos.addItemList({"Pre Amp", "Post Amp"}, 1);
-        addAndMakeVisible(mPos);
-        mPosAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-            mApvts, id("Pos"), mPos);
+        // Prev/Next steppers flanking the model combo: click through the tone
+        // stacks one at a time (wraps at both ends). setSelectedItemIndex fires
+        // the combo's onChange, so the param + faces update just like a pick.
+        mPrevModel.setButtonText("<");
+        mNextModel.setButtonText(">");
+        mPrevModel.onClick = [this] { stepModel(-1); };
+        mNextModel.onClick = [this] { stepModel(+1); };
+        for (auto *b : {&mPrevModel, &mNextModel})
+            addAndMakeVisible(*b);
+
+        // Pre/Post placement: a two-way segmented control (same ts*Pos choice
+        // param; index 0 = Pre Amp, 1 = Post Amp, matching the parameter order).
+        mPos = std::make_unique<SegChoice>(mApvts, id("Pos"), juce::StringArray{"PRE", "POST"});
+        addAndMakeVisible(*mPos);
 
         // Amp input drive now lives in this same front-panel section, to the
         // left of the tone knobs. Always live — independent of the tone On
@@ -2608,6 +2731,14 @@ public:
             // 0.0–10.0 readout, one decimal, noon = 5.0 (amp-style tone knobs).
             // Set once; survives the per-model/CAL rebind() like the drive faces.
             k->setRotationReadout(10.0);
+            // Amp-face styling: label under the dial, value only while turning (real
+            // amps don't show numbers), and the per-model knob painter. The caption
+            // colour is set per model in updateFaces(). Input knob stays plugin-styled.
+            k->setCaptionBelow();
+            k->setValueOnDragOnly();
+            k->setCaptionHeight(13);
+            k->setCaptionFont(9.5f, fonts::Bold, 0.137f); // amp-face label spec
+            k->slider().setLookAndFeel(&mKnobLnF);
             addAndMakeVisible(*k);
         }
 
@@ -2644,11 +2775,21 @@ public:
             s.setSliderStyle(juce::Slider::LinearVertical);
             s.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
             s.setDoubleClickReturnValue(true, 0.0);
+            s.setLookAndFeel(&mEqLnF);
             addAndMakeVisible(s);
             mEqAtt[b] = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
                 mApvts, id(eqIds[b]), s);
         }
         updateFaces();
+    }
+
+    ~ToneStackSection() override
+    {
+        // The per-model knob LookAndFeel is a member; detach it from the sliders
+        // before either is destroyed (LnF must outlive the components using it).
+        for (auto *k : {mK1.get(), mK2.get(), mK3.get(), mK4.get()})
+            if (k != nullptr) k->slider().setLookAndFeel(nullptr);
+        for (auto &s : mEq) s.setLookAndFeel(nullptr);
     }
 
     // Editor timer: dim the controls when the stack is off (params stay live),
@@ -2668,7 +2809,9 @@ public:
         const bool gOn = on; // sliders follow the master enable; GraphicOn gates DSP
         for (auto &s : mEq) s.setEnabled(gOn);
         mModel.setEnabled(on);
-        mPos.setEnabled(on);
+        mPrevModel.setEnabled(on);
+        mNextModel.setEnabled(on);
+        mPos->setEnabled(on);
         repaint();
     }
 
@@ -2676,84 +2819,152 @@ public:
     {
         g.setColour(colors::divider);
         g.fillRect(0, 0, getWidth(), 1);
-        g.setColour(colors::caption);
+
+        // Rail caption: FRONT PANEL / CAPTURE EQ (amber in CAL).
+        g.setColour(mCalMode ? colors::accent : colors::caption);
         g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.12f));
         g.drawText(mCalMode ? "CAPTURE EQ" : "FRONT PANEL", mCaptionRect,
                    juce::Justification::centredLeft);
-        // Divider between the always-live Input knob and the (independent) tone
-        // stack — the merge is visual only; the On toggle still gates just tone.
+
+        // "INPUT" column label + value are drawn by the Input LabeledKnob itself;
+        // here we only draw the per-model amp FACE behind the tone knobs.
+        const int model = mModel.getSelectedItemIndex();
+        // Face drop shadow (mock: box-shadow 0 8px 20px rgba(0,0,0,.5)) so the panel
+        // lifts off the lane.
+        {
+            juce::Path fp;
+            fp.addRoundedRectangle(mFaceRect.toFloat(), 10.0f);
+            juce::DropShadow(juce::Colours::black.withAlpha(0.5f), 18, {0, 7}).drawForPath(g, fp);
+        }
+        ampface::paintFace(g, mFaceRect, model, mWasOn, mCalMode);
+
+        // Divider between the always-live Input knob column and the amp face.
         g.setColour(colors::divider);
         g.fillRect(mInnerDiv);
-        if (mGraphicOn->isVisible()) // Cali Lead only
+
+        // Graphic '72 pictograms (speaker + waves) above its two knobs.
+        if (model == 12)
         {
-            // band labels (classic silkscreen names; true centres in the doc)
+            const juce::Colour ink = juce::Colour(0xff241f10).withMultipliedAlpha(mWasOn ? 1.0f : 0.5f);
+            if (mK1->isVisible())
+                ampface::pictogram(g, juce::Rectangle<int>(mK1->getX(), mFaceRect.getY() + 18,
+                                                           mK1->getWidth(), 16), 0, ink);
+            if (mK3->isVisible())
+                ampface::pictogram(g, juce::Rectangle<int>(mK3->getX(), mFaceRect.getY() + 18,
+                                                           mK3->getWidth(), 16), 1, ink);
+        }
+
+        if (mGraphicOn->isVisible()) // Cali Lead only — the 5-band graphic on the face
+        {
             static const char *bands[5] = {"80", "240", "750", "2k2", "6k6"};
-            g.setColour(colors::textDim.withMultipliedAlpha(mWasOn ? 1.0f : 0.45f));
-            g.setFont(fonts::mono(9.0f));
+            const float ea = mWasOn ? 1.0f : 0.45f;
+            g.setColour(juce::Colour(0xffd5d0c2).withMultipliedAlpha(ea));
+            g.setFont(fonts::archivo(7.5f, fonts::Bold));
             for (int b = 0; b < 5; ++b)
                 g.drawText(bands[b], mEqLabel[b], juce::Justification::centred);
-            g.setFont(fonts::archivo(9.5f, fonts::SemiBold, 0.1f));
-            g.setColour(colors::caption);
-            g.drawText("GRAPHIC", mGraphicLabel, juce::Justification::centredLeft);
+            // "GRAPHIC" rotated -90 (vertical), centred in its column.
+            juce::Graphics::ScopedSaveState sv(g);
+            const float ccx = (float)mGraphicLabel.getCentreX(), ccy = (float)mGraphicLabel.getCentreY();
+            g.addTransform(juce::AffineTransform::rotation(-juce::MathConstants<float>::halfPi, ccx, ccy));
+            g.setColour(juce::Colour(0xffd5d0c2).withMultipliedAlpha(ea));
+            g.setFont(fonts::archivo(8.0f, fonts::ExtraBold, 0.22f));
+            g.drawText("GRAPHIC", juce::Rectangle<float>(80.0f, 14.0f).withCentre({ccx, ccy}).toNearestInt(),
+                       juce::Justification::centred);
         }
     }
 
     void resized() override
     {
         auto r = getLocalBounds();
-        r.removeFromTop(6); // divider + air
-        auto head = r.removeFromTop(24);
-        mCaptionRect = head.removeFromLeft(80);
+        r.removeFromTop(4); // divider + air
+
+        // --- utility rail: caption | On | model combo | FLAT | CAL | PRE|POST ---
+        auto head = r.removeFromTop(26);
+        mCaptionRect = head.removeFromLeft(86);
         mOn->setBounds(head.removeFromLeft(40).withSizeKeepingCentre(40, 22));
         head.removeFromLeft(6);
-        mPos.setBounds(head.removeFromRight(88).withSizeKeepingCentre(88, 22));
-        head.removeFromRight(6);
+        mPos->setBounds(head.removeFromRight(78).withSizeKeepingCentre(78, 24));
+        head.removeFromRight(8);
         mCal.setBounds(head.removeFromRight(40).withSizeKeepingCentre(40, 22));
         head.removeFromRight(5);
         mFlat.setBounds(head.removeFromRight(40).withSizeKeepingCentre(40, 22));
-        head.removeFromRight(6);
+        head.removeFromRight(8);
+        // < model combo > : steppers hug the front-panel selector on both sides.
+        mPrevModel.setBounds(head.removeFromLeft(22).withSizeKeepingCentre(22, 24));
+        head.removeFromLeft(4);
+        mNextModel.setBounds(head.removeFromRight(22).withSizeKeepingCentre(22, 24));
+        head.removeFromRight(4);
         mModel.setBounds(head.withSizeKeepingCentre(head.getWidth(), 24));
 
-        r.removeFromTop(4);
-        auto row = r;
-        const int kh = juce::jmin(row.getHeight(), 78);
+        r.removeFromTop(6);
 
-        // Input drive on the far left (always live), then a divider, then the
-        // tone stack. The tone On toggle in the header still gates only tone.
-        mInput->setBounds(row.removeFromLeft(76).withSizeKeepingCentre(76, kh));
-        mInnerDiv = juce::Rectangle<int>(row.getX() + 6, row.getY() + 4, 1, kh - 8);
+        // --- face row: Input column (plugin-styled) | divider | amp FACE ---
+        auto row = r.removeFromTop(juce::jmin(r.getHeight(), 150));
+        const int faceH = row.getHeight();
+        auto inCol = row.removeFromLeft(74);
+        mInput->setBounds(inCol.withSizeKeepingCentre(66, juce::jmin(faceH, 96)));
+        mInnerDiv = juce::Rectangle<int>(row.getX() + 6, row.getY() + 8, 1, faceH - 16);
         row.removeFromLeft(14);
+        mFaceRect = row; // the amp face occupies the rest
 
-        // graphic zone on the right -- Cali Lead only (hidden elsewhere, the
-        // knob row then keeps the full width)
+        const int model = mModel.getSelectedItemIndex();
+        auto knobRow = row;
+
+        // graphic EQ zone (Cali Lead only) on the right side of the face: a vertical
+        // GRAPHIC label, then 5 slot sliders with band labels beneath.
         if (mGraphicOn->isVisible())
         {
-            auto gz = row.removeFromRight(juce::jmin(150, row.getWidth() / 2 - 8));
-            auto gHead = gz.removeFromTop(16);
-            mGraphicLabel = gHead.removeFromLeft(64);
-            mGraphicOn->setBounds(gHead.removeFromLeft(42).withSizeKeepingCentre(42, 16));
+            auto gz = knobRow.removeFromRight(juce::jmin(214, knobRow.getWidth() * 44 / 100));
+            gz.removeFromRight(42);          // clearance for the jewel lamp
+            gz = gz.reduced(0, 14);
+            auto gHead = gz.removeFromLeft(22);
+            mGraphicOn->setBounds(gHead.removeFromBottom(18).withSizeKeepingCentre(20, 16));
+            mGraphicLabel = gHead;           // vertical "GRAPHIC" text
             auto lab = gz.removeFromBottom(12);
-            const int sw = gz.getWidth() / 5;
+            gz.removeFromBottom(2);
+            const int sw = juce::jmax(14, gz.getWidth() / 5);
             for (int b = 0; b < 5; ++b)
             {
-                mEq[b].setBounds(gz.removeFromLeft(sw).reduced(2, 0));
+                auto col = gz.removeFromLeft(sw);
+                mEq[b].setBounds(col.withSizeKeepingCentre(20, col.getHeight()));
                 mEqLabel[b] = lab.removeFromLeft(sw);
             }
-            row.removeFromRight(10);
         }
 
-        // knob row: place the visible tone knobs evenly
+        // tone knobs, centred over the (remaining) face, shifted right for models
+        // whose face art claims the left edge (Red Star, Cali Lead).
+        knobRow.removeFromLeft(ampface::controlsLeftPad(model));
         juce::Component *ks[4] = {mK1.get(), mK2.get(), mK3.get(), mK4.get()};
         int vis = 0;
         for (auto *k : ks) if (k->isVisible()) ++vis;
-        const int kw = vis > 0 ? juce::jmin(64, row.getWidth() / vis) : 0;
-        for (auto *k : ks)
-            if (k->isVisible())
-                k->setBounds(row.removeFromLeft(kw).withSizeKeepingCentre(kw, kh));
+        if (vis > 0)
+        {
+            const int kw = juce::jmin(84, knobRow.getWidth() / vis);
+            const int dial = juce::jmin(kw - 6, 76);
+            const int boxH = dial + 15;                    // dial + label row
+            // Centre the box on the MIDPOINT between the knob's visible TOP (the beak
+            // tip on chicken-heads, else the dome edge) and the label bottom, so the
+            // whole knob+label reads as one vertically-centred unit in the face.
+            const int midOff = (int)std::lround(ampface::knobTopFrac(model) * dial + boxH) / 2;
+            const int boxTop = knobRow.getCentreY() - midOff;
+            auto grp = juce::Rectangle<int>(knobRow.getCentreX() - kw * vis / 2, boxTop, kw * vis, boxH);
+            for (auto *k : ks)
+                if (k->isVisible())
+                    k->setBounds(grp.removeFromLeft(kw).reduced(3, 0));
+        }
     }
 
 private:
     juce::String id(const char *suffix) const { return "ts" + mS + suffix; }
+
+    // Step the model combo by delta, wrapping around the list ends.
+    void stepModel(int delta)
+    {
+        const int n = mModel.getNumItems();
+        if (n <= 0) return;
+        const int i = (mModel.getSelectedItemIndex() + delta % n + n) % n;
+        mModel.setSelectedItemIndex(i); // fires onChange -> param + updateFaces()
+    }
 
     void setParamRaw(const juce::String &pid, float raw)
     {
@@ -2868,6 +3079,23 @@ private:
         const bool vox = (m == 11), james = (m == 12), e3 = (m == 13);
         const bool mark = (m == 3); // Cali Lead: the only stack with the graphic
         const bool cal = mCalMode;
+
+        // Re-face the knobs for this model: per-model painter + caption colour/font.
+        mKnobLnF.configure(m);
+        const auto &fsp = ampface::spec(m);
+        const juce::Colour lblCol = fsp.label;
+        // Per-model READOUT scale (display + CAL entry only; pot 0..1 unchanged):
+        // Black 65 / Silver 69 read 1-10, Tweed 59 / Tweed 57 read 1-12, others 0-10.
+        double rLo = 0.0, rHi = 10.0;
+        if (m == 1 || m == 2)       { rLo = 1.0; rHi = 10.0; }
+        else if (m == 0 || m == 13) { rLo = 1.0; rHi = 12.0; }
+        for (auto *k : {mK1.get(), mK2.get(), mK3.get(), mK4.get()})
+        {
+            k->setCaptionColour(lblCol);
+            k->setCaptionFont(9.5f, fsp.labelWeight, fsp.labelTrack);
+            k->setRotationReadout(rLo, rHi, 1);
+        }
+
         mGraphicOn->setVisible(mark && !cal);
         for (auto &s : mEq) s.setVisible(mark && !cal);
         if (e3)
@@ -2882,7 +3110,7 @@ private:
         else
         {
             mK1->rebind(mApvts, id(cal ? "RefTreble" : "Treble")); mK1->setCaption("Treble");
-            mK2->rebind(mApvts, id(cal ? "RefMid" : "Mid"));       mK2->setCaption("Mid");
+            mK2->rebind(mApvts, id(cal ? "RefMid" : "Mid"));       mK2->setCaption("Middle");
             mK3->rebind(mApvts, id(cal ? "RefBass" : "Bass"));     mK3->setCaption("Bass");
             mK4->rebind(mApvts, id(cal ? "RefCut" : "Cut"));       mK4->setCaption("Cut");    // Top Boost only
             mK2->setVisible(!vox && !james);   // no mid pot on Top Boost / Graphic 72
@@ -2896,17 +3124,23 @@ private:
 
     juce::AudioProcessorValueTreeState &mApvts;
     juce::String mS;
-    juce::ComboBox mModel, mPos;
+    // The per-model knob painter. Declared BEFORE the knobs so it is destroyed
+    // AFTER them (a LookAndFeel must outlive every component that uses it).
+    ampface::AmpKnobLnF mKnobLnF;
+    ampface::GraphicEqLnF mEqLnF; // Cali Lead graphic-EQ slider painter
+    juce::ComboBox mModel;
+    juce::TextButton mPrevModel, mNextModel; // < > steppers flanking the model combo
+    std::unique_ptr<SegChoice> mPos; // PRE|POST segmented (ts*Pos)
     juce::ToggleButton mCal, mFlat;
     bool mCalMode = false, mRevertArmed = false;
     float mPrev[5] = {0.5f, 0.5f, 0.5f, 0.0f, 0.0f}; // tone before FLAT (for UNDO)
     float mFlatSnap[5] = {0.5f, 0.5f, 0.5f, 0.0f, 0.0f}; // what FLAT wrote (to detect edits)
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mModelAtt, mPosAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mModelAtt;
     std::unique_ptr<ToggleSwitch> mOn, mGraphicOn;
     std::unique_ptr<LabeledKnob> mInput, mK1, mK2, mK3, mK4;
     juce::Slider mEq[5];
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mEqAtt[5];
-    juce::Rectangle<int> mCaptionRect, mGraphicLabel, mEqLabel[5], mInnerDiv;
+    juce::Rectangle<int> mCaptionRect, mGraphicLabel, mEqLabel[5], mInnerDiv, mFaceRect;
     bool mWasOn = true;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ToneStackSection)
@@ -2957,35 +3191,25 @@ public:
     AmpLane(NamRigProcessor &proc, int rig)
         : mProc(proc), mRig(rig)
     {
-        mModelName.setFont(fonts::archivo(20.0f, fonts::Bold));
-        mModelName.setColour(juce::Label::textColourId, colors::textBright);
-        mModelName.setInterceptsMouseClicks(false, false);
-        addAndMakeVisible(mModelName);
+        // Live anti-alias: 6-way segmented control (same oversample choice param).
+        mLiveAa = std::make_unique<SegChoice>(
+            mProc.apvts, rig == 0 ? "oversample" : "oversampleB",
+            juce::StringArray{"Off", juce::String::fromUTF8("2\xC3\x97"), juce::String::fromUTF8("4\xC3\x97"),
+                              juce::String::fromUTF8("8\xC3\x97"), juce::String::fromUTF8("16\xC3\x97"),
+                              juce::String::fromUTF8("32\xC3\x97")});
+        addAndMakeVisible(*mLiveAa);
 
-        auto initCombo = [this](juce::ComboBox &box, const juce::StringArray &items,
-                                const char *paramId,
-                                std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> &att)
-        {
-            box.addItemList(items, 1); // must match the parameter StringArray order
-            addAndMakeVisible(box);
-            att = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-                mProc.apvts, paramId, box);
-        };
-        initCombo(mLiveAa, {"Off", "2x", "4x", "8x", "16x", "32x"},
-                  rig == 0 ? "oversample" : "oversampleB", mLiveAtt);
-        initCombo(mOfflineAa, {"Same as live", "8x", "16x", "32x"},
-                  rig == 0 ? "offlineAA" : "offlineAAB", mOfflineAtt);
+        // Small RENDER (offline) combo — same offlineAA choice param.
+        mOfflineAa.addItemList({"Same as live", juce::String::fromUTF8("8\xC3\x97"),
+                                juce::String::fromUTF8("16\xC3\x97"), juce::String::fromUTF8("32\xC3\x97")}, 1);
+        addAndMakeVisible(mOfflineAa);
+        mOfflineAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            mProc.apvts, rig == 0 ? "offlineAA" : "offlineAAB", mOfflineAa);
 
-        // Per-amp front panel: input drive + circuit-exact tone stack, merged
-        // into one section (see ToneStackSection above; the Input knob lives
-        // inside it now).
+        // Per-amp front panel: input drive + circuit-exact tone stack (per-model
+        // amp face). The Input knob lives inside it, plugin-styled, on the left.
         mTone = std::make_unique<ToneStackSection>(mProc.apvts, rig);
         addAndMakeVisible(*mTone);
-
-        // Scrim shown over the anti-alias section when a standard (A1) model is
-        // loaded — the controls exist but do nothing without an A2 capture.
-        mAaVeil.setText("Unavailable");
-        addChildComponent(mAaVeil); // hidden until refresh() decides
     }
 
     // Dim the whole lane when its rig is bypassed or soloed out (matches CabPanel).
@@ -2996,8 +3220,17 @@ public:
     {
         const bool loaded = mProc.isModelLoaded(mRig);
         const bool a2 = loaded && mProc.isA2Model(mRig);
+        // Cache the name too: swapping one loaded model for another leaves loaded/a2
+        // unchanged, so without this the pill text would stay stale.
+        const juce::String name = loaded ? mProc.getModelName(mRig) : juce::String();
         mTone->refresh();
-        if (loaded != mLoaded) { mLoaded = loaded; repaint(); }
+        if (loaded != mLoaded || a2 != mA2 || name != mModelName)
+        {
+            mLoaded = loaded;
+            mA2 = a2;
+            mModelName = name;
+            repaint();
+        }
 
         // "Capped at 4x" note when Low Latency holds back a higher live AA setting.
         const bool ll = mProc.apvts.getRawParameterValue("lowLatency")->load() >= 0.5f;
@@ -3005,16 +3238,18 @@ public:
             mRig == 0 ? "oversample" : "oversampleB")->load();
         const bool capped = ll && liveChoice > 2; // >4x
         if (capped != mAaCapped) { mAaCapped = capped; repaint(); }
-        mModelName.setText(loaded ? mProc.getModelName(mRig) : "No model loaded",
-                           juce::dontSendNotification);
 
         // Anti-alias is only meaningful for an A2 capture. A standard (A1) model
-        // leaves the controls present but inert -> disable + black out the whole
-        // section with an "Unavailable" scrim (no model = still adjustable).
+        // leaves the controls inert -> swap them for a dashed "fixed" chip (no model
+        // loaded = still adjustable). The old SectionVeil is retired.
         const bool aaAvailable = !loaded || a2;
-        mLiveAa.setEnabled(aaAvailable);
-        mOfflineAa.setEnabled(aaAvailable);
-        mAaVeil.setVisible(loaded && !a2);
+        if (aaAvailable != mAaAvailable)
+        {
+            mAaAvailable = aaAvailable;
+            mLiveAa->setVisible(aaAvailable);
+            mOfflineAa.setVisible(aaAvailable);
+            repaint();
+        }
     }
 
     void mouseUp(const juce::MouseEvent &e) override
@@ -3056,7 +3291,8 @@ public:
         g.setFont(fonts::archivo(11.0f, fonts::Bold, 0.08f));
         g.drawText(mRig == 0 ? "A" : "B", mTagRect, juce::Justification::centredLeft);
 
-        // Loader pill (model name shows in the label below; the pill stays a verb).
+        // Loader pill: absorbs the loaded capture's NAME (bold) + a green LED + an
+        // A1/A2 capture-type chip. Unloaded, it reads "Load NAM model…".
         auto lp = mLoaderRect.toFloat();
         juce::ColourGradient lg(juce::Colour(0xff23272e), lp.getTopLeft(),
                                 juce::Colour(0xff1b1f25), lp.getBottomLeft(), false);
@@ -3067,10 +3303,29 @@ public:
         if (mLoaded) fx::glowEllipse(g, dot, colors::green, 9, 0.5f, 4, 0.4f);
         g.setColour(mLoaded ? colors::green : colors::caption);
         g.fillEllipse(dot);
-        g.setColour(colors::text);
-        g.setFont(fonts::archivo(12.5f, fonts::SemiBold));
-        g.drawText(juce::String::fromUTF8("Load NAM model\xE2\x80\xA6"), lp.withTrimmedLeft(32).toNearestInt(),
-                   juce::Justification::centredLeft);
+
+        // A1/A2 chip at the right end of the pill (only when a model is loaded).
+        auto nameArea = lp.withTrimmedLeft(32).withTrimmedRight(10);
+        if (mLoaded)
+        {
+            const bool a2 = mA2;
+            auto chip = juce::Rectangle<float>(26.0f, 16.0f).withCentre(
+                {lp.getRight() - 24.0f, lp.getCentreY()});
+            g.setColour((a2 ? colors::green : colors::caption).withAlpha(a2 ? 0.10f : 0.0f));
+            g.fillRoundedRectangle(chip, 8.0f);
+            g.setColour(a2 ? juce::Colour(0xff2c4a33) : colors::outline);
+            g.drawRoundedRectangle(chip, 8.0f, 1.0f);
+            g.setColour(a2 ? colors::green : colors::caption);
+            g.setFont(fonts::archivo(9.0f, fonts::ExtraBold, 0.1f));
+            g.drawText(a2 ? "A2" : "A1", chip.toNearestInt(), juce::Justification::centred);
+            nameArea = nameArea.withTrimmedRight(30);
+        }
+
+        g.setColour(mLoaded ? colors::textBright : colors::caption);
+        g.setFont(fonts::archivo(mLoaded ? 15.0f : 12.5f, mLoaded ? fonts::Bold : fonts::SemiBold));
+        g.drawText(mLoaded ? mProc.getModelName(mRig)
+                           : juce::String::fromUTF8("Load NAM model\xE2\x80\xA6"),
+                   nameArea.toNearestInt(), juce::Justification::centredLeft, true);
 
         // Remove (✕) button — shown only when a model is loaded.
         if (mLoaded)
@@ -3086,23 +3341,44 @@ public:
             g.drawLine(x.getX(), x.getBottom(), x.getRight(), x.getY(), 1.6f);
         }
 
-        // Anti-alias section: caption + AA labels + optional capped note.
+        // Anti-alias row (one compact line): caption + live segmented + RENDER combo
+        // + inline capped note. For an A1 capture the controls are swapped for a
+        // dashed "fixed" chip.
         g.setColour(colors::caption);
-        g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.12f));
-        g.drawText(juce::String::fromUTF8("ANTI-ALIAS \xC2\xB7 QUALITY"), mCaptionR,
-                   juce::Justification::topLeft);
-        g.setColour(colors::textDim);
-        g.setFont(fonts::archivo(11.0f));
-        g.drawText("Live AA Oversampling", mLiveLabel, juce::Justification::centredLeft);
-        g.drawText("Offline (render) AA", mOffLabel, juce::Justification::centredLeft);
-        if (mAaCapped)
+        g.setFont(fonts::archivo(9.0f, fonts::ExtraBold, 0.16f));
+        g.drawText("ANTI-ALIAS", mCaptionR, juce::Justification::centredLeft);
+
+        if (!mAaAvailable) // A1 capture: dashed "anti-alias fixed" chip
         {
-            g.setColour(colors::accent);
-            g.setFont(fonts::mono(9.5f, fonts::Medium));
-            g.drawText(juce::String::fromUTF8("Capped at 4\xC3\x97 \xC2\xB7 Low Latency on"),
-                       juce::Rectangle<int>(mLiveAa.getX(), mLiveAa.getBottom() + 2,
-                                            mLiveAa.getWidth(), 12),
-                       juce::Justification::centredLeft);
+            auto chip = mAaFixedRect.toFloat();
+            juce::Path box, dashed;
+            box.addRoundedRectangle(chip, 8.0f);
+            const float dl[2] = {4.0f, 3.0f};
+            juce::PathStrokeType(1.0f).createDashedStroke(dashed, box, dl, 2);
+            g.setColour(colors::outline);
+            g.fillPath(dashed);
+            g.setColour(colors::caption);
+            g.setFont(fonts::archivo(10.0f, fonts::Medium, 0.02f));
+            g.drawText(juce::String::fromUTF8("Standard capture \xE2\x80\x94 anti-alias fixed"),
+                       chip.toNearestInt(), juce::Justification::centred);
+        }
+        else
+        {
+            g.setColour(colors::captionDim);
+            g.setFont(fonts::archivo(9.0f, fonts::SemiBold, 0.06f));
+            g.drawText("RENDER", mRenderLabel, juce::Justification::centredRight);
+            if (mAaCapped)
+            {
+                auto nr = mNoteRect;
+                auto d = juce::Rectangle<float>(6.0f, 6.0f).withCentre(
+                    {(float)nr.getX() + 3.0f, (float)nr.getCentreY()});
+                fx::glowEllipse(g, d, colors::accent, 6, 0.7f, 3, 0.5f);
+                g.setColour(colors::accent);
+                g.fillEllipse(d);
+                g.setFont(fonts::mono(9.0f, fonts::Medium));
+                g.drawText(juce::String::fromUTF8("capped at 4\xC3\x97 \xC2\xB7 low latency"),
+                           nr.withTrimmedLeft(12), juce::Justification::centredLeft);
+            }
         }
 
         // Bypass/solo-out scrim over the whole lane (child controls stay drawn on
@@ -3118,58 +3394,101 @@ public:
     {
         auto area = getLocalBounds().reduced(14, 12);
 
-        // Top: rig tag + loader pill + remove.
+        // Top: rig tag + loader pill (name + A1/A2 chip) + remove ✕.
         auto top = area.removeFromTop(40);
         mTagRect = top.removeFromLeft(24);
         top.removeFromLeft(4);
-        mRemoveRect = top.removeFromRight(38).withSizeKeepingCentre(38, 38);
+        mRemoveRect = top.removeFromRight(34).withSizeKeepingCentre(34, 34);
         top.removeFromRight(8);
         mLoaderRect = top.withSizeKeepingCentre(top.getWidth(), 38);
 
-        area.removeFromTop(8);
-        mModelName.setBounds(area.removeFromTop(24));
-
-        // Front-panel section (input drive + tone stack) directly under the
-        // model name.
+        // Front-panel section: utility rail + per-model amp face.
         area.removeFromTop(10);
-        mTone->setBounds(area.removeFromTop(128));
+        mTone->setBounds(area.removeFromTop(juce::jmin(area.getHeight() - 34, 190)));
 
-        // Anti-alias quality section beneath it, full width. Two labelled combos
-        // placed side by side now that the input knob has moved up.
-        area.removeFromTop(12);
-        mCaptionR = area.removeFromTop(14);
+        // Anti-alias: ONE compact row.
         area.removeFromTop(8);
-        auto labels = area.removeFromTop(15);
-        const int half = (area.getWidth() - 16) / 2;
-        mLiveLabel = labels.removeFromLeft(half);
-        labels.removeFromLeft(16);
-        mOffLabel = labels.removeFromLeft(half);
-        area.removeFromTop(4);
-        auto combos = area.removeFromTop(32);
-        mLiveAa.setBounds(combos.removeFromLeft(half));
-        combos.removeFromLeft(16);
-        mOfflineAa.setBounds(combos.removeFromLeft(half));
-
-        // Blackout scrim covers the whole AA section (caption -> combos).
-        mAaVeil.setBounds(juce::Rectangle<int>(mCaptionR.getX(), mCaptionR.getY(),
-                                               mCaptionR.getWidth(),
-                                               mOfflineAa.getBottom() - mCaptionR.getY())
-                              .expanded(4, 4));
+        auto aa = area.removeFromTop(30);
+        mCaptionR = aa.removeFromLeft(78);
+        aa.removeFromLeft(6);
+        // A1 dashed chip spans the row after the caption (shown when unavailable).
+        mAaFixedRect = juce::Rectangle<int>(aa.getX(), aa.getCentreY() - 11,
+                                            juce::jmin(252, aa.getWidth()), 22);
+        // Available layout: RENDER combo (right) + its label, live seg (left) + note.
+        auto row = aa;
+        mOfflineAa.setBounds(row.removeFromRight(74).withSizeKeepingCentre(74, 24));
+        row.removeFromRight(6);
+        mRenderLabel = row.removeFromRight(50);
+        row.removeFromRight(10);
+        const int segW = juce::jlimit(120, 196, row.getWidth() - 150);
+        mLiveAa->setBounds(row.removeFromLeft(segW).withSizeKeepingCentre(segW, 24));
+        row.removeFromLeft(10);
+        mNoteRect = row;
     }
 
 private:
     NamRigProcessor &mProc;
     int mRig = 0;
-    juce::Label mModelName;
-    juce::ComboBox mLiveAa, mOfflineAa;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mLiveAtt, mOfflineAtt;
+    std::unique_ptr<SegChoice> mLiveAa;
+    juce::ComboBox mOfflineAa;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mOfflineAtt;
     std::unique_ptr<ToneStackSection> mTone;
-    SectionVeil mAaVeil;
     std::unique_ptr<juce::FileChooser> mChooser;
-    juce::Rectangle<int> mTagRect, mLoaderRect, mRemoveRect, mCaptionR, mLiveLabel, mOffLabel;
-    bool mLoaded = false, mAaCapped = false, mDim = false;
+    juce::Rectangle<int> mTagRect, mLoaderRect, mRemoveRect, mCaptionR, mRenderLabel, mNoteRect, mAaFixedRect;
+    bool mLoaded = false, mA2 = false, mAaAvailable = true, mAaCapped = false, mDim = false;
+    juce::String mModelName; // cached so a model swap repaints the pill text
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AmpLane)
+};
+
+//==============================================================================
+// Compact "LINK" pill: a chain-glyph toggle decoupled from its parameter (like
+// InvertSwitch). Clicks fire onToggle; refresh() mirrors the backing param back
+// via setStateQuiet(). Used by the Amp panel (ampLinkAB) and the Mix panel
+// (rigLevelLink). Draws a two-ring chain glyph beside a "LINK" label.
+class LinkToggle : public juce::Component
+{
+public:
+    std::function<void(bool)> onToggle;
+
+    void setStateQuiet(bool on) { if (on != mOn) { mOn = on; repaint(); } }
+    bool state() const { return mOn; }
+    void enablementChanged() override { repaint(); }
+
+    void mouseUp(const juce::MouseEvent &e) override
+    {
+        if (!isEnabled() || !getLocalBounds().contains(e.getPosition())) return;
+        mOn = !mOn;
+        repaint();
+        if (onToggle) onToggle(mOn);
+    }
+
+    void paint(juce::Graphics &g) override
+    {
+        const bool en = isEnabled();
+        auto box = getLocalBounds().toFloat().reduced(0.5f);
+        const juce::Colour acc = colors::accent;
+        g.setColour(en && mOn ? acc.withAlpha(0.16f) : colors::tile);
+        g.fillRoundedRectangle(box, 7.0f);
+        g.setColour(en ? (mOn ? acc : colors::outline) : colors::captionDim);
+        g.drawRoundedRectangle(box, 7.0f, mOn ? 1.4f : 1.0f);
+
+        // Two interlocking rings (chain link) at the left.
+        auto ic = box.reduced(9.0f, 0.0f).removeFromLeft(22.0f);
+        const float rw = 12.0f, rh = 9.0f, cy = ic.getCentreY();
+        const juce::Colour ink = en ? (mOn ? acc : colors::text2) : colors::captionDim;
+        g.setColour(ink);
+        g.drawRoundedRectangle(ic.getX(), cy - rh * 0.5f, rw, rh, rh * 0.5f, 1.4f);
+        g.drawRoundedRectangle(ic.getX() + rw - 6.0f, cy - rh * 0.5f, rw, rh, rh * 0.5f, 1.4f);
+
+        g.setColour(ink);
+        g.setFont(fonts::archivo(11.0f, fonts::SemiBold, 0.08f));
+        g.drawText("LINK", box.withTrimmedLeft(30.0f).toNearestInt(),
+                   juce::Justification::centredLeft);
+    }
+
+private:
+    bool mOn = false;
 };
 
 //==============================================================================
@@ -3195,6 +3514,40 @@ public:
         // Output-normalize is a single global setting -> one toggle in the header.
         mNorm = std::make_unique<ToggleSwitch>(mProc.apvts, "normalize");
         addAndMakeVisible(*mNorm);
+
+        // A/B LINK: makes the two amps act as one. Build the list of params that
+        // get mirrored (all 18 tonestack suffixes + the per-amp Input trim); the
+        // .nam model itself is mirrored separately via loadModel (see syncLink).
+        static const char *tsSfx[] = {"On",       "Model",   "Pos",       "Treble",
+                                      "Mid",      "Bass",    "Cut",       "Ghost",
+                                      "RefTreble","RefMid",  "RefBass",   "RefCut",
+                                      "GraphicOn","Eq1",     "Eq2",       "Eq3",
+                                      "Eq4",      "Eq5"};
+        for (auto *s : tsSfx)
+        {
+            mLinkIdsA.add(juce::String("tsA") + s);
+            mLinkIdsB.add(juce::String("tsB") + s);
+        }
+        mLinkIdsA.add("rigInputA");
+        mLinkIdsB.add("rigInputB");
+        mSnapA.resize((size_t)mLinkIdsA.size(), 0.0f);
+        mSnapB.resize((size_t)mLinkIdsB.size(), 0.0f);
+
+        mLinkBtn.onToggle = [this](bool on)
+        {
+            if (auto *p = mProc.apvts.getParameter("ampLinkAB"))
+                p->setValueNotifyingHost(on ? 1.0f : 0.0f);
+            if (on)
+            {
+                // Enabling snaps Amp A to match Amp B, then mirrors both ways.
+                copyAll(/*fromA=*/false);
+                takeSnapshot();
+                mSnapValid = true;
+            }
+            else
+                mSnapValid = false;
+        };
+        addAndMakeVisible(mLinkBtn);
     }
 
     void resized() override
@@ -3205,6 +3558,8 @@ public:
         mNorm->setBounds(hr.removeFromRight(42).withSizeKeepingCentre(42, 22));
         hr.removeFromRight(8);
         mNormLabelRect = hr.removeFromRight(150);
+        hr.removeFromRight(16);
+        mLinkBtn.setBounds(hr.removeFromRight(92).withSizeKeepingCentre(92, 28));
 
         auto body = bodyArea().reduced(12, 8);
         const int gap = 18;
@@ -3227,15 +3582,115 @@ public:
         g.fillRect((float)mDivX, (float)body.getY(), 1.0f, (float)body.getHeight());
     }
 
-    void refresh() { mA.refresh(); mB.refresh(); mNorm->setEnabled(mProc.hasLoudness()); }
+    void refresh()
+    {
+        syncLink();
+        mA.refresh();
+        mB.refresh();
+        mNorm->setEnabled(mProc.hasLoudness());
+    }
     AmpLane &ampA() { return mA; }
     AmpLane &ampB() { return mB; }
 
 private:
+    // --- A/B link mirroring (message thread; driven from refresh()) -----------
+    // Copy every mirrored param + the .nam model from one side to the other.
+    // fromA == true copies A -> B; false copies B -> A.
+    void copyAll(bool fromA)
+    {
+        auto &s = mProc.apvts;
+        for (int i = 0; i < mLinkIdsA.size(); ++i)
+        {
+            auto *src = s.getParameter(fromA ? mLinkIdsA[i] : mLinkIdsB[i]);
+            auto *dst = s.getParameter(fromA ? mLinkIdsB[i] : mLinkIdsA[i]);
+            if (src && dst)
+                dst->setValueNotifyingHost(src->getValue());
+        }
+        copyModel(fromA);
+    }
+
+    void copyModel(bool fromA)
+    {
+        const int srcRig = fromA ? 0 : 1, dstRig = fromA ? 1 : 0;
+        const juce::String sp = mProc.getModelPath(srcRig);
+        if (sp == mProc.getModelPath(dstRig))
+            return; // already the same capture (or both empty)
+        if (sp.isEmpty())
+            mProc.unloadModel(dstRig);
+        else
+            mProc.loadModel(juce::File(sp), dstRig);
+    }
+
+    void takeSnapshot()
+    {
+        auto &s = mProc.apvts;
+        for (int i = 0; i < mLinkIdsA.size(); ++i)
+        {
+            auto *pa = s.getParameter(mLinkIdsA[i]);
+            auto *pb = s.getParameter(mLinkIdsB[i]);
+            mSnapA[(size_t)i] = pa ? pa->getValue() : 0.0f;
+            mSnapB[(size_t)i] = pb ? pb->getValue() : 0.0f;
+        }
+        mSnapPathA = mProc.getModelPath(0);
+        mSnapPathB = mProc.getModelPath(1);
+    }
+
+    // Keep the two amps identical. On each tick we diff the live params against
+    // the last snapshot: whichever side moved becomes the source and is copied
+    // onto the other. After copying, both sides equal and the snapshot is reset,
+    // so there is no ping-pong.
+    void syncLink()
+    {
+        const bool linked =
+            mProc.apvts.getRawParameterValue("ampLinkAB")->load() >= 0.5f;
+        mLinkBtn.setStateQuiet(linked);
+        if (!linked)
+        {
+            mSnapValid = false;
+            return;
+        }
+        if (!mSnapValid)
+        {
+            // First tick after link engaged (e.g. preset recall): snap A to B.
+            copyAll(/*fromA=*/false);
+            takeSnapshot();
+            mSnapValid = true;
+            return;
+        }
+
+        auto &s = mProc.apvts;
+        for (int i = 0; i < mLinkIdsA.size(); ++i)
+        {
+            auto *pa = s.getParameter(mLinkIdsA[i]);
+            auto *pb = s.getParameter(mLinkIdsB[i]);
+            if (!pa || !pb)
+                continue;
+            const float na = pa->getValue(), nb = pb->getValue();
+            if (na != mSnapA[(size_t)i])
+                pb->setValueNotifyingHost(na); // A moved -> B follows
+            else if (nb != mSnapB[(size_t)i])
+                pa->setValueNotifyingHost(nb); // B moved -> A follows
+        }
+
+        // Model: mirror whichever side's loaded capture changed.
+        const juce::String pa = mProc.getModelPath(0), pb = mProc.getModelPath(1);
+        if (pa != mSnapPathA)
+            copyModel(/*fromA=*/true);
+        else if (pb != mSnapPathB)
+            copyModel(/*fromA=*/false);
+
+        takeSnapshot();
+    }
+
     NamRigProcessor &mProc;
     AmpLane mA, mB;
     juce::TextButton mBrowseBtn;
     std::unique_ptr<ToggleSwitch> mNorm;
+    LinkToggle mLinkBtn;
+    juce::StringArray mLinkIdsA, mLinkIdsB; // parallel A/B mirrored param IDs
+    std::vector<float> mSnapA, mSnapB;      // last-seen normalized values
+    juce::String mSnapPathA, mSnapPathB;    // last-seen model paths
+    bool mSnapValid = false;
     juce::Rectangle<int> mNormLabelRect;
     int mDivX = 0;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(CombinedAmpPanel)
@@ -3736,7 +4191,8 @@ class CombinedCabPanel : public BlockPanel
 public:
     std::function<void()> onBrowse; // open the IR library
 
-    explicit CombinedCabPanel(NamRigProcessor &proc) : BlockPanel("CAB"), mA(proc, 0), mB(proc, 1)
+    explicit CombinedCabPanel(NamRigProcessor &proc)
+        : BlockPanel("CAB"), mProc(proc), mA(proc, 0), mB(proc, 1)
     {
         addAndMakeVisible(mA);
         addAndMakeVisible(mB);
@@ -3744,12 +4200,44 @@ public:
         mBrowseBtn.getProperties().set("pill", true);
         mBrowseBtn.onClick = [this] { if (onBrowse) onBrowse(); };
         addAndMakeVisible(mBrowseBtn);
+
+        // A/B LINK: makes the two cabs act as one. Mirrored params = the IR cuts +
+        // all CABDYN tone/enable settings (the loaded IR itself is mirrored via
+        // loadIr in syncLink). The bare name is the A-side ID; the B-side uses a
+        // "rigB" prefix for knobs and a "B" suffix for the enable bools.
+        static const char *idA[] = {"cabHpf", "cabLpf", "cabDynOn", "cabDynAge",
+                                    "cabDynThump", "cabDynSize", "cabDynSpkrDrive"};
+        static const char *idB[] = {"rigBcabHpf", "rigBcabLpf", "cabDynOnB", "rigBcabDynAge",
+                                    "rigBcabDynThump", "rigBcabDynSize", "rigBcabDynSpkrDrive"};
+        for (auto *s : idA) mLinkIdsA.add(s);
+        for (auto *s : idB) mLinkIdsB.add(s);
+        jassert(mLinkIdsA.size() == mLinkIdsB.size());
+        mSnapA.resize((size_t)mLinkIdsA.size(), 0.0f);
+        mSnapB.resize((size_t)mLinkIdsB.size(), 0.0f);
+
+        mLinkBtn.onToggle = [this](bool on)
+        {
+            if (auto *p = mProc.apvts.getParameter("cabLinkAB"))
+                p->setValueNotifyingHost(on ? 1.0f : 0.0f);
+            if (on)
+            {
+                // Enabling snaps Cab A to match Cab B, then mirrors both ways.
+                copyAll(/*fromA=*/false);
+                takeSnapshot();
+                mSnapValid = true;
+            }
+            else
+                mSnapValid = false;
+        };
+        addAndMakeVisible(mLinkBtn);
     }
 
     void resized() override
     {
         auto hr = headerArea();
         mBrowseBtn.setBounds(hr.removeFromRight(120).withSizeKeepingCentre(120, 28));
+        hr.removeFromRight(16);
+        mLinkBtn.setBounds(hr.removeFromRight(92).withSizeKeepingCentre(92, 28));
 
         auto body = bodyArea().reduced(12, 8);
         const int gap = 18;
@@ -3768,13 +4256,110 @@ public:
         g.fillRect((float)mDivX, (float)body.getY(), 1.0f, (float)body.getHeight());
     }
 
-    void refresh() { mA.refresh(); mB.refresh(); }
+    void refresh()
+    {
+        syncLink();
+        mA.refresh();
+        mB.refresh();
+    }
     CabPanel &cabA() { return mA; }
     CabPanel &cabB() { return mB; }
 
 private:
+    // --- A/B link mirroring (message thread; driven from refresh()) -----------
+    // Copy every mirrored param + the loaded IR from one side to the other.
+    // fromA == true copies A -> B; false copies B -> A.
+    void copyAll(bool fromA)
+    {
+        auto &s = mProc.apvts;
+        for (int i = 0; i < mLinkIdsA.size(); ++i)
+        {
+            auto *src = s.getParameter(fromA ? mLinkIdsA[i] : mLinkIdsB[i]);
+            auto *dst = s.getParameter(fromA ? mLinkIdsB[i] : mLinkIdsA[i]);
+            if (src && dst)
+                dst->setValueNotifyingHost(src->getValue());
+        }
+        copyIr(fromA);
+    }
+
+    void copyIr(bool fromA)
+    {
+        const int srcRig = fromA ? 0 : 1, dstRig = fromA ? 1 : 0;
+        const juce::String sp = mProc.getIrPath(srcRig);
+        if (sp.isEmpty() || sp == mProc.getIrPath(dstRig))
+            return; // nothing to copy (no unloadIr path -> leave dst as-is)
+        mProc.loadIr(juce::File(sp), dstRig);
+    }
+
+    void takeSnapshot()
+    {
+        auto &s = mProc.apvts;
+        for (int i = 0; i < mLinkIdsA.size(); ++i)
+        {
+            auto *pa = s.getParameter(mLinkIdsA[i]);
+            auto *pb = s.getParameter(mLinkIdsB[i]);
+            mSnapA[(size_t)i] = pa ? pa->getValue() : 0.0f;
+            mSnapB[(size_t)i] = pb ? pb->getValue() : 0.0f;
+        }
+        mSnapPathA = mProc.getIrPath(0);
+        mSnapPathB = mProc.getIrPath(1);
+    }
+
+    // Keep the two cabs identical. On each tick we diff the live params against
+    // the last snapshot: whichever side moved becomes the source and is copied
+    // onto the other. After copying, both sides equal and the snapshot is reset,
+    // so there is no ping-pong.
+    void syncLink()
+    {
+        const bool linked =
+            mProc.apvts.getRawParameterValue("cabLinkAB")->load() >= 0.5f;
+        mLinkBtn.setStateQuiet(linked);
+        if (!linked)
+        {
+            mSnapValid = false;
+            return;
+        }
+        if (!mSnapValid)
+        {
+            // First tick after link engaged (e.g. preset recall): snap A to B.
+            copyAll(/*fromA=*/false);
+            takeSnapshot();
+            mSnapValid = true;
+            return;
+        }
+
+        auto &s = mProc.apvts;
+        for (int i = 0; i < mLinkIdsA.size(); ++i)
+        {
+            auto *pa = s.getParameter(mLinkIdsA[i]);
+            auto *pb = s.getParameter(mLinkIdsB[i]);
+            if (!pa || !pb)
+                continue;
+            const float na = pa->getValue(), nb = pb->getValue();
+            if (na != mSnapA[(size_t)i])
+                pb->setValueNotifyingHost(na); // A moved -> B follows
+            else if (nb != mSnapB[(size_t)i])
+                pa->setValueNotifyingHost(nb); // B moved -> A follows
+        }
+
+        // IR: mirror whichever side's loaded IR changed.
+        const juce::String pa = mProc.getIrPath(0), pb = mProc.getIrPath(1);
+        if (pa != mSnapPathA)
+            copyIr(/*fromA=*/true);
+        else if (pb != mSnapPathB)
+            copyIr(/*fromA=*/false);
+
+        takeSnapshot();
+    }
+
+    NamRigProcessor &mProc;
     CabPanel mA, mB;
     juce::TextButton mBrowseBtn;
+    LinkToggle mLinkBtn;
+    juce::StringArray mLinkIdsA, mLinkIdsB; // parallel A/B mirrored param IDs
+    std::vector<float> mSnapA, mSnapB;      // last-seen normalized values
+    juce::String mSnapPathA, mSnapPathB;    // last-seen IR paths
+    bool mSnapValid = false;
     int mDivX = 0;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(CombinedCabPanel)
 };
@@ -6464,55 +7049,6 @@ public:
 private:
     bool mOn = false;
     juce::Colour mAccent{colors::accent};
-};
-
-// Compact "LINK" pill for the Mix panel: ties the two rig Level knobs so a drag
-// on one shifts the other by the same dB (offset preserved). Decoupled from the
-// parameter like InvertSwitch — clicks write rigLevelLink, refresh() mirrors it
-// back via setStateQuiet(). Draws a two-ring chain glyph beside the label.
-class LinkToggle : public juce::Component
-{
-public:
-    std::function<void(bool)> onToggle;
-
-    void setStateQuiet(bool on) { if (on != mOn) { mOn = on; repaint(); } }
-    bool state() const { return mOn; }
-    void enablementChanged() override { repaint(); }
-
-    void mouseUp(const juce::MouseEvent &e) override
-    {
-        if (!isEnabled() || !getLocalBounds().contains(e.getPosition())) return;
-        mOn = !mOn;
-        repaint();
-        if (onToggle) onToggle(mOn);
-    }
-
-    void paint(juce::Graphics &g) override
-    {
-        const bool en = isEnabled();
-        auto box = getLocalBounds().toFloat().reduced(0.5f);
-        const juce::Colour acc = colors::accent;
-        g.setColour(en && mOn ? acc.withAlpha(0.16f) : colors::tile);
-        g.fillRoundedRectangle(box, 7.0f);
-        g.setColour(en ? (mOn ? acc : colors::outline) : colors::captionDim);
-        g.drawRoundedRectangle(box, 7.0f, mOn ? 1.4f : 1.0f);
-
-        // Two interlocking rings (chain link) at the left.
-        auto ic = box.reduced(9.0f, 0.0f).removeFromLeft(22.0f);
-        const float rw = 12.0f, rh = 9.0f, cy = ic.getCentreY();
-        const juce::Colour ink = en ? (mOn ? acc : colors::text2) : colors::captionDim;
-        g.setColour(ink);
-        g.drawRoundedRectangle(ic.getX(), cy - rh * 0.5f, rw, rh, rh * 0.5f, 1.4f);
-        g.drawRoundedRectangle(ic.getX() + rw - 6.0f, cy - rh * 0.5f, rw, rh, rh * 0.5f, 1.4f);
-
-        g.setColour(ink);
-        g.setFont(fonts::archivo(11.0f, fonts::SemiBold, 0.08f));
-        g.drawText("LINK", box.withTrimmedLeft(30.0f).toNearestInt(),
-                   juce::Justification::centredLeft);
-    }
-
-private:
-    bool mOn = false;
 };
 
 // Per-rig OUT L·R meter: two thin vertical bars (tag-coloured fill over a dark

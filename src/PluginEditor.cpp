@@ -80,7 +80,18 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
     // IR library overlay, opened from either cab's Browse button.
     mContent.addChildComponent(mIrBrowser);
     mIrBrowser.onClose = [this] { mIrBrowser.setVisible(false); };
-    mIrBrowser.onLoad = [this](const juce::File &f, int rig) { mProc.loadIr(f, rig); };
+    mIrBrowser.onLoad = [this](const juce::File &f, int rig)
+    {
+        mProc.loadIr(f, rig);
+        // When the cabs are linked, a library load mirrors onto the other cab so
+        // both stay the same IR (and both browser zone labels update).
+        if (mProc.apvts.getRawParameterValue("cabLinkAB")->load() >= 0.5f)
+        {
+            const int other = rig ^ 1;
+            mProc.loadIr(f, other);
+            mIrBrowser.setZoneIrName(other, f.getFileNameWithoutExtension());
+        }
+    };
     mIrBrowser.setRootChooser([this] { return mProc.irLibraryRoot(); },
                               [this](const juce::File &d) { mProc.setIrLibraryRoot(d); });
     mCabPanel.onBrowse = [this] { openIrBrowser(0); };
@@ -88,7 +99,18 @@ NamRigEditor::NamRigEditor(NamRigProcessor &p)
     // Amp-model library overlay, opened from the AMP panel's Browse button.
     mContent.addChildComponent(mAmpBrowser);
     mAmpBrowser.onClose = [this] { mAmpBrowser.setVisible(false); };
-    mAmpBrowser.onLoad = [this](const juce::File &f, int rig) { mProc.loadModel(f, rig); };
+    mAmpBrowser.onLoad = [this](const juce::File &f, int rig)
+    {
+        mProc.loadModel(f, rig);
+        // When the amps are linked, a library load mirrors onto the other amp so
+        // both stay the same capture (and both browser zone labels update).
+        if (mProc.apvts.getRawParameterValue("ampLinkAB")->load() >= 0.5f)
+        {
+            const int other = rig ^ 1;
+            mProc.loadModel(f, other);
+            mAmpBrowser.setZoneModelName(other, f.getFileNameWithoutExtension());
+        }
+    };
     mAmpBrowser.setRootChooser([this] { return mProc.ampLibraryRoot(); },
                                [this](const juce::File &d) { mProc.setAmpLibraryRoot(d); });
     mAmpPanel.onBrowse = [this] { openAmpBrowser(0); };

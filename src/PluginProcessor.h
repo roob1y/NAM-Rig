@@ -60,7 +60,13 @@ public:
     // survives editor close/reopen (message thread only).
     nam_rig::PresetManager &presets() { return *mPresets; }
     juce::String getModelName(int rig = 0) const { return mModelName[rig]; }
+    // Full path of the loaded .nam capture (empty if none). Used by the amp
+    // Link feature to load one rig's model into the other. Message thread only.
+    juce::String getModelPath(int rig = 0) const { return mModelPath[rig]; }
     juce::String getIrName(int rig = 0) const { return cabFor(rig).irName(); }
+    // Full path of the loaded cab IR (empty if none). Used by the cab Link
+    // feature to load one rig's IR into the other. Message thread only.
+    juce::String getIrPath(int rig = 0) const { return mIrPath[rig]; }
     bool isModelLoaded(int rig = 0) const { return mModelLoaded[rig].load(); }
     bool isIrLoaded(int rig = 0) const { return cabFor(rig).isIrLoaded(); }
     // IR magnitude response for the Cab panel (dst must hold CabBlock::kResPts
