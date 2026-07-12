@@ -85,9 +85,15 @@ docs/cabdyn/renders/
 
 # docs
 
-docs/backlog/SCOPE_PEDALBOARD_2026-07-10.md/
-docs/delonge/DELONGE_RIG_HANDOFF.md/
-docs/tonestack/RESEARCH.md/
+docs/backlog/SCOPE_PEDALBOARD_2026-07-10.md
+docs/delonge/DELONGE_RIG_HANDOFF.md
+docs/tonestack/RESEARCH.md
+docs/EAR_FIXES_2026-07-04.md
+docs/backlog/SCOPE_DOUBLER_2026-07-05.md
+docs/backlog/SCOPE_ECO_LIVE_MODE_2026-07-05.md
+docs/backlog/SCOPE_FEEDBACK_SUSTAIN_2026-07-05.md
+docs/backlog/SCOPE_RIG_SHARING_2026-07-05.md
+docs/backlog/SCOPE_SCENES_MORPH_2026-07-05.md
 
 # test-harness OUTPUT fixtures (regenerable). Keep the INPUT fixtures
 # (testdata/chunk_in.f32, testdata/delay11.wav) which the tests read.
