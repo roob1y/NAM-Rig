@@ -157,7 +157,19 @@ public:
     void setRotationReadout(double top = 10.0)
     {
         mRotationReadout = true; // 0..10 rotation display -> suppress the unit suffix
+        mRotTop = top;
+        applyRotationReadout();
+    }
+
+    // (Re)install the 0..top rotation readout on the slider, one decimal place.
+    // MUST be re-applied after every rebind(): constructing a SliderAttachment
+    // overwrites the slider's text/value functions with the parameter's own
+    // formatting (e.g. the tone stack's integer knob10), which would otherwise
+    // silently wipe out this readout.
+    void applyRotationReadout()
+    {
         auto *s = &mSlider;
+        const double top = mRotTop;
         mSlider.textFromValueFunction = [s, top](double v) {
             return juce::String(s->valueToProportionOfLength(v) * top, 1);
         };
@@ -194,6 +206,7 @@ public:
                 true, param->convertFrom0to1(param->getDefaultValue()));
             if (!mReadoutFn) mUnit = param->getLabel(); // custom readout supplies its own unit
         }
+        if (mRotationReadout) applyRotationReadout(); // the new attachment reset it
         repaint();
     }
 
@@ -210,6 +223,7 @@ private:
     juce::StringArray mValueMenu; // when set, the value readout is a click-to-pick dropdown
     juce::String mValueMenuHeader; // optional title for the click-to-pick menu
     int mCaptionH = 15, mValueH = 16;
+    double mRotTop = 10.0; // rotation-readout top (re-applied after each rebind)
     bool mShowValue = true, mDragging = false, mRotationReadout = false, mReadoutFn = false;
     bool mValueOnDrag = false; // pedal-face knobs: readout shown only while turning
 };
@@ -2579,12 +2593,47 @@ public:
         mPosAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
             mApvts, id("Pos"), mPos);
 
+        // Amp input drive now lives in this same front-panel section, to the
+        // left of the tone knobs. Always live — independent of the tone On
+        // toggle (0 dB = the capture's calibrated level).
+        mInput = std::make_unique<LabeledKnob>(mApvts, "rigInput" + mS, "Input");
+        addAndMakeVisible(*mInput);
+
         mK1 = std::make_unique<LabeledKnob>(mApvts, id("Treble"), "Treble");
         mK2 = std::make_unique<LabeledKnob>(mApvts, id("Mid"), "Mid");
         mK3 = std::make_unique<LabeledKnob>(mApvts, id("Bass"), "Bass");
         mK4 = std::make_unique<LabeledKnob>(mApvts, id("Cut"), "Cut");
         for (auto *k : {mK1.get(), mK2.get(), mK3.get(), mK4.get()})
+        {
+            // 0.0–10.0 readout, one decimal, noon = 5.0 (amp-style tone knobs).
+            // Set once; survives the per-model/CAL rebind() like the drive faces.
+            k->setRotationReadout(10.0);
             addAndMakeVisible(*k);
+        }
+
+        // CAL: a mode toggle (no dropdown). While lit, the tone knobs edit the
+        // capture's own EQ points -- the stack's flat reference (ts*Ref*) -- off
+        // the pack sheet, instead of the live tone; the graphic + ghost hide (no
+        // capture reference). Switching CAL off parks each tone knob on its
+        // reference, so the stack lands bit-exact flat on the entered capture,
+        // then normal tone editing resumes.
+        mCal.setButtonText("CAL");
+        mCal.getProperties().set("pill", true);
+        mCal.setClickingTogglesState(true);
+        mCal.onClick = [this] { setCalMode(mCal.getToggleState()); };
+        addAndMakeVisible(mCal);
+
+        // FLAT: one click resets every tone knob to its default value (which
+        // tracks the calibration, so it flattens the stack) and remembers what was
+        // there. It then reads "UNDO" for one click to put the old settings back —
+        // but only until a tone knob is moved, after which the offer expires and it
+        // reverts to plain FLAT. Not a latching mode (clickingTogglesState OFF; the
+        // lit/label state is driven manually); the input knob is left alone.
+        mFlat.setButtonText("FLAT");
+        mFlat.getProperties().set("pill", true);
+        mFlat.setClickingTogglesState(false); // momentary, not a toggle
+        mFlat.onClick = [this] { if (mRevertArmed) revertFlat(); else resetToFlat(); };
+        addAndMakeVisible(mFlat);
 
         mGraphicOn = std::make_unique<ToggleSwitch>(mApvts, id("GraphicOn"));
         addAndMakeVisible(*mGraphicOn);
@@ -2602,15 +2651,20 @@ public:
         updateFaces();
     }
 
-    // Editor timer: dim the controls when the stack is off (params stay live).
+    // Editor timer: dim the controls when the stack is off (params stay live),
+    // keep each tone knob's reset default tracking its calibration, and keep the
+    // CAL/FLAT buttons mutually exclusive.
     void refresh()
     {
+        syncKnobDefaults();   // double-click reset follows the calibration
+        updateModeButtons();  // CAL/FLAT enablement (cheap; every tick)
+        checkRevertExpiry();  // expire the FLAT->UNDO offer once a knob is moved
         const bool on = mApvts.getRawParameterValue(id("On"))->load() >= 0.5f;
         if (on == mWasOn)
             return;
         mWasOn = on;
         for (auto *k : {mK1.get(), mK2.get(), mK3.get(), mK4.get()})
-            k->setEnabled(on);
+            k->setEnabled(on); // NB: mInput stays live (independent of tone On)
         const bool gOn = on; // sliders follow the master enable; GraphicOn gates DSP
         for (auto &s : mEq) s.setEnabled(gOn);
         mModel.setEnabled(on);
@@ -2624,7 +2678,12 @@ public:
         g.fillRect(0, 0, getWidth(), 1);
         g.setColour(colors::caption);
         g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.12f));
-        g.drawText("TONE STACK", mCaptionRect, juce::Justification::centredLeft);
+        g.drawText(mCalMode ? "CAPTURE EQ" : "FRONT PANEL", mCaptionRect,
+                   juce::Justification::centredLeft);
+        // Divider between the always-live Input knob and the (independent) tone
+        // stack — the merge is visual only; the On toggle still gates just tone.
+        g.setColour(colors::divider);
+        g.fillRect(mInnerDiv);
         if (mGraphicOn->isVisible()) // Cali Lead only
         {
             // band labels (classic silkscreen names; true centres in the doc)
@@ -2644,15 +2703,26 @@ public:
         auto r = getLocalBounds();
         r.removeFromTop(6); // divider + air
         auto head = r.removeFromTop(24);
-        mCaptionRect = head.removeFromLeft(84);
-        mOn->setBounds(head.removeFromLeft(42).withSizeKeepingCentre(42, 22));
-        head.removeFromLeft(8);
-        mPos.setBounds(head.removeFromRight(96).withSizeKeepingCentre(96, 22));
-        head.removeFromRight(8);
+        mCaptionRect = head.removeFromLeft(80);
+        mOn->setBounds(head.removeFromLeft(40).withSizeKeepingCentre(40, 22));
+        head.removeFromLeft(6);
+        mPos.setBounds(head.removeFromRight(88).withSizeKeepingCentre(88, 22));
+        head.removeFromRight(6);
+        mCal.setBounds(head.removeFromRight(40).withSizeKeepingCentre(40, 22));
+        head.removeFromRight(5);
+        mFlat.setBounds(head.removeFromRight(40).withSizeKeepingCentre(40, 22));
+        head.removeFromRight(6);
         mModel.setBounds(head.withSizeKeepingCentre(head.getWidth(), 24));
 
         r.removeFromTop(4);
         auto row = r;
+        const int kh = juce::jmin(row.getHeight(), 78);
+
+        // Input drive on the far left (always live), then a divider, then the
+        // tone stack. The tone On toggle in the header still gates only tone.
+        mInput->setBounds(row.removeFromLeft(76).withSizeKeepingCentre(76, kh));
+        mInnerDiv = juce::Rectangle<int>(row.getX() + 6, row.getY() + 4, 1, kh - 8);
+        row.removeFromLeft(14);
 
         // graphic zone on the right -- Cali Lead only (hidden elsewhere, the
         // knob row then keeps the full width)
@@ -2672,47 +2742,154 @@ public:
             row.removeFromRight(10);
         }
 
-        // knob row: place the visible knobs evenly
+        // knob row: place the visible tone knobs evenly
         juce::Component *ks[4] = {mK1.get(), mK2.get(), mK3.get(), mK4.get()};
         int vis = 0;
         for (auto *k : ks) if (k->isVisible()) ++vis;
         const int kw = vis > 0 ? juce::jmin(64, row.getWidth() / vis) : 0;
         for (auto *k : ks)
             if (k->isVisible())
-                k->setBounds(row.removeFromLeft(kw).withSizeKeepingCentre(kw, juce::jmin(row.getHeight(), 78)));
+                k->setBounds(row.removeFromLeft(kw).withSizeKeepingCentre(kw, kh));
     }
 
 private:
     juce::String id(const char *suffix) const { return "ts" + mS + suffix; }
 
+    void setParamRaw(const juce::String &pid, float raw)
+    {
+        if (auto *p = mApvts.getParameter(pid))
+        {
+            p->beginChangeGesture();
+            p->setValueNotifyingHost(p->convertTo0to1(raw));
+            p->endChangeGesture();
+        }
+    }
+
+    // CAL/FLAT enablement (called every tick — trivial). FLAT is a one-shot reset,
+    // hidden behind CAL since CAL retargets the knobs at the references.
+    void updateModeButtons()
+    {
+        const bool on = mApvts.getRawParameterValue(id("On"))->load() >= 0.5f;
+        mCal.setEnabled(on);
+        mFlat.setEnabled(on && !mCalMode);
+    }
+
+    // Each tone knob's double-click RESET lands on its calibration (the flat
+    // point), not a fixed noon — so "reset" means "back to the captured EQ".
+    // Skipped in CAL mode (there the knobs edit the references themselves).
+    void syncKnobDefaults()
+    {
+        if (mCalMode) return;
+        auto setDef = [this](LabeledKnob *k, const char *refId) {
+            k->slider().setDoubleClickReturnValue(
+                true, mApvts.getRawParameterValue(id(refId))->load());
+        };
+        if (mModel.getSelectedItemIndex() == 13) // Tweed 57 (5E3)
+        {
+            setDef(mK1.get(), "RefBass");   // Volume
+            setDef(mK2.get(), "RefTreble"); // Tone
+            // mK3 Ghost has no capture reference — keep its own default
+        }
+        else
+        {
+            setDef(mK1.get(), "RefTreble");
+            setDef(mK2.get(), "RefMid");
+            setDef(mK3.get(), "RefBass");
+            setDef(mK4.get(), "RefCut");
+        }
+    }
+
+    static constexpr const char *kTone[5] = {"Treble", "Mid", "Bass", "Cut", "Ghost"};
+
+    // FLAT: one-click reset — remember the current tone, then set every knob to its
+    // default value (Treble/Mid/Bass/Cut -> their calibration reference, Ghost ->
+    // 0; the same targets the double-click reset uses). Arms UNDO.
+    void resetToFlat()
+    {
+        static const char *ref[5] = {"RefTreble", "RefMid", "RefBass", "RefCut", nullptr};
+        for (int i = 0; i < 5; ++i)
+            mPrev[i] = mApvts.getRawParameterValue(id(kTone[i]))->load(); // for UNDO
+        for (int i = 0; i < 5; ++i)
+            setParamRaw(id(kTone[i]),
+                        ref[i] ? mApvts.getRawParameterValue(id(ref[i]))->load() : 0.0f);
+        for (int i = 0; i < 5; ++i)
+            mFlatSnap[i] = mApvts.getRawParameterValue(id(kTone[i]))->load(); // detect later edits
+        setRevertArmed(true);
+    }
+
+    // UNDO: put the pre-FLAT tone back (only reachable while still armed).
+    void revertFlat()
+    {
+        for (int i = 0; i < 5; ++i)
+            setParamRaw(id(kTone[i]), mPrev[i]);
+        setRevertArmed(false);
+    }
+
+    void setRevertArmed(bool armed)
+    {
+        mRevertArmed = armed;
+        mFlat.setButtonText(armed ? "UNDO" : "FLAT");
+        mFlat.setToggleState(armed, juce::dontSendNotification); // lit while UNDO is available
+    }
+
+    // Once any tone knob moves away from what FLAT wrote, the pre-FLAT settings are
+    // no longer the "old settings" the user meant -> expire the UNDO offer.
+    void checkRevertExpiry()
+    {
+        if (!mRevertArmed) return;
+        for (int i = 0; i < 5; ++i)
+            if (std::abs(mApvts.getRawParameterValue(id(kTone[i]))->load() - mFlatSnap[i]) > 0.005f)
+            {
+                setRevertArmed(false);
+                return;
+            }
+    }
+
+    // Toggle calibration mode. The tone knobs and the capture-reference knobs are
+    // independent: entering/leaving CAL only re-points the knobs (via updateFaces)
+    // at the ts*Ref* or the live tone params. Exiting does NOT copy the entered
+    // calibration back onto the tone knobs — they keep their own settings.
+    void setCalMode(bool on)
+    {
+        if (on == mCalMode) return;
+        mCalMode = on;
+        mCal.setToggleState(on, juce::dontSendNotification);
+        updateModeButtons();
+        updateFaces();
+    }
+
     // Re-face the knob row for the chosen model (rebind keeps the params in
     // place; only caption/visibility change — matches the pedalboard faces).
+    // In CAL mode the knobs point at the capture-reference params (ts*Ref*)
+    // instead of the live tone; the graphic + ghost hide (no capture reference).
     void updateFaces()
     {
         const int m = mModel.getSelectedItemIndex();
         const bool vox = (m == 11), james = (m == 12), e3 = (m == 13);
         const bool mark = (m == 3); // Cali Lead: the only stack with the graphic
-        mGraphicOn->setVisible(mark);
-        for (auto &s : mEq) s.setVisible(mark);
+        const bool cal = mCalMode;
+        mGraphicOn->setVisible(mark && !cal);
+        for (auto &s : mEq) s.setVisible(mark && !cal);
         if (e3)
         {
-            mK1->rebind(mApvts, id("Bass"));   mK1->setCaption("Volume"); // 5E3: signal INTO the wiper
-            mK2->rebind(mApvts, id("Treble")); mK2->setCaption("Tone");
-            mK3->rebind(mApvts, id("Ghost"));  mK3->setCaption("Ghost");  // unused channel's volume
+            mK1->rebind(mApvts, id(cal ? "RefBass" : "Bass"));     mK1->setCaption("Volume"); // 5E3: signal INTO the wiper
+            mK2->rebind(mApvts, id(cal ? "RefTreble" : "Treble")); mK2->setCaption("Tone");
+            mK3->rebind(mApvts, id("Ghost"));  mK3->setCaption("Ghost");  // unused channel's volume (no capture ref)
             mK2->setVisible(true);
-            mK3->setVisible(true);
+            mK3->setVisible(!cal);
             mK4->setVisible(false);
         }
         else
         {
-            mK1->rebind(mApvts, id("Treble")); mK1->setCaption("Treble");
-            mK2->rebind(mApvts, id("Mid"));    mK2->setCaption("Mid");
-            mK3->rebind(mApvts, id("Bass"));   mK3->setCaption("Bass");
-            mK4->rebind(mApvts, id("Cut"));    mK4->setCaption("Cut");    // Top Boost only
+            mK1->rebind(mApvts, id(cal ? "RefTreble" : "Treble")); mK1->setCaption("Treble");
+            mK2->rebind(mApvts, id(cal ? "RefMid" : "Mid"));       mK2->setCaption("Mid");
+            mK3->rebind(mApvts, id(cal ? "RefBass" : "Bass"));     mK3->setCaption("Bass");
+            mK4->rebind(mApvts, id(cal ? "RefCut" : "Cut"));       mK4->setCaption("Cut");    // Top Boost only
             mK2->setVisible(!vox && !james);   // no mid pot on Top Boost / Graphic 72
             mK3->setVisible(true);
             mK4->setVisible(vox);
         }
+        syncKnobDefaults(); // rebind() reset the double-click default -> re-point it at the cal
         resized();
         repaint();
     }
@@ -2720,22 +2897,60 @@ private:
     juce::AudioProcessorValueTreeState &mApvts;
     juce::String mS;
     juce::ComboBox mModel, mPos;
+    juce::ToggleButton mCal, mFlat;
+    bool mCalMode = false, mRevertArmed = false;
+    float mPrev[5] = {0.5f, 0.5f, 0.5f, 0.0f, 0.0f}; // tone before FLAT (for UNDO)
+    float mFlatSnap[5] = {0.5f, 0.5f, 0.5f, 0.0f, 0.0f}; // what FLAT wrote (to detect edits)
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mModelAtt, mPosAtt;
     std::unique_ptr<ToggleSwitch> mOn, mGraphicOn;
-    std::unique_ptr<LabeledKnob> mK1, mK2, mK3, mK4;
+    std::unique_ptr<LabeledKnob> mInput, mK1, mK2, mK3, mK4;
     juce::Slider mEq[5];
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mEqAtt[5];
-    juce::Rectangle<int> mCaptionRect, mGraphicLabel, mEqLabel[5];
+    juce::Rectangle<int> mCaptionRect, mGraphicLabel, mEqLabel[5], mInnerDiv;
     bool mWasOn = true;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ToneStackSection)
 };
 
 //==============================================================================
+// Scrim over a single section (not the whole panel): the bypass look, scoped —
+// dims its own bounds, draws a centred label, and swallows mouse so the disabled
+// controls beneath it can't be touched. Used to black out the anti-alias section
+// when a standard (A1) model is loaded ("Unavailable").
+class SectionVeil : public juce::Component
+{
+public:
+    SectionVeil() { setInterceptsMouseClicks(true, false); }
+    void setText(const juce::String &t) { if (t != mText) { mText = t; repaint(); } }
+    bool hitTest(int, int) override { return true; }
+    void paint(juce::Graphics &g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        g.setColour(colors::panel.withAlpha(0.72f));
+        g.fillRoundedRectangle(b, 8.0f);
+        auto ctr = b.getCentre();
+        {
+            juce::Graphics::ScopedSaveState save(g);
+            g.addTransform(juce::AffineTransform::scale(1.0f, 0.4f, ctr.x, ctr.y));
+            juce::ColourGradient halo(juce::Colours::black.withAlpha(0.40f), ctr.x, ctr.y,
+                                      juce::Colours::black.withAlpha(0.0f), ctr.x + 130.0f, ctr.y, true);
+            g.setGradientFill(halo);
+            g.fillRect(getLocalBounds());
+        }
+        g.setColour(colors::textBright.withAlpha(0.95f));
+        g.setFont(fonts::archivo(14.0f, fonts::ExtraBold, 0.24f));
+        g.drawText(mText, getLocalBounds(), juce::Justification::centred);
+    }
+private:
+    juce::String mText;
+};
+
+//==============================================================================
 // One amp "lane" inside the combined AMP panel (no box/title of its own — the
-// parent draws the single "AMP" frame). Holds the model loader, status line,
-// input drive and the per-rig anti-alias quality controls. Dims when its rig is
-// bypassed/soloed out. Accepts .nam files dragged straight from the OS.
+// parent draws the single "AMP" frame). Holds the model loader, the model name,
+// input drive, the per-amp tone stack and the per-rig anti-alias quality
+// controls. Dims when its rig is bypassed/soloed out. Accepts .nam files dragged
+// straight from the OS.
 class AmpLane : public juce::Component, public juce::FileDragAndDropTarget
 {
 public:
@@ -2746,12 +2961,6 @@ public:
         mModelName.setColour(juce::Label::textColourId, colors::textBright);
         mModelName.setInterceptsMouseClicks(false, false);
         addAndMakeVisible(mModelName);
-
-        mInfo.setColour(juce::Label::textColourId, colors::textDim);
-        mInfo.setFont(fonts::mono(12.0f));
-        mInfo.setInterceptsMouseClicks(false, false);
-        mInfo.setJustificationType(juce::Justification::topLeft);
-        addAndMakeVisible(mInfo);
 
         auto initCombo = [this](juce::ComboBox &box, const juce::StringArray &items,
                                 const char *paramId,
@@ -2767,14 +2976,16 @@ public:
         initCombo(mOfflineAa, {"Same as live", "8x", "16x", "32x"},
                   rig == 0 ? "offlineAA" : "offlineAAB", mOfflineAtt);
 
-        // Independent per-capture input drive (0 dB = the model's calibrated level).
-        mInput = std::make_unique<LabeledKnob>(mProc.apvts,
-                                               rig == 0 ? "rigInputA" : "rigInputB", "Input");
-        addAndMakeVisible(*mInput);
-
-        // Per-amp tone stack (circuit-exact; see ToneStackSection above).
+        // Per-amp front panel: input drive + circuit-exact tone stack, merged
+        // into one section (see ToneStackSection above; the Input knob lives
+        // inside it now).
         mTone = std::make_unique<ToneStackSection>(mProc.apvts, rig);
         addAndMakeVisible(*mTone);
+
+        // Scrim shown over the anti-alias section when a standard (A1) model is
+        // loaded — the controls exist but do nothing without an A2 capture.
+        mAaVeil.setText("Unavailable");
+        addChildComponent(mAaVeil); // hidden until refresh() decides
     }
 
     // Dim the whole lane when its rig is bypassed or soloed out (matches CabPanel).
@@ -2797,40 +3008,13 @@ public:
         mModelName.setText(loaded ? mProc.getModelName(mRig) : "No model loaded",
                            juce::dontSendNotification);
 
+        // Anti-alias is only meaningful for an A2 capture. A standard (A1) model
+        // leaves the controls present but inert -> disable + black out the whole
+        // section with an "Unavailable" scrim (no model = still adjustable).
         const bool aaAvailable = !loaded || a2;
         mLiveAa.setEnabled(aaAvailable);
         mOfflineAa.setEnabled(aaAvailable);
-
-        juce::String info;
-        if (!loaded)
-            info = "Load a .nam model to bring the amp online.";
-        else if (!a2)
-            info = "Standard model - anti-aliasing needs an A2 model.";
-        else
-        {
-            const int engaged = mProc.engagedFactor(mRig);
-            info = engaged > 0 ? "Engaged at " + juce::String(engaged) + "x"
-                               : "Passthrough";
-            info << "  |  PDC " << mProc.getLatencySamples() << " smp";
-        }
-        const float calDb = mProc.calibrationGainDb(mRig);
-        if (calDb != 0.0f)
-            info << "  |  cal " << (calDb > 0 ? "+" : "") << juce::String(calDb, 1) << " dB";
-        // Corrected normalize (static metadata + input-cal compensation) — this
-        // is what's actually applied at the out-trim, so a +cal / -cal pair reads
-        // the values that make them match, not the misleading static numbers.
-        const float normDb = mProc.normalizationGainDb(mRig) + mProc.calibrationCompensationDb(mRig);
-        mNormalized = (normDb != 0.0f);
-        if (mNormalized)
-            info << "  |  norm " << (normDb > 0 ? "+" : "") << juce::String(normDb, 1) << " dB";
-        // Self-heal flag: a block hit a non-finite sample and was auto-reset. Shows
-        // it happened (and which block) so a silent NaN never goes unnoticed.
-        const auto nanN = mProc.nanRecoveries();
-        if (nanN > 0)
-            info << "  |  (!) recovered NaN x" << (int)nanN
-                 << " (" << mProc.lastNanBlock() << ")";
-        if (info != mInfo.getText())
-            mInfo.setText(info, juce::dontSendNotification);
+        mAaVeil.setVisible(loaded && !a2);
     }
 
     void mouseUp(const juce::MouseEvent &e) override
@@ -2902,27 +3086,7 @@ public:
             g.drawLine(x.getX(), x.getBottom(), x.getRight(), x.getY(), 1.6f);
         }
 
-        // Tag pills (A2 / normalized).
-        auto tagPill = [&](juce::Rectangle<int> &row, const juce::String &t)
-        {
-            const int w = (int)std::ceil(juce::GlyphArrangement::getStringWidth(fonts::mono(11.0f), t)) + 22;
-            auto r = row.removeFromLeft(w).toFloat();
-            row.removeFromLeft(7);
-            g.setColour(juce::Colour(0xff191c21));
-            g.fillRoundedRectangle(r, 6.0f);
-            g.setColour(colors::cardBorder);
-            g.drawRoundedRectangle(r, 6.0f, 1.0f);
-            g.setColour(juce::Colour(0xff7a808a));
-            g.setFont(fonts::mono(11.0f));
-            g.drawText(t, r, juce::Justification::centred);
-        };
-        auto tags = mTagsRect;
-        if (mLoaded) tagPill(tags, mProc.isA2Model(mRig) ? "A2 model" : "standard");
-        if (mNormalized) tagPill(tags, "normalized");
-
-        // Anti-alias column: divider + caption + AA labels + optional capped note.
-        g.setColour(colors::divider);
-        g.fillRect(mDivX, mCaptionR.getY(), 1, mOfflineAa.getBottom() - mCaptionR.getY());
+        // Anti-alias section: caption + AA labels + optional capped note.
         g.setColour(colors::caption);
         g.setFont(fonts::archivo(10.0f, fonts::SemiBold, 0.12f));
         g.drawText(juce::String::fromUTF8("ANTI-ALIAS \xC2\xB7 QUALITY"), mCaptionR,
@@ -2964,48 +3128,46 @@ public:
 
         area.removeFromTop(8);
         mModelName.setBounds(area.removeFromTop(24));
-        area.removeFromTop(2);
-        mInfo.setBounds(area.removeFromTop(34));
 
-        // Tag pills pinned to the bottom.
-        mTagsRect = area.removeFromBottom(24);
-        area.removeFromBottom(6);
+        // Front-panel section (input drive + tone stack) directly under the
+        // model name.
+        area.removeFromTop(10);
+        mTone->setBounds(area.removeFromTop(128));
 
-        // Tone stack section above the tag pills (divider + header + knobs/graphic).
-        mTone->setBounds(area.removeFromBottom(128));
-        area.removeFromBottom(6);
-
-        // Middle: input knob (left) | anti-alias quality (right).
+        // Anti-alias quality section beneath it, full width. Two labelled combos
+        // placed side by side now that the input knob has moved up.
+        area.removeFromTop(12);
+        mCaptionR = area.removeFromTop(14);
         area.removeFromTop(8);
-        auto mid = area;
-        auto knobCol = mid.removeFromLeft(96);
-        mInput->setBounds(knobCol.removeFromTop(80).withSizeKeepingCentre(84, 76));
-        mid.removeFromLeft(14);
-        mDivX = mid.getX() - 7;
-        auto right = mid;
-        mCaptionR = right.removeFromTop(14);
-        right.removeFromTop(8);
-        mLiveLabel = right.removeFromTop(15);
-        right.removeFromTop(4);
-        mLiveAa.setBounds(right.removeFromTop(32));
-        right.removeFromTop(18);
-        mOffLabel = right.removeFromTop(15);
-        right.removeFromTop(4);
-        mOfflineAa.setBounds(right.removeFromTop(32));
+        auto labels = area.removeFromTop(15);
+        const int half = (area.getWidth() - 16) / 2;
+        mLiveLabel = labels.removeFromLeft(half);
+        labels.removeFromLeft(16);
+        mOffLabel = labels.removeFromLeft(half);
+        area.removeFromTop(4);
+        auto combos = area.removeFromTop(32);
+        mLiveAa.setBounds(combos.removeFromLeft(half));
+        combos.removeFromLeft(16);
+        mOfflineAa.setBounds(combos.removeFromLeft(half));
+
+        // Blackout scrim covers the whole AA section (caption -> combos).
+        mAaVeil.setBounds(juce::Rectangle<int>(mCaptionR.getX(), mCaptionR.getY(),
+                                               mCaptionR.getWidth(),
+                                               mOfflineAa.getBottom() - mCaptionR.getY())
+                              .expanded(4, 4));
     }
 
 private:
     NamRigProcessor &mProc;
     int mRig = 0;
-    juce::Label mModelName, mInfo;
+    juce::Label mModelName;
     juce::ComboBox mLiveAa, mOfflineAa;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> mLiveAtt, mOfflineAtt;
-    std::unique_ptr<LabeledKnob> mInput;
     std::unique_ptr<ToneStackSection> mTone;
+    SectionVeil mAaVeil;
     std::unique_ptr<juce::FileChooser> mChooser;
-    juce::Rectangle<int> mTagRect, mLoaderRect, mRemoveRect, mTagsRect, mCaptionR, mLiveLabel, mOffLabel;
-    int mDivX = 0;
-    bool mLoaded = false, mNormalized = false, mAaCapped = false, mDim = false;
+    juce::Rectangle<int> mTagRect, mLoaderRect, mRemoveRect, mCaptionR, mLiveLabel, mOffLabel;
+    bool mLoaded = false, mAaCapped = false, mDim = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AmpLane)
 };

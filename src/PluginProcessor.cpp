@@ -960,7 +960,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
                 juce::ParameterID(id("Model"), 1), nm("Model"), tsModels, 0));
             params.push_back(std::make_unique<juce::AudioParameterChoice>(
                 juce::ParameterID(id("Pos"), 1), nm("Position"),
-                juce::StringArray{"Pre Amp", "Post Amp"}, 0)); // pre = drives the capture
+                juce::StringArray{"Pre Amp", "Post Amp"}, 1)); // default Post; Pre = drives the capture
             // NOTE (product call 2026-07-11): the stack ships RELATIVE-only --
             // flat at the default knob positions (the capture's own baked-in
             // stack is the reference), knob moves add the circuit-exact
@@ -980,6 +980,24 @@ juce::AudioProcessorValueTreeState::ParameterLayout NamRigProcessor::createParam
                 juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f, knob10(0.0f, 1.0f)));
             params.push_back(std::make_unique<juce::AudioParameterFloat>(
                 juce::ParameterID(id("Ghost"), 1), nm("Ghost"),
+                juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f, knob10(0.0f, 1.0f)));
+            // CAPTURE EQ calibration: the capture's own knob positions (off the
+            // pack sheet, user-entered). Moves the stack's flat reference from
+            // noon to the capture settings, so knobs parked there are bit-exact
+            // flat and any move is the exact retune of the real amp away from
+            // its captured state. Same 1-10 readout as the tone knobs: matching
+            // numbers is what guarantees flat.
+            params.push_back(std::make_unique<juce::AudioParameterFloat>(
+                juce::ParameterID(id("RefTreble"), 1), nm("Capture Treble"),
+                juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f, knob10(0.0f, 1.0f)));
+            params.push_back(std::make_unique<juce::AudioParameterFloat>(
+                juce::ParameterID(id("RefMid"), 1), nm("Capture Mid"),
+                juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f, knob10(0.0f, 1.0f)));
+            params.push_back(std::make_unique<juce::AudioParameterFloat>(
+                juce::ParameterID(id("RefBass"), 1), nm("Capture Bass"),
+                juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f, knob10(0.0f, 1.0f)));
+            params.push_back(std::make_unique<juce::AudioParameterFloat>(
+                juce::ParameterID(id("RefCut"), 1), nm("Capture Cut"),
                 juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f, knob10(0.0f, 1.0f)));
             params.push_back(std::make_unique<juce::AudioParameterBool>(
                 juce::ParameterID(id("GraphicOn"), 1), nm("Graphic"), false));
@@ -1502,6 +1520,7 @@ void NamRigProcessor::processBlock(juce::AudioBuffer<float> &buffer, juce::MidiB
         {
             auto gp = [&](const char *suf) { return apvts.getRawParameterValue("ts" + S + suf)->load(); };
             t.setModel((int)gp("Model")); // relative-only (block default; see layout note)
+            t.setReference(gp("RefTreble"), gp("RefMid"), gp("RefBass"), gp("RefCut"));
             t.setKnob1(gp("Treble"));
             t.setKnob2(gp("Mid"));
             t.setKnob3(gp("Bass"));
@@ -1920,11 +1939,9 @@ void NamRigProcessor::loadModel(const juce::File &namFile, int rig)
         return;
     }
 
-    juce::String suffix = info.isA2 ? " [AA up to 32x]" : " [1x only]";
-    if (info.expectedSampleRate > 0.0 && std::abs(info.expectedSampleRate - 48000.0) > 1.0)
-        suffix += " [warn: native " + juce::String(info.expectedSampleRate, 0) + "Hz; AA assumes 48k]";
-
-    mModelName[rig] = namFile.getFileNameWithoutExtension() + suffix;
+    // Model name is just the file name — the A1/A2 (and any AA) state is shown by
+    // the anti-alias section's Unavailable scrim, not tacked onto the name.
+    mModelName[rig] = namFile.getFileNameWithoutExtension();
     // Cache the source text so presets can embed the model (single-file rigs).
     mModelText[rig] = namFile.loadFileAsString();
     mModelBaseName[rig] = namFile.getFileNameWithoutExtension();
